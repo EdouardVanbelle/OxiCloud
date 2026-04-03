@@ -40,8 +40,26 @@ function formatDateTime(value) {
         dateValue = new Date(value);
     }
     if (isNaN(dateValue.getTime())) return String(value);
-    return dateValue.toLocaleDateString() + ' ' +
-        dateValue.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterday = new Date(today)
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    const hour = dateValue.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    // FIXME/: i18n
+    if (dateValue >= today) {
+        return hour;
+    }
+    else if (dateValue >= yesterday) {
+        return 'Yesterday at ' + hour;
+    }
+    else {
+       return dateValue.toLocaleDateString() + ' ' + hour;
+    }
+
+        
 }
 
 function formatDateShort(value) {
