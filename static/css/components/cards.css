@@ -11,6 +11,12 @@
     display: none;
 }
 
+/* element hidden on grid view */
+.files-grid-view .file-item .date-cell,
+.files-grid-view .file-item .size-cell {
+    display: none;
+}
+
 /* Rubber band / lasso selection rectangle */
 .selection-rect {
 	position: fixed;
@@ -19,7 +25,6 @@
 	pointer-events: none;
 	z-index: 1000;
 	border-radius: 3px;
-	display: none;
 }
 
 .files-grid-view .file-item {
@@ -54,11 +59,6 @@
 	box-shadow: 0 0 0 1px rgba(255, 94, 58, 0.2), 0 6px 18px rgba(255, 94, 58, 0.15);
 }
 
-/* element hidden on grid view */
-.files-grid-view .file-item .date-cell,
-.files-grid-view .file-item .size-cell {
-    display: none;
-}
 /* Selection checkbox */
 .files-grid-view .file-item .checkbox-cell {
 	position: absolute;

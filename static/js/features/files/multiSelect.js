@@ -382,7 +382,7 @@ const multiSelect = {
 
         const excludeIds = items.filter(i => i.type === 'folder').map(i => i.id);
         await contextMenus.loadAllFolders(excludeIds[0] || null, 'batch');
-        dialog.style.display = 'flex';
+        dialog.classList.remove('hidden');
     },
 
     /** Batch download — downloads all selected items as a single ZIP */

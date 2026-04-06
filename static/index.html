@@ -212,7 +212,7 @@
                             <span data-i18n="actions.upload">Upload</span>
                             <i class="fas fa-caret-down upload-caret"></i>
                         </button>
-                        <div class="upload-dropdown-menu" id="upload-dropdown-menu">
+                        <div class="upload-dropdown-menu hidden" id="upload-dropdown-menu">
                             <button class="upload-dropdown-item" id="upload-files-btn">
                                 <i class="fas fa-file"></i>
                                 <span data-i18n="actions.upload_files">Upload files</span>
@@ -241,7 +241,7 @@
 
             <div id="batch-selection-bar" class="batch-selection-bar hidden"></div>
 
-            <div class="dropzone" id="dropzone">
+            <div class="dropzone hidden" id="dropzone">
                 <i class="fas fa-cloud-upload-alt dropzone-icon"></i>
                 <p data-i18n="dropzone.drag_files">Drag files here or click to select</p>
                 <input type="file" id="file-input" class="hidden" multiple>
@@ -293,7 +293,7 @@
     </div>
 
     <!-- About Modal -->
-    <div class="about-modal-overlay" id="about-modal-overlay">
+    <div class="about-modal-overlay hidden" id="about-modal-overlay">
         <div class="about-modal">
             <div class="about-modal-logo">
                 <i class="fas fa-cloud"></i>

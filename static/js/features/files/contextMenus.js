@@ -271,7 +271,7 @@ const contextMenus = {
         // Each handler checks its own state, so multiple dialogs can be closed with multiple Escape presses
         if (!window._moveDialogEscapeHandler) {
             window._moveDialogEscapeHandler = (e) => {
-                if (e.key === 'Escape' && moveFileDialog.style.display === 'flex') {
+                if (e.key === 'Escape' && !moveFileDialog.classList.contains('hidden')) {
                     this.closeMoveDialog();
                 }
             };
@@ -372,7 +372,7 @@ const contextMenus = {
         // Update header text
         const headerSpan = renameDialog.querySelector('.rename-dialog-header span');
         if (headerSpan) headerSpan.textContent = window.i18n ? window.i18n.t('dialogs.rename_folder') : 'Rename folder';
-        renameDialog.style.display = 'flex';
+        renameDialog.classList.remove("hidden");
         renameInput.focus();
         renameInput.select();
     },
@@ -392,7 +392,7 @@ const contextMenus = {
         // Update header text
         const headerSpan = renameDialog.querySelector('.rename-dialog-header span');
         if (headerSpan) headerSpan.textContent = window.i18n ? window.i18n.t('dialogs.rename_file') : 'Rename file';
-        renameDialog.style.display = 'flex';
+        renameDialog.classList.remove("hidden");
         renameInput.focus();
         renameInput.select();
     },
@@ -401,7 +401,7 @@ const contextMenus = {
      * Close rename dialog
      */
     closeRenameDialog() {
-        document.getElementById('rename-dialog').style.display = 'none';
+        document.getElementById('rename-dialog').classList.add('hidden');
         window.app.contextMenuTargetFolder = null;
         window.app.renameTarget = null;
     },
@@ -469,14 +469,14 @@ const contextMenus = {
         await this.loadMoveDialogFolders(startFolderId);
 
         // Show dialog
-        document.getElementById('move-file-dialog').style.display = 'flex';
+        document.getElementById('move-file-dialog').classList.remove('hidden');
     },
 
     /**
      * Close move dialog
      */
     closeMoveDialog() {
-        document.getElementById('move-file-dialog').style.display = 'none';
+        document.getElementById('move-file-dialog').classList.add('hidden');
         window.app.contextMenuTargetFile = null;
         window.app.contextMenuTargetFolder = null;
     },
@@ -571,7 +571,7 @@ const contextMenus = {
 
             // Always show breadcrumb to allow navigation back to home
             this._renderMoveDialogBreadcrumb(breadcrumbContainer, breadcrumb, effectiveParentId);
-            breadcrumbContainer.style.display = 'flex';
+            breadcrumbContainer.classList.remove('hidden');
 
             // Option to select current folder as destination (only after navigating into subfolders)
             if (breadcrumb.length > 0 && effectiveParentId && effectiveParentId !== itemId) {
@@ -919,7 +919,7 @@ const contextMenus = {
         if (newShareSection) newShareSection.classList.add('hidden');
 
         // Show dialog
-        shareDialog.style.display = 'flex';
+        shareDialog.classList.remove('hidden');
         console.log('Share dialog opened for', itemType, item.name);
         } catch (error) {
             console.error('Error opening share dialog:', error);
@@ -1011,7 +1011,7 @@ const contextMenus = {
         window.app.notificationShareUrl = shareUrl;
 
         // Show dialog
-        document.getElementById('notification-dialog').style.display = 'flex';
+        document.getElementById('notification-dialog').classList.remove('hidden');
     },
 
     /**
@@ -1036,7 +1036,7 @@ const contextMenus = {
 
         try {
             window.fileSharing.sendShareNotification(shareUrl, email, message);
-            document.getElementById('notification-dialog').style.display = 'none';
+            document.getElementById('notification-dialog').classList.add('hidden');
         } catch (error) {
             console.error('Error sending notification:', error);
             window.ui.showNotification('Error', 'Could not send notification');
@@ -1048,7 +1048,7 @@ const contextMenus = {
      */
     closeShareDialog() {
         const dialog = document.getElementById('share-dialog');
-        if (dialog) dialog.style.display = 'none';
+        if (dialog) dialog.classList.add('hidden');
         window.app.shareDialogItem = null;
         window.app.shareDialogItemType = null;
     },
@@ -1057,7 +1057,7 @@ const contextMenus = {
      * Close notification dialog
      */
     closeNotificationDialog() {
-        document.getElementById('notification-dialog').style.display = 'none';
+        document.getElementById('notification-dialog').classList.add('hidden');
         window.app.notificationShareUrl = null;
     }
 };

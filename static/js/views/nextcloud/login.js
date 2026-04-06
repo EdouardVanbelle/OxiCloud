@@ -25,7 +25,7 @@ document.getElementById('login-flow-form').action = '/login/v2/flow/' + token;
 
         // If password login is disabled, hide the password form
         if (!info.password_login_enabled) {
-            document.getElementById('login-flow-form').style.display = 'none';
+            document.getElementById('login-flow-form').classList.add("hidden");
         }
 
         // SSO button redirects to the OIDC flow for this NC token

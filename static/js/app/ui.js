@@ -18,7 +18,7 @@ const ui = {
         // Folder context menu
         if (!document.getElementById('folder-context-menu')) {
             const folderMenu = document.createElement('div');
-            folderMenu.className = 'context-menu';
+            folderMenu.classList.add('context-menu', 'hidden');
             folderMenu.id = 'folder-context-menu';
             folderMenu.innerHTML = `
                 <div class="context-menu-item" id="download-folder-option">
@@ -48,7 +48,7 @@ const ui = {
         // File context menu
         if (!document.getElementById('file-context-menu')) {
             const fileMenu = document.createElement('div');
-            fileMenu.className = 'context-menu';
+            fileMenu.classList.add('context-menu', 'hidden');
             fileMenu.id = 'file-context-menu';
             fileMenu.innerHTML = `
                 <div class="context-menu-item" id="view-file-option">
@@ -88,7 +88,7 @@ const ui = {
         // Rename dialog — modern
         if (!document.getElementById('rename-dialog')) {
             const renameDialog = document.createElement('div');
-            renameDialog.className = 'rename-dialog';
+            renameDialog.classList.add('rename-dialog', 'hidden');
             renameDialog.id = 'rename-dialog';
             renameDialog.innerHTML = `
                 <div class="rename-dialog-content">
@@ -111,7 +111,7 @@ const ui = {
         // Move dialog — modern with navigation
         if (!document.getElementById('move-file-dialog')) {
             const moveDialog = document.createElement('div');
-            moveDialog.className = 'rename-dialog';
+            moveDialog.classList.add('rename-dialog', 'hidden');
             moveDialog.id = 'move-file-dialog';
             moveDialog.innerHTML = `
                 <div class="rename-dialog-content">
@@ -138,7 +138,7 @@ const ui = {
         // Share dialog
         if (!document.getElementById('share-dialog')) {
             const shareDialog = document.createElement('div');
-            shareDialog.className = 'share-dialog';
+            shareDialog.classList.add('share-dialog', 'hidden');
             shareDialog.id = 'share-dialog';
             shareDialog.innerHTML = `
                 <div class="share-dialog-content">
@@ -233,7 +233,7 @@ const ui = {
         // Notification dialog
         if (!document.getElementById('notification-dialog')) {
             const notificationDialog = document.createElement('div');
-            notificationDialog.className = 'share-dialog';
+            notificationDialog.classList.add('share-dialog', 'hidden');
             notificationDialog.id = 'notification-dialog';
             notificationDialog.innerHTML = `
                 <div class="share-dialog-content">
@@ -369,7 +369,7 @@ const ui = {
                         fileOps.uploadFiles(droppedEntries.map(x => x.file));
                     }
                     setTimeout(() => {
-                        dropzone.style.display = 'none';
+                        dropzone?.classList.add("hidden");
                     }, 500);
                     return;
                 }
@@ -385,7 +385,7 @@ const ui = {
                 }
             }
             setTimeout(() => {
-                dropzone.style.display = 'none';
+                dropzone?.classList.add("hidden");
             }, 500);
         });
 
@@ -393,8 +393,8 @@ const ui = {
         document.addEventListener('dragover', (e) => {
             e.preventDefault();
             if (e.dataTransfer.types.includes('Files')) {
-                dropzone.style.display = 'block';
-                dropzone.classList.add('active');
+                dropzone?.classList.remove("hidden");
+                dropzone?.classList.add('active');
             }
         });
 
@@ -403,8 +403,8 @@ const ui = {
                 e.clientX >= window.innerWidth || e.clientY >= window.innerHeight) {
                 dropzone.classList.remove('active');
                 setTimeout(() => {
-                    if (!dropzone.classList.contains('active')) {
-                        dropzone.style.display = 'none';
+                    if (!dropzone?.classList.contains('active')) {
+                        dropzone?.classList.add("hidden");
                     }
                 }, 100);
             }
@@ -428,7 +428,7 @@ const ui = {
                         fileOps.uploadFiles(droppedEntries.map(x => x.file));
                     }
                     setTimeout(() => {
-                        dropzone.style.display = 'none';
+                        dropzone?.classList.add("hidden");
                     }, 500);
                     return;
                 }
@@ -445,7 +445,7 @@ const ui = {
             }
 
             setTimeout(() => {
-                dropzone.style.display = 'none';
+                dropzone?.classList.add("hidden");
             }, 500);
         });
     },
@@ -623,7 +623,7 @@ const ui = {
     closeContextMenu() {
         const menu = document.getElementById('folder-context-menu');
         if (menu) {
-            menu.style.display = 'none';
+            menu.classList.add("hidden");
             window.app.contextMenuTargetFolder = null;
         }
     },
@@ -634,7 +634,7 @@ const ui = {
     closeFileContextMenu() {
         const menu = document.getElementById('file-context-menu');
         if (menu) {
-            menu.style.display = 'none';
+            menu.classList.add("hidden");
             window.app.contextMenuTargetFile = null;
         }
     },
@@ -932,7 +932,7 @@ const ui = {
             }
             menu.style.left = `${e.pageX}px`;
             menu.style.top  = `${e.pageY}px`;
-            menu.style.display = 'block';
+            menu?.classList.remove("hidden");
         });
 
         // dragstart
@@ -1196,7 +1196,6 @@ const ui = {
         el.setAttribute('draggable', 'true');
 
         el.innerHTML = `
-            
             <div class="checkbox-cell"><input type="checkbox" class="item-checkbox"></div>
             <div class="name-cell">
                 <div class="file-icon ${iconSpecialClass}">
@@ -1217,7 +1216,9 @@ const ui = {
             </div>
         `;
         var thumb = el.querySelector('.file-thumb');
-        if (thumb) thumb.addEventListener('error', function() { this.style.display = 'none'; });
+        if (thumb) thumb.addEventListener('error', function() { 
+            this.classList.add("hidden");
+        });
         this._bindStarClick(el);
         return el;
     },
@@ -1368,7 +1369,7 @@ function toggleCardSelection(card, event) {
  */
 function showContextMenuAtElement(triggerElement, menuId) {
     // Hide any open menus first
-    document.querySelectorAll('.context-menu').forEach(m => m.style.display = 'none');
+    document.querySelectorAll('.context-menu').forEach(m => m?.classList.add("hidden") );
 
     const menu = document.getElementById(menuId);
     if (!menu) return;
@@ -1395,7 +1396,7 @@ function showContextMenuAtElement(triggerElement, menuId) {
 
     menu.style.left = `${left}px`;
     menu.style.top = `${top}px`;
-    menu.style.display = 'block';
+    menu.classList.remove("hidden");
 }
 
 /**
@@ -1408,7 +1409,8 @@ function initRubberBandSelection() {
     if (!selRect) {
         selRect = document.createElement('div');
         selRect.id = 'selection-rect';
-        selRect.className = 'selection-rect';
+        selRect.classList.add('selection-rect');
+        selRect.classList.add('hidden');
         document.body.appendChild(selRect);
     }
 
@@ -1436,7 +1438,7 @@ function initRubberBandSelection() {
         selRect.style.top = `${startY}px`;
         selRect.style.width = '0px';
         selRect.style.height = '0px';
-        selRect.style.display = 'none'; // show only after a small movement
+        selRect.classList.add("hidden");
 
         e.preventDefault(); // prevent text selection
     });
@@ -1454,7 +1456,7 @@ function initRubberBandSelection() {
 
         // Only show the rect after a small threshold to avoid flicker on click
         if (width > 5 || height > 5) {
-            selRect.style.display = 'block';
+            selRect.classList.remove("hidden");
         }
 
         selRect.style.left = `${left}px`;
@@ -1495,8 +1497,8 @@ function initRubberBandSelection() {
     document.addEventListener('mouseup', () => {
         if (!active) return;
         active = false;
-        const hadSelection = selRect.style.display === 'block';
-        selRect.style.display = 'none';
+        const hadSelection = !selRect.classList.contains("hidden");
+        selRect.classList.add("hidden");
         // Update the batch bar after rubber band selection completes
         if (window.multiSelect) window.multiSelect._syncUI();
         // Suppress the click event that follows mouseup so the global

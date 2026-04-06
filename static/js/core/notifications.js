@@ -103,7 +103,7 @@ const notifications = (() => {
         if (!body || !empty) return;
         // Any real items?
         const hasItems = body.querySelector('.notif-item') !== null;
-        empty.style.display = hasItems ? 'none' : '';
+        empty.classList.toggle("hidden", !hasItems);
     }
 
     /* ── generic notification ───────────────────────────────── */

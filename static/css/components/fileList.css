@@ -363,7 +363,7 @@
 	color: #334155;
 }
 
-/* could be visible if we want */ 
+/* invisible in files-list-view, could be visible if we want */ 
 .files-list-view .file-item .action-cell button.favorite-star {
     display: none;
     border: none;

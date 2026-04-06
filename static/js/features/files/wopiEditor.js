@@ -124,7 +124,7 @@ class WopiEditor {
         form.target = 'wopi_frame';
         form.action = editorData.editor_url;
         form.method = 'post';
-        form.style.display = 'none';
+        form.classList.add( 'hidden');
 
         var tokenInput = document.createElement('input');
         tokenInput.name = 'access_token';

@@ -10,7 +10,7 @@
 	padding: 15px;
 	border-left: 4px solid #ff5e3a;
 	z-index: 1000;
-	display: none;
+	display: flex;
 
 	[dir='rtl'] & {
 		left: 20px;

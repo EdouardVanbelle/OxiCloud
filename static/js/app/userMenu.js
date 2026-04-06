@@ -121,7 +121,7 @@ function setupUserMenu() {
         aboutBtn.addEventListener('click', () => {
             wrapper.classList.remove('open');
             const overlay = document.getElementById('about-modal-overlay');
-            if (overlay) overlay.classList.add('show');
+            if (overlay) overlay.classList.remove('hidden');
         });
     }
 
@@ -129,18 +129,18 @@ function setupUserMenu() {
     const aboutOverlay = document.getElementById('about-modal-overlay');
     if (aboutCloseBtn) {
         aboutCloseBtn.addEventListener('click', () => {
-            aboutOverlay.classList.remove('show');
+            aboutOverlay.classList.add('hidden');
         });
     }
     if (aboutOverlay) {
         aboutOverlay.addEventListener('click', (e) => {
             if (e.target === aboutOverlay) {
-                aboutOverlay.classList.remove('show');
+                aboutOverlay.classList.add('hidden');
             }
         });
         document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && aboutOverlay.classList.contains('show')) {
-                aboutOverlay.classList.remove('show');
+            if (e.key === 'Escape' && !aboutOverlay.classList.contains('hidden')) {
+                aboutOverlay.classList.add('hidden');
             }
         });
     }

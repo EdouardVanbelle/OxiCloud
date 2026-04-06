@@ -174,7 +174,7 @@ const Modal = {
         if (!this.overlay) return;
         
         // Show overlay
-        this.overlay.style.display = 'flex';
+        this.overlay.classList.remove("hidden");
         
         // Trigger animation
         requestAnimationFrame(() => {
@@ -211,7 +211,7 @@ const Modal = {
         this.overlay.classList.remove('active');
         
         setTimeout(() => {
-            this.overlay.style.display = 'none';
+            this.overlay.classList.add("hidden");
             
             if (!confirmed && this.onCancel) {
                 this.onCancel();

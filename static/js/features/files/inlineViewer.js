@@ -125,7 +125,7 @@ class InlineViewer {
     // Show viewer based on file type
     if (isImage) {
       // Show zoom controls
-      controls.style.display = 'flex';
+      controls.classList.remove('hidden');
       
       // Show loading indicator
       const loader = document.createElement('div');
@@ -138,7 +138,7 @@ class InlineViewer {
     } 
     else if (file.mime_type && file.mime_type === 'application/pdf') {
       // Hide zoom controls for PDFs
-      controls.style.display = 'none';
+      controls.classList.add('hidden');
       
       // Show loading indicator
       const loader = document.createElement('div');
@@ -151,7 +151,7 @@ class InlineViewer {
     } 
     else if (file.mime_type && this.isTextViewable(file.mime_type)) {
       // Hide zoom controls for text files
-      controls.style.display = 'none';
+      controls.classList.add('hidden');
       
       // Show loading indicator
       const loader = document.createElement('div');
@@ -164,7 +164,7 @@ class InlineViewer {
     }
     else if (file.mime_type && file.mime_type.startsWith('audio/')) {
       // Hide zoom controls for audio
-      controls.style.display = 'none';
+      controls.classList.add('hidden');
 
       // Show loading indicator
       const loader = document.createElement('div');
@@ -177,7 +177,7 @@ class InlineViewer {
     }
     else if (file.mime_type && file.mime_type.startsWith('video/')) {
       // Hide zoom controls for video
-      controls.style.display = 'none';
+      controls.classList.add('hidden');
 
       // Show loading indicator
       const loader = document.createElement('div');
@@ -190,7 +190,7 @@ class InlineViewer {
     }
     else {
       // Hide zoom controls for unsupported files
-      controls.style.display = 'none';
+      controls.classList.add('hidden');
       
       // Show unsupported file message
       const message = document.createElement('div');

@@ -149,14 +149,14 @@ function setupActionsBarDelegation() {
             case 'upload-files-btn': {
                 e.stopPropagation();
                 const menu = document.getElementById('upload-dropdown-menu');
-                if (menu) menu.classList.remove('show');
+                if (menu) menu.classList.add('hidden');
                 if (elements.fileInput) elements.fileInput.click();
                 break;
             }
             case 'upload-folder-btn': {
                 e.stopPropagation();
                 const menu = document.getElementById('upload-dropdown-menu');
-                if (menu) menu.classList.remove('show');
+                if (menu) menu.classList.add('hidden');
                 const folderInput = document.getElementById('folder-input');
                 if (folderInput) folderInput.click();
                 break;
@@ -439,11 +439,11 @@ function setupUploadDropdown() {
     // Toggle dropdown on button click
     uploadBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        const isOpen = menu.classList.contains('show');
+        const isOpen = !menu.classList.contains('hidden');
         // Close any other open dropdowns
-        document.querySelectorAll('.upload-dropdown-menu.show').forEach(m => m.classList.remove('show'));
+        document.querySelectorAll('.upload-dropdown-menu').forEach(m => m.classList.add('hidden'));
         if (!isOpen) {
-            menu.classList.add('show');
+            menu.classList.remove('hidden');
         }
     }, { signal });
 
@@ -455,7 +455,7 @@ function setupUploadDropdown() {
     }
     uploadDropdownDocumentClickHandler = (e) => {
         if (e.target.closest('#upload-dropdown')) return;
-        document.querySelectorAll('.upload-dropdown-menu.show').forEach(m => m.classList.remove('show'));
+        document.querySelectorAll('.upload-dropdown-menu').forEach(m => m.classList.add('hidden'));
     };
     // @ts-ignore
     document.addEventListener('click', uploadDropdownDocumentClickHandler);
@@ -638,12 +638,12 @@ function setupEventListeners() {
         const folderMenu = document.getElementById('folder-context-menu');
         const fileMenu = document.getElementById('file-context-menu');
         
-        if (folderMenu && folderMenu.style.display === 'block' && 
+        if (folderMenu && !folderMenu.classList.contains("hidden") && 
             !folderMenu.contains(e.target)) {
             ui.closeContextMenu();
         }
         
-        if (fileMenu && fileMenu.style.display === 'block' && 
+        if (fileMenu && !fileMenu.classList.contains("hidden") && 
             !fileMenu.contains(e.target)) {
             ui.closeFileContextMenu();
         }

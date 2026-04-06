@@ -336,7 +336,7 @@ function initLanguageSelector() {
             
             const backToLoginLink = document.getElementById('back-to-login');
             if (backToLoginLink) {
-                backToLoginLink.parentElement.style.display = 'none';
+                backToLoginLink.parentElement.classList.add("hidden");
             }
         } else {
             showPanel(document.getElementById('login-panel'));
@@ -399,7 +399,7 @@ async function showInitialPanel() {
         // Hide the "Already set up? Sign in" link since there's no admin yet
         const backToLoginLink = document.getElementById('back-to-login');
         if (backToLoginLink) {
-            backToLoginLink.parentElement.style.display = 'none';
+            backToLoginLink.parentElement.classList.add("hidden");
         }
         return;
     }
@@ -413,7 +413,7 @@ async function showInitialPanel() {
     // Hide the admin setup link if admin already exists
     const showAdminSetupLink = document.getElementById('show-admin-setup');
     if (showAdminSetupLink && systemStatus.admin_count > 0) {
-        showAdminSetupLink.parentElement.style.display = 'none';
+        showAdminSetupLink.parentElement.classList.add("hidden");
     }
     
     // Check for OIDC/SSO configuration and update login panel accordingly
@@ -453,9 +453,9 @@ async function configureOidcLoginUI() {
         
         if (!oidcInfo.password_login_enabled) {
             // OIDC-only mode: hide password form and divider, show only SSO button
-            if (loginForm) loginForm.style.display = 'none';
-            if (authDivider) authDivider.style.display = 'none';
-            if (showRegisterToggle) showRegisterToggle.parentElement.style.display = 'none';
+            if (loginForm) loginForm.classList.add("hidden");
+            if (authDivider) authDivider.classList.add("hidden");
+            if (showRegisterToggle) showRegisterToggle.parentElement.classList.add("hidden");
             showPanel(oidcSection);
         } else {
             // Both password and OIDC enabled: show divider + SSO button
@@ -682,7 +682,7 @@ if (isLoginPage && loginForm) {
         e.preventDefault();
         
         // Clear previous errors
-        loginError.style.display = 'none';
+        loginError.classList.add("hidden");
         
         const username = document.getElementById('login-username').value;
         const password = document.getElementById('login-password').value;
@@ -706,7 +706,7 @@ if (isLoginPage && loginForm) {
         redirectToMainApp();
     } catch (error) {
         loginError.textContent = error.message || 'Error logging in';
-        loginError.style.display = 'block';
+        loginError.classList.remove("hidden");
     }
 });
 }
@@ -717,8 +717,8 @@ if (isLoginPage && registerForm) {
     e.preventDefault();
     
     // Clear previous messages
-    registerError.style.display = 'none';
-    registerSuccess.style.display = 'none';
+    registerError.classList.add("hidden");
+    registerSuccess.classList.add("hidden");
     
     const username = document.getElementById('register-username').value;
     const email = document.getElementById('register-email').value;
@@ -729,7 +729,7 @@ if (isLoginPage && registerForm) {
     if (password !== confirmPassword) {
         const errorMsg = window.i18n ? window.i18n.t('auth.passwords_mismatch') : 'Passwords do not match';
         registerError.textContent = errorMsg;
-        registerError.style.display = 'block';
+        registerError.classList.remove("hidden");
         return;
     }
     
@@ -739,7 +739,7 @@ if (isLoginPage && registerForm) {
         // Show success message
         const successMsg = window.i18n ? window.i18n.t('auth.account_success') : 'Account created successfully! You can now log in.';
         registerSuccess.textContent = successMsg;
-        registerSuccess.style.display = 'block';
+        registerSuccess.classList.remove("hidden");
         
         // Clear form
         registerForm.reset();
@@ -752,7 +752,7 @@ if (isLoginPage && registerForm) {
     } catch (error) {
         const errorMsg = window.i18n ? window.i18n.t('auth.admin_create_error') : 'Error registering account';
         registerError.textContent = error.message || errorMsg;
-        registerError.style.display = 'block';
+        registerError.classList.remove("hidden");
     }
 });
 }
@@ -763,9 +763,9 @@ if (isLoginPage && adminSetupForm) {
     e.preventDefault();
     
     // Clear previous errors/success messages
-    adminSetupError.style.display = 'none';
+    adminSetupError.classList.add("hidden");
     const adminSetupSuccess = document.getElementById('admin-setup-success');
-    if (adminSetupSuccess) adminSetupSuccess.style.display = 'none';
+    if (adminSetupSuccess) adminSetupSuccess.classList.add("hidden");
     
     const email = document.getElementById('admin-email').value;
     const password = document.getElementById('admin-password').value;
@@ -775,7 +775,7 @@ if (isLoginPage && adminSetupForm) {
     if (password !== confirmPassword) {
         const errorMsg = window.i18n ? window.i18n.t('auth.passwords_mismatch') : 'Passwords do not match';
         adminSetupError.textContent = errorMsg;
-        adminSetupError.style.display = 'block';
+        adminSetupError.classList.remove("hidden");
         return;
     }
     
@@ -802,20 +802,20 @@ if (isLoginPage && adminSetupForm) {
         
         if (adminSetupSuccess) {
             adminSetupSuccess.textContent = successMsg;
-            adminSetupSuccess.style.display = 'block';
+            adminSetupSuccess.classList.remove("hidden");
         }
         
         // Wait 2 seconds then switch to login panel
         setTimeout(() => {
             showPanel(loginPanel);
             hidePanel(adminSetupPanel);
-            if (adminSetupSuccess) adminSetupSuccess.style.display = 'none';
+            if (adminSetupSuccess) adminSetupSuccess.classList.add("hidden");
         }, 2000);
         
     } catch (error) {
         const errorMsg = window.i18n ? window.i18n.t('auth.admin_create_error') : 'Error creating admin account';
         adminSetupError.textContent = error.message || errorMsg;
-        adminSetupError.style.display = 'block';
+        adminSetupError.classList.remove("hidden");
     }
 });
 }

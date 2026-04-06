@@ -44,10 +44,10 @@ const uiNotifications = {
             notification.querySelector('.notification-message').textContent = message;
         }
 
-        notification.style.display = 'block';
+        notification.classList.remove("hidden");
 
         setTimeout(() => {
-            notification.style.display = 'none';
+            notification.classList.add("hidden");
         }, 5000);
     }
 };
