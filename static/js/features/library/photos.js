@@ -3,6 +3,8 @@
  * Photo grid grouped by day/month/year, with infinite scroll and multi-select.
  */
 
+import { photosLightbox } from './photosLightbox.js';
+
 const photosView = {
     /** @type {Array} All loaded photo items */
     items: [],
@@ -483,8 +485,8 @@ const photosView = {
 
         // Otherwise open lightbox
         const idx = this.items.findIndex((f) => f.id === id);
-        if (idx >= 0 && window.photosLightbox) {
-            window.photosLightbox.open(this.items, idx);
+        if (idx >= 0) {
+            photosLightbox.open(this.items, idx);
         }
     },
 
@@ -604,5 +606,3 @@ const photosView = {
             .replace(/</g, '&lt;');
     }
 };
-
-window.photosView = photosView;

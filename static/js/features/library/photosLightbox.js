@@ -3,7 +3,7 @@
  * Full-screen image/video viewer with prev/next navigation.
  */
 
-const photosLightbox = {
+export const photosLightbox = {
     /** @type {Array} Items array reference */
     items: [],
     /** @type {number} Current index */
@@ -282,5 +282,3 @@ const photosLightbox = {
             .replace(/</g, '&lt;');
     }
 };
-
-window.photosLightbox = photosLightbox;
