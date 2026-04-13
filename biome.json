@@ -44,5 +44,11 @@
     "formatter": {
       "enabled": true
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": ["static/js/**/*.js"],
+      "plugins": ["./.grit/rules/js.no-window-assign.grit"]
+    }
+  ]
 }

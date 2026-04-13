@@ -1,0 +1,18 @@
+engine biome(1.0)
+language js
+
+or {
+  // window.foo = value
+  `window.$_ = $_` as $node,
+  // window["foo"] = value
+  `window[$_] = $_` as $node,
+  // Object.assign(window, {...})
+  `Object.assign(window, $_)` as $node
+} where {
+  register_diagnostic(
+    span = $node,
+    message = "Do not assign properties to window. Use a module export instead.",
+    severity = "error"
+  )
+}
+
