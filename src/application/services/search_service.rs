@@ -253,7 +253,7 @@ impl SearchService {
         }
 
         // Merge files + folders by relevance and truncate to the final limit
-        suggestions.sort_by(|a, b| b.relevance_score.cmp(&a.relevance_score));
+        suggestions.sort_by_key(|f| Reverse(f.relevance_score));
         suggestions.truncate(limit);
 
         let elapsed = start.elapsed().as_millis() as u64;
@@ -346,13 +346,13 @@ impl SearchUseCase for SearchService {
                     enriched_folders.sort_by_cached_key(|f| Reverse(f.name.to_lowercase()));
                 }
                 "date" => {
-                    enriched_folders.sort_by(|a, b| a.modified_at.cmp(&b.modified_at));
+                    enriched_folders.sort_by_key(|f| f.modified_at);
                 }
                 "date_desc" => {
-                    enriched_folders.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+                    enriched_folders.sort_by_key(|f| Reverse(f.modified_at));
                 }
                 _ => {
-                    enriched_folders.sort_by(|a, b| b.relevance_score.cmp(&a.relevance_score));
+                    enriched_folders.sort_by_key(|f| Reverse(f.relevance_score));
                 }
             }
 
@@ -432,13 +432,13 @@ impl SearchUseCase for SearchService {
                 enriched_folders.sort_by_cached_key(|f| Reverse(f.name.to_lowercase()));
             }
             "date" => {
-                enriched_folders.sort_by(|a, b| a.modified_at.cmp(&b.modified_at));
+                enriched_folders.sort_by_key(|f| f.modified_at);
             }
             "date_desc" => {
-                enriched_folders.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+                enriched_folders.sort_by_key(|f| Reverse(f.modified_at));
             }
             _ => {
-                enriched_folders.sort_by(|a, b| b.relevance_score.cmp(&a.relevance_score));
+                enriched_folders.sort_by_key(|f| Reverse(f.relevance_score));
             }
         }
 
