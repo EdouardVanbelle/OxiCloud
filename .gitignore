@@ -87,3 +87,11 @@ resources/gen/
 
 # Helm chart dependencies
 charts/*/charts/*
+
+# Playwright
+tests/e2e/node_modules/
+tests/e2e/test-results/
+tests/e2e/playwright-report/
+tests/e2e/blob-report/
+tests/e2e/playwright/.cache/
+tests/e2e/playwright/.auth/
