@@ -1,0 +1,29 @@
+[advisories]
+ignore = [
+    # paste unmaintained — transitive via azure_core 0.21.0 (latest available).
+    # No direct security impact; no upgrade path exists.
+    # keep warning "RUSTSEC-2024-0436",
+
+    # rand 0.7.3 unsound — transitive via http-types → azure_core 0.21.0.
+    # Only exploitable with a custom logger using rand::rng(); not applicable here.
+    "RUSTSEC-2026-0097",
+
+    # RUSTSEC-2023-0071 (Marvin Attack): rsa crate is a transitive dependency from jsonwebtoken.
+    # Not affected: This application uses HS256 for internal JWT signing and only performs
+    # RSA public key verification (not private key operations) for OIDC/OAuth2 tokens.
+    "RUSTSEC-2023-0071",
+
+    # rustls-webpki 0.101.7 — three advisories, all transitive via AWS SDK → rustls 0.21.12.
+    # aws-sdk-s3 1.x (latest) has not yet migrated to rustls 0.23.x; no upgrade path available.
+    # Severity: low — exploitation requires either a rogue CA or a MitM on AWS S3 infrastructure.
+    #   RUSTSEC-2026-0104: DoS via panic in CRL parsing (only if CRLs are processed).
+    #   RUSTSEC-2026-0098: URI name constraints ignored (requires CA misissuance).
+    #   RUSTSEC-2026-0099: Wildcard name constraint bypass (requires CA misissuance).
+    "RUSTSEC-2026-0104",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+
+    # instant unmaintained — transitive via azure_core 0.21.0 (latest available).
+    # No direct security impact; no upgrade path exists.
+    "RUSTSEC-2024-0384",
+]

@@ -37,6 +37,10 @@ check:
     cargo fmt --all
     cargo clippy --all-features --all-targets -- -D warnings
 
+# audit security (condition: cargo install cargo-audit)
+audit:
+    cargo audit
+
 openapi:
     cargo run --bin generate-openapi
 
