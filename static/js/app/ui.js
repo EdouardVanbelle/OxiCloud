@@ -1339,7 +1339,7 @@ const ui = {
             thumb.addEventListener('error', () => {
                 console.log(`thumbnail not found for "${file.name}", try to generate it...`);
                 thumb.classList.add('hidden');
-                thumbnail.generate(file, (dataUrl) => {
+                thumbnail.queueGenerate(file, (dataUrl) => {
                     thumb.src = dataUrl;
                     thumb.classList.remove('hidden');
                 });

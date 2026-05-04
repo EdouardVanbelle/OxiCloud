@@ -3,6 +3,8 @@ import { getCsrfHeaders } from '../core/csrf.js';
 /** @type {typeof import('../vendors/pdf.min.d.ts') | null} */
 let _pdfjsLib = null;
 
+// TODO: do we need to add a max concurrncy ?
+
 /**
  * Lazy-loads pdf.min.mjs on first use via dynamic import so it is never
  * bundled into the IIFE (it uses top-level await which breaks IIFE wrapping).
@@ -52,8 +54,10 @@ export const thumbnail = {
      * @param {number} targetWidth
      * @param {number} targetHeight
      * @returns {Size}
+     *
+     * @private
      */
-    computeSize(srcWidth, srcHeight, targetWidth, targetHeight) {
+    _computeSize(srcWidth, srcHeight, targetWidth, targetHeight) {
         const srcRatio = srcWidth / srcHeight;
         const targetRatio = targetWidth / targetHeight;
         if (srcRatio > targetRatio) {
@@ -69,10 +73,12 @@ export const thumbnail = {
      * @param {number} targetWidth
      * @param {number} targetHeight
      * @param {ImageEncodeOptions} imageEncodeOptions
-     * @returns
+     * @returns {Promise<Blob>}
+     *
+     * @private
      */
-    bitmapToBlob(bitmap, targetWidth, targetHeight, imageEncodeOptions) {
-        const { width, height } = this.computeSize(bitmap.width, bitmap.height, targetWidth, targetHeight);
+    _bitmapToBlob(bitmap, targetWidth, targetHeight, imageEncodeOptions) {
+        const { width, height } = this._computeSize(bitmap.width, bitmap.height, targetWidth, targetHeight);
         const canvas = new OffscreenCanvas(width, height);
         canvas.getContext('2d')?.drawImage(bitmap, 0, 0, width, height);
         return canvas.convertToBlob(imageEncodeOptions);
@@ -81,9 +87,11 @@ export const thumbnail = {
     /**
      *
      * @param {Blob} blob
-     * @returns
+     * @returns {Promise<any>}
+     *
+     * @private
      */
-    blobToDataUrl(blob) {
+    _blobToDataUrl(blob) {
         return new Promise((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () => resolve(reader.result);
@@ -96,9 +104,12 @@ export const thumbnail = {
      *
      * @param {Object} file
      * @param {string} source
-     * @returns
+     * @returns {Promise<ImageBitmap>}
+     *
+     * @private
      */
-    async sourceToBitmap(file, source) {
+    async _sourceToBitmap(file, source) {
+        // FIXME: more efficient to use mimetype
         switch (file.icon_special_class) {
             case 'image-icon': {
                 const response = await fetch(source);
@@ -150,18 +161,25 @@ export const thumbnail = {
      *
      * @param {Object} file the source of the image
      * @param {(dataURL: string) => void} [onIconGenerated] the callback once thumbnail is generated
+     * @param {(dataURL: string) => void} [onPreviewGenerated] the callback once thumbnail is generated
+     *
+     * @private
      */
-    async generate(file, onIconGenerated) {
+    async _generate(file, onIconGenerated, onPreviewGenerated) {
         const source = `${window.location.origin}/api/files/${file.id}`;
 
-        const bitmap = await this.sourceToBitmap(file, source);
+        const bitmap = await this._sourceToBitmap(file, source);
 
         const [iconBlob, previewBlob, largeBlob] = await Promise.all(
-            Object.values(this.SIZES).map(({ width, height }) => this.bitmapToBlob(bitmap, width, height, { type: this.FORMAT, quality: this.QUALITY }))
+            Object.values(this.SIZES).map(({ width, height }) => this._bitmapToBlob(bitmap, width, height, { type: this.FORMAT, quality: this.QUALITY }))
         );
 
         if (onIconGenerated) {
-            onIconGenerated(await this.blobToDataUrl(iconBlob));
+            onIconGenerated(await this._blobToDataUrl(iconBlob));
+        }
+
+        if (onPreviewGenerated) {
+            onPreviewGenerated(await this._blobToDataUrl(previewBlob));
         }
 
         await Promise.all(
@@ -177,5 +195,35 @@ export const thumbnail = {
                 }).then((r) => console.log(`uploaded ${size} thumbnail of ${file.name}: ${r.status}`))
             )
         );
+    },
+
+    MAX_CONCURRENT: 3,
+    _activeGenerates: 0,
+    /** @type {Array<() => void>} */
+    _generateQueue: [],
+
+    /**
+     * Concurrency-limited wrapper around generate().
+     * At most MAX_CONCURRENT generations run simultaneously; excess calls are
+     * queued and resume automatically as slots free up.
+     *
+     * @param {Object} file
+     * @param {((dataURL: string) => void) | null} [onIconGenerated]
+     * @param {((dataURL: string) => void) | null} [onPreviewGenerated]
+     * @returns {Promise<void>}
+     */
+    async queueGenerate(file, onIconGenerated, onPreviewGenerated) {
+        if (this._activeGenerates >= this.MAX_CONCURRENT) {
+            await new Promise((resolve) => this._generateQueue.push(resolve));
+        }
+        this._activeGenerates++;
+        try {
+            await this._generate(file, onIconGenerated, onPreviewGenerated);
+        } finally {
+            this._activeGenerates--;
+            if (this._generateQueue.length > 0) {
+                this._generateQueue.shift()();
+            }
+        }
     }
 };
