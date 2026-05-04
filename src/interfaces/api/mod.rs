@@ -1,4 +1,5 @@
 pub mod cookie_auth;
+pub mod deserializer;
 pub mod handlers;
 pub mod routes;
 
@@ -130,7 +131,8 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
         handlers::batch_handler::get_folders_batch,
         handlers::batch_handler::move_folders_batch,
         handlers::batch_handler::trash_batch,
-        handlers::batch_handler::download_batch,
+        handlers::batch_handler::download_batch_post,
+        handlers::batch_handler::download_batch_querystring,
         // Music/playlist handlers (free functions)
         handlers::music_handler::create_playlist,
         handlers::music_handler::list_playlists,
