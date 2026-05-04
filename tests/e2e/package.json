@@ -1,0 +1,19 @@
+{
+  "name": "e2e",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "pretest": "node -e \"(async()=>{await require('./spawn-db.js')()})().catch(e=>{console.error(e);process.exit(1)})\"",
+    "test": "npx playwright test",
+    "posttest": "node -e \"(async()=>{await require('./stop-db.js')()})().catch(e=>{console.error(e);process.exit(1)})\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@types/node": "^25.6.0"
+  }
+}

@@ -63,3 +63,11 @@ front-lint:
 # check CSS rules
 front-rules:
     stylelint static/css/
+
+# end-to-end tests
+front-test:
+    cd tests/e2e && npm test
+
+# update images snapshots
+front-test-update-snapshot:
+    cd tests/e2e && npm test -- --update-snapshots
