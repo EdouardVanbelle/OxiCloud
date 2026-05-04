@@ -8,6 +8,8 @@ import { i18n } from '../../core/i18n.js';
 import { thumbnail } from '../thumbnail.js';
 import { photosLightbox } from './photosLightbox.js';
 
+/** @import {FileInfo} from '../../core/types.js' */
+
 const photosView = {
     /** @type {Array} All loaded photo items */
     items: [],
@@ -53,7 +55,7 @@ const photosView = {
             this._container = el;
         }
         if (!this._initialized) {
-            this.groupMode = localStorage.getItem('oxicloud-photos-group') || 'monthly';
+            this.groupMode = /** @type {'daily'|'monthly'|'yearly'} */ (localStorage.getItem('oxicloud-photos-group')) || 'monthly';
             this._initialized = true;
         }
     },
@@ -292,7 +294,7 @@ const photosView = {
     async _generateVideoThumbnail(tile, img) {
         const fileId = tile.dataset.id;
         // TODO: remove this HACK, this is not evolutive...
-        const file = { id: fileId, icon_special_class: 'video-icon', name: tile.dataset.name, mime_type: tile.dataset.mime };
+        const file = /** @type {FileInfo} */ ({ id: fileId, icon_special_class: 'video-icon', name: tile.dataset.name, mime_type: tile.dataset.mime });
 
         try {
             await thumbnail.queueGenerate(file, null, (previewDataUrl) => {

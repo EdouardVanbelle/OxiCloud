@@ -1,5 +1,7 @@
 import { getCsrfHeaders } from '../core/csrf.js';
 
+/** @import {FileInfo} from '../core/types.js' */
+
 /** @type {typeof import('../vendors/pdf.min.d.ts') | null} */
 let _pdfjsLib = null;
 
@@ -18,14 +20,19 @@ async function getPdfjsLib() {
 }
 
 export const thumbnail = {
-    SUPPORTED_CLASS: ['image-icon', 'pdf-icon', 'video-icon'],
+    SUPPORTED_MIME_TYPE: [/^image\//, /^application\/pdf$/, /^video\//],
     /**
      *
-     * @param {String} iconSpecialClass
+     * @param {Object} file
      * @returns {boolean}
      */
-    canHandle(iconSpecialClass) {
-        return this.SUPPORTED_CLASS.includes(iconSpecialClass);
+    canHandle(file) {
+        for (const re of this.SUPPORTED_MIME_TYPE) {
+            if (file.mime_type.match(re)) {
+                return true;
+            }
+        }
+        return false;
     },
 
     // TODO: use these informations from server ?
@@ -102,7 +109,7 @@ export const thumbnail = {
 
     /**
      *
-     * @param {Object} file
+     * @param {FileInfo} file
      * @param {string} source
      * @returns {Promise<ImageBitmap>}
      *
@@ -110,58 +117,55 @@ export const thumbnail = {
      */
     async _sourceToBitmap(file, source) {
         // FIXME: more efficient to use mimetype
-        switch (file.icon_special_class) {
-            case 'image-icon': {
-                const response = await fetch(source);
-                if (!response.ok) throw new Error(`failed to fetch: ${response.status}`);
-                const blob = await response.blob();
-                return createImageBitmap(blob);
-            }
-
-            case 'pdf-icon': {
-                const pdfjsLib = await getPdfjsLib();
-                const pdf = await pdfjsLib.getDocument(source).promise;
-                const page = await pdf.getPage(1);
-                const viewport = page.getViewport({ scale: 1 });
-                const canvas = document.createElement('canvas');
-                canvas.width = viewport.width;
-                canvas.height = viewport.height;
-                await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
-                return createImageBitmap(canvas);
-            }
-
-            case 'video-icon': {
-                return new Promise((resolve, reject) => {
-                    const video = document.createElement('video');
-                    video.src = source;
-                    video.muted = true;
-                    video.preload = 'metadata';
-                    video.onloadedmetadata = () => {
-                        // seek to 1/3 of video to take snapshot
-                        video.currentTime = video.duration / 3;
-                    };
-                    video.onseeked = async () => {
-                        const bitmap = await createImageBitmap(video);
-                        video.pause();
-                        video.removeAttribute('src'); // hack to close network connection
-                        video.load();
-                        resolve(bitmap);
-                    };
-                    video.onerror = reject;
-                });
-            }
-
-            default:
-                throw new Error(`unknown type: ${file.icon_special_class} for file ${file.name}`);
+        if (file.mime_type.startsWith('image/')) {
+            const response = await fetch(source);
+            if (!response.ok) throw new Error(`failed to fetch: ${response.status}`);
+            const blob = await response.blob();
+            return createImageBitmap(blob);
         }
+
+        if (file.mime_type === 'application/pdf') {
+            const pdfjsLib = await getPdfjsLib();
+            const pdf = await pdfjsLib.getDocument(source).promise;
+            const page = await pdf.getPage(1);
+            const viewport = page.getViewport({ scale: 1 });
+            const canvas = document.createElement('canvas');
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+            return createImageBitmap(canvas);
+        }
+
+        if (file.mime_type.startsWith('video/')) {
+            return new Promise((resolve, reject) => {
+                const video = document.createElement('video');
+                video.src = source;
+                video.muted = true;
+                video.preload = 'metadata';
+                video.onloadedmetadata = () => {
+                    // seek to 1/3 of video to take snapshot
+                    video.currentTime = video.duration / 3;
+                };
+                video.onseeked = async () => {
+                    const bitmap = await createImageBitmap(video);
+                    video.pause();
+                    video.removeAttribute('src'); // hack to close network connection
+                    video.load();
+                    resolve(bitmap);
+                };
+                video.onerror = reject;
+            });
+        }
+
+        throw new Error(`unsupported mime type: ${file.mime_type} for file ${file.name}`);
     },
 
     /**
      * generateThumbnail and update image
      *
      * @param {Object} file the source of the image
-     * @param {(dataURL: string) => void} [onIconGenerated] the callback once thumbnail is generated
-     * @param {(dataURL: string) => void} [onPreviewGenerated] the callback once thumbnail is generated
+     * @param {((dataURL: string) => void) | null} [onIconGenerated] the callback once thumbnail is generated
+     * @param {((dataURL: string) => void) | null} [onPreviewGenerated] the callback once thumbnail is generated
      *
      * @private
      */
@@ -207,7 +211,7 @@ export const thumbnail = {
      * At most MAX_CONCURRENT generations run simultaneously; excess calls are
      * queued and resume automatically as slots free up.
      *
-     * @param {Object} file
+     * @param {FileInfo} file
      * @param {((dataURL: string) => void) | null} [onIconGenerated]
      * @param {((dataURL: string) => void) | null} [onPreviewGenerated]
      * @returns {Promise<void>}
@@ -219,6 +223,14 @@ export const thumbnail = {
         this._activeGenerates++;
         try {
             await this._generate(file, onIconGenerated, onPreviewGenerated);
+        } catch (err) {
+            if (err instanceof Event) {
+                console.warn(`generation of thumbnail for ${file.name} failed: `, err.target.error);
+            } else if (err instanceof Error) {
+                console.warn(`generation of thumbnail for ${file.name} failed: `, err.message);
+            } else {
+                console.warn(`generation of thumbnail for ${file.name} failed: `, err);
+            }
         } finally {
             this._activeGenerates--;
             if (this._generateQueue.length > 0) {

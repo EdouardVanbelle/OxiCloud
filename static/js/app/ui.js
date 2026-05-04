@@ -1303,7 +1303,7 @@ const ui = {
         const formattedDate = formatDateTime(file.modified_at);
         const isFav = favorites?.isFavorite(file.id, 'file');
         const isShared = sharedView.isShared(file.id, 'file');
-        const canThumbnail = thumbnail.canHandle(iconSpecialClass);
+        const canThumbnail = thumbnail.canHandle(file);
 
         const el = document.createElement('div');
         el.className = 'file-item';
