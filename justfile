@@ -39,7 +39,7 @@ check:
 
 # audit security (condition: cargo install cargo-audit)
 audit:
-    cargo audit --ignore RUSTSEC-2023-0071
+    cargo audit
 
 openapi:
     cargo run --bin generate-openapi

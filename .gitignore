@@ -20,9 +20,10 @@
 *.su
 *.idb
 
-# Build cache (keep .cargo/config.toml for project build settings)
+# Build cache (keep .cargo/config.toml for project build settings, keep audit config)
 .cargo/*
 !.cargo/config.toml
+!.cargo/audit.toml
 
 # temporary file to tools
 tmp/

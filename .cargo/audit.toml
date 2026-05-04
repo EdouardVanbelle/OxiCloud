@@ -1,0 +1,15 @@
+[advisories]
+ignore = [
+    # paste unmaintained — transitive via azure_core 0.21.0 (latest available).
+    # No direct security impact; no upgrade path exists.
+    # keep warning "RUSTSEC-2024-0436",
+
+    # rand 0.7.3 unsound — transitive via http-types → azure_core 0.21.0.
+    # Only exploitable with a custom logger using rand::rng(); not applicable here.
+    "RUSTSEC-2026-0097",
+
+    # RUSTSEC-2023-0071 (Marvin Attack): rsa crate is a transitive dependency from jsonwebtoken.
+    # Not affected: This application uses HS256 for internal JWT signing and only performs
+    # RSA public key verification (not private key operations) for OIDC/OAuth2 tokens.
+    "RUSTSEC-2023-0071",
+]
