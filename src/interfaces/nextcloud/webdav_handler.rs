@@ -495,10 +495,8 @@ fn parse_proppatch_favorite(body: &str) -> Option<u8> {
                 let text = e.decode().ok()?;
                 return text.trim().parse::<u8>().ok();
             }
-            Ok(Event::End(ref e)) => {
-                if e.local_name().as_ref() == b"favorite" {
-                    inside_favorite = false;
-                }
+            Ok(Event::End(ref e)) if e.local_name().as_ref() == b"favorite" => {
+                inside_favorite = false;
             }
             Ok(Event::Eof) => break,
             Err(_) => break,

@@ -752,10 +752,8 @@ impl WebDavAdapter {
                         _ => (),
                     }
                 }
-                Ok(Event::Text(e)) => {
-                    if current_prop.is_some() {
-                        current_text.push_str(&e.decode().unwrap_or_default());
-                    }
+                Ok(Event::Text(e)) if current_prop.is_some() => {
+                    current_text.push_str(&e.decode().unwrap_or_default());
                 }
                 Ok(Event::End(ref e)) => {
                     let name = e.name();
@@ -961,10 +959,8 @@ impl WebDavAdapter {
                         _ => (),
                     }
                 }
-                Ok(Event::Text(e)) => {
-                    if in_owner {
-                        owner_text.push_str(&e.decode().unwrap_or_default());
-                    }
+                Ok(Event::Text(e)) if in_owner => {
+                    owner_text.push_str(&e.decode().unwrap_or_default());
                 }
                 Ok(Event::End(ref e)) => {
                     let name = e.name();
