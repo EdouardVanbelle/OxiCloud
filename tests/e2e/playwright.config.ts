@@ -13,6 +13,9 @@ export default defineConfig({
   use: {
     baseURL: 'http://localhost:8087',
     trace: 'on-first-retry',
+  },
+
+  expect: {
     toHaveScreenshot: { maxDiffPixelRatio: 0.02 },
   },
 
@@ -28,7 +31,7 @@ export default defineConfig({
   ],
 
   webServer: {
-    command: 'cargo run',
+    command: process.env.CI ? `${process.env.GITHUB_WORKSPACE}/target/debug/oxicloud` : 'cargo run',
     url: 'http://localhost:8087',
     timeout: 600_000,
     reuseExistingServer: false,

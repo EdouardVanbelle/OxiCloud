@@ -16,29 +16,41 @@ jobs:
   test:
     timeout-minutes: 60
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: tests/e2e
     steps:
     - uses: actions/checkout@v4
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
 
-    - name: Cache Rust build
+    - name: Cache compiled binary
+      id: binary-cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/target/debug/oxicloud
+        key: ${{ runner.os }}-oxicloud-binary-${{ hashFiles('src/**', 'Cargo.toml', 'Cargo.lock') }}
+
+    - name: Cache Rust dependencies
+      if: steps.binary-cache.outputs.cache-hit != 'true'
       uses: Swatinem/rust-cache@v2
+
+    - name: Build server
+      if: steps.binary-cache.outputs.cache-hit != 'true'
+      run: cargo build
 
     - uses: actions/setup-node@v4
       with:
         node-version: lts/*
 
     - name: Install Node dependencies
+      working-directory: tests/e2e
       run: npm ci
 
     - name: Install Playwright browsers
+      working-directory: tests/e2e
       run: npx playwright install --with-deps
 
     - name: Run Playwright tests (spawns DB via pretest hook)
+      working-directory: tests/e2e
       run: npm test
 
     - uses: actions/upload-artifact@v4
