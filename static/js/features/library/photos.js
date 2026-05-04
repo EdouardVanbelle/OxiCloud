@@ -5,7 +5,10 @@
 
 import { getCsrfHeaders } from '../../core/csrf.js';
 import { i18n } from '../../core/i18n.js';
+import { thumbnail } from '../thumbnail.js';
 import { photosLightbox } from './photosLightbox.js';
+
+/** @import {FileInfo} from '../../core/types.js' */
 
 const photosView = {
     /** @type {Array} All loaded photo items */
@@ -28,12 +31,6 @@ const photosView = {
     groupMode: 'monthly',
     /** @type {Map<string, string>} fileId → thumbnail URL (persists across re-renders) */
     _videoThumbCache: new Map(),
-    /** @type {number} Max concurrent video thumbnail extractions */
-    _maxConcurrentDecodes: 3,
-    /** @type {number} Currently running video decodes */
-    _activeDecodes: 0,
-    /** @type {Array} Pending video decode queue */
-    _decodeQueue: [],
     /** @type {number} Items already rendered in the DOM */
     _renderedCount: 0,
 
@@ -58,7 +55,7 @@ const photosView = {
             this._container = el;
         }
         if (!this._initialized) {
-            this.groupMode = localStorage.getItem('oxicloud-photos-group') || 'monthly';
+            this.groupMode = /** @type {'daily'|'monthly'|'yearly'} */ (localStorage.getItem('oxicloud-photos-group')) || 'monthly';
             this._initialized = true;
         }
     },
@@ -236,7 +233,7 @@ const photosView = {
         const selected = this.selected.has(file.id) ? ' selected' : '';
         const cachedThumb = isVideo && this._videoThumbCache.has(file.id) ? this._videoThumbCache.get(file.id) : null;
         const thumbUrl = cachedThumb || `/api/files/${file.id}/thumbnail/preview`;
-        let h = `<div class="photo-tile${selected}" data-id="${this._escAttr(file.id)}" data-mime="${this._escAttr(file.mime_type)}">`;
+        let h = `<div class="photo-tile${selected}" data-id="${this._escAttr(file.id)}" data-mime="${this._escAttr(file.mime_type)}" data-name="${this._escAttr(file.name)}">`;
         h += `<div class="photo-check"><i class="fas fa-check"></i></div>`;
         h += `<img src="${thumbUrl}" loading="lazy" alt="${this._escAttr(file.name)}">`;
         if (isVideo) h += `<div class="video-badge"><i class="fas fa-play"></i></div>`;
@@ -286,131 +283,29 @@ const photosView = {
             img.addEventListener(
                 'error',
                 () => {
-                    this._enqueueVideoThumbnail(tile, img);
+                    this._generateVideoThumbnail(tile, img);
                 },
                 { once: true }
             );
         }
     },
 
-    /** Enqueue a video thumbnail decode, respecting concurrency limit. */
-    _enqueueVideoThumbnail(tile, img) {
-        if (this._activeDecodes < this._maxConcurrentDecodes) {
-            this._activeDecodes++;
-            this._generateVideoThumbnail(tile, img);
-        } else {
-            this._decodeQueue.push({ tile, img });
-        }
-    },
-
-    /** Process next item in the decode queue. */
-    _drainDecodeQueue() {
-        this._activeDecodes--;
-        if (this._decodeQueue.length > 0) {
-            const next = this._decodeQueue.shift();
-            this._activeDecodes++;
-            this._generateVideoThumbnail(next.tile, next.img);
-        }
-    },
-
-    /** Extract a single frame from a video and display it as the tile
-     *  thumbnail, then upload the JPEG to the server for caching. */
-    _generateVideoThumbnail(tile, img) {
-        // TODO: use thumbnail.js s common lib
-
+    /** Extract a frame and upload all thumbnail sizes via thumbnail.queueGenerate(). */
+    async _generateVideoThumbnail(tile, img) {
         const fileId = tile.dataset.id;
-        const video = document.createElement('video');
-        video.crossOrigin = 'anonymous';
-        video.preload = 'metadata';
-        video.muted = true;
-        // Auth is handled via HttpOnly cookie — direct URL works
-        video.src = `/api/files/${fileId}`;
+        // TODO: remove this HACK, this is not evolutive...
+        const file = /** @type {FileInfo} */ ({ id: fileId, icon_special_class: 'video-icon', name: tile.dataset.name, mime_type: tile.dataset.mime });
 
-        video.addEventListener(
-            'loadeddata',
-            () => {
-                // Seek to 25 % of duration, clamped between 0.5 s and 5 s
-                video.currentTime = Math.min(5, Math.max(0.5, video.duration * 0.25));
-            },
-            { once: true }
-        );
-
-        video.addEventListener(
-            'seeked',
-            () => {
-                // Pre-scale to thumbnail size in the browser — saves ~22× RAM,
-                // ~15× bandwidth, and lets the server skip resize entirely.
-                const MAX_THUMB = 400; // must match ThumbnailSize::Preview
-                const scale = Math.min(MAX_THUMB / video.videoWidth, MAX_THUMB / video.videoHeight, 1);
-                const canvas = document.createElement('canvas');
-                canvas.width = Math.round(video.videoWidth * scale);
-                canvas.height = Math.round(video.videoHeight * scale);
-                const ctx = canvas.getContext('2d');
-                ctx?.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-                // JPEG: explicit quality control, universally supported,
-                // and server stores as-is when dimensions fit (zero re-encode).
-                const mimeType = 'image/jpeg';
-
-                canvas.toBlob(
-                    (blob) => {
-                        if (!blob) {
-                            this._drainDecodeQueue();
-                            return;
-                        }
-
-                        // Show immediately in the tile
-                        const url = URL.createObjectURL(blob);
-                        img.src = url;
-                        // Cache locally so re-renders are instant
-                        this._videoThumbCache.set(fileId, url);
-
-                        // Upload to server for permanent caching
-                        const token = localStorage.getItem('token') || sessionStorage.getItem('token');
-                        const headers = /** @type {Record<String, String>} */ ({ 'Content-Type': blob.type, ...getCsrfHeaders() });
-                        if (token) headers.Authorization = `Bearer ${token}`;
-
-                        fetch(`/api/files/${fileId}/thumbnail/preview`, {
-                            method: 'PUT',
-                            headers,
-                            credentials: 'same-origin',
-                            body: blob
-                        })
-                            .then((resp) => {
-                                if (resp.ok) {
-                                    // Switch from blob URL to server URL so the blob
-                                    // can be garbage-collected and future loads use
-                                    // the permanently cached JPEG from the server.
-                                    const serverUrl = `/api/files/${fileId}/thumbnail/preview?v=1`;
-                                    this._videoThumbCache.set(fileId, serverUrl);
-                                }
-                            })
-                            .catch(() => {
-                                /* best-effort */
-                            });
-
-                        // Release video resources
-                        video.src = '';
-                        video.load();
-                        this._drainDecodeQueue();
-                    },
-                    mimeType,
-                    0.8
-                );
-            },
-            { once: true }
-        );
-
-        // If the video can't be loaded at all, keep the generic play badge
-        video.addEventListener(
-            'error',
-            () => {
-                video.src = '';
-                video.load();
-                this._drainDecodeQueue();
-            },
-            { once: true }
-        );
+        try {
+            await thumbnail.queueGenerate(file, null, (previewDataUrl) => {
+                img.src = previewDataUrl;
+                this._videoThumbCache.set(fileId, previewDataUrl);
+            });
+            // Switch to permanent server URL so the data URL can be GC'd
+            this._videoThumbCache.set(fileId, `/api/files/${fileId}/thumbnail/preview?v=1`);
+        } catch {
+            // Keep generic play badge on error
+        }
     },
 
     /** Render the group mode toolbar */
