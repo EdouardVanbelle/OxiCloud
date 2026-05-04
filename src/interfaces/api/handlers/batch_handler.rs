@@ -852,6 +852,21 @@ pub async fn move_folders_batch(
 }
 
 // Hander as a workarround for drag & drop (does not support POST requests)
+#[utoipa::path(
+    get,
+    path = "/api/batch/download",
+    params(
+        ("file_ids" = Option<String>, Query, description = "Comma-separated file IDs"),
+        ("folder_ids" = Option<String>, Query, description = "Comma-separated folder IDs"),
+    ),
+    responses(
+        (status = 200, description = "ZIP archive stream"),
+        (status = 400, description = "Bad request"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "ZIP creation failed")
+    ),
+    tag = "batch"
+)]
 pub async fn download_batch_querystring(
     State(state): State<BatchHandlerState>,
     auth_user: AuthUser,
