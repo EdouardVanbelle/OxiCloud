@@ -159,6 +159,60 @@ impl ShareService {
 
         Ok(share)
     }
+
+    /// `allow_password_protected = true` only after the caller's right to
+    /// bypass has been verified (e.g. via an unlock cookie).
+    async fn fetch_share_resolved(
+        &self,
+        token: &str,
+        allow_password_protected: bool,
+    ) -> Result<ShareDto, DomainError> {
+        let share = self
+            .share_repository
+            .find_share_by_token(token)
+            .await
+            .map_err(|e| {
+                ShareServiceError::NotFound(format!("Share with token {} not found: {}", token, e))
+            })?;
+
+        if share.is_expired() {
+            return Err(ShareServiceError::Expired.into());
+        }
+
+        if share.has_password() && !allow_password_protected {
+            return Err(DomainError::new(
+                ErrorKind::AccessDenied,
+                "Share",
+                "This share is password protected",
+            ));
+        }
+
+        Ok(ShareDto::from_entity(&share, &self.config.base_url()))
+    }
+
+    pub fn issue_unlock_jwt(&self, share_token: &str) -> Result<String, DomainError> {
+        crate::infrastructure::services::share_unlock_cookie::issue_jwt(
+            &self.config.auth.jwt_secret,
+            share_token,
+            crate::infrastructure::services::share_unlock_cookie::DEFAULT_TTL_SECS,
+        )
+    }
+
+    pub async fn get_shared_link_with_unlock(
+        &self,
+        token: &str,
+        unlock_jwt: Option<&str>,
+    ) -> Result<ShareDto, DomainError> {
+        let unlocked = match unlock_jwt {
+            Some(jwt) => crate::infrastructure::services::share_unlock_cookie::verify_jwt(
+                &self.config.auth.jwt_secret,
+                token,
+                jwt,
+            ),
+            None => false,
+        };
+        self.fetch_share_resolved(token, unlocked).await
+    }
 }
 
 impl ShareUseCase for ShareService {
@@ -221,33 +275,7 @@ impl ShareUseCase for ShareService {
     }
 
     async fn get_shared_link_by_token(&self, token: &str) -> Result<ShareDto, DomainError> {
-        // Find the shared link by its token
-        let share = self
-            .share_repository
-            .find_share_by_token(token)
-            .await
-            .map_err(|e| {
-                ShareServiceError::NotFound(format!("Share with token {} not found: {}", token, e))
-            })?;
-
-        // Check if it has expired
-        if share.is_expired() {
-            return Err(ShareServiceError::Expired.into());
-        }
-
-        // SECURITY: If the share is password-protected, do NOT return
-        // the full metadata.  Force the caller to verify the password
-        // first via `verify_shared_link_password`.
-        if share.has_password() {
-            return Err(DomainError::new(
-                ErrorKind::AccessDenied,
-                "Share",
-                "This share is password protected",
-            ));
-        }
-
-        // Convert the entity to DTO for the response
-        Ok(ShareDto::from_entity(&share, &self.config.base_url()))
+        self.fetch_share_resolved(token, false).await
     }
 
     async fn get_shared_links_for_item(

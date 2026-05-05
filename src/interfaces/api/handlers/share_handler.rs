@@ -5,7 +5,7 @@ use axum::{
     Json,
     body::Body,
     extract::{Path, Query, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
@@ -13,6 +13,7 @@ use serde_json::json;
 use utoipa::ToSchema;
 
 use crate::application::services::share_service::ShareService;
+use crate::infrastructure::services::share_unlock_cookie;
 use crate::{
     application::{
         dtos::share_dto::{CreateShareDto, UpdateShareDto},
@@ -26,6 +27,15 @@ use crate::{
     interfaces::errors::AppError,
     interfaces::middleware::auth::AuthUser,
 };
+
+fn unlock_jwt_from_headers(headers: &HeaderMap, share_token: &str) -> Option<String> {
+    headers
+        .get(header::COOKIE)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|cookie_header| {
+            share_unlock_cookie::extract_from_cookie_header(cookie_header, share_token)
+        })
+}
 
 #[derive(Debug, Deserialize)]
 pub struct GetSharesQuery {
@@ -211,12 +221,19 @@ pub async fn delete_shared_link(
 pub async fn access_shared_item(
     State(share_use_case): State<Arc<ShareService>>,
     Path(token): Path<String>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     // Register the access
     let _ = share_use_case.register_shared_link_access(&token).await;
 
+    // Honour an unlock cookie if one was issued by a prior `/verify` call.
+    let unlock_jwt = unlock_jwt_from_headers(&headers, &token);
+
     // Get the shared link
-    match share_use_case.get_shared_link_by_token(&token).await {
+    match share_use_case
+        .get_shared_link_with_unlock(&token, unlock_jwt.as_deref())
+        .await
+    {
         Ok(item) => (StatusCode::OK, Json(item)).into_response(),
         Err(err) => {
             // Special handling for share access errors
@@ -261,7 +278,17 @@ pub async fn verify_shared_item_password(
         .verify_shared_link_password(&token, &req.password)
         .await
     {
-        Ok(item) => (StatusCode::OK, Json(item)).into_response(),
+        Ok(item) => match share_use_case.issue_unlock_jwt(&token) {
+            Ok(jwt) => {
+                let cookie = share_unlock_cookie::build_set_cookie(
+                    &token,
+                    &jwt,
+                    share_unlock_cookie::DEFAULT_TTL_SECS,
+                );
+                (StatusCode::OK, [(header::SET_COOKIE, cookie)], Json(item)).into_response()
+            }
+            Err(_) => (StatusCode::OK, Json(item)).into_response(),
+        },
         Err(err) => {
             if err.kind == ErrorKind::AccessDenied {
                 if err.message.contains("expired") {
@@ -296,6 +323,7 @@ pub async fn verify_shared_item_password(
 pub async fn download_shared_file(
     State(state): State<Arc<AppState>>,
     Path(token): Path<String>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     // 1. Resolve share service
     let share_service = match &state.share_service {
@@ -311,7 +339,11 @@ pub async fn download_shared_file(
     };
 
     // 2. Validate the share token (handles expiry + password checks)
-    let share_dto = match share_service.get_shared_link_by_token(&token).await {
+    let unlock_jwt = unlock_jwt_from_headers(&headers, &token);
+    let share_dto = match share_service
+        .get_shared_link_with_unlock(&token, unlock_jwt.as_deref())
+        .await
+    {
         Ok(dto) => dto,
         Err(err) => {
             if err.kind == ErrorKind::AccessDenied {

@@ -174,7 +174,13 @@
 }
 
 .share-options {
-    padding: 20px 24px 0;
+    padding: 20px 24px 20px;
+}
+
+.share-options > #share-confirm-btn {
+    display: block;
+    margin-left: auto;
+    margin-top: 16px;
 }
 
 .share-options h3,
