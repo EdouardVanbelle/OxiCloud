@@ -965,6 +965,58 @@ impl FolderRepository for FolderDbRepository {
             })
             .collect()
     }
+
+    async fn is_folder_in_subtree(
+        &self,
+        candidate_folder_id: &str,
+        root_folder_id: &str,
+    ) -> Result<bool, DomainError> {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (\
+                 SELECT 1 \
+                 FROM storage.folders c, storage.folders r \
+                 WHERE c.id = $1::uuid \
+                   AND r.id = $2::uuid \
+                   AND c.is_trashed = false \
+                   AND r.is_trashed = false \
+                   AND c.lpath <@ r.lpath \
+             )",
+        )
+        .bind(candidate_folder_id)
+        .bind(root_folder_id)
+        .fetch_one(self.pool())
+        .await
+        .map_err(|e| {
+            DomainError::internal_error("FolderDb", format!("is_folder_in_subtree: {e}"))
+        })?;
+        Ok(exists)
+    }
+
+    async fn is_file_in_subtree(
+        &self,
+        file_id: &str,
+        root_folder_id: &str,
+    ) -> Result<bool, DomainError> {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (\
+                 SELECT 1 \
+                 FROM storage.files f \
+                 JOIN storage.folders parent ON f.folder_id = parent.id \
+                 JOIN storage.folders root   ON root.id = $2::uuid \
+                 WHERE f.id = $1::uuid \
+                   AND f.is_trashed = false \
+                   AND parent.is_trashed = false \
+                   AND root.is_trashed = false \
+                   AND parent.lpath <@ root.lpath \
+             )",
+        )
+        .bind(file_id)
+        .bind(root_folder_id)
+        .fetch_one(self.pool())
+        .await
+        .map_err(|e| DomainError::internal_error("FolderDb", format!("is_file_in_subtree: {e}")))?;
+        Ok(exists)
+    }
 }
 
 // ── Extra helpers for blob-storage bootstrap ──

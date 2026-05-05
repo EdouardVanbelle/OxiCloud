@@ -967,56 +967,15 @@ impl FileHandler {
 
     /// Build a Content-Disposition header value.
     ///
-    /// Uses RFC 5987 `filename*=UTF-8''<percent-encoded>` to safely handle
-    /// filenames with quotes, non-ASCII characters, or other special chars.
-    /// A sanitised ASCII `filename=` fallback is included for legacy clients.
+    /// Build a `Content-Disposition` header value for an authenticated download,
+    /// honouring the `?inline=true|1` query param. Delegates to the shared
+    /// `build_content_disposition` so the share-link path produces identical
+    /// header values for the same `(name, mime)` pair.
     fn content_disposition(name: &str, mime: &str, params: &HashMap<String, String>) -> String {
         let force_inline = params
             .get("inline")
             .is_some_and(|v| v == "true" || v == "1");
-        let disposition = if force_inline
-            || mime.starts_with("image/")
-            || mime == "application/pdf"
-            || mime.starts_with("video/")
-            || mime.starts_with("audio/")
-        {
-            "inline"
-        } else {
-            "attachment"
-        };
-
-        // RFC 5987 percent-encode for filename* (attr-char safe set)
-        use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-        // Characters that DON'T need encoding per RFC 5987 attr-char:
-        //   ALPHA / DIGIT / "!" / "#" / "$" / "&" / "+" / "-" / "." /
-        //   "^" / "_" / "`" / "|" / "~"
-        const RFC5987_SET: &AsciiSet = &NON_ALPHANUMERIC
-            .remove(b'!')
-            .remove(b'#')
-            .remove(b'$')
-            .remove(b'&')
-            .remove(b'+')
-            .remove(b'-')
-            .remove(b'.')
-            .remove(b'^')
-            .remove(b'_')
-            .remove(b'`')
-            .remove(b'|')
-            .remove(b'~');
-        let encoded = utf8_percent_encode(name, RFC5987_SET).to_string();
-
-        // ASCII fallback: strip anything outside printable ASCII and
-        // replace '"' and '\\' to prevent header injection.
-        let ascii_safe: String = name
-            .chars()
-            .filter(|c| c.is_ascii_graphic() || *c == ' ')
-            .map(|c| match c {
-                '"' | '\\' => '_',
-                _ => c,
-            })
-            .collect();
-
-        format!("{disposition}; filename=\"{ascii_safe}\"; filename*=UTF-8''{encoded}")
+        build_content_disposition(name, mime, force_inline)
     }
 
     /// Build a 201 Created JSON response.
@@ -1071,6 +1030,49 @@ impl FileHandler {
 pub struct MoveFilePayload {
     /// Target folder ID (None means root)
     pub folder_id: Option<String>,
+}
+
+/// RFC 5987-compliant `Content-Disposition` with both ASCII fallback and
+/// `filename*=UTF-8''...` for non-ASCII filenames.
+pub(super) fn build_content_disposition(name: &str, mime: &str, force_inline: bool) -> String {
+    let disposition = if force_inline
+        || mime.starts_with("image/")
+        || mime == "application/pdf"
+        || mime.starts_with("video/")
+        || mime.starts_with("audio/")
+    {
+        "inline"
+    } else {
+        "attachment"
+    };
+
+    use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
+    // RFC 5987 attr-char safe set (no encoding needed for these).
+    const RFC5987_SET: &AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'!')
+        .remove(b'#')
+        .remove(b'$')
+        .remove(b'&')
+        .remove(b'+')
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'^')
+        .remove(b'_')
+        .remove(b'`')
+        .remove(b'|')
+        .remove(b'~');
+    let encoded = utf8_percent_encode(name, RFC5987_SET).to_string();
+
+    let ascii_safe: String = name
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .map(|c| match c {
+            '"' | '\\' => '_',
+            _ => c,
+        })
+        .collect();
+
+    format!("{disposition}; filename=\"{ascii_safe}\"; filename*=UTF-8''{encoded}")
 }
 
 // ── Route handlers (free functions) ──────────────────────────────────────────

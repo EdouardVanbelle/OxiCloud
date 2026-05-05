@@ -17,6 +17,7 @@ pub mod nextcloud_file_id_service;
 pub mod nextcloud_login_flow_service;
 pub mod recent_service;
 pub mod search_service;
+pub mod share_browse_service;
 pub mod share_service;
 pub mod storage_settings_service;
 pub mod storage_usage_service;
