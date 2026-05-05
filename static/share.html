@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OxiCloud — Shared</title>
   <script src="/js/core/theme-init.js"></script>
+  <script type="module" src="/js/core/icons.js"></script>
   <link rel="stylesheet" href="/css/main.css">
   <link rel="stylesheet" href="/css/views/share-public.css">
 </head>
@@ -49,17 +50,11 @@
       </a>
     </div>
 
-    <!-- Folder share view -->
-    <div id="share-folder" class="share-state hidden">
-      <h2 id="folder-name"></h2>
-      <p class="subtitle" id="folder-meta">Shared folder</p>
-      <div id="folder-contents" class="folder-list">
-        <p class="subtitle">Folder browsing is not yet available. Use a WebDAV client for full access.</p>
-      </div>
-    </div>
+    <!-- Folder share view: populated by publicShare.js -->
+    <div id="share-folder" class="share-state hidden"></div>
 
   </div>
 
-  <script src="/js/views/public/publicShare.js"></script>
+  <script type="module" src="/js/views/public/publicShare.js"></script>
 </body>
 </html>

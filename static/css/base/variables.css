@@ -116,6 +116,13 @@
     --color-overlay-light: rgba(0, 0, 0, 0.45);
     --color-overlay-heavy: rgba(0, 0, 0, 0.85);
     --color-overlay-darkest: rgba(0, 0, 0, 0.92);
+    --color-overlay-shadow: rgba(0, 0, 0, 0.6);
+
+    /* Foreground / control surfaces on top of dark overlays */
+    --color-on-overlay: rgba(255, 255, 255, 0.95);
+    --color-on-overlay-muted: rgba(255, 255, 255, 0.9);
+    --color-overlay-button: rgba(255, 255, 255, 0.12);
+    --color-overlay-button-hover: rgba(255, 255, 255, 0.22);
 
     /* Items */
     --color-item: var(--color-bg-surface);
