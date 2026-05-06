@@ -42,6 +42,11 @@ pub struct RecentItemDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
 
+    /// Full human-readable path (e.g. "Documents/Work" for a folder,
+    /// "Documents/Work/report.pdf" for a file)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_path: Option<String>,
+
     // ── Pre-computed display fields ──
     /// FontAwesome icon CSS class (e.g. "fas fa-file-image", "fas fa-folder")
     pub icon_class: String,

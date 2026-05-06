@@ -116,7 +116,8 @@
         "search_btn": "Suchen",
         "close": "Schließen",
         "delete_permanently": "Endgültig löschen",
-        "empty_trash": "Papierkorb leeren"
+        "empty_trash": "Papierkorb leeren",
+        "open_parent_folder": "Zum übergeordneten Ordner"
     },
     "user_menu": {
         "appearance": "Erscheinungsbild",

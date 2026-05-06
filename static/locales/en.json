@@ -116,7 +116,8 @@
         "search_btn": "Search",
         "close": "Close",
         "delete_permanently": "Delete permanently",
-        "empty_trash": "Empty trash"
+        "empty_trash": "Empty trash",
+        "open_parent_folder": "Go to parent folder"
     },
     "user_menu": {
         "appearance": "Appearance",

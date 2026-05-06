@@ -116,7 +116,8 @@
         "search_btn": "Pesquisar",
         "close": "Fechar",
         "delete_permanently": "Excluir permanentemente",
-        "empty_trash": "Esvaziar lixeira"
+        "empty_trash": "Esvaziar lixeira",
+        "open_parent_folder": "Ir para a pasta pai"
     },
     "user_menu": {
         "appearance": "Aparência",

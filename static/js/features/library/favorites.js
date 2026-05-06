@@ -10,6 +10,7 @@ import { ui } from '../../app/ui.js';
 import { getCsrfHeaders } from '../../core/csrf.js';
 import { i18n } from '../../core/i18n.js';
 import { multiSelect } from '../files/multiSelect.js';
+import * as pathTooltip from '../pathTooltip.js';
 
 const favorites = {
     /** @type {Map<string, object>} key = "file:<id>" | "folder:<id>" */
@@ -190,7 +191,8 @@ const favorites = {
                         id: item.item_id,
                         name: item.item_name || item.item_id,
                         parent_id: item.parent_id || '',
-                        modified_at: item.modified_at || item.created_at
+                        modified_at: item.modified_at || item.created_at,
+                        path: item.item_path || ''
                     });
                 } else {
                     files.push({
@@ -203,12 +205,16 @@ const favorites = {
                         category: item.category,
                         size: item.item_size || 0,
                         size_formatted: item.size_formatted,
-                        modified_at: item.modified_at || item.created_at
+                        modified_at: item.modified_at || item.created_at,
+                        path: item.item_path || ''
                     });
                 }
             }
             if (folders.length) ui.renderFolders(folders);
             if (files.length) ui.renderFiles(files);
+
+            const filesList = document.getElementById('files-list');
+            if (filesList) pathTooltip.init(filesList);
         } catch (error) {
             console.error('Error displaying favorites:', error);
             if (ui?.showNotification) {

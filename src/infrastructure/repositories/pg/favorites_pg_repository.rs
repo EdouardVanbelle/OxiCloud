@@ -33,10 +33,17 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
                 f.size                                          AS "item_size",
                 f.mime_type                                     AS "item_mime_type",
                 COALESCE(f.folder_id::TEXT, fld.parent_id::TEXT) AS "parent_id",
-                COALESCE(f.updated_at, fld.updated_at)          AS "modified_at"
+                COALESCE(f.updated_at, fld.updated_at)          AS "modified_at",
+                CASE
+                    WHEN uf.item_type = 'folder' THEN fld.path
+                    WHEN uf.item_type = 'file'   THEN COALESCE(pfld.path || '/' || f.name, f.name)
+                    ELSE NULL
+                END                                             AS "item_path"
             FROM auth.user_favorites uf
             LEFT JOIN storage.files   f   ON uf.item_type = 'file'
                                          AND f.id = uf.item_id::UUID
+            LEFT JOIN storage.folders pfld ON uf.item_type = 'file'
+                                          AND pfld.id = f.folder_id
             LEFT JOIN storage.folders fld ON uf.item_type = 'folder'
                                          AND fld.id = uf.item_id::UUID
             WHERE uf.user_id = $1
@@ -70,6 +77,7 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
                     item_mime_type: row.try_get("item_mime_type").ok(),
                     parent_id: row.try_get("parent_id").ok(),
                     modified_at: row.try_get("modified_at").ok(),
+                    item_path: row.try_get("item_path").ok(),
                     // Temporary defaults; with_display_fields() computes the real values
                     icon_class: String::new(),
                     icon_special_class: String::new(),

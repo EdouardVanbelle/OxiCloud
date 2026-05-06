@@ -116,7 +116,8 @@
         "search_btn": "Zoeken",
         "close": "Sluiten",
         "delete_permanently": "Permanent verwijderen",
-        "empty_trash": "Prullenbak legen"
+        "empty_trash": "Prullenbak legen",
+        "open_parent_folder": "Naar bovenliggende map"
     },
     "user_menu": {
         "appearance": "Weergave",
