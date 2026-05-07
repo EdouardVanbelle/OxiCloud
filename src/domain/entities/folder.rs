@@ -1,6 +1,6 @@
 use uuid::Uuid;
 
-use crate::domain::services::path_service::StoragePath;
+use crate::domain::services::path_service::{StoragePath, validate_storage_name};
 
 // Re-export entity errors from the centralized module
 pub use super::entity_errors::{FolderError, FolderResult};
@@ -71,8 +71,8 @@ impl Folder {
         owner_id: Option<Uuid>,
     ) -> FolderResult<Self> {
         // Validate folder name
-        if name.is_empty() || name.contains('/') || name.contains('\\') {
-            return Err(FolderError::InvalidFolderName(name));
+        if let Err(reason) = validate_storage_name(&name) {
+            return Err(FolderError::InvalidFolderName(format!("{name}: {reason}")));
         }
 
         let now = std::time::SystemTime::now()
@@ -126,8 +126,8 @@ impl Folder {
         modified_at: u64,
     ) -> FolderResult<Self> {
         // Validate folder name
-        if name.is_empty() || name.contains('/') || name.contains('\\') {
-            return Err(FolderError::InvalidFolderName(name));
+        if let Err(reason) = validate_storage_name(&name) {
+            return Err(FolderError::InvalidFolderName(format!("{name}: {reason}")));
         }
 
         // Store the path string for serialization compatibility
@@ -208,9 +208,10 @@ impl Folder {
 
     /// Creates a new version of the folder with updated name
     pub fn with_name(&self, new_name: String) -> FolderResult<Self> {
-        // Validate folder name
-        if new_name.is_empty() || new_name.contains('/') || new_name.contains('\\') {
-            return Err(FolderError::InvalidFolderName(new_name));
+        if let Err(reason) = validate_storage_name(&new_name) {
+            return Err(FolderError::InvalidFolderName(format!(
+                "{new_name}: {reason}"
+            )));
         }
 
         // Update path based on the name
