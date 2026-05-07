@@ -64,7 +64,6 @@ const favorites = {
 
             if (!response.ok) {
                 console.warn(`Favorites API returned ${response.status}`);
-                this._ready = true;
                 return;
             }
 
@@ -78,7 +77,6 @@ const favorites = {
             console.log(`Favorites cache loaded: ${this._cache.size} items`);
         } catch (err) {
             console.error('Error fetching favorites:', err);
-            this._ready = true;
         }
     },
 
@@ -161,10 +159,7 @@ const favorites = {
      */
     async displayFavorites() {
         try {
-            // Ensure cache is fresh
-            if (!this._ready) {
-                await this._fetchFromServer();
-            }
+            await this._fetchFromServer();
 
             ui.resetFilesList(); // ensure also list visible & error hidden
             // wire buttons & select-all-checkbox as list header has changed in ui.resetFilesList()
