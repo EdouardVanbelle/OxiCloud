@@ -1,3 +1,5 @@
+import { oxiIconsInit } from '../../core/icons';
+
 /**
  * publicShare.js — Client-side logic for the public share page (/s/{token}).
  *
@@ -26,6 +28,8 @@
     const pathParts = window.location.pathname.split('/');
     const tokenIdx = pathParts.indexOf('s');
     const TOKEN = tokenIdx !== -1 ? pathParts[tokenIdx + 1] : null;
+
+    oxiIconsInit();
 
     if (!TOKEN) {
         showState('expired');

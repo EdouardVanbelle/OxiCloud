@@ -15,7 +15,7 @@
 // All icons use viewBox="0 0 {width} 512" and fill="currentColor".
 // Keys use FA5 class names (without "fa-" prefix) for backward compatibility.
 
-const _ICONS = {
+const OxiIcons = {
     'arrow-left': [
         448,
         'M9.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.2 288 416 288c17.7 0 32-14.3 32-32s-14.3-32-32-32l-306.7 0L214.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z'
@@ -430,7 +430,7 @@ const _ICONS = {
  * @returns {string} SVG markup string, or empty string if icon not found
  */
 function oxiIcon(name, extraClass) {
-    const entry = _ICONS[name];
+    const entry = OxiIcons[name];
     if (!entry) return '';
     const [w, d] = entry;
     const cls = extraClass ? `oxi-icon ${extraClass}` : 'oxi-icon';
@@ -477,13 +477,13 @@ function replaceIconsInElement(container) {
         }
 
         // Use outline variant if available and element uses "far"
-        if (isRegular && _ICONS[`${iconName}-outline`]) {
+        if (isRegular && OxiIcons[`${iconName}-outline`]) {
             iconName = `${iconName}-outline`;
         }
 
-        if (!iconName || !_ICONS[iconName]) continue;
+        if (!iconName || !OxiIcons[iconName]) continue;
 
-        const [w, d] = _ICONS[iconName];
+        const [w, d] = OxiIcons[iconName];
 
         // Build SVG element
         const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -510,14 +510,7 @@ function replaceIconsInElement(container) {
     }
 }
 
-// ── Expose globally ────────────────────────────────────────────
-export { oxiIcon, replaceIconsInElement };
-export const OxiIcons = _ICONS;
-
-// ── Auto-replace: MutationObserver bridge ──────────────────────
-// Watches the DOM for new <i class="fa-..."> elements and converts them
-// to inline SVGs automatically.  Debounced to at most once per frame.
-(function autoReplace() {
+function oxiIconsInit() {
     let raf = 0;
     const scan = () => {
         raf = 0;
@@ -541,4 +534,11 @@ export const OxiIcons = _ICONS;
             }
         }
     }).observe(document.documentElement, { childList: true, subtree: true });
-})();
+}
+
+// ── Expose globally ────────────────────────────────────────────
+export { OxiIcons, oxiIcon, oxiIconsInit, replaceIconsInElement };
+
+// ── Auto-replace: MutationObserver bridge ──────────────────────
+// Watches the DOM for new <i class="fa-..."> elements and converts them
+// to inline SVGs automatically.  Debounced to at most once per frame.
