@@ -51,10 +51,10 @@ impl SessionRepository for SessionPgRepository {
                 sqlx::query(
                     r#"
                         INSERT INTO auth.sessions (
-                            id, user_id, refresh_token, expires_at, 
-                            ip_address, user_agent, created_at, revoked
+                            id, user_id, refresh_token, expires_at,
+                            ip_address, user_agent, created_at, revoked, family_id
                         ) VALUES (
-                            $1, $2, $3, $4, $5, $6, $7, $8
+                            $1, $2, $3, $4, $5, $6, $7, $8, $9
                         )
                         "#,
                 )
@@ -66,6 +66,7 @@ impl SessionRepository for SessionPgRepository {
                 .bind(session_clone.user_agent())
                 .bind(session_clone.created_at())
                 .bind(session_clone.is_revoked())
+                .bind(session_clone.family_id())
                 .execute(&mut **tx)
                 .await
                 .map_err(Self::map_sqlx_error)?;
@@ -108,9 +109,9 @@ impl SessionRepository for SessionPgRepository {
     async fn get_session_by_id(&self, id: Uuid) -> SessionRepositoryResult<Session> {
         let row = sqlx::query(
             r#"
-            SELECT 
-                id, user_id, refresh_token, expires_at, 
-                ip_address, user_agent, created_at, revoked
+            SELECT
+                id, user_id, refresh_token, expires_at,
+                ip_address, user_agent, created_at, revoked, family_id
             FROM auth.sessions
             WHERE id = $1
             "#,
@@ -129,19 +130,21 @@ impl SessionRepository for SessionPgRepository {
             row.get("user_agent"),
             row.get("created_at"),
             row.get("revoked"),
+            row.get("family_id"),
         ))
     }
 
-    /// Gets a session by refresh token
+    /// Gets a session by refresh token — returns revoked sessions too so the
+    /// application layer can distinguish "not found" from "replayed revoked token".
     async fn get_session_by_refresh_token(
         &self,
         refresh_token: &str,
     ) -> SessionRepositoryResult<Session> {
         let row = sqlx::query(
             r#"
-            SELECT 
-                id, user_id, refresh_token, expires_at, 
-                ip_address, user_agent, created_at, revoked
+            SELECT
+                id, user_id, refresh_token, expires_at,
+                ip_address, user_agent, created_at, revoked, family_id
             FROM auth.sessions
             WHERE refresh_token = $1
             "#,
@@ -160,6 +163,7 @@ impl SessionRepository for SessionPgRepository {
             row.get("user_agent"),
             row.get("created_at"),
             row.get("revoked"),
+            row.get("family_id"),
         ))
     }
 
@@ -170,9 +174,9 @@ impl SessionRepository for SessionPgRepository {
     ) -> SessionRepositoryResult<Vec<Session>> {
         let rows = sqlx::query(
             r#"
-            SELECT 
-                id, user_id, refresh_token, expires_at, 
-                ip_address, user_agent, created_at, revoked
+            SELECT
+                id, user_id, refresh_token, expires_at,
+                ip_address, user_agent, created_at, revoked, family_id
             FROM auth.sessions
             WHERE user_id = $1
             ORDER BY created_at DESC
@@ -195,6 +199,7 @@ impl SessionRepository for SessionPgRepository {
                     row.get("user_agent"),
                     row.get("created_at"),
                     row.get("revoked"),
+                    row.get("family_id"),
                 )
             })
             .collect();
@@ -270,6 +275,31 @@ impl SessionRepository for SessionPgRepository {
         .await
     }
 
+    /// Revokes all sessions in a token family (theft response)
+    async fn revoke_session_family(&self, family_id: Uuid) -> SessionRepositoryResult<u64> {
+        let result = sqlx::query(
+            r#"
+            UPDATE auth.sessions
+            SET revoked = true
+            WHERE family_id = $1 AND revoked = false
+            "#,
+        )
+        .bind(family_id)
+        .execute(&*self.pool)
+        .await
+        .map_err(Self::map_sqlx_error)?;
+
+        let affected = result.rows_affected();
+        if affected > 0 {
+            tracing::warn!(
+                "Token reuse detected: revoked {} session(s) in family {}",
+                affected,
+                family_id
+            );
+        }
+        Ok(affected)
+    }
+
     /// Deletes expired sessions
     async fn delete_expired_sessions(&self) -> SessionRepositoryResult<u64> {
         let now = Utc::now();
@@ -314,6 +344,12 @@ impl SessionStoragePort for SessionPgRepository {
 
     async fn revoke_all_user_sessions(&self, user_id: Uuid) -> Result<u64, DomainError> {
         SessionRepository::revoke_all_user_sessions(self, user_id)
+            .await
+            .map_err(DomainError::from)
+    }
+
+    async fn revoke_session_family(&self, family_id: Uuid) -> Result<u64, DomainError> {
+        SessionRepository::revoke_session_family(self, family_id)
             .await
             .map_err(DomainError::from)
     }

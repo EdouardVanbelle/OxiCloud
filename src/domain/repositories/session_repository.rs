@@ -52,6 +52,9 @@ pub trait SessionRepository: Send + Sync + 'static {
     /// Revokes all sessions for a user
     async fn revoke_all_user_sessions(&self, user_id: Uuid) -> SessionRepositoryResult<u64>;
 
+    /// Revokes all sessions in a token family (theft response)
+    async fn revoke_session_family(&self, family_id: Uuid) -> SessionRepositoryResult<u64>;
+
     /// Deletes expired sessions
     async fn delete_expired_sessions(&self) -> SessionRepositoryResult<u64>;
 }
