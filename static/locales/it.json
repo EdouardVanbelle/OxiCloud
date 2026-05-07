@@ -116,7 +116,8 @@
         "search_btn": "Cerca",
         "close": "Chiudi",
         "delete_permanently": "Elimina definitivamente",
-        "empty_trash": "Svuota il cestino"
+        "empty_trash": "Svuota il cestino",
+        "open_parent_folder": "Vai alla cartella padre"
     },
     "user_menu": {
         "appearance": "Aspetto",

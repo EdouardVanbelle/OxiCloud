@@ -116,7 +116,8 @@
         "search_btn": "खोजें",
         "close": "बंद करें",
         "delete_permanently": "स्थायी रूप से हटाएँ",
-        "empty_trash": "रद्दी खाली करें"
+        "empty_trash": "रद्दी खाली करें",
+        "open_parent_folder": "मूल फ़ोल्डर पर जाएं"
     },
     "user_menu": {
         "appearance": "दिखावट",

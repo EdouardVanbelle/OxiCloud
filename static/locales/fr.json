@@ -116,7 +116,8 @@
         "search_btn": "Rechercher",
         "close": "Fermer",
         "delete_permanently": "Supprimer définitivement",
-        "empty_trash": "Vider la corbeille"
+        "empty_trash": "Vider la corbeille",
+        "open_parent_folder": "Aller au dossier parent"
     },
     "user_menu": {
         "appearance": "Apparence",

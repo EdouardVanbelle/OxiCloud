@@ -235,7 +235,8 @@
         "search_btn": "Buscar",
         "close": "Cerrar",
         "delete_permanently": "Eliminar permanentemente",
-        "empty_trash": "Vaciar papelera"
+        "empty_trash": "Vaciar papelera",
+        "open_parent_folder": "Ir a la carpeta padre"
     },
     "user_menu": {
         "appearance": "Apariencia",

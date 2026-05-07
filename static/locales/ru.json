@@ -116,7 +116,8 @@
         "search_btn": "Найти",
         "close": "Закрыть",
         "delete_permanently": "Удалить навсегда",
-        "empty_trash": "Очистить корзину"
+        "empty_trash": "Очистить корзину",
+        "open_parent_folder": "Перейти в родительскую папку"
     },
     "user_menu": {
         "appearance": "Оформление",

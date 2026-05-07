@@ -31,10 +31,17 @@ impl RecentItemsRepositoryPort for RecentItemsPgRepository {
                 COALESCE(f.name, fld.name)                      AS "item_name",
                 f.size                                          AS "item_size",
                 f.mime_type                                     AS "item_mime_type",
-                COALESCE(f.folder_id::TEXT, fld.parent_id::TEXT) AS "parent_id"
+                COALESCE(f.folder_id::TEXT, fld.parent_id::TEXT) AS "parent_id",
+                CASE
+                    WHEN ur.item_type = 'folder' THEN fld.path
+                    WHEN ur.item_type = 'file'   THEN COALESCE(pfld.path || '/' || f.name, f.name)
+                    ELSE NULL
+                END                                             AS "item_path"
             FROM auth.user_recent_files ur
             LEFT JOIN storage.files   f   ON ur.item_type = 'file'
                                          AND f.id = ur.item_id::UUID
+            LEFT JOIN storage.folders pfld ON ur.item_type = 'file'
+                                          AND pfld.id = f.folder_id
             LEFT JOIN storage.folders fld ON ur.item_type = 'folder'
                                          AND fld.id = ur.item_id::UUID
             WHERE ur.user_id = $1
@@ -68,6 +75,7 @@ impl RecentItemsRepositoryPort for RecentItemsPgRepository {
                     item_size: row.try_get("item_size").ok(),
                     item_mime_type: row.try_get("item_mime_type").ok(),
                     parent_id: row.try_get("parent_id").ok(),
+                    item_path: row.try_get("item_path").ok(),
                     // Temporary defaults; with_display_fields() computes the real values
                     icon_class: String::new(),
                     icon_special_class: String::new(),

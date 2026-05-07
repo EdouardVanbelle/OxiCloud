@@ -116,7 +116,8 @@
         "search_btn": "검색",
         "close": "닫기",
         "delete_permanently": "영구 삭제",
-        "empty_trash": "휴지통 비우기"
+        "empty_trash": "휴지통 비우기",
+        "open_parent_folder": "상위 폴더로 이동"
     },
     "user_menu": {
         "appearance": "외관",

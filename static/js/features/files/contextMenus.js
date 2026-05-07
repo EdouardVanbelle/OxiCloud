@@ -5,6 +5,7 @@
 
 import { resolveHomeFolder } from '../../app/authSession.js';
 import { loadFiles } from '../../app/filesView.js';
+import { switchToFilesSection } from '../../app/navigation.js';
 import { app } from '../../app/state.js';
 import { showConfirmDialog, ui } from '../../app/ui.js';
 import { getCsrfHeaders } from '../../core/csrf.js';
@@ -62,6 +63,13 @@ const contextMenus = {
             const isFav = favorites.isFavorite(targetFolder.id, 'folder');
             this._setFavoriteOptionLabel('favorite-folder-option', isFav);
         }
+    },
+
+    syncOpenParentFolderOption() {
+        const option = document.getElementById('open-parent-folder-option');
+        if (!option) return;
+        const folderId = app?.contextMenuTargetFile?.folder_id;
+        option.classList.toggle('hidden', !folderId);
     },
 
     syncAddToPlaylistOption() {
@@ -196,6 +204,16 @@ const contextMenus = {
                 fileOps.downloadFile(app.contextMenuTargetFile.id, app.contextMenuTargetFile.name);
             }
             ui.closeFileContextMenu();
+        });
+
+        document.getElementById('open-parent-folder-option').addEventListener('click', () => {
+            const folderId = app.contextMenuTargetFile?.folder_id;
+            ui.closeFileContextMenu();
+            if (folderId) {
+                switchToFilesSection();
+                app.currentPath = folderId;
+                loadFiles();
+            }
         });
 
         document.getElementById('favorite-file-option').addEventListener('click', async () => {

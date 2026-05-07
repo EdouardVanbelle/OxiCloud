@@ -116,7 +116,8 @@
         "search_btn": "検索",
         "close": "閉じる",
         "delete_permanently": "完全に削除",
-        "empty_trash": "ゴミ箱を空にする"
+        "empty_trash": "ゴミ箱を空にする",
+        "open_parent_folder": "親フォルダへ移動"
     },
     "user_menu": {
         "appearance": "外観",

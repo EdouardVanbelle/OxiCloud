@@ -1,4 +1,6 @@
 :root {
+    --sidebar-width: 250px;
+
     /* Backgrounds */
     --color-bg-page: #f5f7fa;
     --color-bg-surface: #ffffff;
