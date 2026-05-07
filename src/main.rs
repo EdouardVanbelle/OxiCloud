@@ -468,6 +468,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
         ));
 
+    // Warn once at startup if auth cookies are not Secure.
+    // HttpOnly + SameSite protection is nullified over plain HTTP because tokens
+    // travel in cleartext and can be intercepted by a network observer.
+    if !crate::interfaces::api::cookie_auth::is_cookie_secure() {
+        tracing::warn!(
+            "⚠️  SECURITY: auth cookies are NOT marked Secure. \
+             Tokens will be transmitted in plaintext over HTTP. \
+             Set OXICLOUD_COOKIE_SECURE=true for any HTTPS deployment."
+        );
+    }
+
     // Start server — tuned socket for low-latency responses
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
     tracing::info!("Starting OxiCloud server on http://{}", addr);

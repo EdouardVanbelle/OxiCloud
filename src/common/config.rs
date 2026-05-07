@@ -450,9 +450,9 @@ impl Default for AuthConfig {
             // to set OXICLOUD_JWT_SECRET in production. The from_env() method
             // will validate this and warn/panic if not configured.
             jwt_secret: String::new(),
-            access_token_expiry_secs: 3600,     // 1 hour
-            refresh_token_expiry_secs: 2592000, // 30 days
-            hash_memory_cost: 65536,            // 64 MiB
+            access_token_expiry_secs: 3600,    // 1 hour
+            refresh_token_expiry_secs: 604800, // 7 days — with rotation, active sessions auto-renew
+            hash_memory_cost: 65536,           // 64 MiB
             hash_time_cost: 3,
             hash_parallelism: 2,
             rate_limit: RateLimitConfig::default(),

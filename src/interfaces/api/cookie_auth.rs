@@ -43,7 +43,7 @@ fn cookie_secure() -> bool {
         let secure = v == "true" || v == "1";
         if !secure {
             tracing::warn!(
-                "OXICLOUD_COOKIE_SECURE is explicitly disabled — \
+                "⚠️  SECURITY: OXICLOUD_COOKIE_SECURE is explicitly disabled — \
                  cookies will be sent over plain HTTP. \
                  Do NOT use this in production."
             );
@@ -55,7 +55,7 @@ fn cookie_secure() -> bool {
         Ok(url) if url.starts_with("https") => true,
         Ok(url) if url.starts_with("http://") => {
             tracing::info!(
-                "OXICLOUD_BASE_URL is HTTP — cookie Secure flag is OFF. \
+                "⚠️  SECURITY: OXICLOUD_BASE_URL is HTTP — cookie Secure flag is OFF. \
                  Set OXICLOUD_COOKIE_SECURE=true to override if your proxy terminates TLS."
             );
             false
@@ -63,7 +63,7 @@ fn cookie_secure() -> bool {
         _ => {
             // Default to false for compatibility with HTTP deployments
             tracing::info!(
-                "OXICLOUD_BASE_URL not set — defaulting to non-secure cookies \
+                "⚠️  SECURITY: OXICLOUD_BASE_URL not set — defaulting to non-secure cookies \
                  for HTTP compatibility. Set OXICLOUD_COOKIE_SECURE=true for HTTPS deployments."
             );
             false
@@ -72,9 +72,11 @@ fn cookie_secure() -> bool {
 }
 
 /// Build a `Set-Cookie` header value.
-fn build_cookie(name: &str, value: &str, path: &str, max_age_secs: i64) -> String {
+fn build_cookie(name: &str, value: &str, path: &str, max_age_secs: i64, same_site: &str) -> String {
     let secure = if cookie_secure() { "; Secure" } else { "" };
-    format!("{name}={value}; HttpOnly; SameSite=Lax; Path={path}; Max-Age={max_age_secs}{secure}",)
+    format!(
+        "{name}={value}; HttpOnly; SameSite={same_site}; Path={path}; Max-Age={max_age_secs}{secure}",
+    )
 }
 
 /// Append `Set-Cookie` headers for both access and refresh tokens.
@@ -96,6 +98,7 @@ pub fn append_auth_cookies(
         access_token,
         "/",
         access_expiry_secs,
+        "Lax", // Lax: cookie is sent on top-level navigations (links from other sites)
     )) {
         headers.append(SET_COOKIE, val);
     }
@@ -104,6 +107,7 @@ pub fn append_auth_cookies(
         refresh_token,
         "/api/auth",
         refresh_expiry_secs,
+        "Strict", // Strict: refresh endpoint is never reached via cross-site navigation
     )) {
         headers.append(SET_COOKIE, val);
     }
