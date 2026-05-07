@@ -5,6 +5,7 @@
 
 import { formatFileSize, formatQuotaSize } from '../core/formatters.js';
 import { i18n } from '../core/i18n.js';
+import { oxiIconsInit } from '../core/icons.js';
 import { Modal } from '../core/modal.js';
 import { fileOps } from '../features/files/fileOperations.js';
 import { multiSelect } from '../features/files/multiSelect.js';
@@ -334,6 +335,8 @@ function switchSectionTo(section) {
  * Initialize the application
  */
 function initApp() {
+    oxiIconsInit();
+
     // Cache DOM elements
     cacheElements();
 
