@@ -112,29 +112,6 @@ const ui = {
             i18n.translateElement(fileMenu);
         }
 
-        // Rename dialog — modern
-        if (!document.getElementById('rename-dialog')) {
-            const renameDialog = document.createElement('div');
-            renameDialog.classList.add('rename-dialog', 'hidden');
-            renameDialog.id = 'rename-dialog';
-            renameDialog.innerHTML = `
-                <div class="rename-dialog-content">
-                    <div class="rename-dialog-header">
-                        <i class="fas fa-pen dialog-header-icon"></i>
-                        <span data-i18n="dialogs.rename_folder">Rename</span>
-                    </div>
-                    <div class="rename-dialog-body">
-                        <input type="text" id="rename-input" data-i18n-placeholder="dialogs.new_name" placeholder="New name">
-                    </div>
-                    <div class="rename-dialog-buttons">
-                        <button class="btn btn-secondary" id="rename-cancel-btn" data-i18n="actions.cancel">Cancel</button>
-                        <button class="btn btn-primary" id="rename-confirm-btn" data-i18n="actions.rename">Rename</button>
-                    </div>
-                </div>
-            `;
-            document.body.appendChild(renameDialog);
-        }
-
         // Move dialog — modern with navigation
         if (!document.getElementById('move-file-dialog')) {
             const moveDialog = document.createElement('div');

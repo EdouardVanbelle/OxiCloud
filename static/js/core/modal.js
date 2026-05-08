@@ -31,6 +31,12 @@ const Modal = {
     onConfirm: null,
     onCancel: null,
 
+    /** @private @type {((value: string) => Promise<void>) | null} */
+    _action: null,
+
+    /** @private @type {HTMLElement | null} */
+    errorEl: null,
+
     // Rename mode: select only name without extension
     _selectNameOnly: false,
 
@@ -53,6 +59,8 @@ const Modal = {
         this.closeBtn = document.getElementById('modal-close-btn');
 
         // Event listeners
+        this.errorEl = document.getElementById('modal-error');
+
         this.cancelBtn?.addEventListener('click', () => this.close(false));
         this.closeBtn?.addEventListener('click', () => this.close(false));
         this.confirmBtn?.addEventListener('click', () => this.confirm());
@@ -63,6 +71,9 @@ const Modal = {
                 this.close(false);
             }
         });
+
+        // Clear inline error as soon as the user starts typing
+        this.input?.addEventListener('input', () => this.clearError());
 
         // Handle Enter and Escape keys
         this.input?.addEventListener('keydown', (e) => {
@@ -75,6 +86,23 @@ const Modal = {
         });
     },
 
+    /** @param {string} message */
+    showError(message) {
+        this.input?.classList.add('modal-input--error');
+        if (this.errorEl) {
+            this.errorEl.textContent = message;
+            this.errorEl.classList.remove('hidden');
+        }
+    },
+
+    clearError() {
+        this.input?.classList.remove('modal-input--error');
+        if (this.errorEl) {
+            this.errorEl.textContent = '';
+            this.errorEl.classList.add('hidden');
+        }
+    },
+
     /**
      * Show input modal (replacement for prompt())
      * @param {Object} options - Modal configuration
@@ -85,11 +113,23 @@ const Modal = {
      * @param {string} options.icon - Font Awesome icon class (e.g., 'fa-folder-plus')
      * @param {string} options.confirmText - Confirm button text
      * @param {string} options.cancelText - Cancel button text
+     * @param {(value: string) => Promise<void>} [options.action] - Async action called on confirm.
+     *   Throw an Error to keep the modal open and display the error message inline.
+     *   When omitted the modal resolves immediately with the input value (legacy behaviour).
      * @returns {Promise<string|null>} - Resolves with input value or null if cancelled
      */
     prompt(options = {}) {
         return new Promise((resolve) => {
-            const { title = 'Input', label = '', placeholder = '', value = '', icon = 'fa-keyboard', confirmText = null, cancelText = null } = options;
+            const {
+                title = 'Input',
+                label = '',
+                placeholder = '',
+                value = '',
+                icon = 'fa-keyboard',
+                confirmText = null,
+                cancelText = null,
+                action = null
+            } = options;
 
             // Set modal content - update the icon
             const iconContainer = document.querySelector('.modal-icon');
@@ -120,6 +160,9 @@ const Modal = {
                 this.cancelBtn.textContent = i18n.t('actions.cancel');
             }
 
+            this._action = action;
+            this.clearError();
+
             // Set callbacks
             this.onConfirm = () => {
                 const inputValue = this.input.value.trim();
@@ -134,15 +177,17 @@ const Modal = {
 
     /**
      * Show modal for creating new folder
+     * @param {(value: string) => Promise<void>} [action]
      * @returns {Promise<string|null>}
      */
-    promptNewFolder() {
+    promptNewFolder(action = null) {
         return this.prompt({
             title: i18n.t('dialogs.new_folder_title'),
             label: i18n.t('dialogs.folder_name'),
             placeholder: i18n.t('dialogs.folder_placeholder'),
             icon: 'fa-folder-plus',
-            confirmText: i18n.t('actions.create')
+            confirmText: i18n.t('actions.create'),
+            action
         });
     },
 
@@ -150,9 +195,10 @@ const Modal = {
      * Show modal for renaming
      * @param {string} currentName - Current name of file/folder
      * @param {boolean} isFolder - Whether it's a folder
+     * @param {(value: string) => Promise<void>} [action]
      * @returns {Promise<string|null>}
      */
-    promptRename(currentName, isFolder = false) {
+    promptRename(currentName, isFolder = false, action = null) {
         this._selectNameOnly = !isFolder;
 
         return this.prompt({
@@ -161,7 +207,8 @@ const Modal = {
             placeholder: '',
             value: currentName,
             icon: isFolder ? 'fa-folder' : 'fa-file',
-            confirmText: i18n.t('actions.rename')
+            confirmText: i18n.t('actions.rename'),
+            action
         });
     },
 
@@ -206,6 +253,8 @@ const Modal = {
     close(confirmed = false) {
         if (!this.overlay) return;
 
+        this.clearError();
+        this._action = null;
         this.overlay.classList.remove('active');
 
         setTimeout(() => {
@@ -222,13 +271,31 @@ const Modal = {
     },
 
     /**
-     * Confirm the action
+     * Confirm the action. When an async action is set, the modal stays open
+     * until it resolves — closing only on success, showing the error inline on failure.
      */
-    confirm() {
-        if (this.onConfirm) {
-            this.onConfirm();
+    async confirm() {
+        if (!this._action) {
+            if (this.onConfirm) this.onConfirm();
+            this.close(true);
+            return;
         }
-        this.close(true);
+
+        const inputValue = this.input.value.trim();
+        if (!inputValue) return;
+
+        this.clearError();
+        this.confirmBtn.disabled = true;
+
+        try {
+            await this._action(inputValue);
+            if (this.onConfirm) this.onConfirm();
+            this.close(true);
+        } catch (e) {
+            this.showError(e.message || 'An error occurred');
+            this.confirmBtn.disabled = false;
+            this.input.focus();
+        }
     }
 };
 

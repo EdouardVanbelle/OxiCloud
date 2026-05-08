@@ -6,6 +6,7 @@ use crate::application::ports::storage_ports::{CopyFolderTreeResult, FileReadPor
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::application::services::trash_service::TrashService;
 use crate::common::errors::DomainError;
+use crate::domain::services::path_service::validate_storage_name;
 use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
 use crate::infrastructure::repositories::pg::file_blob_write_repository::FileBlobWriteRepository;
 use crate::infrastructure::repositories::pg::folder_db_repository::FolderDbRepository;
@@ -189,6 +190,12 @@ impl FileManagementUseCase for FileManagementService {
     }
 
     async fn rename_file(&self, file_id: &str, new_name: &str) -> Result<FileDto, DomainError> {
+        if let Err(reason) = validate_storage_name(new_name) {
+            return Err(DomainError::validation_error(format!(
+                "Invalid file name '{new_name}': {reason}"
+            )));
+        }
+
         info!("Renaming file with ID: {} to \"{}\"", file_id, new_name);
 
         let renamed_file = self

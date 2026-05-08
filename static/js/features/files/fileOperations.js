@@ -689,6 +689,10 @@ const fileOps = {
      * Create a new folder
      * @param {string} name - Folder name
      */
+    /**
+     * Create a new folder
+     * @param {string} name - Folder name
+     */
     async createFolder(name) {
         try {
             console.log('Creating folder with name:', name);
@@ -718,13 +722,20 @@ const fileOps = {
 
                 ui.showNotification('Folder created', `"${name}" created successfully`);
             } else {
-                const errorData = await response.text();
-                console.error('Create folder error:', errorData);
-                ui.showNotification('Error', 'Error creating the folder');
+                const errorText = await response.text();
+                console.error('Create folder error:', errorText);
+                let errorMessage = 'Unknown error';
+                try {
+                    const errorData = JSON.parse(errorText);
+                    errorMessage = errorData.error || response.statusText;
+                } catch (_e) {
+                    errorMessage = errorText || response.statusText;
+                }
+                throw new Error(errorMessage);
             }
         } catch (error) {
             console.error('Error creating folder:', error);
-            ui.showNotification('Error', 'Error creating the folder');
+            throw error;
         }
     },
 
@@ -978,6 +989,12 @@ const fileOps = {
      * @param {string} newName - New file name
      * @returns {Promise<boolean>} - Success status
      */
+    /**
+     * Rename a file
+     * @param {string} fileId - File ID
+     * @param {string} newName - New file name
+     * @returns {Promise<string|null>} - null on success, error message string on failure
+     */
     async renameFile(fileId, newName) {
         try {
             console.log(`Renaming file ${fileId} to "${newName}"`);
@@ -995,24 +1012,22 @@ const fileOps = {
 
             if (response.ok) {
                 ui.showNotification(i18n.t('notifications.file_renamed'), i18n.t('notifications.file_renamed_to', { name: newName }));
-                return true;
             } else {
                 const errorText = await response.text();
                 console.error('Error response:', errorText);
-                let errorMessage = 'Unknown error';
                 try {
                     const errorData = JSON.parse(errorText);
-                    errorMessage = errorData.error || response.statusText;
-                } catch (_e) {
-                    errorMessage = errorText || response.statusText;
+                    throw new Error(errorData.error || response.statusText);
+                } catch (parseError) {
+                    if (parseError instanceof SyntaxError) {
+                        throw new Error(errorText || response.statusText);
+                    }
+                    throw parseError;
                 }
-                ui.showNotification('Error', `Error renaming the file: ${errorMessage}`);
-                return false;
             }
         } catch (error) {
             console.error('Error renaming file:', error);
-            ui.showNotification('Error', 'Error renaming the file');
-            return false;
+            throw error;
         }
     },
 
@@ -1021,6 +1036,12 @@ const fileOps = {
      * @param {string} folderId - Folder ID
      * @param {string} newName - New folder name
      * @returns {Promise<boolean>} - Success status
+     */
+    /**
+     * Rename a folder
+     * @param {string} folderId - Folder ID
+     * @param {string} newName - New folder name
+     * @returns {Promise<string|null>} - null on success, error message string on failure
      */
     async renameFolder(folderId, newName) {
         try {
@@ -1039,28 +1060,23 @@ const fileOps = {
 
             if (response.ok) {
                 ui.showNotification('Folder renamed', `Folder renamed to "${newName}"`);
-                return true;
             } else {
                 const errorText = await response.text();
                 console.error('Error response:', errorText);
-
-                let errorMessage = 'Unknown error';
                 try {
                     // Try to parse as JSON
                     const errorData = JSON.parse(errorText);
-                    errorMessage = errorData.error || response.statusText;
-                } catch (_e) {
-                    // If not JSON, use text as is
-                    errorMessage = errorText || response.statusText;
+                    throw new Error(errorData.error || response.statusText);
+                } catch (parseError) {
+                    if (parseError instanceof SyntaxError) {
+                        throw new Error(errorText || response.statusText);
+                    }
+                    throw parseError;
                 }
-
-                ui.showNotification('Error', `Error renaming the folder: ${errorMessage}`);
-                return false;
             }
         } catch (error) {
             console.error('Error renaming folder:', error);
-            ui.showNotification('Error', 'Error renaming the folder');
-            return false;
+            throw error;
         }
     },
 
