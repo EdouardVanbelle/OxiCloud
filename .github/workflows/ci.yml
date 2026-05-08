@@ -1,5 +1,7 @@
 name: CI
 
+# IMPORTANT: using Swatinem/rust-cache@v2 : reuse same cache as playwright.yml (minimize non necessary new compilation)
+
 on:
   push:
     branches:
