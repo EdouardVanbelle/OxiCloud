@@ -11,6 +11,7 @@ import { showConfirmDialog, ui } from '../../app/ui.js';
 import { getCsrfHeaders } from '../../core/csrf.js';
 import { escapeHtml } from '../../core/formatters.js';
 import { i18n } from '../../core/i18n.js';
+import { Modal } from '../../core/modal.js';
 import { favorites } from '../library/favorites.js';
 import { musicView } from '../library/music.js';
 import { fileSharing } from '../sharing/fileSharing.js';
@@ -69,7 +70,8 @@ const contextMenus = {
         const option = document.getElementById('open-parent-folder-option');
         if (!option) return;
         const folderId = app?.contextMenuTargetFile?.folder_id;
-        option.classList.toggle('hidden', !folderId);
+        const alreadyViewing = folderId && folderId === app?.currentPath;
+        option.classList.toggle('hidden', !folderId || alreadyViewing);
     },
 
     syncAddToPlaylistOption() {
@@ -120,11 +122,14 @@ const contextMenus = {
             ui.closeContextMenu();
         });
 
-        document.getElementById('rename-folder-option').addEventListener('click', () => {
-            if (app.contextMenuTargetFolder) {
-                this.showRenameDialog(app.contextMenuTargetFolder);
-            }
+        document.getElementById('rename-folder-option').addEventListener('click', async () => {
+            const folder = app.contextMenuTargetFolder;
             ui.closeContextMenu();
+            if (!folder) return;
+            const newName = await Modal.promptRename(folder.name, true, async (name) => {
+                await fileOps.renameFolder(folder.id, name);
+            });
+            if (newName) loadFiles();
         });
 
         document.getElementById('move-folder-option').addEventListener('click', () => {
@@ -239,11 +244,14 @@ const contextMenus = {
             ui.closeFileContextMenu();
         });
 
-        document.getElementById('rename-file-option').addEventListener('click', () => {
-            if (app.contextMenuTargetFile) {
-                this.showRenameFileDialog(app.contextMenuTargetFile);
-            }
+        document.getElementById('rename-file-option').addEventListener('click', async () => {
+            const file = app.contextMenuTargetFile;
             ui.closeFileContextMenu();
+            if (!file) return;
+            const newName = await Modal.promptRename(file.name, false, async (name) => {
+                await fileOps.renameFile(file.id, name);
+            });
+            if (newName) loadFiles();
         });
 
         document.getElementById('move-file-option').addEventListener('click', () => {
@@ -278,23 +286,6 @@ const contextMenus = {
             ui.closeFileContextMenu();
             if (file) {
                 await fileOps.deleteFile(file.id, file.name);
-            }
-        });
-
-        // Rename dialog events
-        const renameCancelBtn = document.getElementById('rename-cancel-btn');
-        const renameConfirmBtn = document.getElementById('rename-confirm-btn');
-        const renameInput = document.getElementById('rename-input');
-
-        renameCancelBtn.addEventListener('click', this.closeRenameDialog);
-        renameConfirmBtn.addEventListener('click', () => contextMenus.renameItem());
-
-        // Rename on Enter key
-        renameInput.addEventListener('keyup', (e) => {
-            if (e.key === 'Enter') {
-                contextMenus.renameItem();
-            } else if (e.key === 'Escape') {
-                this.closeRenameDialog();
             }
         });
 
@@ -387,55 +378,6 @@ const contextMenus = {
     },
 
     /**
-     * Show rename dialog for a folder
-     * @param {Object} folder - Folder object
-     */
-    showRenameDialog(folder) {
-        const renameInput = document.getElementById('rename-input');
-        const renameDialog = document.getElementById('rename-dialog');
-
-        app.renameMode = 'folder';
-        // Store the folder reference so it survives context menu cleanup
-        app.renameTarget = folder;
-        renameInput.value = folder.name;
-        // Update header text
-        const headerSpan = renameDialog.querySelector('.rename-dialog-header span');
-        if (headerSpan) headerSpan.textContent = i18n.t('dialogs.rename_folder');
-        renameDialog?.classList.remove('hidden');
-        renameInput.focus();
-        renameInput.select();
-    },
-
-    /**
-     * Show rename dialog for a file
-     * @param {Object} file - File object
-     */
-    showRenameFileDialog(file) {
-        const renameInput = document.getElementById('rename-input');
-        const renameDialog = document.getElementById('rename-dialog');
-
-        app.renameMode = 'file';
-        // Store the file reference so it survives context menu cleanup
-        app.renameTarget = file;
-        renameInput.value = file.name;
-        // Update header text
-        const headerSpan = renameDialog.querySelector('.rename-dialog-header span');
-        if (headerSpan) headerSpan.textContent = i18n.t('dialogs.rename_file');
-        renameDialog?.classList.remove('hidden');
-        renameInput.focus();
-        renameInput.select();
-    },
-
-    /**
-     * Close rename dialog
-     */
-    closeRenameDialog() {
-        document.getElementById('rename-dialog')?.classList.add('hidden');
-        app.contextMenuTargetFolder = null;
-        app.renameTarget = null;
-    },
-
-    /**
      * Show move dialog for a file or folder
      * @param {Object} item - File or folder object
      * @param {string} mode - 'file' or 'folder'
@@ -506,43 +448,6 @@ const contextMenus = {
         document.getElementById('move-file-dialog')?.classList.add('hidden');
         app.contextMenuTargetFile = null;
         app.contextMenuTargetFolder = null;
-    },
-
-    /**
-     * Rename the selected folder or file
-     */
-    async renameItem() {
-        const newName = document.getElementById('rename-input').value.trim();
-        if (!newName) {
-            alert(i18n.t('errors.empty_name'));
-            return;
-        }
-
-        // Use renameTarget which was saved before the context menu was closed
-        const target = app.renameTarget;
-        if (!target) {
-            console.error('No rename target available');
-            return;
-        }
-
-        if (app.renameMode === 'file') {
-            const success = await fileOps.renameFile(target.id, newName);
-            if (success) {
-                contextMenus.closeRenameDialog();
-                loadFiles();
-            }
-        } else if (app.renameMode === 'folder') {
-            const success = await fileOps.renameFolder(target.id, newName);
-            if (success) {
-                contextMenus.closeRenameDialog();
-                loadFiles();
-            }
-        }
-    },
-
-    // Keep backward compat
-    renameFolder() {
-        return contextMenus.renameItem();
     },
 
     /**

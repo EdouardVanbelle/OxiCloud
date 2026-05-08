@@ -203,10 +203,9 @@ function setupActionsBarDelegation() {
                 break;
             }
             case 'new-folder-btn': {
-                const folderName = await Modal.promptNewFolder();
-                if (folderName) {
-                    fileOps.createFolder(folderName);
-                }
+                await Modal.promptNewFolder(async (name) => {
+                    await fileOps.createFolder(name);
+                });
                 break;
             }
             case 'grid-view-btn':

@@ -78,6 +78,10 @@
     box-shadow: 0 0 0 3px var(--color-accent-ring);
 }
 
+.rename-dialog input--error {
+    border-color: var(--color-error-text);
+}
+
 .rename-dialog-buttons {
     display: flex;
     justify-content: flex-end;

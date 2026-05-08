@@ -253,6 +253,16 @@
     color: var(--color-text-placeholder);
 }
 
+.modal-input--error {
+    border-color: var(--color-error-text);
+}
+
+.modal-error {
+    margin-top: 8px;
+    font-size: 13px;
+    color: var(--color-error-text);
+}
+
 .modal-footer {
     display: flex;
     justify-content: flex-end;
