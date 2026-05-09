@@ -29,6 +29,7 @@
  */
 
 import { getCsrfHeaders } from './csrf.js';
+import { ApiError } from './ApiError.js';
 
 const REFRESH_ENDPOINT = '/api/auth/refresh';
 const USER_DATA_KEY = 'oxicloud_user';
@@ -64,6 +65,13 @@ async function _refresh() {
     return _refreshInFlight;
 }
 
+/** Decode a non-ok Response into an ApiError without re-throwing. */
+async function _toApiError(response) {
+    let body = null;
+    try { body = await response.json(); } catch {}
+    return ApiError.from(response.status, body);
+}
+
 function installFetchInterceptor() {
     // Capture the real fetch before overwriting it.
     _originalFetch = window.fetch.bind(window);
@@ -73,35 +81,39 @@ function installFetchInterceptor() {
         // so this interceptor does not call itself recursively.
         const response = await _originalFetch(url, options);
 
-        if (response.status !== 401) return response;
+        if (response.ok) return response;
 
         const urlStr = typeof url === 'string' ? url : url instanceof URL ? url.href : (url.url ?? '');
 
-        // Cross-origin: a 401 from an external service is none of our business.
-        // Pass it through untouched so the caller can handle it themselves.
+        // Cross-origin errors are none of our business — pass through untouched.
+        let isSameOrigin = false;
         try {
-            if (new URL(urlStr, window.location.origin).origin !== window.location.origin) {
-                return response;
+            isSameOrigin = new URL(urlStr, window.location.origin).origin === window.location.origin;
+        } catch {}
+        if (!isSameOrigin) return response;
+
+        // Share endpoints use HTTP 401 to mean "password required", not session
+        // expiry — return the raw response so the caller can show a password prompt.
+        if (response.status === 401 && urlStr.includes('/api/s/')) return response;
+
+        // Non-auth 401: try a token refresh then retry the original request.
+        // Auth endpoints are excluded: a 401 on /api/auth/* means the credentials
+        // themselves are invalid; retrying after a refresh would loop.
+        if (response.status === 401 && !urlStr.includes('/api/auth/')) {
+            const refreshed = await _refresh();
+            if (!refreshed) {
+                localStorage.removeItem(USER_DATA_KEY);
+                window.location.href = '/login?source=session_expired';
+                throw new Error('Session expired');
             }
-        } catch {
-            return response;
+            const retried = await _originalFetch(url, options);
+            if (retried.ok) return retried;
+            throw await _toApiError(retried);
         }
 
-        // Auth endpoints must bypass retry: a 401 on /api/auth/* means the
-        // credentials themselves are invalid; retrying would cause a loop.
-        // Public share endpoints (/api/s/) use 401 to mean "password required",
-        // not "session expired" — intercepting them would wrongly redirect to login.
-        if (urlStr.includes('/api/auth/') || urlStr.includes('/api/s/')) return response;
-
-        const refreshed = await _refresh();
-        if (!refreshed) {
-            localStorage.removeItem(USER_DATA_KEY);
-            window.location.href = '/login?source=session_expired';
-            throw new Error('Session expired');
-        }
-
-        // Retry with _originalFetch for the same reason as above.
-        return _originalFetch(url, options);
+        // All other same-origin errors: decode body and throw a typed ApiError
+        // so callers receive a translated message via e.message.
+        throw await _toApiError(response);
     };
 }
 

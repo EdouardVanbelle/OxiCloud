@@ -7,6 +7,7 @@ import { refreshUserData } from '../../app/authSession.js';
 import { loadFiles } from '../../app/filesView.js';
 import { app } from '../../app/state.js';
 import { showConfirmDialog, ui } from '../../app/ui.js';
+import { ApiError, extractApiError } from '../../core/ApiError.js';
 import { getCsrfHeaders, getCsrfToken } from '../../core/csrf.js';
 import { i18n } from '../../core/i18n.js';
 import { notifications } from '../../core/notifications.js';
@@ -18,21 +19,6 @@ import { notifications } from '../../core/notifications.js';
  */
 function getAuthHeaders() {
     return { ...getCsrfHeaders() };
-}
-
-/**
- * Extract a translated error message from a parsed API error body.
- * Uses error_code for i18n when available, falls back to the raw error string.
- * @param {Object} body - Parsed JSON error response
- * @returns {string}
- */
-function extractApiError(body) {
-    if (body?.error_type && body?.error_code) {
-        const key = `errors.${body.error_type}.${body.error_code}`;
-        const translated = i18n.t(key);
-        if (translated && translated !== key) return translated;
-    }
-    return body?.error || 'Unknown error';
 }
 
 // File Operations Module
@@ -174,12 +160,11 @@ const fileOps = {
                     finalize({ ok: true, data });
                 } else {
                     safeUpdateFile(0, 'error');
-                    // Parse error body for quota-exceeded or other messages
                     let errorMsg = null;
                     let isQuotaError = false;
                     try {
                         const errBody = JSON.parse(xhr.responseText);
-                        errorMsg = errBody.error || null;
+                        errorMsg = extractApiError(errBody);
                         isQuotaError = errBody.error_type === 'quota_exceeded' || xhr.status === 507;
                     } catch (_) {}
                     finalize({ ok: false, errorMsg, isQuotaError });
@@ -241,40 +226,19 @@ const fileOps = {
         try {
             const response = await fetch('/api/files/upload', {
                 method: 'POST',
-                headers: {
-                    ...getAuthHeaders(),
-                    'Cache-Control': 'no-cache, no-store, must-revalidate'
-                },
+                headers: { ...getAuthHeaders(), 'Cache-Control': 'no-cache, no-store, must-revalidate' },
                 body: formData,
                 signal: controller.signal,
                 cache: 'no-store'
             });
-
-            // Read body as text first (always consume the response fully)
-            let rawText = '';
-            try {
-                rawText = await response.text();
-            } catch (_) {}
-
-            let body = null;
-            try {
-                body = JSON.parse(rawText);
-            } catch (_) {}
-
-            if (response.ok) {
-                return { ok: true, data: body };
-            }
-
-            const errorMsg = body && typeof body === 'object' ? body.error || null : rawText || null;
-            const isQuotaError = (body && typeof body === 'object' && body.error_type === 'quota_exceeded') || response.status === 507;
-            return { ok: false, errorMsg, isQuotaError };
+            const data = await response.json();
+            return { ok: true, data };
         } catch (e) {
-            const isTimeout = e?.name === 'AbortError';
-            return {
-                ok: false,
-                isTimeout,
-                errorMsg: isTimeout ? `Timeout after ${Math.round(timeoutMs / 1000)}s` : `Fetch upload failed: ${e?.message || 'network error'}`
-            };
+            if (e?.name === 'AbortError') {
+                return { ok: false, isTimeout: true, errorMsg: `Timeout after ${Math.round(timeoutMs / 1000)}s` };
+            }
+            const isQuotaError = e instanceof ApiError && (e.error_type === 'quota_exceeded' || e.status === 507);
+            return { ok: false, errorMsg: e.message || 'network error', isQuotaError };
         } finally {
             clearTimeout(timeoutId);
         }
@@ -520,21 +484,12 @@ const fileOps = {
                             'Content-Type': 'application/json',
                             'Cache-Control': 'no-cache, no-store, must-revalidate'
                         },
-                        body: JSON.stringify({
-                            name: folderName,
-                            parent_id: parentId
-                        })
+                        body: JSON.stringify({ name: folderName, parent_id: parentId })
                     });
-
-                    if (response.ok) {
-                        const folder = await response.json();
-                        folderMap.set(folderPath, folder.id);
-                        console.log(`Created folder: ${folderPath} -> ${folder.id}`);
-                    } else {
-                        console.error(`Error creating folder ${folderPath}:`, await response.text());
-                    }
+                    const folder = await response.json();
+                    folderMap.set(folderPath, folder.id);
                 } catch (error) {
-                    console.error(`Network error creating folder ${folderPath}:`, error);
+                    console.error(`Error creating folder ${folderPath}:`, error.message);
                 }
             }
 
@@ -707,9 +662,6 @@ const fileOps = {
      */
     async createFolder(name) {
         try {
-            console.log('Creating folder with name:', name);
-
-            // Send the actual request to the backend to create the folder
             const response = await fetch('/api/folders', {
                 method: 'POST',
                 headers: {
@@ -717,33 +669,11 @@ const fileOps = {
                     'Content-Type': 'application/json',
                     'Cache-Control': 'no-cache, no-store, must-revalidate'
                 },
-                body: JSON.stringify({
-                    name: name,
-                    parent_id: app.currentPath || app.userHomeFolderId || null
-                })
+                body: JSON.stringify({ name, parent_id: app.currentPath || app.userHomeFolderId || null })
             });
-
-            if (response.ok) {
-                // Get the created folder from the backend
-                const folder = await response.json();
-                console.log('Folder created successfully:', folder);
-
-                // Optimistic UI: add folder card directly from server response
-                // — no reload needed since the backend already confirmed creation.
-                ui.addFolderToView(folder);
-
-                ui.showNotification('Folder created', `"${name}" created successfully`);
-            } else {
-                let errorMessage = response.statusText;
-                try {
-                    const body = JSON.parse(await response.text());
-                    console.error('Create folder error:', body);
-                    errorMessage = extractApiError(body);
-                } catch (_e) {
-                    /* non-JSON body */
-                }
-                throw new Error(errorMessage);
-            }
+            const folder = await response.json();
+            ui.addFolderToView(folder);
+            ui.showNotification('Folder created', `"${name}" created successfully`);
         } catch (error) {
             console.error('Error creating folder:', error);
             throw error;
@@ -758,36 +688,16 @@ const fileOps = {
      */
     async moveFile(fileId, targetFolderId) {
         try {
-            const response = await fetch(`/api/files/${fileId}/move`, {
+            await fetch(`/api/files/${fileId}/move`, {
                 method: 'PUT',
-                headers: {
-                    ...getAuthHeaders(),
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    folder_id: targetFolderId === '' ? null : targetFolderId
-                })
+                headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                body: JSON.stringify({ folder_id: targetFolderId === '' ? null : targetFolderId })
             });
-
-            if (response.ok) {
-                // Reload files after moving
-                await loadFiles();
-                ui.showNotification('File moved', 'File moved successfully');
-                return true;
-            } else {
-                let errorMessage = 'Unknown error';
-                try {
-                    const errorData = await response.json();
-                    errorMessage = errorData.error || 'Unknown error';
-                } catch (_e) {
-                    errorMessage = 'Error processing server response';
-                }
-                ui.showNotification('Error', `Error moving the file: ${errorMessage}`);
-                return false;
-            }
+            await loadFiles();
+            ui.showNotification('File moved', 'File moved successfully');
+            return true;
         } catch (error) {
-            console.error('Error moving file:', error);
-            ui.showNotification('Error', 'Error moving the file');
+            ui.showNotification('Error', `Error moving the file: ${error.message}`);
             return false;
         }
     },
@@ -800,36 +710,16 @@ const fileOps = {
      */
     async moveFolder(folderId, targetFolderId) {
         try {
-            const response = await fetch(`/api/folders/${folderId}/move`, {
+            await fetch(`/api/folders/${folderId}/move`, {
                 method: 'PUT',
-                headers: {
-                    ...getAuthHeaders(),
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    parent_id: targetFolderId === '' ? null : targetFolderId
-                })
+                headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                body: JSON.stringify({ parent_id: targetFolderId === '' ? null : targetFolderId })
             });
-
-            if (response.ok) {
-                // Reload files after moving
-                await loadFiles();
-                ui.showNotification('Folder moved', 'Folder moved successfully');
-                return true;
-            } else {
-                let errorMessage = 'Unknown error';
-                try {
-                    const errorData = await response.json();
-                    errorMessage = errorData.error || 'Unknown error';
-                } catch (_e) {
-                    errorMessage = 'Error processing server response';
-                }
-                ui.showNotification('Error', `Error moving the folder: ${errorMessage}`);
-                return false;
-            }
+            await loadFiles();
+            ui.showNotification('Folder moved', 'Folder moved successfully');
+            return true;
         } catch (error) {
-            console.error('Error moving folder:', error);
-            ui.showNotification('Error', 'Error moving the folder');
+            ui.showNotification('Error', `Error moving the folder: ${error.message}`);
             return false;
         }
     },
@@ -901,38 +791,19 @@ const fileOps = {
      */
     async copyFile(fileId, targetFolderId) {
         try {
-            const response = await fetch('/api/batch/files/copy', {
+            await fetch('/api/batch/files/copy', {
                 method: 'POST',
-                headers: {
-                    ...getAuthHeaders(),
-                    'Content-Type': 'application/json'
-                },
+                headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     file_ids: [fileId],
                     target_folder_id: targetFolderId === '' ? null : targetFolderId
                 })
             });
-
-            if (response.ok) {
-                await response.json();
-                // Reload files after copying
-                await loadFiles();
-                ui.showNotification('File copied', 'File copied successfully');
-                return true;
-            } else {
-                let errorMessage = 'Unknown error';
-                try {
-                    const errorData = await response.json();
-                    errorMessage = errorData.error || 'Unknown error';
-                } catch (_e) {
-                    errorMessage = 'Error processing server response';
-                }
-                ui.showNotification('Error', `Error copying the file: ${errorMessage}`);
-                return false;
-            }
+            await loadFiles();
+            ui.showNotification('File copied', 'File copied successfully');
+            return true;
         } catch (error) {
-            console.error('Error copying file:', error);
-            ui.showNotification('Error', 'Error copying the file');
+            ui.showNotification('Error', `Error copying the file: ${error.message}`);
             return false;
         }
     },
@@ -998,42 +869,16 @@ const fileOps = {
      * Rename a file
      * @param {string} fileId - File ID
      * @param {string} newName - New file name
-     * @returns {Promise<boolean>} - Success status
-     */
-    /**
-     * Rename a file
-     * @param {string} fileId - File ID
-     * @param {string} newName - New file name
-     * @returns {Promise<string|null>} - null on success, error message string on failure
+     * @returns {Promise<void>}
      */
     async renameFile(fileId, newName) {
         try {
-            console.log(`Renaming file ${fileId} to "${newName}"`);
-
-            const response = await fetch(`/api/files/${fileId}/rename`, {
+            await fetch(`/api/files/${fileId}/rename`, {
                 method: 'PUT',
-                headers: {
-                    ...getAuthHeaders(),
-                    'Content-Type': 'application/json'
-                },
+                headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
                 body: JSON.stringify({ name: newName })
             });
-
-            console.log('Response status:', response.status);
-
-            if (response.ok) {
-                ui.showNotification(i18n.t('notifications.file_renamed'), i18n.t('notifications.file_renamed_to', { name: newName }));
-            } else {
-                let errorMessage = response.statusText;
-                try {
-                    const body = JSON.parse(await response.text());
-                    console.error('Error response:', body);
-                    errorMessage = extractApiError(body);
-                } catch (_e) {
-                    /* non-JSON body */
-                }
-                throw new Error(errorMessage);
-            }
+            ui.showNotification(i18n.t('notifications.file_renamed'), i18n.t('notifications.file_renamed_to', { name: newName }));
         } catch (error) {
             console.error('Error renaming file:', error);
             throw error;
@@ -1048,32 +893,12 @@ const fileOps = {
      */
     async renameFolder(folderId, newName) {
         try {
-            console.log(`Renaming folder ${folderId} to "${newName}"`);
-
-            const response = await fetch(`/api/folders/${folderId}/rename`, {
+            await fetch(`/api/folders/${folderId}/rename`, {
                 method: 'PUT',
-                headers: {
-                    ...getAuthHeaders(),
-                    'Content-Type': 'application/json'
-                },
+                headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
                 body: JSON.stringify({ name: newName })
             });
-
-            console.log('Response status:', response.status);
-
-            if (response.ok) {
-                ui.showNotification('Folder renamed', `Folder renamed to "${newName}"`);
-            } else {
-                let errorMessage = response.statusText;
-                try {
-                    const body = JSON.parse(await response.text());
-                    console.error('Error response:', body);
-                    errorMessage = extractApiError(body);
-                } catch (_e) {
-                    /* non-JSON body */
-                }
-                throw new Error(errorMessage);
-            }
+            ui.showNotification('Folder renamed', `Folder renamed to "${newName}"`);
         } catch (error) {
             console.error('Error renaming folder:', error);
             throw error;
@@ -1095,36 +920,21 @@ const fileOps = {
         if (!confirmed) return false;
 
         try {
-            // Use the trash API endpoint
-            const response = await fetch(`/api/trash/files/${fileId}`, {
-                method: 'DELETE',
-                headers: getAuthHeaders()
-            });
-
-            if (response.ok) {
+            await fetch(`/api/trash/files/${fileId}`, { method: 'DELETE', headers: getAuthHeaders() });
+            loadFiles();
+            ui.showNotification('File moved to trash', `"${fileName}" moved to trash`);
+            return true;
+        } catch {
+            // Trash not enabled or failed — fall back to direct deletion.
+            try {
+                await fetch(`/api/files/${fileId}`, { method: 'DELETE', headers: getAuthHeaders() });
                 loadFiles();
-                ui.showNotification('File moved to trash', `"${fileName}" moved to trash`);
+                ui.showNotification('File deleted', `"${fileName}" deleted successfully`);
                 return true;
-            } else {
-                // Fallback to direct deletion if trash fails
-                const fallbackResponse = await fetch(`/api/files/${fileId}`, {
-                    method: 'DELETE',
-                    headers: getAuthHeaders()
-                });
-
-                if (fallbackResponse.ok) {
-                    loadFiles();
-                    ui.showNotification('File deleted', `"${fileName}" deleted successfully`);
-                    return true;
-                } else {
-                    ui.showNotification('Error', 'Error deleting the file');
-                    return false;
-                }
+            } catch (error) {
+                ui.showNotification('Error', `Error deleting the file: ${error.message}`);
+                return false;
             }
-        } catch (error) {
-            console.error('Error deleting file:', error);
-            ui.showNotification('Error', 'Error deleting the file');
-            return false;
         }
     },
 
@@ -1142,47 +952,31 @@ const fileOps = {
         });
         if (!confirmed) return false;
 
-        try {
-            // Use the trash API endpoint
-            const response = await fetch(`/api/trash/folders/${folderId}`, {
-                method: 'DELETE',
-                headers: getAuthHeaders()
-            });
-
-            if (response.ok) {
-                // If we're inside the folder we just deleted, go back up
-                if (app.currentPath === folderId) {
-                    app.currentPath = '';
-                    ui.updateBreadcrumb('');
-                }
-                loadFiles();
-                ui.showNotification('Folder moved to trash', `"${folderName}" moved to trash`);
-                return true;
-            } else {
-                // Fallback to direct deletion if trash fails
-                const fallbackResponse = await fetch(`/api/folders/${folderId}`, {
-                    method: 'DELETE',
-                    headers: getAuthHeaders()
-                });
-
-                if (fallbackResponse.ok) {
-                    // If we're inside the folder we just deleted, go back up
-                    if (app.currentPath === folderId) {
-                        app.currentPath = '';
-                        ui.updateBreadcrumb('');
-                    }
-                    loadFiles();
-                    ui.showNotification('Folder deleted', `"${folderName}" deleted successfully`);
-                    return true;
-                } else {
-                    ui.showNotification('Error', 'Error deleting the folder');
-                    return false;
-                }
+        const navigateUpIfNeeded = () => {
+            if (app.currentPath === folderId) {
+                app.currentPath = '';
+                ui.updateBreadcrumb('');
             }
-        } catch (error) {
-            console.error('Error deleting folder:', error);
-            ui.showNotification('Error', 'Error deleting the folder');
-            return false;
+        };
+
+        try {
+            await fetch(`/api/trash/folders/${folderId}`, { method: 'DELETE', headers: getAuthHeaders() });
+            navigateUpIfNeeded();
+            loadFiles();
+            ui.showNotification('Folder moved to trash', `"${folderName}" moved to trash`);
+            return true;
+        } catch {
+            // Trash not enabled or failed — fall back to direct deletion.
+            try {
+                await fetch(`/api/folders/${folderId}`, { method: 'DELETE', headers: getAuthHeaders() });
+                navigateUpIfNeeded();
+                loadFiles();
+                ui.showNotification('Folder deleted', `"${folderName}" deleted successfully`);
+                return true;
+            } catch (error) {
+                ui.showNotification('Error', `Error deleting the folder: ${error.message}`);
+                return false;
+            }
         }
     },
 
@@ -1192,16 +986,8 @@ const fileOps = {
      */
     async getTrashItems() {
         try {
-            const response = await fetch('/api/trash', {
-                headers: getAuthHeaders()
-            });
-
-            if (response.ok) {
-                return await response.json();
-            } else {
-                console.error('Error fetching trash items:', response.statusText);
-                return [];
-            }
+            const response = await fetch('/api/trash', { headers: getAuthHeaders() });
+            return await response.json();
         } catch (error) {
             console.error('Error fetching trash items:', error);
             return [];
@@ -1215,25 +1001,15 @@ const fileOps = {
      */
     async restoreFromTrash(trashId) {
         try {
-            const response = await fetch(`/api/trash/${trashId}/restore`, {
+            await fetch(`/api/trash/${trashId}/restore`, {
                 method: 'POST',
-                headers: {
-                    ...getAuthHeaders(),
-                    'Content-Type': 'application/json'
-                },
+                headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
                 body: JSON.stringify({})
             });
-
-            if (response.ok) {
-                ui.showNotification('Item restored', 'Item restored successfully');
-                return true;
-            } else {
-                ui.showNotification('Error', 'Error restoring the item');
-                return false;
-            }
+            ui.showNotification('Item restored', 'Item restored successfully');
+            return true;
         } catch (error) {
-            console.error('Error restoring item from trash:', error);
-            ui.showNotification('Error', 'Error restoring the item');
+            ui.showNotification('Error', `Error restoring the item: ${error.message}`);
             return false;
         }
     },
@@ -1252,21 +1028,11 @@ const fileOps = {
         if (!confirmed) return false;
 
         try {
-            const response = await fetch(`/api/trash/${trashId}`, {
-                method: 'DELETE',
-                headers: getAuthHeaders()
-            });
-
-            if (response.ok) {
-                ui.showNotification('Item deleted', 'Item permanently deleted');
-                return true;
-            } else {
-                ui.showNotification('Error', 'Error deleting the item');
-                return false;
-            }
+            await fetch(`/api/trash/${trashId}`, { method: 'DELETE', headers: getAuthHeaders() });
+            ui.showNotification('Item deleted', 'Item permanently deleted');
+            return true;
         } catch (error) {
-            console.error('Error deleting item permanently:', error);
-            ui.showNotification('Error', 'Error deleting the item');
+            ui.showNotification('Error', `Error deleting the item: ${error.message}`);
             return false;
         }
     },
@@ -1284,21 +1050,11 @@ const fileOps = {
         if (!confirmed) return false;
 
         try {
-            const response = await fetch('/api/trash/empty', {
-                method: 'DELETE',
-                headers: getAuthHeaders()
-            });
-
-            if (response.ok) {
-                ui.showNotification('Trash emptied', 'The trash has been emptied successfully');
-                return true;
-            } else {
-                ui.showNotification('Error', 'Error emptying the trash');
-                return false;
-            }
+            await fetch('/api/trash/empty', { method: 'DELETE', headers: getAuthHeaders() });
+            ui.showNotification('Trash emptied', 'The trash has been emptied successfully');
+            return true;
         } catch (error) {
-            console.error('Error emptying trash:', error);
-            ui.showNotification('Error', 'Error emptying the trash');
+            ui.showNotification('Error', `Error emptying the trash: ${error.message}`);
             return false;
         }
     },
@@ -1310,24 +1066,17 @@ const fileOps = {
      */
     async downloadFile(fileId, fileName) {
         try {
-            const response = await fetch(`/api/files/${fileId}`, {
-                headers: getAuthHeaders()
-            });
-            if (response.ok) {
-                const blob = await response.blob();
-                const url = URL.createObjectURL(blob);
-                const link = document.createElement('a');
-                link.href = url;
-                link.download = fileName;
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-                URL.revokeObjectURL(url);
-            } else {
-                ui.showNotification('Error', 'Error downloading the file');
-            }
+            const response = await fetch(`/api/files/${fileId}`, { headers: getAuthHeaders() });
+            const blob = await response.blob();
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = fileName;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
         } catch (error) {
-            console.error('Error downloading file:', error);
             ui.showNotification('Error', 'Error downloading the file');
         }
     },
@@ -1339,27 +1088,18 @@ const fileOps = {
      */
     async downloadFolder(folderId, folderName) {
         try {
-            // Show notification to user
             ui.showNotification('Preparing download', 'Preparing the folder for download...');
-
-            const response = await fetch(`/api/folders/${folderId}/download?format=zip`, {
-                headers: getAuthHeaders()
-            });
-            if (response.ok) {
-                const blob = await response.blob();
-                const url = URL.createObjectURL(blob);
-                const link = document.createElement('a');
-                link.href = url;
-                link.download = `${folderName}.zip`;
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-                URL.revokeObjectURL(url);
-            } else {
-                ui.showNotification('Error', 'Error downloading the folder');
-            }
+            const response = await fetch(`/api/folders/${folderId}/download?format=zip`, { headers: getAuthHeaders() });
+            const blob = await response.blob();
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `${folderName}.zip`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
         } catch (error) {
-            console.error('Error downloading folder:', error);
             ui.showNotification('Error', 'Error downloading the folder');
         }
     }
