@@ -443,7 +443,9 @@
         "title": "सूचनाएँ",
         "empty": "कोई सूचना नहीं",
         "link_created": "लिंक बनाया गया",
-        "share_success": "शेयर लिंक सफलतापूर्वक बनाया गया"
+        "share_success": "शेयर लिंक सफलतापूर्वक बनाया गया",
+        "upload_files_section_title": "यहाँ अपलोड उपलब्ध नहीं है",
+        "upload_files_section_body": "फ़ाइलें अपलोड करने के लिए फ़ाइलें अनुभाग पर जाएँ"
     },
     "batch": {
         "one_selected": "1 आइटम चयनित",

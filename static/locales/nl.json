@@ -443,7 +443,9 @@
         "title": "Notificaties",
         "empty": "Geen notificaties",
         "link_created": "Link aangemaakt",
-        "share_success": "Deellink succesvol aangemaakt"
+        "share_success": "Deellink succesvol aangemaakt",
+        "upload_files_section_title": "Uploaden hier niet beschikbaar",
+        "upload_files_section_body": "Ga naar de sectie Bestanden om bestanden te uploaden"
     },
     "batch": {
         "one_selected": "1 item geselecteerd",
