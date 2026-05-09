@@ -8,6 +8,9 @@ pub use routes::create_public_api_routes;
 
 use utoipa::OpenApi;
 
+use crate::application::dtos::contact_dto::{
+    AddressDto, ContactDto, ContactGroupDto, EmailDto, PhoneDto,
+};
 use crate::application::dtos::favorites_dto::{
     BatchFavoritesResult, BatchFavoritesStats, FavoriteItemDto,
 };
@@ -40,6 +43,10 @@ use crate::application::ports::chunked_upload_ports::{
 };
 use crate::interfaces::api::handlers::chunked_upload_handler::{
     CompleteUploadResponse, CreateUploadRequest,
+};
+use crate::interfaces::api::handlers::contacts_handler::{
+    AddMemberRequest, AddressBookResponse, CreateAddressBookRequest, CreateContactRequest,
+    GroupNameRequest, UpdateAddressBookRequest, UpdateContactRequest,
 };
 use crate::interfaces::api::handlers::dedup_handler::{
     DedupUploadResponse, HashCheckResponse, StatsResponse,
@@ -147,6 +154,24 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
         handlers::music_handler::remove_share,
         handlers::music_handler::get_playlist_shares,
         handlers::music_handler::get_audio_metadata,
+        // Contacts / address-book handlers (free functions)
+        handlers::contacts_handler::list_address_books,
+        handlers::contacts_handler::create_address_book,
+        handlers::contacts_handler::update_address_book,
+        handlers::contacts_handler::delete_address_book,
+        handlers::contacts_handler::list_contacts,
+        handlers::contacts_handler::create_contact,
+        handlers::contacts_handler::get_contact,
+        handlers::contacts_handler::update_contact,
+        handlers::contacts_handler::delete_contact,
+        handlers::contacts_handler::list_groups,
+        handlers::contacts_handler::create_group,
+        handlers::contacts_handler::get_group,
+        handlers::contacts_handler::update_group,
+        handlers::contacts_handler::delete_group,
+        handlers::contacts_handler::list_contacts_in_group,
+        handlers::contacts_handler::add_contact_to_group,
+        handlers::contacts_handler::remove_contact_from_group,
         // Admin handlers (pub free functions)
         handlers::admin_handler::get_dashboard_stats,
         handlers::admin_handler::list_users,
@@ -231,6 +256,19 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
             HashCheckResponse,
             DedupUploadResponse,
             StatsResponse,
+            // Contacts / address-book schemas
+            AddressBookResponse,
+            CreateAddressBookRequest,
+            UpdateAddressBookRequest,
+            ContactDto,
+            ContactGroupDto,
+            EmailDto,
+            PhoneDto,
+            AddressDto,
+            CreateContactRequest,
+            UpdateContactRequest,
+            GroupNameRequest,
+            AddMemberRequest,
         )
     ),
     tags(
@@ -247,6 +285,7 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
         (name = "dedup", description = "Content deduplication endpoints"),
         (name = "batch", description = "Batch operation endpoints"),
         (name = "playlists", description = "Music playlist endpoints"),
+        (name = "contacts", description = "Address books, contacts, and groups endpoints"),
         (name = "admin", description = "Admin management endpoints"),
     ),
     info(

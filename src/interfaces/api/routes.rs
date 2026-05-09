@@ -392,6 +392,67 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
         tracing::info!("Music routes initialized");
     }
 
+    // REST browse API for CardDAV contacts, groups, and OxiCloud users.
+    // Write operations and protocol sync remain on the /carddav endpoint.
+    if let Some(contact_service) = app_state.contact_use_case.clone() {
+        use crate::interfaces::api::handlers::contacts_handler::{self, ContactsApiState};
+
+        let auth_svc = app_state
+            .auth_service
+            .as_ref()
+            .map(|s| s.auth_application_service.clone());
+
+        let contacts_state = ContactsApiState {
+            contact_service,
+            auth_service: auth_svc,
+        };
+
+        let contacts_router = Router::new()
+            .route(
+                "/",
+                get(contacts_handler::list_address_books)
+                    .post(contacts_handler::create_address_book),
+            )
+            .route(
+                "/{book_id}",
+                put(contacts_handler::update_address_book)
+                    .delete(contacts_handler::delete_address_book),
+            )
+            .route(
+                "/{book_id}/contacts",
+                get(contacts_handler::list_contacts).post(contacts_handler::create_contact),
+            )
+            .route(
+                "/{book_id}/contacts/{contact_id}",
+                get(contacts_handler::get_contact)
+                    .put(contacts_handler::update_contact)
+                    .delete(contacts_handler::delete_contact),
+            )
+            .route(
+                "/{book_id}/groups",
+                get(contacts_handler::list_groups).post(contacts_handler::create_group),
+            )
+            .route(
+                "/{book_id}/groups/{group_id}",
+                get(contacts_handler::get_group)
+                    .put(contacts_handler::update_group)
+                    .delete(contacts_handler::delete_group),
+            )
+            .route(
+                "/{book_id}/groups/{group_id}/contacts",
+                get(contacts_handler::list_contacts_in_group)
+                    .post(contacts_handler::add_contact_to_group),
+            )
+            .route(
+                "/{book_id}/groups/{group_id}/contacts/{contact_id}",
+                delete(contacts_handler::remove_contact_from_group),
+            )
+            .with_state(contacts_state);
+
+        router = router.nest("/address-books", contacts_router);
+        tracing::info!("Contacts REST API routes initialized");
+    }
+
     // NOTE: WebDAV routes are mounted at top-level (/webdav) in main.rs
     // for client compatibility, NOT under /api.
 

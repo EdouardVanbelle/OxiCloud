@@ -1,8 +1,9 @@
 use crate::domain::entities::contact::{Address, Contact, ContactGroup, Email, Phone};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EmailDto {
     pub email: String,
     pub r#type: String,
@@ -19,7 +20,7 @@ impl From<Email> for EmailDto {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PhoneDto {
     pub number: String,
     pub r#type: String,
@@ -36,7 +37,7 @@ impl From<Phone> for PhoneDto {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AddressDto {
     pub street: Option<String>,
     pub city: Option<String>,
@@ -61,7 +62,7 @@ impl From<Address> for AddressDto {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ContactDto {
     pub id: String,
     pub address_book_id: String,
@@ -181,7 +182,7 @@ pub struct CreateContactVCardDto {
     pub user_id: String, // User creating the contact
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ContactGroupDto {
     pub id: String,
     pub address_book_id: String,

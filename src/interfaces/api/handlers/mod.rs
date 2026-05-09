@@ -5,6 +5,7 @@ pub mod batch_handler;
 pub mod caldav_handler;
 pub mod carddav_handler;
 pub mod chunked_upload_handler;
+pub mod contacts_handler;
 pub mod dedup_handler;
 pub mod device_auth_handler;
 pub mod favorites_handler;

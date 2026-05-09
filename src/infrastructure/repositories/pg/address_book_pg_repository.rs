@@ -42,10 +42,11 @@ impl AddressBookRepository for AddressBookPgRepository {
         .await
         .map_err(|e| DomainError::database_error(format!("Failed to create address book: {}", e)))?;
 
+        let owner_id: Uuid = row.get("owner_id");
         Ok(AddressBook::from_raw(
             row.get("id"),
             row.get("name"),
-            row.get("owner_id"),
+            owner_id.to_string(),
             row.get("description"),
             row.get("color"),
             row.get("is_public"),
@@ -79,10 +80,11 @@ impl AddressBookRepository for AddressBookPgRepository {
             DomainError::database_error(format!("Failed to update address book: {}", e))
         })?;
 
+        let owner_id: Uuid = row.get("owner_id");
         Ok(AddressBook::from_raw(
             row.get("id"),
             row.get("name"),
-            row.get("owner_id"),
+            owner_id.to_string(),
             row.get("description"),
             row.get("color"),
             row.get("is_public"),
@@ -127,10 +129,11 @@ impl AddressBookRepository for AddressBookPgRepository {
         })?;
 
         let result = maybe_row.map(|row| {
+            let owner_id: Uuid = row.get("owner_id");
             AddressBook::from_raw(
                 row.get("id"),
                 row.get("name"),
-                row.get("owner_id"),
+                owner_id.to_string(),
                 row.get("description"),
                 row.get("color"),
                 row.get("is_public"),
@@ -164,10 +167,11 @@ impl AddressBookRepository for AddressBookPgRepository {
         let result = rows
             .into_iter()
             .map(|row| {
+                let owner_id: Uuid = row.get("owner_id");
                 AddressBook::from_raw(
                     row.get("id"),
                     row.get("name"),
-                    row.get("owner_id"),
+                    owner_id.to_string(),
                     row.get("description"),
                     row.get("color"),
                     row.get("is_public"),
@@ -201,10 +205,11 @@ impl AddressBookRepository for AddressBookPgRepository {
         let result = rows
             .into_iter()
             .map(|row| {
+                let owner_id: Uuid = row.get("owner_id");
                 AddressBook::from_raw(
                     row.get("id"),
                     row.get("name"),
-                    row.get("owner_id"),
+                    owner_id.to_string(),
                     row.get("description"),
                     row.get("color"),
                     row.get("is_public"),
@@ -235,10 +240,11 @@ impl AddressBookRepository for AddressBookPgRepository {
         let result = rows
             .into_iter()
             .map(|row| {
+                let owner_id: Uuid = row.get("owner_id");
                 AddressBook::from_raw(
                     row.get("id"),
                     row.get("name"),
-                    row.get("owner_id"),
+                    owner_id.to_string(),
                     row.get("description"),
                     row.get("color"),
                     row.get("is_public"),
@@ -317,7 +323,10 @@ impl AddressBookRepository for AddressBookPgRepository {
 
         let result = rows
             .into_iter()
-            .map(|row| (row.get("user_id"), row.get("can_write")))
+            .map(|row| {
+                let user_id: Uuid = row.get("user_id");
+                (user_id.to_string(), row.get("can_write"))
+            })
             .collect();
 
         Ok(result)
