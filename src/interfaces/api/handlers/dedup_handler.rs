@@ -11,6 +11,7 @@ use utoipa::ToSchema;
 use crate::application::ports::dedup_ports::DedupResultDto;
 use crate::common::di::AppState;
 use crate::interfaces::middleware::auth::AuthUser;
+use crate::interfaces::errors::ErrorResponse;
 use std::sync::Arc;
 
 /// Global application state for dependency injection
@@ -512,7 +513,7 @@ impl DedupHandler {
     ),
     responses(
         (status = 200, description = "Hash check result (user-scoped)", body = HashCheckResponse),
-        (status = 400, description = "Invalid hash format"),
+        (status = 400, description = "Invalid hash format", body = ErrorResponse),
     ),
     tag = "dedup",
     security(("bearerAuth" = []))
@@ -532,8 +533,8 @@ pub async fn check_hash(
     responses(
         (status = 201, description = "New blob stored", body = DedupUploadResponse),
         (status = 200, description = "Blob already existed (dedup hit)", body = DedupUploadResponse),
-        (status = 400, description = "No file field or empty file"),
-        (status = 500, description = "Upload failed"),
+        (status = 400, description = "No file field or empty file", body = ErrorResponse),
+        (status = 500, description = "Upload failed", body = ErrorResponse),
     ),
     tag = "dedup",
     security(("bearerAuth" = []))
@@ -551,7 +552,7 @@ pub async fn upload_with_dedup(
     path = "/api/dedup/stats",
     responses(
         (status = 200, description = "Deduplication statistics", body = StatsResponse),
-        (status = 403, description = "Admin role required"),
+        (status = 403, description = "Admin role required", body = ErrorResponse),
     ),
     tag = "dedup",
     security(("bearerAuth" = []))
@@ -568,8 +569,8 @@ pub async fn get_stats(state: State<GlobalState>, auth_user: AuthUser) -> impl I
     ),
     responses(
         (status = 200, description = "Raw blob content (user-scoped)"),
-        (status = 400, description = "Invalid hash format"),
-        (status = 404, description = "Blob not found or not owned by this user"),
+        (status = 400, description = "Invalid hash format", body = ErrorResponse),
+        (status = 404, description = "Blob not found or not owned by this user", body = ErrorResponse),
     ),
     tag = "dedup",
     security(("bearerAuth" = []))
@@ -587,8 +588,8 @@ pub async fn get_blob(
     path = "/api/dedup/recalculate",
     responses(
         (status = 200, description = "Statistics after integrity verification", body = StatsResponse),
-        (status = 403, description = "Admin role required"),
-        (status = 500, description = "Integrity verification failed"),
+        (status = 403, description = "Admin role required", body = ErrorResponse),
+        (status = 500, description = "Integrity verification failed", body = ErrorResponse),
     ),
     tag = "dedup",
     security(("bearerAuth" = []))

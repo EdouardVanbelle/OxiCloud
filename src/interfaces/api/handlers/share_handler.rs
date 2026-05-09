@@ -14,6 +14,7 @@ use utoipa::ToSchema;
 
 use crate::application::services::share_service::ShareService;
 use crate::infrastructure::services::share_unlock_cookie;
+use crate::interfaces::errors::ErrorResponse;
 use crate::{
     application::{
         dtos::share_dto::{CreateShareDto, UpdateShareDto},
@@ -57,7 +58,7 @@ pub struct VerifyPasswordRequest {
     request_body = CreateShareDto,
     responses(
         (status = 201, description = "Share created", body = crate::application::dtos::share_dto::ShareDto),
-        (status = 400, description = "Bad request")
+        (status = 400, description = "Bad request", body = ErrorResponse)
     ),
     tag = "shares"
 )]
@@ -79,7 +80,7 @@ pub async fn create_shared_link(
     params(("id" = String, Path, description = "Share ID")),
     responses(
         (status = 200, description = "Share details", body = crate::application::dtos::share_dto::ShareDto),
-        (status = 404, description = "Share not found")
+        (status = 404, description = "Share not found", body = ErrorResponse)
     ),
     tag = "shares"
 )]
@@ -157,7 +158,7 @@ pub async fn get_user_shares(
     request_body = UpdateShareDto,
     responses(
         (status = 200, description = "Share updated", body = crate::application::dtos::share_dto::ShareDto),
-        (status = 404, description = "Share not found")
+        (status = 404, description = "Share not found", body = ErrorResponse)
     ),
     tag = "shares"
 )]
@@ -187,7 +188,7 @@ pub async fn update_shared_link(
     params(("id" = String, Path, description = "Share ID")),
     responses(
         (status = 204, description = "Share deleted"),
-        (status = 404, description = "Share not found")
+        (status = 404, description = "Share not found", body = ErrorResponse)
     ),
     tag = "shares"
 )]
@@ -213,8 +214,8 @@ pub async fn delete_shared_link(
     params(("token" = String, Path, description = "Share token")),
     responses(
         (status = 200, description = "Shared item details"),
-        (status = 401, description = "Password required"),
-        (status = 410, description = "Share expired")
+        (status = 401, description = "Password required", body = ErrorResponse),
+        (status = 410, description = "Share expired", body = ErrorResponse)
     ),
     tag = "shares"
 )]
@@ -264,8 +265,8 @@ pub async fn access_shared_item(
     params(("token" = String, Path, description = "Share token")),
     responses(
         (status = 200, description = "Password verified, item details returned"),
-        (status = 401, description = "Invalid password"),
-        (status = 410, description = "Share expired")
+        (status = 401, description = "Invalid password", body = ErrorResponse),
+        (status = 410, description = "Share expired", body = ErrorResponse)
     ),
     tag = "shares"
 )]
@@ -313,10 +314,10 @@ pub async fn verify_shared_item_password(
     params(("token" = String, Path, description = "Share token")),
     responses(
         (status = 200, description = "File content stream"),
-        (status = 401, description = "Password required"),
-        (status = 404, description = "Share not found"),
-        (status = 410, description = "Share expired"),
-        (status = 503, description = "Sharing disabled")
+        (status = 401, description = "Password required", body = ErrorResponse),
+        (status = 404, description = "Share not found", body = ErrorResponse),
+        (status = 410, description = "Share expired", body = ErrorResponse),
+        (status = 503, description = "Sharing disabled", body = ErrorResponse)
     ),
     tag = "shares"
 )]

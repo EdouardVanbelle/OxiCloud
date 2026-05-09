@@ -53,6 +53,7 @@ use crate::interfaces::api::handlers::dedup_handler::{
     DedupUploadResponse, HashCheckResponse, StatsResponse,
 };
 use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
+use crate::interfaces::errors::ErrorResponse;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -270,6 +271,8 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
             UpdateContactRequest,
             GroupNameRequest,
             AddMemberRequest,
+            // Error response schema
+            ErrorResponse,
         )
     ),
     tags(
