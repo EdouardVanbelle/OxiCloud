@@ -405,6 +405,7 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
         let contacts_state = ContactsApiState {
             contact_service,
             auth_service: auth_svc,
+            expose_system_users: app_state.core.config.features.expose_system_users,
         };
 
         let contacts_router = Router::new()

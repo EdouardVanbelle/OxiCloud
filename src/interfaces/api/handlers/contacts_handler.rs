@@ -30,6 +30,8 @@ const SYSTEM_BOOK_ID: &str = "system";
 pub struct ContactsApiState {
     pub contact_service: Arc<ContactStorageAdapter>,
     pub auth_service: Option<Arc<AuthApplicationService>>,
+    /// When false, the virtual "system" address book (OxiCloud users) is hidden.
+    pub expose_system_users: bool,
 }
 
 /// Address book entry with `is_readonly` and `is_system` flags.
@@ -251,7 +253,7 @@ pub async fn list_address_books(
                 })
                 .collect();
 
-            if state.auth_service.is_some() {
+            if state.expose_system_users && state.auth_service.is_some() {
                 let now = Utc::now();
                 response.push(AddressBookResponse {
                     id: SYSTEM_BOOK_ID.to_string(),
@@ -438,6 +440,9 @@ pub async fn list_contacts(
     Query(params): Query<ListQuery>,
 ) -> impl IntoResponse {
     if book_id == SYSTEM_BOOK_ID {
+        if !state.expose_system_users {
+            return system_book_unavailable();
+        }
         let Some(auth_service) = &state.auth_service else {
             return system_book_unavailable();
         };
@@ -544,6 +549,9 @@ pub async fn get_contact(
     Path((book_id, contact_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     if book_id == SYSTEM_BOOK_ID {
+        if !state.expose_system_users {
+            return system_book_unavailable();
+        }
         let Some(auth_service) = &state.auth_service else {
             return system_book_unavailable();
         };
