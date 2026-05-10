@@ -50,7 +50,9 @@ use oxicloud::interfaces;
 
 use common::di::AppServiceFactory;
 use infrastructure::db::create_database_pools;
-use interfaces::{create_api_routes, create_public_api_routes, web::create_web_routes};
+use interfaces::{
+    create_api_routes, create_health_routes, create_public_api_routes, web::create_web_routes,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -115,6 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build application router
     let api_routes = create_api_routes(&app_state);
     let public_api_routes = create_public_api_routes(&app_state);
+    let health_routes = create_health_routes(&app_state);
     let web_routes = create_web_routes();
 
     let mut app;
@@ -319,6 +322,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
 
         app = Router::new()
+            // Health / readiness probes — no auth, mounted at root
+            .merge(health_routes)
             // Rate-limited auth endpoints (login, register, refresh)
             .nest("/api/auth", auth_login)
             .nest("/api/auth", auth_register)
@@ -375,6 +380,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Auth disabled — no middleware applied
         tracing::warn!("Authentication is DISABLED — all API routes are publicly accessible");
         app = Router::new()
+            // Health / readiness probes — no auth, mounted at root
+            .merge(health_routes)
             .nest("/api", public_api_routes)
             .nest("/api", api_routes)
             // RFC 6764 well-known discovery (just redirects)

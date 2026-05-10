@@ -2,14 +2,40 @@ use crate::application::services::batch_operations::BatchOperationService;
 use crate::common::di::AppState;
 use axum::{
     Router,
-    extract::DefaultBodyLimit,
-    response::Json as AxumJson,
+    extract::{DefaultBodyLimit, State},
+    http::StatusCode,
+    response::{IntoResponse, Json as AxumJson},
     routing::{delete, get, post, put},
 };
 use serde_json::json;
 use std::sync::Arc;
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 use utoipa::OpenApi;
+
+/// Liveness probe — returns 200 if the process is running, no DB check.
+async fn health() -> impl IntoResponse {
+    (StatusCode::OK, AxumJson(json!({"status": "ok"})))
+}
+
+/// Readiness probe — returns 200 if the DB pool can serve queries, 503 otherwise.
+async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match &state.db_pool {
+        Some(pool) => match sqlx::query("SELECT 1").execute(pool.as_ref()).await {
+            Ok(_) => (
+                StatusCode::OK,
+                AxumJson(json!({"status": "ok", "db": "ok"})),
+            ),
+            Err(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                AxumJson(json!({"status": "error", "db": "error"})),
+            ),
+        },
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            AxumJson(json!({"status": "error", "db": "not configured"})),
+        ),
+    }
+}
 
 /// Returns the application version from Cargo.toml (compile-time constant)
 async fn get_version() -> AxumJson<serde_json::Value> {
@@ -44,6 +70,18 @@ use crate::interfaces::api::handlers::search_handler::{
     clear_search_cache, search_files_get, search_files_post, suggest_files,
 };
 use crate::interfaces::api::handlers::trash_handler;
+
+/// Creates root-level health check routes — mounted directly at `/`, not under `/api/`.
+/// (follow docker/kubernetes best practices)
+///
+/// - `GET /health` — liveness probe, no DB check, always 200 if process is up.
+/// - `GET /ready`  — readiness probe, pings DB pool, returns 503 if unreachable.
+pub fn create_health_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/health", get(health))
+        .route("/ready", get(ready))
+        .with_state(app_state.clone())
+}
 
 /// Creates public API routes that should NOT require authentication.
 pub fn create_public_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
