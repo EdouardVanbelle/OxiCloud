@@ -1,5 +1,6 @@
 // device-verify.js — Extracted from inline <script> in device-verify.html
 import { getCsrfHeaders } from '../../core/csrf.js';
+import { oxiIconsInit } from '../../core/icons.js';
 
 (() => {
     var API_BASE = window.location.origin;
@@ -11,6 +12,8 @@ import { getCsrfHeaders } from '../../core/csrf.js';
     var btnDeny = document.getElementById('btn-deny');
     var debounceTimer = null;
     var currentCode = '';
+
+    oxiIconsInit();
 
     // Pre-fill from URL query param (?code=ABCD-1234)
     var params = new URLSearchParams(window.location.search);

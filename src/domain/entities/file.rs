@@ -1,6 +1,6 @@
 use uuid::Uuid;
 
-use crate::domain::services::path_service::StoragePath;
+use crate::domain::services::path_service::{StoragePath, validate_storage_name};
 
 // Re-export entity errors from the centralized module
 pub use super::entity_errors::{FileError, FileResult};
@@ -100,9 +100,8 @@ impl File {
         mime_type: String,
         folder_id: Option<String>,
     ) -> FileResult<Self> {
-        // Validate file name
-        if name.is_empty() || name.contains('/') || name.contains('\\') {
-            return Err(FileError::InvalidFileName(name));
+        if let Err(reason) = validate_storage_name(&name) {
+            return Err(FileError::InvalidFileName(format!("{name}: {reason}")));
         }
 
         let now = std::time::SystemTime::now()
@@ -137,9 +136,8 @@ impl File {
         created_at: u64,
         modified_at: u64,
     ) -> FileResult<Self> {
-        // Validate folder name
-        if name.is_empty() || name.contains('/') || name.contains('\\') {
-            return Err(FileError::InvalidFileName(name));
+        if let Err(reason) = validate_storage_name(&name) {
+            return Err(FileError::InvalidFileName(format!("{name}: {reason}")));
         }
 
         // Store the path string for serialization compatibility
@@ -199,9 +197,8 @@ impl File {
         owner_id: Option<Uuid>,
         etag: String,
     ) -> FileResult<Self> {
-        // Validate file name
-        if name.is_empty() || name.contains('/') || name.contains('\\') {
-            return Err(FileError::InvalidFileName(name));
+        if let Err(reason) = validate_storage_name(&name) {
+            return Err(FileError::InvalidFileName(format!("{name}: {reason}")));
         }
 
         // Store the path string for serialization compatibility
@@ -321,9 +318,8 @@ impl File {
 
     /// Creates a new version of the file with updated name
     pub fn with_name(&self, new_name: String) -> FileResult<Self> {
-        // Validate file name
-        if new_name.is_empty() || new_name.contains('/') || new_name.contains('\\') {
-            return Err(FileError::InvalidFileName(new_name));
+        if let Err(reason) = validate_storage_name(&new_name) {
+            return Err(FileError::InvalidFileName(format!("{new_name}: {reason}")));
         }
 
         // Update path based on name

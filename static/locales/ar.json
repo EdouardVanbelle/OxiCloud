@@ -116,7 +116,8 @@
         "search_btn": "بحث",
         "close": "إغلاق",
         "delete_permanently": "حذف نهائياً",
-        "empty_trash": "تفريغ سلة المهملات"
+        "empty_trash": "تفريغ سلة المهملات",
+        "open_parent_folder": "الانتقال إلى المجلد الأصلي"
     },
     "user_menu": {
         "appearance": "المظهر",

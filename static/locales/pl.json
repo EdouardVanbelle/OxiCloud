@@ -116,7 +116,8 @@
         "search_btn": "Szukaj",
         "close": "Zamknij",
         "delete_permanently": "Usuń trwale",
-        "empty_trash": "Opróżnij kosz"
+        "empty_trash": "Opróżnij kosz",
+        "open_parent_folder": "Przejdź do folderu nadrzędnego"
     },
     "user_menu": {
         "appearance": "Wygląd",

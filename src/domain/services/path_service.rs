@@ -6,6 +6,26 @@
 
 use std::path::PathBuf;
 
+/// Validates a single file or folder name component.
+///
+/// Returns `Err` with a human-readable reason if the name is rejected.
+/// Callers should wrap the reason into their own error type.
+pub fn validate_storage_name(name: &str) -> Result<(), &'static str> {
+    if name.is_empty() {
+        return Err("name cannot be empty");
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err("name must not contain '/' or '\\'");
+    }
+    if name.contains('\0') {
+        return Err("name must not contain null bytes");
+    }
+    if name == "." || name == ".." {
+        return Err("'.' and '..' are not valid names");
+    }
+    Ok(())
+}
+
 /// Represents a storage path in the domain (Value Object)
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StoragePath {

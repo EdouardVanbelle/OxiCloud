@@ -20,7 +20,7 @@ import { thumbnail } from '../features/thumbnail.js';
 import { sharedView } from '../views/shared/sharedView.js';
 import { loadFiles } from './filesView.js';
 import { updateHistory } from './main.js';
-import { syncViewContainers } from './navigation.js';
+import { switchToFilesSection, syncViewContainers } from './navigation.js';
 import { app } from './state.js';
 import { uiFileTypes } from './uiFileTypes.js';
 import { uiNotifications } from './uiNotifications.js';
@@ -62,6 +62,7 @@ const ui = {
                 </div>
             `;
             document.body.appendChild(folderMenu);
+            i18n.translateElement(folderMenu);
         }
 
         // File context menu
@@ -81,6 +82,9 @@ const ui = {
                 </div>
                 <div class="context-menu-item" id="download-file-option">
                     <i class="fas fa-download"></i> <span data-i18n="actions.download">Download</span>
+                </div>
+                <div class="context-menu-item hidden" id="open-parent-folder-option">
+                    <i class="fas fa-folder-open"></i> <span data-i18n="actions.open_parent_folder">Go to parent folder</span>
                 </div>
                 <div class="context-menu-separator"></div>
                 <div class="context-menu-item" id="favorite-file-option">
@@ -105,6 +109,7 @@ const ui = {
                 </div>
             `;
             document.body.appendChild(fileMenu);
+            i18n.translateElement(fileMenu);
         }
 
         // Rename dialog — modern
@@ -912,6 +917,12 @@ const ui = {
         const navigateFolder = (card) => {
             const folderId = card.dataset.folderId;
             const folderName = card.dataset.folderName;
+            if (app.currentSection === 'favorites' || app.currentSection === 'recent') {
+                switchToFilesSection();
+                app.currentPath = folderId;
+                loadFiles();
+                return;
+            }
             app.breadcrumbPath.push({ id: folderId, name: folderName });
             app.currentPath = folderId;
             this.updateBreadcrumb();
@@ -1011,6 +1022,9 @@ const ui = {
             }
             if (contextMenus && typeof contextMenus.syncAddToPlaylistOption === 'function') {
                 contextMenus.syncAddToPlaylistOption();
+            }
+            if (contextMenus && typeof contextMenus.syncOpenParentFolderOption === 'function') {
+                contextMenus.syncOpenParentFolderOption();
             }
             if (menu) {
                 menu.style.left = `${e.pageX}px`;
@@ -1295,6 +1309,7 @@ const ui = {
         el.dataset.folderId = folder.id;
         el.dataset.folderName = folder.name;
         el.dataset.parentId = folder.parent_id || '';
+        if (folder.path) el.dataset.path = folder.path;
 
         const isFav = favorites?.isFavorite(folder.id, 'folder');
         const isShared = sharedView.isShared(folder.id, 'folder');
@@ -1345,6 +1360,7 @@ const ui = {
         el.dataset.fileId = file.id;
         el.dataset.fileName = file.name;
         el.dataset.folderId = file.folder_id || '';
+        if (file.path) el.dataset.path = file.path;
         el.setAttribute('draggable', 'true');
 
         el.innerHTML = `
@@ -1556,6 +1572,9 @@ function showContextMenuAtElement(triggerElement, menuId) {
     }
     if (contextMenus && typeof contextMenus.syncAddToPlaylistOption === 'function') {
         contextMenus.syncAddToPlaylistOption();
+    }
+    if (contextMenus && typeof contextMenus.syncOpenParentFolderOption === 'function') {
+        contextMenus.syncOpenParentFolderOption();
     }
 
     menu.style.left = `${left}px`;

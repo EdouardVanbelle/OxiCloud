@@ -1,3 +1,5 @@
+import { oxiIconsInit } from '../../core/icons';
+
 /**
  * publicShare.js — client-side logic for /s/{token}.
  * Drives the password / file / folder / expired states and renders the
@@ -27,6 +29,9 @@ import { uiFileTypes } from '../../app/uiFileTypes.js';
     const pathParts = window.location.pathname.split('/');
     const tokenIdx = pathParts.indexOf('s');
     const TOKEN = tokenIdx !== -1 ? pathParts[tokenIdx + 1] : null;
+
+    oxiIconsInit();
+
     if (!TOKEN) {
         showState('expired');
         if ($expiredMsg) $expiredMsg.textContent = 'Invalid share link.';

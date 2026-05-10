@@ -410,13 +410,14 @@ impl AuthApplicationService {
 
         let refresh_token = self.token_service.generate_refresh_token();
 
-        // Save session
+        // Save session — new login starts a new token family
         let session = Session::new(
             user.id(),
             refresh_token.clone(),
             None, // IP (can be added from the HTTP layer)
             None, // User-Agent (can be added from the HTTP layer)
             self.token_service.refresh_token_expiry_days(),
+            Uuid::new_v4(),
         );
 
         self.session_storage.create_session(session).await?;
@@ -484,8 +485,25 @@ impl AuthApplicationService {
             .get_session_by_refresh_token(&dto.refresh_token)
             .await?;
 
-        // Check if the session is expired or revoked
-        if session.is_expired() || session.is_revoked() {
+        // Reuse detection: a revoked token being replayed indicates the token was
+        // stolen after rotation. Invalidate the entire family to protect all devices.
+        if session.is_revoked() {
+            tracing::warn!(
+                user_id = %session.user_id(),
+                family_id = %session.family_id(),
+                "Refresh token reuse detected — revoking entire token family"
+            );
+            self.session_storage
+                .revoke_session_family(session.family_id())
+                .await?;
+            return Err(DomainError::new(
+                ErrorKind::AccessDenied,
+                "Auth",
+                "Session expired or invalid",
+            ));
+        }
+
+        if session.is_expired() {
             return Err(DomainError::new(
                 ErrorKind::AccessDenied,
                 "Auth",
@@ -505,21 +523,22 @@ impl AuthApplicationService {
             ));
         }
 
-        // Revoke current session
+        // Revoke current session before issuing the next token in the family
         self.session_storage.revoke_session(session.id()).await?;
 
         // Generate new tokens
         let access_token = self.token_service.generate_access_token(&user)?;
-
         let new_refresh_token = self.token_service.generate_refresh_token();
 
-        // Create new session
+        // New session inherits the family_id so reuse of any ancestor triggers
+        // full-family revocation
         let new_session = Session::new(
             user.id(),
             new_refresh_token.clone(),
             None,
             None,
             self.token_service.refresh_token_expiry_days(),
+            session.family_id(),
         );
 
         self.session_storage.create_session(new_session).await?;
@@ -1245,6 +1264,7 @@ impl AuthApplicationService {
             None,
             None,
             self.token_service.refresh_token_expiry_days(),
+            Uuid::new_v4(),
         );
         self.session_storage.create_session(session).await?;
 

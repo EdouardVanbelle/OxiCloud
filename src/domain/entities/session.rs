@@ -11,6 +11,9 @@ pub struct Session {
     user_agent: Option<String>,
     created_at: DateTime<Utc>,
     revoked: bool,
+    /// Groups all tokens issued from the same original login.
+    /// Replaying a revoked token from this family triggers full-family revocation.
+    family_id: Uuid,
 }
 
 impl Session {
@@ -20,6 +23,7 @@ impl Session {
         ip_address: Option<String>,
         user_agent: Option<String>,
         expires_in_days: i64,
+        family_id: Uuid,
     ) -> Self {
         if refresh_token.is_empty() {
             panic!("Session refresh_token cannot be empty");
@@ -35,6 +39,7 @@ impl Session {
             user_agent,
             created_at: now,
             revoked: false,
+            family_id,
         }
     }
 
@@ -48,6 +53,7 @@ impl Session {
         user_agent: Option<String>,
         created_at: DateTime<Utc>,
         revoked: bool,
+        family_id: Uuid,
     ) -> Self {
         Self {
             id,
@@ -58,6 +64,7 @@ impl Session {
             user_agent,
             created_at,
             revoked,
+            family_id,
         }
     }
 
@@ -100,5 +107,9 @@ impl Session {
 
     pub fn revoke(&mut self) {
         self.revoked = true;
+    }
+
+    pub fn family_id(&self) -> Uuid {
+        self.family_id
     }
 }

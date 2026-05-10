@@ -7,10 +7,10 @@ Usage:
 
 What it does:
   1. Scans every file under static/ for  fas fa-<name>  occurrences.
-  2. Reads the _ICONS registry from static/js/core/icons.js.
+  2. Reads the OxiIcons registry from static/js/core/icons.js.
   3. For each icon name that is missing from the registry, looks up
        tmp/Font-Awesome/svgs/solid/<name>.svg
-     and adds the entry  '<name>': [<width>, '<path>']  to _ICONS.
+     and adds the entry  '<name>': [<width>, '<path>']  to OxiIcons.
   4. Rewrites icons.js in-place (unless --dry-run is given).
 
 FontAwesome source:  tmp/Font-Awesome/svgs/solid/
@@ -75,15 +75,15 @@ for path in sorted(STATIC_DIR.rglob("*")):
 
 print(f"Found {len(used_icons)} distinct FA icon(s) referenced in static/")
 
-# ── 2. Parse existing _ICONS keys from icons.js ───────────────────────────────
+# ── 2. Parse existing OxiIcons keys from icons.js ───────────────────────────────
 icons_src = ICONS_JS.read_text(encoding="utf-8")
 
-# Extract only the _ICONS object body so we never accidentally match keys from
+# Extract only the OxiIcons object body so we never accidentally match keys from
 # other objects or functions elsewhere in the file.
-_ICONS_BLOCK_RE = re.compile(r'const _ICONS\s*=\s*\{(.*?)^};', re.DOTALL | re.MULTILINE)
+_ICONS_BLOCK_RE = re.compile(r'const OxiIcons\s*=\s*\{(.*?)^};', re.DOTALL | re.MULTILINE)
 block_match = _ICONS_BLOCK_RE.search(icons_src)
 if not block_match:
-    print("✗ Could not locate 'const _ICONS = { … };' in icons.js — aborting.")
+    print("✗ Could not locate 'const OxiIcons = { … };' in icons.js — aborting.")
     sys.exit(1)
 icons_block = block_match.group(1)
 
@@ -93,7 +93,7 @@ icons_block = block_match.group(1)
 ICON_KEY_RE = re.compile(r"""['"]?([\w-]+)['"]?\s*:\s*\[""")
 registered: set[str] = {m.group(1) for m in ICON_KEY_RE.finditer(icons_block)}
 
-print(f"Registry has {len(registered)} icon(s) in _ICONS")
+print(f"Registry has {len(registered)} icon(s) in OxiIcons")
 
 # ── 3. Find missing icons ─────────────────────────────────────────────────────
 missing = {name: files for name, files in used_icons.items() if name not in registered}
@@ -150,12 +150,12 @@ for name, width, d in new_entries:
 
 insert_block = "\n".join(insert_lines) + "\n"
 
-# Insert just before the closing "};" of _ICONS (line 396 area)
+# Insert just before the closing "};" of OxiIcons (line 396 area)
 # Anchor: the line that is exactly "};"
 ICONS_END_RE = re.compile(r'^};$', re.MULTILINE)
 m = ICONS_END_RE.search(icons_src)
 if not m:
-    print("\n✗ Could not locate the closing '}; ' of _ICONS in icons.js — aborting.")
+    print("\n✗ Could not locate the closing '}; ' of OxiIcons in icons.js — aborting.")
     sys.exit(1)
 
 # Ensure the last existing entry has a trailing comma before we append.

@@ -4,7 +4,7 @@ use crate::application::dtos::folder_dto::{
 use crate::application::ports::inbound::FolderUseCase;
 use crate::common::errors::{DomainError, ErrorKind};
 use crate::domain::repositories::folder_repository::FolderRepository;
-use crate::domain::services::path_service::StoragePath;
+use crate::domain::services::path_service::{StoragePath, validate_storage_name};
 use crate::infrastructure::repositories::pg::folder_db_repository::FolderDbRepository;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -136,12 +136,11 @@ impl FolderUseCase for FolderService {
     /// Creates a new folder
     async fn create_folder(&self, dto: CreateFolderDto) -> Result<FolderDto, DomainError> {
         // Input validation
-        if dto.name.is_empty() {
-            return Err(DomainError::new(
-                ErrorKind::InvalidInput,
-                "Folder",
-                "Folder name cannot be empty",
-            ));
+        if let Err(reason) = validate_storage_name(&dto.name) {
+            return Err(DomainError::validation_error(format!(
+                "Invalid folder name '{}': {reason}",
+                dto.name
+            )));
         }
 
         // If a parent_id is provided, verify it exists
@@ -397,12 +396,11 @@ impl FolderUseCase for FolderService {
         caller_id: Uuid,
     ) -> Result<FolderDto, DomainError> {
         // Input validation
-        if dto.name.is_empty() {
-            return Err(DomainError::new(
-                ErrorKind::InvalidInput,
-                "Folder",
-                "New folder name cannot be empty",
-            ));
+        if let Err(reason) = validate_storage_name(&dto.name) {
+            return Err(DomainError::validation_error(format!(
+                "Invalid folder name '{}': {reason}",
+                dto.name
+            )));
         }
 
         // Verify the folder exists and belongs to the caller

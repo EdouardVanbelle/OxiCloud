@@ -182,8 +182,8 @@ async function loadFiles(options = { insertHistory: true }) {
         // not required anymore
         clearTimeout(loadingFiles);
 
-        if (response.status === 401 || response.status === 403) {
-            console.warn('Auth error when loading files, showing empty list');
+        if (response.status === 403) {
+            console.warn('Forbidden when loading files');
             // FIXME: i18n
             ui.showError(`<p>Could not load files</p>`);
             return;

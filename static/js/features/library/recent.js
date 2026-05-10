@@ -10,6 +10,7 @@ import { ui } from '../../app/ui.js';
 import { getCsrfHeaders } from '../../core/csrf.js';
 import { i18n } from '../../core/i18n.js';
 import { multiSelect } from '../files/multiSelect.js';
+import * as pathTooltip from '../pathTooltip.js';
 
 const recent = {
     /** Maximum items to request from the server */
@@ -128,7 +129,8 @@ const recent = {
                         id: item.item_id,
                         name: item.item_name || item.item_id,
                         parent_id: item.parent_id || '',
-                        modified_at: item.accessed_at
+                        modified_at: item.accessed_at,
+                        path: item.item_path || ''
                     });
                 } else {
                     files.push({
@@ -141,12 +143,14 @@ const recent = {
                         category: item.category,
                         size: item.item_size || 0,
                         size_formatted: item.size_formatted,
-                        modified_at: item.accessed_at
+                        modified_at: item.accessed_at,
+                        path: item.item_path || ''
                     });
                 }
             }
             if (folders.length) ui.renderFolders(folders);
             if (files.length) ui.renderFiles(files);
+            if (filesList) pathTooltip.init(filesList);
         } catch (error) {
             console.error('Error displaying recent files:', error);
             if (ui?.showNotification) {
