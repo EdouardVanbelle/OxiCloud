@@ -411,6 +411,11 @@ async fn serve_share_file(
         return Response::builder()
             .status(StatusCode::NOT_MODIFIED)
             .header(header::ETAG, &etag)
+            .header(
+                header::CACHE_CONTROL,
+                "private, max-age=3600, must-revalidate",
+            )
+            .header(header::VARY, "Cookie, Range")
             .body(Body::empty())
             .unwrap()
             .into_response();
@@ -443,6 +448,11 @@ async fn serve_share_file(
                                 )
                                 .header(header::ACCEPT_RANGES, "bytes")
                                 .header(header::ETAG, &etag)
+                                .header(
+                                    header::CACHE_CONTROL,
+                                    "private, max-age=3600, must-revalidate",
+                                )
+                                .header(header::VARY, "Cookie, Range")
                                 .body(Body::from_stream(Box::into_pin(stream)))
                                 .unwrap()
                                 .into_response();
@@ -457,6 +467,11 @@ async fn serve_share_file(
                 return Response::builder()
                     .status(StatusCode::RANGE_NOT_SATISFIABLE)
                     .header(header::CONTENT_RANGE, format!("bytes */{}", file_dto.size))
+                    .header(
+                        header::CACHE_CONTROL,
+                        "private, max-age=3600, must-revalidate",
+                    )
+                    .header(header::VARY, "Cookie, Range")
                     .body(Body::empty())
                     .unwrap()
                     .into_response();
@@ -473,6 +488,11 @@ async fn serve_share_file(
                 .header(header::CONTENT_LENGTH, data.len())
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::ETAG, &etag)
+                .header(
+                    header::CACHE_CONTROL,
+                    "private, max-age=3600, must-revalidate",
+                )
+                .header(header::VARY, "Cookie, Range")
                 .body(Body::from(data))
                 .unwrap()
                 .into_response(),
@@ -483,6 +503,11 @@ async fn serve_share_file(
                 .header(header::CONTENT_LENGTH, mmap_data.len())
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::ETAG, &etag)
+                .header(
+                    header::CACHE_CONTROL,
+                    "private, max-age=3600, must-revalidate",
+                )
+                .header(header::VARY, "Cookie, Range")
                 .body(Body::from(mmap_data))
                 .unwrap()
                 .into_response(),
@@ -493,6 +518,11 @@ async fn serve_share_file(
                 .header(header::CONTENT_LENGTH, file_dto.size)
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::ETAG, &etag)
+                .header(
+                    header::CACHE_CONTROL,
+                    "private, max-age=3600, must-revalidate",
+                )
+                .header(header::VARY, "Cookie, Range")
                 .body(Body::from_stream(stream))
                 .unwrap()
                 .into_response(),
@@ -572,7 +602,8 @@ pub async fn list_share_contents_root(
         (status = 400, description = "Share is not a folder share"),
         (status = 401, description = "Password required"),
         (status = 404, description = "Subfolder not found or not in share scope"),
-        (status = 410, description = "Share expired")
+        (status = 410, description = "Share expired"),
+        (status = 503, description = "Sharing disabled")
     ),
     tag = "shares"
 )]
@@ -665,7 +696,8 @@ pub async fn download_share_zip_root(
         (status = 200, description = "ZIP archive of the subfolder"),
         (status = 401, description = "Password required"),
         (status = 404, description = "Subfolder not found or not in share scope"),
-        (status = 410, description = "Share expired")
+        (status = 410, description = "Share expired"),
+        (status = 503, description = "Sharing or ZIP service disabled")
     ),
     tag = "shares"
 )]
@@ -744,6 +776,8 @@ async fn serve_share_zip(
         .header(header::CONTENT_TYPE, "application/zip")
         .header(header::CONTENT_DISPOSITION, disposition)
         .header(header::CONTENT_LENGTH, file_size)
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .header(header::VARY, "Cookie")
         .body(body)
         .unwrap();
 

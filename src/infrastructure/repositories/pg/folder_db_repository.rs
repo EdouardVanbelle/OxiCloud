@@ -971,19 +971,26 @@ impl FolderRepository for FolderDbRepository {
         candidate_folder_id: &str,
         root_folder_id: &str,
     ) -> Result<bool, DomainError> {
+        let (Ok(candidate_uuid), Ok(root_uuid)) = (
+            Uuid::parse_str(candidate_folder_id),
+            Uuid::parse_str(root_folder_id),
+        ) else {
+            return Ok(false);
+        };
+
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS (\
                  SELECT 1 \
                  FROM storage.folders c, storage.folders r \
-                 WHERE c.id = $1::uuid \
-                   AND r.id = $2::uuid \
+                 WHERE c.id = $1 \
+                   AND r.id = $2 \
                    AND c.is_trashed = false \
                    AND r.is_trashed = false \
                    AND c.lpath <@ r.lpath \
              )",
         )
-        .bind(candidate_folder_id)
-        .bind(root_folder_id)
+        .bind(candidate_uuid)
+        .bind(root_uuid)
         .fetch_one(self.pool())
         .await
         .map_err(|e| {
@@ -997,21 +1004,27 @@ impl FolderRepository for FolderDbRepository {
         file_id: &str,
         root_folder_id: &str,
     ) -> Result<bool, DomainError> {
+        let (Ok(file_uuid), Ok(root_uuid)) =
+            (Uuid::parse_str(file_id), Uuid::parse_str(root_folder_id))
+        else {
+            return Ok(false);
+        };
+
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS (\
                  SELECT 1 \
                  FROM storage.files f \
                  JOIN storage.folders parent ON f.folder_id = parent.id \
-                 JOIN storage.folders root   ON root.id = $2::uuid \
-                 WHERE f.id = $1::uuid \
+                 JOIN storage.folders root   ON root.id = $2 \
+                 WHERE f.id = $1 \
                    AND f.is_trashed = false \
                    AND parent.is_trashed = false \
                    AND root.is_trashed = false \
                    AND parent.lpath <@ root.lpath \
              )",
         )
-        .bind(file_id)
-        .bind(root_folder_id)
+        .bind(file_uuid)
+        .bind(root_uuid)
         .fetch_one(self.pool())
         .await
         .map_err(|e| DomainError::internal_error("FolderDb", format!("is_file_in_subtree: {e}")))?;

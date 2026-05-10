@@ -200,9 +200,14 @@ import { uiFileTypes } from '../../app/uiFileTypes.js';
         return folderId ? `/api/s/${TOKEN_ENC}/zip/${encodeURIComponent(folderId)}` : `/api/s/${TOKEN_ENC}/zip`;
     }
 
+    let currentLoadController = null;
     function loadAndRender(folderId) {
+        if (currentLoadController) currentLoadController.abort();
+        const controller = new AbortController();
+        currentLoadController = controller;
+
         $folder.innerHTML = '<div class="gallery-loading"><div class="spinner"></div></div>';
-        fetch(listingUrl(folderId))
+        fetch(listingUrl(folderId), { signal: controller.signal })
             .then((res) => {
                 if (res.ok) return res.json();
                 if (res.status === 401) {
@@ -216,10 +221,11 @@ import { uiFileTypes } from '../../app/uiFileTypes.js';
                 throw new Error(`HTTP ${res.status}`);
             })
             .then((listing) => {
-                if (!listing) return;
+                if (controller.signal.aborted || !listing) return;
                 renderGallery(listing, folderId);
             })
             .catch((err) => {
+                if (err.name === 'AbortError') return;
                 $folder.innerHTML = '<div class="gallery-error">Failed to load contents. Try again.</div>';
                 console.error('share gallery load failed:', err);
             });
