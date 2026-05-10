@@ -64,10 +64,14 @@ front-lint:
 front-rules:
     stylelint static/css/
 
-# end-to-end tests
+# end-to-end Playwright tests
 front-test:
     cd tests/e2e && npm test
 
 # update images snapshots
 front-test-update-snapshot:
     cd tests/e2e && npm test -- --update-snapshots
+
+# Hurl API functional tests (starts postgres + server, tears down after)
+api-test:
+    bash tests/api/run.sh

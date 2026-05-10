@@ -1,4 +1,21 @@
 import { defineConfig, devices } from '@playwright/test';
+import * as fs from 'fs';
+import * as path from 'path';
+
+/** Parse a KEY=VALUE env file, skipping blank lines and comments. */
+function loadEnv(filePath: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const line of fs.readFileSync(filePath, 'utf-8').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const idx = trimmed.indexOf('=');
+    if (idx === -1) continue;
+    env[trimmed.slice(0, idx)] = trimmed.slice(idx + 1);
+  }
+  return env;
+}
+
+const commonEnv = loadEnv(path.join(__dirname, '../common/server.env'));
 
 export default defineConfig({
   testDir: './scenarios',
@@ -39,19 +56,9 @@ export default defineConfig({
     stdout: 'pipe',
     stderr: 'pipe',
     env: {
-      DATABASE_URL: 'postgres://oxicloud_test:oxicloud_test@localhost:5433/oxicloud_test',
-      OXICLOUD_SERVER_PORT: 8087,
-      OXICLOUD_DB_CONNECTION_STRING: 'postgres://oxicloud_test:oxicloud_test@localhost:5433/oxicloud_test',
+      ...commonEnv,
+      OXICLOUD_SERVER_PORT: '8087',
       OXICLOUD_STORAGE_PATH: './tests/e2e/storage',
-      OXICLOUD_STATIC_PATH: './static',
-      OXICLOUD_JWT_SECRET: 'test-secret-do-not-use-in-prod-minimum-32-chars',
-      OXICLOUD_ENABLE_AUTH: 'true',
-      OXICLOUD_ENABLE_TRASH: 'true',
-      OXICLOUD_ENABLE_SEARCH: 'true',
-      OXICLOUD_ENABLE_FILE_SHARING: 'true',
-      OXICLOUD_WOPI_ENABLED: 'false',
-      OXICLOUD_OIDC_ENABLED: 'false',
-      RUST_LOG: 'warn',
     },
   },
 });
