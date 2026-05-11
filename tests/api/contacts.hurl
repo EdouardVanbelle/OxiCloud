@@ -165,6 +165,8 @@ jsonpath "$.phone[0].type" == "mobile"
 # ─────────────────────────────────────────────────────────────
 # Step 8 – Update John Doe: add nickname, notes, and organisation
 #           Uses If-Match for optimistic concurrency
+#           Captures the refreshed ETag into etag_updated so that
+#           the original etag remains available as a stale value.
 # ─────────────────────────────────────────────────────────────
 PUT {{base_url}}/api/address-books/{{book_id}}/contacts/{{contact_id}}
 Authorization: Bearer {{token}}
@@ -195,7 +197,7 @@ If-Match: {{etag}}
 
 HTTP 200
 [Captures]
-etag: header "ETag"
+etag_updated: header "ETag"
 [Asserts]
 header "ETag" exists
 jsonpath "$.id" == {{contact_id}}
@@ -207,17 +209,35 @@ jsonpath "$.notes" == "Updated via Hurl test"
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 9 – Delete John Doe (uses refreshed ETag from step 8)
+# Step 9 – Stale ETag rejection: update with the pre-step-8 ETag
+#           The contact was already modified so this must return 412
+# ─────────────────────────────────────────────────────────────
+PUT {{base_url}}/api/address-books/{{book_id}}/contacts/{{contact_id}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+If-Match: {{etag}}
+{
+  "first_name": "John",
+  "last_name": "Doe",
+  "full_name": "John Doe",
+  "nickname": "should-not-be-saved"
+}
+
+HTTP 412
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 10 – Delete John Doe (uses refreshed ETag from step 8)
 # ─────────────────────────────────────────────────────────────
 DELETE {{base_url}}/api/address-books/{{book_id}}/contacts/{{contact_id}}
 Authorization: Bearer {{token}}
-If-Match: {{etag}}
+If-Match: {{etag_updated}}
 
 HTTP 204
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 10 – Address book must be empty again
+# Step 11 – Address book must be empty again
 # ─────────────────────────────────────────────────────────────
 GET {{base_url}}/api/address-books/{{book_id}}/contacts
 Authorization: Bearer {{token}}
@@ -228,7 +248,7 @@ jsonpath "$" count == 0
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 11 – Delete the personal address book
+# Step 12 – Delete the personal address book
 # ─────────────────────────────────────────────────────────────
 DELETE {{base_url}}/api/address-books/{{book_id}}
 Authorization: Bearer {{token}}
@@ -237,7 +257,7 @@ HTTP 204
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 12 – Verify the address book is gone from the list
+# Step 13 – Verify the address book is gone from the list
 # ─────────────────────────────────────────────────────────────
 GET {{base_url}}/api/address-books
 Authorization: Bearer {{token}}
@@ -248,7 +268,7 @@ jsonpath "$[*].id" not contains {{book_id}}
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 13 – List the system address book (OxiCloud users)
+# Step 14 – List the system address book (OxiCloud users)
 # ─────────────────────────────────────────────────────────────
 GET {{base_url}}/api/address-books/system/contacts
 Authorization: Bearer {{token}}

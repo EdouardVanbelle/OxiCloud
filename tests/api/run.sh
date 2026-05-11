@@ -13,9 +13,9 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 COMMON="$REPO_ROOT/tests/common"
 API_DIR="$REPO_ROOT/tests/api"
 
-# .env is the single source of truth for connection details and credentials.
-# shellcheck source=.env
-source "$API_DIR/.env"
+# test.env is the single source of truth for connection details and credentials.
+# shellcheck source=test.env
+source "$API_DIR/test.env"
 
 # Derive server port from base_url (e.g. http://localhost:8087 → 8087)
 SERVER_PORT="${base_url##*:}"
@@ -77,7 +77,7 @@ log "Server is ready."
 # ── 4. Run Hurl tests ─────────────────────────────────────────────────────────
 
 log "Running Hurl tests..."
-hurl --variables-file "$API_DIR/.env" --test --jobs 1 \
+hurl --variables-file "$API_DIR/test.env" --test --jobs 1 \
   "$API_DIR/setup.hurl" \
   "$API_DIR/contacts.hurl"
 

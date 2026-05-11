@@ -9,7 +9,7 @@ Tests are written using [Hurl](https://hurl.dev) — a plain-text, CLI-first HTT
 
 ## Configuration
 
-Edit `.env` to match your local instance. This file is the single source of
+Edit `test.env` to match your local instance. This file is the single source of
 truth: `run.sh` sources it for shell variables and passes it to Hurl as
 `--variables-file`.
 
@@ -24,19 +24,19 @@ password=TestPassword1!
 
 ```bash
 # First-time setup (run once on a fresh instance)
-hurl --variables-file tests/api/hurl.vars --test tests/api/setup.hurl
+hurl --variables-file tests/api/test.env --test tests/api/setup.hurl
 
 # Contacts CRUD scenario
-hurl --variables-file tests/api/hurl.vars --test tests/api/contacts.hurl
+hurl --variables-file tests/api/test.env --test tests/api/contacts.hurl
 
 # All scenarios at once
-hurl --variables-file tests/api/hurl.vars --test tests/api/setup.hurl tests/api/contacts.hurl
+hurl --variables-file tests/api/test.env --test tests/api/setup.hurl tests/api/contacts.hurl
 
 # With full request/response output
-hurl --variables-file tests/api/hurl.vars --test --verbose tests/api/contacts.hurl
+hurl --variables-file tests/api/test.env --test --verbose tests/api/contacts.hurl
 
 # Generate an HTML report
-hurl --variables-file tests/api/hurl.vars --test --report-html /tmp/hurl-report tests/api/contacts.hurl
+hurl --variables-file tests/api/test.env --test --report-html /tmp/hurl-report tests/api/contacts.hurl
 ```
 
 ## Test files
@@ -45,7 +45,7 @@ hurl --variables-file tests/api/hurl.vars --test --report-html /tmp/hurl-report 
 |---|---|
 | `setup.hurl` | One-time admin account creation; also asserts the endpoint is locked afterwards |
 | `contacts.hurl` | Full contacts CRUD scenario (13 steps, see below) |
-| `.env` | Variables: `base_url`, `username`, `email`, `password` — used by both Hurl and `run.sh` |
+| `test.env` | Variables: `base_url`, `username`, `email`, `password` — used by both Hurl and `run.sh` |
 
 ## Scenario: `contacts.hurl`
 
