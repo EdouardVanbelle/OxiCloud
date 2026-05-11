@@ -4,9 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "pretest": "node -e \"(async()=>{await require('./spawn-db.js')()})().catch(e=>{console.error(e);process.exit(1)})\"",
+    "pretest": "bash ../common/spawn-db.sh",
     "test": "npx playwright test",
-    "posttest": "node -e \"(async()=>{await require('./stop-db.js')()})().catch(e=>{console.error(e);process.exit(1)})\""
+    "posttest": "bash ../common/stop-db.sh"
   },
   "keywords": [],
   "author": "",

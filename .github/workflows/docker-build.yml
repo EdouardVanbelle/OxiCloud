@@ -6,9 +6,9 @@ on:
   pull_request:
     branches: [ "main", "dev" ]
 
-concurrency:
-  group: rust-build-${{ github.ref }}
-  cancel-in-progress: false
+#concurrency:
+#  group: rust-build-${{ github.ref }}
+#  cancel-in-progress: false
 
 jobs:
   build-and-test:

@@ -67,10 +67,10 @@ WORKDIR /app
 # Expose application port
 EXPOSE 8086
 
-# Basic health check — verifies the HTTP server responds on the main port.
+# Liveness probe — verifies the HTTP server is up (no DB check, fast).
 # Docker / Compose / Swarm will mark the container unhealthy after 3 failures.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -qO- http://localhost:8086/api/version || exit 1
+    CMD wget -qO- http://localhost:8086/health || exit 1
 
 # Entrypoint fixes volume permissions then drops to oxicloud user.
 # The container starts as root so it can chown mounted volumes,

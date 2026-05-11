@@ -2,14 +2,40 @@ use crate::application::services::batch_operations::BatchOperationService;
 use crate::common::di::AppState;
 use axum::{
     Router,
-    extract::DefaultBodyLimit,
-    response::Json as AxumJson,
+    extract::{DefaultBodyLimit, State},
+    http::StatusCode,
+    response::{IntoResponse, Json as AxumJson},
     routing::{delete, get, post, put},
 };
 use serde_json::json;
 use std::sync::Arc;
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 use utoipa::OpenApi;
+
+/// Liveness probe — returns 200 if the process is running, no DB check.
+async fn health() -> impl IntoResponse {
+    (StatusCode::OK, AxumJson(json!({"status": "ok"})))
+}
+
+/// Readiness probe — returns 200 if the DB pool can serve queries, 503 otherwise.
+async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match &state.db_pool {
+        Some(pool) => match sqlx::query("SELECT 1").execute(pool.as_ref()).await {
+            Ok(_) => (
+                StatusCode::OK,
+                AxumJson(json!({"status": "ok", "db": "ok"})),
+            ),
+            Err(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                AxumJson(json!({"status": "error", "db": "error"})),
+            ),
+        },
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            AxumJson(json!({"status": "error", "db": "not configured"})),
+        ),
+    }
+}
 
 /// Returns the application version from Cargo.toml (compile-time constant)
 async fn get_version() -> AxumJson<serde_json::Value> {
@@ -44,6 +70,18 @@ use crate::interfaces::api::handlers::search_handler::{
     clear_search_cache, search_files_get, search_files_post, suggest_files,
 };
 use crate::interfaces::api::handlers::trash_handler;
+
+/// Creates root-level health check routes — mounted directly at `/`, not under `/api/`.
+/// (follow docker/kubernetes best practices)
+///
+/// - `GET /health` — liveness probe, no DB check, always 200 if process is up.
+/// - `GET /ready`  — readiness probe, pings DB pool, returns 503 if unreachable.
+pub fn create_health_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/health", get(health))
+        .route("/ready", get(ready))
+        .with_state(app_state.clone())
+}
 
 /// Creates public API routes that should NOT require authentication.
 pub fn create_public_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
@@ -390,6 +428,68 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
 
         router = router.nest("/playlists", music_router);
         tracing::info!("Music routes initialized");
+    }
+
+    // REST browse API for CardDAV contacts, groups, and OxiCloud users.
+    // Write operations and protocol sync remain on the /carddav endpoint.
+    if let Some(contact_service) = app_state.contact_use_case.clone() {
+        use crate::interfaces::api::handlers::contacts_handler::{self, ContactsApiState};
+
+        let auth_svc = app_state
+            .auth_service
+            .as_ref()
+            .map(|s| s.auth_application_service.clone());
+
+        let contacts_state = ContactsApiState {
+            contact_service,
+            auth_service: auth_svc,
+            expose_system_users: app_state.core.config.features.expose_system_users,
+        };
+
+        let contacts_router = Router::new()
+            .route(
+                "/",
+                get(contacts_handler::list_address_books)
+                    .post(contacts_handler::create_address_book),
+            )
+            .route(
+                "/{book_id}",
+                put(contacts_handler::update_address_book)
+                    .delete(contacts_handler::delete_address_book),
+            )
+            .route(
+                "/{book_id}/contacts",
+                get(contacts_handler::list_contacts).post(contacts_handler::create_contact),
+            )
+            .route(
+                "/{book_id}/contacts/{contact_id}",
+                get(contacts_handler::get_contact)
+                    .put(contacts_handler::update_contact)
+                    .delete(contacts_handler::delete_contact),
+            )
+            .route(
+                "/{book_id}/groups",
+                get(contacts_handler::list_groups).post(contacts_handler::create_group),
+            )
+            .route(
+                "/{book_id}/groups/{group_id}",
+                get(contacts_handler::get_group)
+                    .put(contacts_handler::update_group)
+                    .delete(contacts_handler::delete_group),
+            )
+            .route(
+                "/{book_id}/groups/{group_id}/contacts",
+                get(contacts_handler::list_contacts_in_group)
+                    .post(contacts_handler::add_contact_to_group),
+            )
+            .route(
+                "/{book_id}/groups/{group_id}/contacts/{contact_id}",
+                delete(contacts_handler::remove_contact_from_group),
+            )
+            .with_state(contacts_state);
+
+        router = router.nest("/address-books", contacts_router);
+        tracing::info!("Contacts REST API routes initialized");
     }
 
     // NOTE: WebDAV routes are mounted at top-level (/webdav) in main.rs
