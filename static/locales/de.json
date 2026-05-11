@@ -443,7 +443,9 @@
         "title": "Benachrichtigungen",
         "empty": "Keine Benachrichtigungen",
         "link_created": "Link erstellt",
-        "share_success": "Freigabelink erfolgreich erstellt"
+        "share_success": "Freigabelink erfolgreich erstellt",
+        "upload_files_section_title": "Upload hier nicht verfügbar",
+        "upload_files_section_body": "Wechseln Sie zum Abschnitt Dateien, um Dateien hochzuladen"
     },
     "batch": {
         "one_selected": "1 Element ausgewählt",

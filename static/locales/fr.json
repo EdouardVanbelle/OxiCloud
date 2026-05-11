@@ -443,7 +443,9 @@
         "empty": "No notifications",
         "title": "Notifications",
         "link_created": "Lien créé",
-        "share_success": "Lien de partage créé avec succès"
+        "share_success": "Lien de partage créé avec succès",
+        "upload_files_section_title": "Dépôt non disponible ici",
+        "upload_files_section_body": "Accédez à la section Fichiers pour déposer des fichiers"
     },
     "batch": {
         "one_selected": "1 élément sélectionné",

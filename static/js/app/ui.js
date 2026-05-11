@@ -437,11 +437,11 @@ const ui = {
             }, 500);
         });
 
-        // Document-wide drag and drop
+        // Document-wide drag and drop — only active in the Files section
         document.addEventListener('dragover', (e) => {
             e.preventDefault();
             if (!e.dataTransfer) return;
-            if (e.dataTransfer.types.includes('Files')) {
+            if (e.dataTransfer.types.includes('Files') && app.currentSection === 'files') {
                 dropzone?.classList.remove('hidden');
                 dropzone?.classList.add('active');
             }
@@ -466,6 +466,12 @@ const ui = {
             if (handledDropEvents.has(e)) return;
 
             if (!e.dataTransfer) return;
+            if (app.currentSection !== 'files') {
+                if (e.dataTransfer.types.includes('Files')) {
+                    this.showNotification(i18n.t('notifications.upload_files_section_title'), i18n.t('notifications.upload_files_section_body'));
+                }
+                return;
+            }
             if (e.dataTransfer.files.length > 0) {
                 // First try directory-aware extraction (Finder folder drag & drop)
                 const droppedEntries = await collectDroppedEntries(e.dataTransfer);

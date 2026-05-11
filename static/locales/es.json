@@ -443,7 +443,9 @@
         "title": "Notificaciones",
         "empty": "Sin notificaciones",
         "link_created": "Enlace creado",
-        "share_success": "Enlace compartido creado correctamente"
+        "share_success": "Enlace compartido creado correctamente",
+        "upload_files_section_title": "Subida no disponible aquí",
+        "upload_files_section_body": "Ve a la sección Archivos para subir archivos"
     },
     "batch": {
         "one_selected": "1 elemento seleccionado",

@@ -443,7 +443,9 @@
         "empty": "No notifications",
         "title": "Notifications",
         "link_created": "Link creato",
-        "share_success": "Link di condivisione creato con successo"
+        "share_success": "Link di condivisione creato con successo",
+        "upload_files_section_title": "Caricamento non disponibile qui",
+        "upload_files_section_body": "Vai alla sezione File per caricare i file"
     },
     "batch": {
         "one_selected": "1 elemento selezionato",

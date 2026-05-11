@@ -443,7 +443,9 @@
         "title": "Powiadomienia",
         "empty": "Brak powiadomień",
         "link_created": "Link utworzony",
-        "share_success": "Link udostępniania utworzony pomyślnie"
+        "share_success": "Link udostępniania utworzony pomyślnie",
+        "upload_files_section_title": "Przesyłanie niedostępne tutaj",
+        "upload_files_section_body": "Przejdź do sekcji Pliki, aby przesłać pliki"
     },
     "batch": {
         "one_selected": "Wybrano 1 element",

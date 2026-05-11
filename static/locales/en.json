@@ -443,7 +443,9 @@
         "title": "Notifications",
         "empty": "No notifications",
         "link_created": "Link created",
-        "share_success": "Shared link created successfully"
+        "share_success": "Shared link created successfully",
+        "upload_files_section_title": "Upload not available here",
+        "upload_files_section_body": "Go to the Files section to upload files"
     },
     "batch": {
         "one_selected": "1 item selected",

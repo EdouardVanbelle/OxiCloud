@@ -443,7 +443,9 @@
         "title": "الإشعارات",
         "empty": "لا توجد إشعارات",
         "link_created": "تم إنشاء الرابط",
-        "share_success": "تم إنشاء رابط المشاركة بنجاح"
+        "share_success": "تم إنشاء رابط المشاركة بنجاح",
+        "upload_files_section_title": "التحميل غير متاح هنا",
+        "upload_files_section_body": "انتقل إلى قسم الملفات لتحميل الملفات"
     },
     "batch": {
         "one_selected": "عنصر واحد محدد",

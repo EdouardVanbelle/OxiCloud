@@ -673,7 +673,9 @@
         "title": "通知",
         "empty": "暂无通知",
         "link_created": "链接已创建",
-        "share_success": "分享链接创建成功"
+        "share_success": "分享链接创建成功",
+        "upload_files_section_title": "此处不支持上传",
+        "upload_files_section_body": "请前往文件部分上传文件"
     },
     "upload": {
         "uploading": "正在上传...",

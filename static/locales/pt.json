@@ -443,7 +443,9 @@
         "empty": "No notifications",
         "title": "Notifications",
         "link_created": "Link criado",
-        "share_success": "Link de partilha criado com sucesso"
+        "share_success": "Link de partilha criado com sucesso",
+        "upload_files_section_title": "Upload não disponível aqui",
+        "upload_files_section_body": "Vá para a seção Arquivos para enviar arquivos"
     },
     "batch": {
         "one_selected": "1 item selecionado",

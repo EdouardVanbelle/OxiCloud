@@ -443,7 +443,9 @@
         "title": "알림",
         "empty": "알림이 없습니다",
         "link_created": "링크 생성됨",
-        "share_success": "공유 링크가 성공적으로 생성되었습니다"
+        "share_success": "공유 링크가 성공적으로 생성되었습니다",
+        "upload_files_section_title": "여기서는 업로드할 수 없습니다",
+        "upload_files_section_body": "파일을 업로드하려면 파일 섹션으로 이동하세요"
     },
     "batch": {
         "one_selected": "1개 선택됨",

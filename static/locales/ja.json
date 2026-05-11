@@ -443,7 +443,9 @@
         "title": "通知",
         "empty": "通知はありません",
         "link_created": "リンクを作成しました",
-        "share_success": "共有リンクを正常に作成しました"
+        "share_success": "共有リンクを正常に作成しました",
+        "upload_files_section_title": "ここではアップロードできません",
+        "upload_files_section_body": "ファイルをアップロードするには「ファイル」セクションに移動してください"
     },
     "batch": {
         "one_selected": "1件選択中",
