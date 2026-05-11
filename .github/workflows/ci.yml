@@ -39,6 +39,10 @@ jobs:
               - 'src/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'tests/api/**'
+              - 'tests/e2e/**'
+              - 'tests/fixtures/**'
+              - 'tests/common/**'
 
   frontend-check:
     name: Frontend — CSS and JS checks (format, lint, rules)
