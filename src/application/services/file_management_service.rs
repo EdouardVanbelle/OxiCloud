@@ -186,6 +186,8 @@ impl FileManagementUseCase for FileManagementService {
         target_folder_id: Option<String>,
     ) -> Result<FileDto, DomainError> {
         self.verify_owner(file_id, caller_id).await?;
+        self.verify_target_folder_owner(&target_folder_id, caller_id)
+            .await?;
         self.copy_file(file_id, target_folder_id).await
     }
 
