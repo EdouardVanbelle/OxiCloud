@@ -326,4 +326,31 @@ impl FileManagementUseCase for FileManagementService {
 
         Ok(result)
     }
+
+    async fn copy_folder_tree_owned(
+        &self,
+        source_folder_id: &str,
+        caller_id: Uuid,
+        target_parent_id: Option<String>,
+        dest_name: Option<String>,
+    ) -> Result<CopyFolderTreeResult, DomainError> {
+        if let Some(folder_repo) = &self.folder_repo {
+            let owner = folder_repo.get_folder_user_id(source_folder_id).await?;
+            if owner != caller_id {
+                return Err(DomainError::not_found(
+                    "Folder",
+                    "Source folder not found or access denied",
+                ));
+            }
+        } else {
+            return Err(DomainError::internal_error(
+                "FileManagement",
+                "Folder ownership verification unavailable",
+            ));
+        }
+        self.verify_target_folder_owner(&target_parent_id, caller_id)
+            .await?;
+        self.copy_folder_tree(source_folder_id, target_parent_id, dest_name)
+            .await
+    }
 }

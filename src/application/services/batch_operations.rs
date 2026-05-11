@@ -12,6 +12,7 @@ use tracing::info;
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::{FolderDto, MoveFolderDto};
 use crate::application::ports::file_ports::{FileManagementUseCase, FileRetrievalUseCase};
+use crate::application::ports::storage_ports::CopyFolderTreeResult;
 use crate::application::ports::inbound::FolderUseCase;
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::application::services::file_management_service::FileManagementService;
@@ -610,6 +611,73 @@ impl BatchOperationService {
 
         info!(
             "Batch folder move completed: {}/{} successful in {}ms",
+            result.stats.successful, result.stats.total, result.stats.execution_time_ms
+        );
+
+        Ok(result)
+    }
+
+    /// Copies multiple folder trees to a target parent in parallel
+    pub async fn copy_folders(
+        &self,
+        folder_ids: Vec<String>,
+        target_folder_id: Option<String>,
+        user_id: Uuid,
+    ) -> Result<BatchResult<CopyFolderTreeResult>, BatchOperationError> {
+        info!("Starting batch copy of {} folders", folder_ids.len());
+        let start_time = std::time::Instant::now();
+
+        let mut result = BatchResult {
+            successful: Vec::new(),
+            failed: Vec::new(),
+            stats: BatchStats {
+                total: folder_ids.len(),
+                ..Default::default()
+            },
+        };
+
+        let target: Option<Arc<str>> = target_folder_id.map(|s| Arc::from(s.as_str()));
+
+        let mut operation_stream = stream::iter(folder_ids.into_iter().map(|folder_id| {
+            let file_management = self.file_management.clone();
+            let target = target.clone();
+
+            async move {
+                let copy_result = file_management
+                    .copy_folder_tree_owned(
+                        &folder_id,
+                        user_id,
+                        target.map(|s| s.to_string()),
+                        None,
+                    )
+                    .await;
+                (folder_id, copy_result)
+            }
+        }))
+        .buffer_unordered(self.config.concurrency.max_concurrent_files);
+
+        while let Some((folder_id, operation_result)) = operation_stream.next().await {
+            match operation_result {
+                Ok(copy_result) => {
+                    result.successful.push(copy_result);
+                    result.stats.successful += 1;
+                }
+                Err(e) => {
+                    result.failed.push((folder_id, e.to_string()));
+                    result.stats.failed += 1;
+                }
+            }
+        }
+
+        result.stats.execution_time_ms = start_time.elapsed().as_millis();
+        result.stats.max_concurrency = self
+            .config
+            .concurrency
+            .max_concurrent_files
+            .min(result.stats.total);
+
+        info!(
+            "Batch folder copy completed: {}/{} successful in {}ms",
             result.stats.successful, result.stats.total, result.stats.execution_time_ms
         );
 

@@ -671,6 +671,19 @@ impl FileManagementUseCase for StubFileManagementUseCase {
     ) -> Result<FileDto, DomainError> {
         Ok(FileDto::default())
     }
+
+    async fn copy_folder_tree_owned(
+        &self,
+        _source_folder_id: &str,
+        _caller_id: Uuid,
+        _target_parent_id: Option<String>,
+        _dest_name: Option<String>,
+    ) -> Result<crate::application::ports::storage_ports::CopyFolderTreeResult, DomainError> {
+        Err(DomainError::internal_error(
+            "StubFileManagement",
+            "copy_folder_tree_owned not implemented",
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------

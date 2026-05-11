@@ -237,6 +237,7 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/folders/delete", post(batch_handler::delete_folders_batch))
         .route("/folders/create", post(batch_handler::create_folders_batch))
         .route("/folders/get", post(batch_handler::get_folders_batch))
+        .route("/folders/copy", post(batch_handler::copy_folders_batch))
         .route("/folders/move", post(batch_handler::move_folders_batch))
         // Trash operations (soft delete)
         .route("/trash", post(batch_handler::trash_batch))
