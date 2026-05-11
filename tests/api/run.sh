@@ -85,8 +85,12 @@ log "Server is ready."
 # ── 4. Run Hurl tests ─────────────────────────────────────────────────────────
 
 log "Running Hurl tests..."
-hurl --variables-file "$API_DIR/test.env" --test --jobs 1 \
+hurl --variables-file "$API_DIR/test.env" --file-root "$REPO_ROOT/tests" --test --jobs 1 \
   "$API_DIR/setup.hurl" \
+  "$API_DIR/files-folders.hurl" \
+  "$API_DIR/favorites.hurl" \
+  "$API_DIR/trash.hurl" \
+  "$API_DIR/recent.hurl" \
   "$API_DIR/contacts.hurl"
 
 log "All tests passed."

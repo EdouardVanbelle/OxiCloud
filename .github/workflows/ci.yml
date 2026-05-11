@@ -39,6 +39,7 @@ jobs:
               - 'src/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'tests/**'
 
   frontend-check:
     name: Frontend — CSS and JS checks (format, lint, rules)
@@ -143,7 +144,6 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [rust-fmt, rust-clippy, rust-test]
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v6
@@ -170,7 +170,8 @@ jobs:
           name: oxicloud-release
           path: target/release/
 
-      - run: chmod +x target/release/oxicloud
+      - name: Set execute bit on pre-built binary
+        run: chmod +x target/release/oxicloud
 
       - name: Install Hurl
         env:
@@ -209,7 +210,8 @@ jobs:
           name: oxicloud-release
           path: target/release/
 
-      - run: chmod +x target/release/oxicloud
+      - name: Set execute bit on pre-built binary
+        run: chmod +x target/release/oxicloud
 
       - uses: actions/setup-node@v4
         with:
