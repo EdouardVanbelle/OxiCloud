@@ -334,6 +334,16 @@ pub trait FileManagementUseCase: Send + Sync + 'static {
             "copy_folder_tree not implemented",
         ))
     }
+
+    /// Copies a folder tree, enforcing that `caller_id` owns both the source folder
+    /// and the target parent folder.
+    async fn copy_folder_tree_owned(
+        &self,
+        source_folder_id: &str,
+        caller_id: Uuid,
+        target_parent_id: Option<String>,
+        dest_name: Option<String>,
+    ) -> Result<CopyFolderTreeResult, DomainError>;
 }
 
 /// Factory for creating file use case implementations

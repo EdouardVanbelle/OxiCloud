@@ -9,6 +9,7 @@ use utoipa::ToSchema;
 
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
+use crate::application::ports::storage_ports::CopyFolderTreeResult;
 use crate::application::services::batch_operations::{
     BatchOperationService, BatchResult, BatchStats,
 };
@@ -837,6 +838,90 @@ pub async fn move_folders_batch(
         })?;
 
     let response: BatchOperationResponse<FolderDto> = result.into();
+
+    let status_code = if response.stats.failed > 0 {
+        if response.stats.successful > 0 {
+            StatusCode::PARTIAL_CONTENT
+        } else {
+            StatusCode::BAD_REQUEST
+        }
+    } else {
+        StatusCode::OK
+    };
+
+    Ok((status_code, Json(response)).into_response())
+}
+
+/// DTO returned for each successfully copied folder tree
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CopiedFolderDto {
+    /// UUID of the newly created root folder
+    pub new_root_folder_id: String,
+    /// Total folders created (including root)
+    pub folders_copied: i64,
+    /// Total files copied (zero-copy via dedup)
+    pub files_copied: i64,
+}
+
+impl From<CopyFolderTreeResult> for CopiedFolderDto {
+    fn from(r: CopyFolderTreeResult) -> Self {
+        Self {
+            new_root_folder_id: r.new_root_folder_id,
+            folders_copied: r.folders_copied,
+            files_copied: r.files_copied,
+        }
+    }
+}
+
+/// Handler for copying multiple folder trees in batch
+#[utoipa::path(
+    post,
+    path = "/api/batch/folders/copy",
+    responses(
+        (status = 200, description = "All folders copied"),
+        (status = 206, description = "Partial success"),
+        (status = 400, description = "Bad request"),
+        (status = 401, description = "Unauthorized")
+    ),
+    tag = "batch"
+)]
+pub async fn copy_folders_batch(
+    State(state): State<BatchHandlerState>,
+    auth_user: AuthUser,
+    Json(request): Json<BatchFolderOperationRequest>,
+) -> ApiResult<impl IntoResponse> {
+    if request.folder_ids.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "No folder IDs provided"
+            })),
+        )
+            .into_response());
+    }
+    if request.folder_ids.len() > MAX_BATCH_SIZE {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("Batch size {} exceeds maximum of {}", request.folder_ids.len(), MAX_BATCH_SIZE)
+            })),
+        )
+            .into_response());
+    }
+
+    let result = state
+        .batch_service
+        .copy_folders(request.folder_ids, request.target_folder_id, auth_user.id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Batch copy_folders failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Batch operation failed".to_string(),
+            )
+        })?;
+
+    let response: BatchOperationResponse<CopiedFolderDto> = result.into();
 
     let status_code = if response.stats.failed > 0 {
         if response.stats.successful > 0 {

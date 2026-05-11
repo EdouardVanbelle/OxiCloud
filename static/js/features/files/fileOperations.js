@@ -208,7 +208,7 @@ const fileOps = {
                 safeUpdateFile(0, 'error');
                 finalize({
                     ok: false,
-                    errorMsg: `Client send() failed: ${e?.message || 'unknown error'}`
+                    errorMsg: `Client send() failed: ${/** @type {Error} */ (e)?.message || 'unknown error'}`
                 });
             }
         });
@@ -286,7 +286,7 @@ const fileOps = {
 
         try {
             // Legacy progress bar (inside dropzone) — keep working for drag-drop
-            const progressBar = document.querySelector('.progress-fill');
+            const progressBar = /** @type {HTMLDivElement} */ (document.querySelector('.progress-fill'));
             const uploadProgressDiv = document.querySelector('.upload-progress');
             if (uploadProgressDiv) {
                 uploadProgressDiv.classList.remove('hidden');
@@ -447,7 +447,7 @@ const fileOps = {
         }
         this._isUploading = true;
 
-        const progressBar = document.querySelector('.progress-fill');
+        const progressBar = /** @type {HTMLDivElement} */ (document.querySelector('.progress-fill'));
         const uploadProgressDiv = document.querySelector('.upload-progress');
         if (uploadProgressDiv) {
             uploadProgressDiv.classList.remove('hidden');
@@ -928,23 +928,31 @@ const fileOps = {
 
     /**
      * Copy a folder to another folder
-     * Note: Backend folder copy is not yet implemented, this shows a notification
      * @param {string} folderId - Folder ID
      * @param {string} targetFolderId - Target folder ID
      * @returns {Promise<boolean>} - Success status
      */
-    async copyFolder(_folderId, _targetFolderId) {
-        // Folder copy is not yet implemented in the backend
-        ui.showNotification('Not implemented', 'Folder copy is not yet supported');
-        return false;
+    async copyFolder(folderId, targetFolderId) {
+        const res = await fetch('/api/batch/folders/copy', {
+            method: 'POST',
+            headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ folder_ids: [folderId], target_folder_id: targetFolderId })
+        });
+        return res.ok;
     },
+
+    /**
+     * @typedef {Object} BatchCopyReturn
+     * @property {number} success
+     * @property {number} errors
+     */
 
     /**
      * Copy files & folders
      * @param {string[]} fileIds - File IDs
      * @param {string[]} folderIds - Folder IDs
      * @param {string} targetFolderId - Target folder ID
-     * @returns {Promise<boolean>} - Success status
+     * @returns {Promise<BatchCopyReturn>} - Success status
      */
     async batchCopy(fileIds, folderIds, targetFolderId) {
         // FIXME ensure not moving a folder into itself
@@ -964,13 +972,22 @@ const fileOps = {
                 });
                 const data = await res.json();
                 success += data.stats?.successful || 0;
-                errors += data.stats?.failed || 0;
+                errors += data.stats?.failed || (!res.ok && !data.stats ? fileIds.length : 0);
             }
 
-            // Note: Folder copy is not yet implemented in batch API
+            // Batch copy folders
             if (folderIds.length > 0) {
-                ui.showNotification('Info', 'Folder copy is not yet supported in batch mode');
-                errors += folderIds.lenngth;
+                const res = await fetch('/api/batch/folders/copy', {
+                    method: 'POST',
+                    headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        folder_ids: folderIds,
+                        target_folder_id: targetFolderId
+                    })
+                });
+                const data = await res.json();
+                success += data.stats?.successful || 0;
+                errors += data.stats?.failed || (!res.ok && !data.stats ? folderIds.length : 0);
             }
         } catch (err) {
             console.error('Batch copy error:', err);

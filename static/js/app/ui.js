@@ -997,18 +997,8 @@ const ui = {
             setContextTarget(card, info);
             const menuId = info.type === 'folder' ? 'folder-context-menu' : 'file-context-menu';
             const menu = document.getElementById(menuId);
-            if (contextMenus && typeof contextMenus.syncFavoriteOptionLabels === 'function') {
-                contextMenus.syncFavoriteOptionLabels();
-            }
-            if (contextMenus && typeof contextMenus.syncWopiOptionVisibility === 'function') {
-                contextMenus.syncWopiOptionVisibility().catch(() => {});
-            }
-            if (contextMenus && typeof contextMenus.syncAddToPlaylistOption === 'function') {
-                contextMenus.syncAddToPlaylistOption();
-            }
-            if (contextMenus && typeof contextMenus.syncOpenParentFolderOption === 'function') {
-                contextMenus.syncOpenParentFolderOption();
-            }
+            contextMenus.sync();
+
             if (menu) {
                 menu.style.left = `${e.pageX}px`;
                 menu.style.top = `${e.pageY}px`;
@@ -1201,9 +1191,7 @@ const ui = {
             }
 
             // Keep context-menu label in sync if available
-            if (contextMenus && typeof contextMenus.syncFavoriteOptionLabels === 'function') {
-                contextMenus.syncFavoriteOptionLabels();
-            }
+            contextMenus.syncFavoriteOptionLabels();
         });
 
         const shared = el.querySelector('.file-badge-shared');
@@ -1547,18 +1535,7 @@ function showContextMenuAtElement(triggerElement, menuId) {
         top = rect.top - 4 + window.scrollY; // flip above if no room
     }
 
-    if (contextMenus && typeof contextMenus.syncFavoriteOptionLabels === 'function') {
-        contextMenus.syncFavoriteOptionLabels();
-    }
-    if (contextMenus && typeof contextMenus.syncWopiOptionVisibility === 'function') {
-        contextMenus.syncWopiOptionVisibility().catch(() => {});
-    }
-    if (contextMenus && typeof contextMenus.syncAddToPlaylistOption === 'function') {
-        contextMenus.syncAddToPlaylistOption();
-    }
-    if (contextMenus && typeof contextMenus.syncOpenParentFolderOption === 'function') {
-        contextMenus.syncOpenParentFolderOption();
-    }
+    contextMenus.sync();
 
     menu.style.left = `${left}px`;
     menu.style.top = `${top}px`;

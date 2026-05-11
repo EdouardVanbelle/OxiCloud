@@ -70,8 +70,8 @@ const contextMenus = {
         const option = document.getElementById('open-parent-folder-option');
         if (!option) return;
         const folderId = app?.contextMenuTargetFile?.folder_id;
-        const alreadyViewing = folderId && folderId === app?.currentPath;
-        option.classList.toggle('hidden', !folderId || alreadyViewing);
+        const isFilesSection = app.currentSection === 'files';
+        option.classList.toggle('hidden', !folderId || isFilesSection);
     },
 
     syncAddToPlaylistOption() {
@@ -87,6 +87,12 @@ const contextMenus = {
         }
     },
 
+    sync() {
+        this.syncFavoriteOptionLabels();
+        this.syncWopiOptionVisibility().catch(() => {});
+        this.syncAddToPlaylistOption();
+        this.syncOpenParentFolderOption();
+    },
     /**
      * Assign events to menu items and dialogs
      */
@@ -688,8 +694,8 @@ const contextMenus = {
     /**
      * Load all folders for the move dialog (batch operations)
      * Uses the same navigation pattern as loadMoveDialogFolders
-     * @param {string} itemId - ID of the item being moved (unused, kept for compatibility)
-     * @param {string} mode - 'batch' for batch operations
+     * @param {string} _itemId - ID of the item being moved (unused, kept for compatibility)
+     * @param {string} _mode - 'batch' for batch operations
      */
     async loadAllFolders(_itemId, _mode) {
         // For batch mode, use the same navigation as regular move dialog
@@ -731,13 +737,13 @@ const contextMenus = {
             if (itemName) itemName.textContent = item.name;
 
             // Reset form
-            const pwField = document.getElementById('share-password');
-            const expField = document.getElementById('share-expiration');
+            const pwField = /** @type HTMLInputElement */ (document.getElementById('share-password'));
+            const expField = /** @type HTMLInputElement */ (document.getElementById('share-expiration'));
             if (pwField) pwField.value = '';
             if (expField) expField.value = '';
-            const permRead = document.getElementById('share-permission-read');
-            const permWrite = document.getElementById('share-permission-write');
-            const permReshare = document.getElementById('share-permission-reshare');
+            const permRead = /** @type HTMLInputElement */ (document.getElementById('share-permission-read'));
+            const permWrite = /** @type HTMLInputElement */ (document.getElementById('share-permission-write'));
+            const permReshare = /** @type HTMLInputElement */ (document.getElementById('share-permission-reshare'));
             if (permRead) permRead.checked = true;
             if (permWrite) permWrite.checked = false;
             if (permReshare) permReshare.checked = false;
@@ -862,11 +868,11 @@ const contextMenus = {
         }
 
         // Get values from form
-        const password = document.getElementById('share-password').value;
-        const expirationDate = document.getElementById('share-expiration').value;
-        const permissionRead = document.getElementById('share-permission-read').checked;
-        const permissionWrite = document.getElementById('share-permission-write').checked;
-        const permissionReshare = document.getElementById('share-permission-reshare').checked;
+        const password = /** @type HTMLInputElement */ (document.getElementById('share-password')).value;
+        const expirationDate = /** @type HTMLInputElement */ (document.getElementById('share-expiration')).value;
+        const permissionRead = /** @type HTMLInputElement */ (document.getElementById('share-permission-read')).checked;
+        const permissionWrite = /** @type HTMLInputElement */ (document.getElementById('share-permission-write')).checked;
+        const permissionReshare = /** @type HTMLInputElement */ (document.getElementById('share-permission-reshare')).checked;
 
         const item = app.shareDialogItem;
         const itemType = app.shareDialogItemType;
@@ -905,7 +911,7 @@ const contextMenus = {
             const shareInfo = await response.json();
 
             // Update UI with new share
-            const shareUrl = document.getElementById('generated-share-url');
+            const shareUrl = /** @type HTMLInputElement */ (document.getElementById('generated-share-url'));
             if (shareUrl) {
                 shareUrl.value = shareInfo.url;
                 document.getElementById('new-share-section').classList.remove('hidden');
@@ -920,7 +926,7 @@ const contextMenus = {
             ui.showNotification(i18n.t('notifications.link_created'), i18n.t('notifications.share_success'));
         } catch (error) {
             console.error('Error creating shared link:', error);
-            ui.showNotification('Error', error.message || 'Could not create shared link');
+            ui.showNotification('Error', /** @type {Error} */ (error).message || 'Could not create shared link');
         }
     },
 
@@ -931,8 +937,8 @@ const contextMenus = {
     showEmailNotificationDialog(shareUrl) {
         // Update dialog content
         document.getElementById('notification-share-url').textContent = shareUrl;
-        document.getElementById('notification-email').value = '';
-        document.getElementById('notification-message').value = '';
+        /** @type HTMLInputElement */ (document.getElementById('notification-email')).value = '';
+        /** @type HTMLInputElement */ (document.getElementById('notification-message')).value = '';
 
         // Store the URL for later use
         app.notificationShareUrl = shareUrl;
@@ -945,8 +951,8 @@ const contextMenus = {
      * Send share notification email
      */
     sendShareNotification() {
-        const email = document.getElementById('notification-email').value.trim();
-        const message = document.getElementById('notification-message').value.trim();
+        const email = /** @type HTMLInputElement */ (document.getElementById('notification-email')).value.trim();
+        const message = /** @type HTMLInputElement */ (document.getElementById('notification-message')).value.trim();
         const shareUrl = app.notificationShareUrl;
 
         if (!email || !shareUrl) {
@@ -1013,7 +1019,7 @@ const contextMenus = {
         container.innerHTML = '<div class="folder-select-loading"><i class="fas fa-spinner fa-spin"></i></div>';
 
         // Reset add button state
-        const addBtn = document.getElementById('playlist-add-btn');
+        const addBtn = /** @type {HTMLButtonElement} */ (document.getElementById('playlist-add-btn'));
         if (addBtn) addBtn.disabled = true;
 
         // Show dialog
@@ -1057,7 +1063,7 @@ const contextMenus = {
                 });
                 item.classList.add('selected');
                 this._selectedPlaylistId = playlist.id;
-                const addBtn = document.getElementById('playlist-add-btn');
+                const addBtn = /** @type {HTMLButtonElement} */ (document.getElementById('playlist-add-btn'));
                 if (addBtn) addBtn.disabled = false;
             });
 
@@ -1071,7 +1077,7 @@ const contextMenus = {
 
         if (!playlistId || files.length === 0) return;
 
-        const addBtn = document.getElementById('playlist-add-btn');
+        const addBtn = /** @type {HTMLButtonElement} */ (document.getElementById('playlist-add-btn'));
         if (addBtn) addBtn.disabled = true;
 
         try {
@@ -1101,7 +1107,7 @@ const contextMenus = {
             }
         } catch (err) {
             console.error('Error adding to playlist:', err);
-            ui.showNotification(i18n.t('music.error'), err.message || i18n.t('music.add_error'));
+            ui.showNotification(i18n.t('music.error'), /** @type {Error} */ (err).message || i18n.t('music.add_error'));
             if (addBtn) addBtn.disabled = false;
         }
     },
