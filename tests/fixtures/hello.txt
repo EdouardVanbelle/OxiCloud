@@ -1,1 +1,1 @@
-hello from hurl test
+Hello from OxiCloud Hurl tests.

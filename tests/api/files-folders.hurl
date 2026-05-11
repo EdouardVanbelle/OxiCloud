@@ -167,7 +167,7 @@ file_id: jsonpath "$.id"
 jsonpath "$.id" isString
 jsonpath "$.name" == "hello.txt"
 jsonpath "$.folder_id" == {{test2_id}}
-jsonpath "$.size" == 21
+jsonpath "$.size" == 32
 jsonpath "$.mime_type" == "text/plain"
 
 
