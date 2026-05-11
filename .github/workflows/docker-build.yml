@@ -16,6 +16,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
+    services:
+      postgres:
+        image: postgres:18.2-alpine3.23
+        env:
+          POSTGRES_USER: oxicloud_test
+          POSTGRES_PASSWORD: oxicloud_test
+          POSTGRES_DB: oxicloud_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -43,25 +58,36 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Verify image starts correctly
+      - name: Verify /ready returns 200
         run: |
-          # Start the container in background
+          # Start OxiCloud with host networking so it can reach the postgres service
           docker run -d --name oxicloud-test \
-            -e DATABASE_URL="postgres://test:test@localhost/test" \
-            -p 8080:8080 \
-            test/oxicloud:test || true
+            --network host \
+            -e OXICLOUD_DB_CONNECTION_STRING="postgres://oxicloud_test:oxicloud_test@localhost:5432/oxicloud_test" \
+            -e OXICLOUD_STATIC_PATH=/app/static \
+            -e OXICLOUD_JWT_SECRET="ci-test-secret-do-not-use-in-prod-minimum-32-chars" \
+            -e OXICLOUD_ENABLE_AUTH=true \
+            -e OXICLOUD_ENABLE_TRASH=true \
+            -e OXICLOUD_ENABLE_SEARCH=true \
+            -e OXICLOUD_SERVER_PORT=8086 \
+            -e RUST_LOG=warn \
+            test/oxicloud:test
 
-          # Give it a moment to start (or fail)
-          sleep 3
+          echo "Waiting for /ready..."
+          timeout 60 bash -c \
+            'until curl -sf http://localhost:8086/ready > /dev/null; do sleep 1; done'
 
-          # Check that the container exists and show logs
-          echo "=== Container status ==="
-          docker ps -a --filter name=oxicloud-test
-          echo "=== Container logs ==="
-          docker logs oxicloud-test 2>&1 || true
+          echo "=== /ready response ==="
+          curl -sf http://localhost:8086/ready | tee /tmp/ready.json
+          echo ""
 
-          # Cleanup
-          docker rm -f oxicloud-test || true
+          # Assert both server and DB report ok
+          grep -q '"status":"ok"' /tmp/ready.json
+          grep -q '"db":"ok"'     /tmp/ready.json
+
+          echo "✅ /ready returned 200 with status=ok and db=ok"
+
+          docker rm -f oxicloud-test
 
       - name: Verify image structure
         run: |
