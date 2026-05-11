@@ -463,9 +463,11 @@ impl FolderUseCase for FolderService {
             }
 
             // Verify the destination exists and is owned by the caller
-            let parent = self.folder_storage.get_folder(parent_id).await.map_err(|_| {
-                DomainError::not_found("Folder", parent_id)
-            })?;
+            let parent = self
+                .folder_storage
+                .get_folder(parent_id)
+                .await
+                .map_err(|_| DomainError::not_found("Folder", parent_id))?;
             if parent.owner_id() != Some(caller_id) {
                 tracing::warn!(
                     "move_folder: user '{}' attempted to move into folder '{}' owned by '{:?}'",
