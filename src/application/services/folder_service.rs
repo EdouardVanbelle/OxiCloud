@@ -404,12 +404,7 @@ impl FolderUseCase for FolderService {
         }
 
         // Verify the folder exists and belongs to the caller
-        let existing_folder = self.folder_storage.get_folder(id).await.map_err(|e| {
-            DomainError::internal_error(
-                "FolderStorage",
-                format!("Failed to get folder with ID: {} for renaming: {}", id, e),
-            )
-        })?;
+        let existing_folder = self.folder_storage.get_folder(id).await?;
 
         if existing_folder.owner_id() != Some(caller_id) {
             tracing::warn!(
@@ -444,12 +439,7 @@ impl FolderUseCase for FolderService {
         caller_id: Uuid,
     ) -> Result<FolderDto, DomainError> {
         // Verify the source folder exists and belongs to the caller
-        let source_folder = self.folder_storage.get_folder(id).await.map_err(|e| {
-            DomainError::internal_error(
-                "FolderStorage",
-                format!("Failed to get folder with ID: {} for moving: {}", id, e),
-            )
-        })?;
+        let source_folder = self.folder_storage.get_folder(id).await?;
 
         if source_folder.owner_id() != Some(caller_id) {
             tracing::warn!(
@@ -461,7 +451,7 @@ impl FolderUseCase for FolderService {
             return Err(DomainError::not_found("Folder", id));
         }
 
-        // If a parent_id is specified, verify it exists
+        // If a parent_id is specified, verify it exists and belongs to the caller
         if let Some(parent_id) = &dto.parent_id {
             // Verify we are not trying to move the folder into itself or one of its descendants
             if parent_id == id {
@@ -472,9 +462,17 @@ impl FolderUseCase for FolderService {
                 ));
             }
 
-            // Verify the destination exists
-            let parent_exists = self.folder_storage.get_folder(parent_id).await.is_ok();
-            if !parent_exists {
+            // Verify the destination exists and is owned by the caller
+            let parent = self.folder_storage.get_folder(parent_id).await.map_err(|_| {
+                DomainError::not_found("Folder", parent_id)
+            })?;
+            if parent.owner_id() != Some(caller_id) {
+                tracing::warn!(
+                    "move_folder: user '{}' attempted to move into folder '{}' owned by '{:?}'",
+                    caller_id,
+                    parent_id,
+                    parent.owner_id()
+                );
                 return Err(DomainError::not_found("Folder", parent_id));
             }
 
@@ -500,12 +498,7 @@ impl FolderUseCase for FolderService {
     /// Deletes a folder after verifying ownership.
     async fn delete_folder(&self, id: &str, caller_id: Uuid) -> Result<(), DomainError> {
         // Verify the folder exists and belongs to the caller
-        let folder = self.folder_storage.get_folder(id).await.map_err(|e| {
-            DomainError::internal_error(
-                "FolderStorage",
-                format!("Failed to get folder with ID: {} for deletion: {}", id, e),
-            )
-        })?;
+        let folder = self.folder_storage.get_folder(id).await?;
 
         if folder.owner_id() != Some(caller_id) {
             tracing::warn!(
