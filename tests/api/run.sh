@@ -66,9 +66,17 @@ mkdir -p "$OXICLOUD_STORAGE_PATH"
 
 # ── 3. Start OxiCloud server ──────────────────────────────────────────────────
 
-log "Building and starting OxiCloud server on port $SERVER_PORT..."
-cd "$REPO_ROOT"
-cargo run &
+BUILD_TARGET="${BUILD_TARGET:-debug}"
+OXICLOUD_BIN="$REPO_ROOT/target/$BUILD_TARGET/oxicloud"
+
+if [[ -x "$OXICLOUD_BIN" ]]; then
+  log "Starting pre-built OxiCloud server ($BUILD_TARGET) on port $SERVER_PORT..."
+  "$OXICLOUD_BIN" &
+else
+  log "Building and starting OxiCloud server on port $SERVER_PORT..."
+  cd "$REPO_ROOT"
+  cargo run &
+fi
 SERVER_PID=$!
 log "Waiting for server at $base_url..."
 wait_for_http "$base_url/ready" 120

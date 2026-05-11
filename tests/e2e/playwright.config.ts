@@ -48,7 +48,9 @@ export default defineConfig({
   ],
 
   webServer: {
-    command: process.env.CI ? `${process.env.GITHUB_WORKSPACE}/target/debug/oxicloud` : 'cargo run',
+    command: process.env.BUILD_TARGET
+      ? `${process.env.GITHUB_WORKSPACE}/target/${process.env.BUILD_TARGET}/oxicloud`
+      : 'cargo run',
     url: 'http://localhost:8087',
     timeout: 600_000,
     reuseExistingServer: false,
