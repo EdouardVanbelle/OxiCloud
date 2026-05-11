@@ -208,7 +208,7 @@ const fileOps = {
                 safeUpdateFile(0, 'error');
                 finalize({
                     ok: false,
-                    errorMsg: `Client send() failed: ${e?.message || 'unknown error'}`
+                    errorMsg: `Client send() failed: ${/** @type {Error} */ (e)?.message || 'unknown error'}`
                 });
             }
         });
@@ -286,7 +286,7 @@ const fileOps = {
 
         try {
             // Legacy progress bar (inside dropzone) — keep working for drag-drop
-            const progressBar = document.querySelector('.progress-fill');
+            const progressBar = /** @type {HTMLDivElement} */ (document.querySelector('.progress-fill'));
             const uploadProgressDiv = document.querySelector('.upload-progress');
             if (uploadProgressDiv) {
                 uploadProgressDiv.classList.remove('hidden');
@@ -447,7 +447,7 @@ const fileOps = {
         }
         this._isUploading = true;
 
-        const progressBar = document.querySelector('.progress-fill');
+        const progressBar = /** @type {HTMLDivElement} */ (document.querySelector('.progress-fill'));
         const uploadProgressDiv = document.querySelector('.upload-progress');
         if (uploadProgressDiv) {
             uploadProgressDiv.classList.remove('hidden');
@@ -929,8 +929,8 @@ const fileOps = {
     /**
      * Copy a folder to another folder
      * Note: Backend folder copy is not yet implemented, this shows a notification
-     * @param {string} folderId - Folder ID
-     * @param {string} targetFolderId - Target folder ID
+     * @param {string} _folderId - Folder ID
+     * @param {string} _targetFolderId - Target folder ID
      * @returns {Promise<boolean>} - Success status
      */
     async copyFolder(_folderId, _targetFolderId) {
