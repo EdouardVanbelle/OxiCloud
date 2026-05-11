@@ -4,7 +4,7 @@ Tests are written using [Hurl](https://hurl.dev) — a plain-text, CLI-first HTT
 
 ## Prerequisites
 
-- [Hurl](https://hurl.dev/docs/installation.html) ≥ 4.0  
+- [Hurl](https://hurl.dev/docs/installation.html) ≥ 4.0
   Install: `cargo install hurl` or via your package manager
 
 ## Configuration
