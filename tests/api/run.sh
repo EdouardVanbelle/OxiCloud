@@ -92,6 +92,9 @@ hurl --variables-file "$API_DIR/test.env" --file-root "$REPO_ROOT/tests" --test 
   "$API_DIR/trash.hurl" \
   "$API_DIR/recent.hurl" \
   "$API_DIR/batch_folder_copy.hurl" \
+  "$API_DIR/dedup_blob_cleanup.hurl" \
   "$API_DIR/contacts.hurl"
+
+#bash "$API_DIR/dedup_bulk_upload.sh"
 
 log "All tests passed."
