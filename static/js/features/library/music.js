@@ -291,7 +291,7 @@ const musicView = {
         const coverEl = document.getElementById('music-playlist-cover');
         if (coverEl) {
             if (playlist.cover_file_id) {
-                coverEl.innerHTML = `<img src="/api/files/${encodeURIComponent(playlist.cover_file_id)}" alt="" class="music-cover-img"><div class="music-cover-overlay"><i class="fas fa-camera"></i></div>`;
+                coverEl.innerHTML = `<img src="/api/files/${encodeURIComponent(playlist.cover_file_id)}/thumbnail/preview" alt="" class="music-cover-img"><div class="music-cover-overlay"><i class="fas fa-camera"></i></div>`;
             } else {
                 coverEl.innerHTML = `<i class="fas fa-music"></i><div class="music-cover-overlay"><i class="fas fa-camera"></i></div>`;
             }
@@ -1137,9 +1137,14 @@ const musicView = {
 
             try {
                 const formData = new FormData();
-                formData.append('file', file);
                 const folderId = app?.currentPath || app?.userHomeFolderId || '';
+
+                // FIXME: mime type check ? (must be an image)
+
+                // beware order is important: folder_id first
+                // TODO fix server side
                 formData.append('folder_id', folderId);
+                formData.append('file', file);
 
                 const uploadResp = await fetch('/api/files/upload', {
                     method: 'POST',
@@ -1151,6 +1156,7 @@ const musicView = {
                 const uploaded = await uploadResp.json();
                 if (!uploaded.id) throw new Error('No file ID returned');
 
+                // FIXME: better that server stores base64( resized-preview( image))
                 const resp = await fetch(`/api/playlists/${this.currentPlaylist.id}`, {
                     method: 'PUT',
                     credentials: 'include',
@@ -1165,7 +1171,7 @@ const musicView = {
 
                 const coverEl = document.getElementById('music-playlist-cover');
                 if (coverEl) {
-                    coverEl.innerHTML = `<img src="/api/files/${encodeURIComponent(uploaded.id)}" alt="" class="music-cover-img"><div class="music-cover-overlay"><i class="fas fa-camera"></i></div>`;
+                    coverEl.innerHTML = `<img src="/api/files/${encodeURIComponent(uploaded.id)}/thumbnail/preview" alt="" class="music-cover-img"><div class="music-cover-overlay"><i class="fas fa-camera"></i></div>`;
                 }
 
                 if (notifications) {
