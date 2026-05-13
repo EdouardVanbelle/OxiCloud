@@ -78,7 +78,7 @@ Hexagonal / Clean Architecture with four layers. Dependencies point inward only.
 
 - **DI via `AppState`**: All services are `Arc`-wrapped and assembled in `common/di.rs`. `AppState` is wrapped in `Arc` and passed as Axum state. Many services are `Option<Arc<T>>` because they depend on features being enabled (auth, WOPI, trash, etc.).
 
-- **Content-addressable storage**: Files use SHA-256 blob dedup. `storage.file_blobs` stores content; `storage.file_metadata` references blobs with ref-counting. See `file_blob_write_repository.rs` and `file_blob_read_repository.rs`.
+- **Content-addressable storage**: Files use BLAKE3 blob dedup. `storage.file_blobs` stores content; `storage.file_metadata` references blobs with ref-counting. See `file_blob_write_repository.rs` and `file_blob_read_repository.rs`.
 
 - **ltree paths**: Folder hierarchy uses PostgreSQL `ltree` for efficient subtree queries (recursive copies, moves, searches).
 

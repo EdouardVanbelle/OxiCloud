@@ -21,7 +21,7 @@ type GlobalState = Arc<AppState>;
 pub struct HashCheckResponse {
     /// Whether a blob with this hash already exists
     pub exists: bool,
-    /// The SHA-256 hash that was checked
+    /// The BLAKE3 hash that was checked
     pub hash: String,
     /// If exists, the size of the existing blob
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -36,7 +36,7 @@ pub struct HashCheckResponse {
 pub struct DedupUploadResponse {
     /// Whether this was a new file or an existing one
     pub is_new: bool,
-    /// The SHA-256 hash of the content
+    /// The BLAKE3 hash of the content
     pub hash: String,
     /// The size of the content in bytes
     pub size: u64,
@@ -95,13 +95,13 @@ impl DedupHandler {
     ) -> impl IntoResponse {
         let dedup = &state.core.dedup_service;
 
-        // Validate hash format (SHA-256 = 64 hex chars)
+        // Validate hash format (BLAKE3 = 64 hex chars)
         if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
             return Response::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    r#"{"error": "Invalid hash format. Expected SHA-256 (64 hex characters)"}"#,
+                    r#"{"error": "Invalid hash format. Expected BLAKE3 (64 hex characters)"}"#,
                 ))
                 .unwrap()
                 .into_response();
@@ -508,7 +508,7 @@ impl DedupHandler {
     get,
     path = "/api/dedup/check/{hash}",
     params(
-        ("hash" = String, Path, description = "SHA-256 hash (64 hex characters)"),
+        ("hash" = String, Path, description = "BLAKE3 hash (64 hex characters)"),
     ),
     responses(
         (status = 200, description = "Hash check result (user-scoped)", body = HashCheckResponse),
@@ -564,7 +564,7 @@ pub async fn get_stats(state: State<GlobalState>, auth_user: AuthUser) -> impl I
     get,
     path = "/api/dedup/blob/{hash}",
     params(
-        ("hash" = String, Path, description = "SHA-256 hash of the blob (64 hex characters)"),
+        ("hash" = String, Path, description = "BLAKE3 hash of the blob (64 hex characters)"),
     ),
     responses(
         (status = 200, description = "Raw blob content (user-scoped)"),

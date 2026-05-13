@@ -14,7 +14,7 @@ NextCloud was too slow on a home server. So OxiCloud was built to run on minimal
 | **Cold start** | < 1 s | 5–15 s |
 | **CPU at idle** | ~0 % | 1–5 % (cron, background jobs) |
 | **Min. hardware** | 1 vCPU / 512 MB RAM | 2 vCPU / 2 GB RAM |
-| **File dedup** | SHA-256 content-addressable | None |
+| **File dedup** | BLAKE3 content-addressable | None |
 | **Dependencies** | Single binary + PostgreSQL | PHP, Apache/Nginx, Redis, Cron, … |
 | **WebDAV** | Built-in (RFC 4918) | Built-in |
 | **CalDAV / CardDAV** | Built-in | Via apps |
@@ -28,7 +28,7 @@ NextCloud was too slow on a home server. So OxiCloud was built to run on minimal
 ### Storage & Files
 - Drag-and-drop upload, multi-file, grid & list views
 - Chunked uploads (TUS-like, parallel, resumable, MD5 integrity)
-- SHA-256 content-addressable file deduplication with ref-counting
+- BLAKE3 content-addressable file deduplication with ref-counting
 - Adaptive compression (zstd / gzip per MIME type)
 - Trash bin with soft-delete and auto-purge
 - Favourites, recent files, full-text search

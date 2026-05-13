@@ -25,7 +25,7 @@ features:
     details: Single Rust binary, ~40 MB Docker image, <1s cold start, 30–50 MB idle RAM.
   - icon: 📁
     title: Full File Management
-    details: Chunked uploads, SHA-256 deduplication, trash, favourites, full-text search, thumbnails.
+    details: Chunked uploads, BLAKE3 deduplication, trash, favourites, full-text search, thumbnails.
   - icon: 🔗
     title: WebDAV / CalDAV / CardDAV
     details: RFC-compliant protocols for files, calendars, and contacts. Works with all major clients.

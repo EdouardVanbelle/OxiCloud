@@ -10,7 +10,7 @@ OxiCloud uses **moka** (a lock-free, concurrent cache) for write-behind caching 
 | Directory listings | 120 s | 10 000 | Frequently accessed folder contents |
 | Thumbnail cache | configurable | 1 000 | Generated WebP/AVIF thumbnails |
 | Image transcode | configurable | 500 | On-the-fly image transcoding results |
-| Blob hash | 30 s TTI | 5 000 | SHA-256 hashes for dedup lookups |
+| Blob hash | 30 s TTI | 5 000 | BLAKE3 hashes for dedup lookups |
 | Audio metadata | — | 2 000 | ID3 tags and duration |
 
 ## How It Works
