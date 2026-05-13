@@ -1,4 +1,5 @@
 pub mod auth_ports;
+pub mod blob_lifecycle;
 pub mod blob_storage_ports;
 pub mod cache_ports;
 pub mod calendar_ports;
@@ -7,6 +8,7 @@ pub mod chunked_upload_ports;
 pub mod compression_ports;
 pub mod dedup_ports;
 pub mod favorites_ports;
+pub mod file_lifecycle;
 pub mod file_ports;
 pub mod inbound;
 pub mod music_ports;

@@ -163,6 +163,7 @@ async fn handle_assemble(
             )
             .await
             .map_err(|e| AppError::internal_error(format!("Failed to update file: {}", e)))?;
+
         Some(dto.etag)
     } else {
         // For new files we still need to read the temp file since create_file takes &[u8].

@@ -62,7 +62,7 @@ use crate::infrastructure::services::image_transcode_service::ImageTranscodeServ
 use crate::infrastructure::services::jwt_service::JwtTokenService;
 use crate::infrastructure::services::password_hasher::Argon2PasswordHasher;
 use crate::infrastructure::services::path_resolver_service::PathResolverService;
-use crate::infrastructure::services::thumbnail_service::ThumbnailService;
+use crate::infrastructure::services::thumbnail_service::{ThumbnailRefreshHook, ThumbnailService};
 use crate::infrastructure::services::wopi_discovery_service::WopiDiscoveryService;
 use crate::infrastructure::services::zip_service::ZipService;
 
@@ -264,7 +264,8 @@ impl AppServiceFactory {
                 blob_backend,
                 db_pool.clone(),
                 maintenance_pool.clone(),
-            ),
+            )
+            .add_blob_hook(thumbnail_service.clone()),
         );
         dedup_service.initialize().await?;
 
@@ -355,12 +356,18 @@ impl AppServiceFactory {
 
         // Refactored services with all infrastructure ports
         // In blob model, dedup is handled by the repository — no separate write-behind needed
+        let thumbnail_refresh_hook = Arc::new(ThumbnailRefreshHook::new(
+            core.thumbnail_service.clone(),
+            core.dedup_service.clone(),
+        ));
         let file_upload_service = Arc::new(
             FileUploadService::new_with_read(
                 repos.file_write_repository.clone(),
                 repos.file_read_repository.clone(),
             )
-            .with_content_cache(core.file_content_cache.clone()),
+            .with_content_cache(core.file_content_cache.clone())
+            .with_file_created_hook(thumbnail_refresh_hook.clone())
+            .with_file_updated_hook(thumbnail_refresh_hook),
         );
 
         let file_retrieval_service = Arc::new(FileRetrievalService::new_with_cache(
@@ -370,14 +377,16 @@ impl AppServiceFactory {
         ));
 
         // FileManagementService — ref_count handled by PG trigger, no dedup port needed
-        let file_management_service = Arc::new(FileManagementService::with_trash(
-            repos.file_write_repository.clone(),
-            trash_service.clone(),
-            Some(repos.file_read_repository.clone()),
-            Some(repos.folder_repository.clone()),
-            Some(core.thumbnail_service.clone()),
-            Some(core.file_content_cache.clone()),
-        ));
+        let file_management_service = Arc::new(
+            FileManagementService::with_trash(
+                repos.file_write_repository.clone(),
+                trash_service.clone(),
+                Some(repos.file_read_repository.clone()),
+                Some(repos.folder_repository.clone()),
+                Some(core.file_content_cache.clone()),
+            )
+            .with_file_deleted_hook(core.thumbnail_service.clone()),
+        );
 
         let file_use_case_factory = Arc::new(AppFileUseCaseFactory::new(
             repos.file_read_repository.clone(),
@@ -451,6 +460,7 @@ impl AppServiceFactory {
             repos.file_write_repository.clone(),
             repos.folder_repository.clone(),
             self.config.storage.trash_retention_days,
+            core.dedup_service.clone(),
             Some(core.thumbnail_service.clone()),
             Some(core.file_content_cache.clone()),
         ));

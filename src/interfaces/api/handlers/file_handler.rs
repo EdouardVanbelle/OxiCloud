@@ -783,6 +783,7 @@ impl FileHandler {
                             file_id,
                             blob_hash_owned,
                             original_bytes,
+                            dedup_service.clone(),
                         );
                     }
                     Err(err) => {

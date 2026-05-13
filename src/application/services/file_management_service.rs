@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::application::dtos::file_dto::FileDto;
+use crate::application::ports::file_lifecycle::FileDeletedHook;
 use crate::application::ports::file_ports::FileManagementUseCase;
 use crate::application::ports::storage_ports::{CopyFolderTreeResult, FileReadPort, FileWritePort};
 use crate::application::ports::trash_ports::TrashUseCase;
@@ -11,7 +12,6 @@ use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlob
 use crate::infrastructure::repositories::pg::file_blob_write_repository::FileBlobWriteRepository;
 use crate::infrastructure::repositories::pg::folder_db_repository::FolderDbRepository;
 use crate::infrastructure::services::file_content_cache::FileContentCache;
-use crate::infrastructure::services::thumbnail_service::ThumbnailService;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -26,8 +26,9 @@ pub struct FileManagementService {
     file_read: Option<Arc<FileBlobReadRepository>>,
     folder_repo: Option<Arc<FolderDbRepository>>,
     trash_service: Option<Arc<TrashService>>,
-    thumbnail_service: Option<Arc<ThumbnailService>>,
     content_cache: Option<Arc<FileContentCache>>,
+    /// Hooks fired after a file is permanently deleted.
+    file_deleted_hooks: Vec<Arc<dyn FileDeletedHook>>,
 }
 
 impl FileManagementService {
@@ -38,8 +39,8 @@ impl FileManagementService {
             file_read: None,
             folder_repo: None,
             trash_service: None,
-            thumbnail_service: None,
             content_cache: None,
+            file_deleted_hooks: Vec::new(),
         }
     }
 
@@ -49,7 +50,6 @@ impl FileManagementService {
         trash_service: Option<Arc<TrashService>>,
         file_read: Option<Arc<FileBlobReadRepository>>,
         folder_repo: Option<Arc<FolderDbRepository>>,
-        thumbnail_service: Option<Arc<ThumbnailService>>,
         content_cache: Option<Arc<FileContentCache>>,
     ) -> Self {
         Self {
@@ -57,9 +57,15 @@ impl FileManagementService {
             file_read,
             folder_repo,
             trash_service,
-            thumbnail_service,
             content_cache,
+            file_deleted_hooks: Vec::new(),
         }
+    }
+
+    /// Registers a hook to fire after a file is permanently deleted.
+    pub fn with_file_deleted_hook(mut self, hook: Arc<dyn FileDeletedHook>) -> Self {
+        self.file_deleted_hooks.push(hook);
+        self
     }
 
     /// Verifies ownership via the read repository.
@@ -230,15 +236,11 @@ impl FileManagementUseCase for FileManagementService {
 
     async fn delete_file(&self, id: &str) -> Result<(), DomainError> {
         self.file_repository.delete_file(id).await?;
-        // Invalidate content cache — file no longer exists.
         if let Some(cc) = &self.content_cache {
             cc.invalidate(id).await;
         }
-        // Best-effort thumbnail cleanup
-        if let Some(thumb) = &self.thumbnail_service
-            && let Err(e) = thumb.delete_thumbnails(id).await
-        {
-            warn!("Failed to delete thumbnails for file {}: {}", id, e);
+        for hook in &self.file_deleted_hooks {
+            hook.on_file_deleted(id).await;
         }
         Ok(())
     }
@@ -283,15 +285,11 @@ impl FileManagementUseCase for FileManagementService {
         // Step 2: Permanent delete — trigger handles blob ref_count
         warn!("Permanently deleting file: {}", id);
         self.file_repository.delete_file(id).await?;
-        // Invalidate content cache — file permanently removed.
         if let Some(cc) = &self.content_cache {
             cc.invalidate(id).await;
         }
-        // Best-effort thumbnail cleanup
-        if let Some(thumb) = &self.thumbnail_service
-            && let Err(e) = thumb.delete_thumbnails(id).await
-        {
-            warn!("Failed to delete thumbnails for file {}: {}", id, e);
+        for hook in &self.file_deleted_hooks {
+            hook.on_file_deleted(id).await;
         }
         info!("File permanently deleted: {}", id);
 

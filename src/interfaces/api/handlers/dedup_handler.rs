@@ -21,12 +21,14 @@ type GlobalState = Arc<AppState>;
 pub struct HashCheckResponse {
     /// Whether a blob with this hash already exists
     pub exists: bool,
-    /// The SHA-256 hash that was checked
+    /// The BLAKE3 hash that was checked
     pub hash: String,
     /// If exists, the size of the existing blob
     #[serde(skip_serializing_if = "Option::is_none")]
     pub existing_size: Option<u64>,
-    /// If exists, the number of references to this blob
+    /// Global reference count for this blob across all users.
+    /// Only populated when the authenticated user has the `admin` role;
+    /// omitted for regular users to prevent cross-user content inference.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ref_count: Option<u32>,
 }
@@ -36,7 +38,7 @@ pub struct HashCheckResponse {
 pub struct DedupUploadResponse {
     /// Whether this was a new file or an existing one
     pub is_new: bool,
-    /// The SHA-256 hash of the content
+    /// The BLAKE3 hash of the content
     pub hash: String,
     /// The size of the content in bytes
     pub size: u64,
@@ -85,7 +87,8 @@ impl DedupHandler {
     /// Check if the authenticated user already has a file with the given hash.
     ///
     /// User-scoped: only reveals whether **this user** owns a file that
-    /// references the blob — never exposes global existence or ref_count.
+    /// references the blob — never exposes global existence to non-admins.
+    /// Admins additionally receive the global `ref_count` in the response.
     ///
     /// GET /api/dedup/check/{hash}
     pub(super) async fn check_hash_impl(
@@ -95,13 +98,13 @@ impl DedupHandler {
     ) -> impl IntoResponse {
         let dedup = &state.core.dedup_service;
 
-        // Validate hash format (SHA-256 = 64 hex chars)
+        // Validate hash format (BLAKE3 = 64 hex chars)
         if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
             return Response::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    r#"{"error": "Invalid hash format. Expected SHA-256 (64 hex characters)"}"#,
+                    r#"{"error": "Invalid hash format. Expected BLAKE3 (64 hex characters)"}"#,
                 ))
                 .unwrap()
                 .into_response();
@@ -113,13 +116,20 @@ impl DedupHandler {
             .await;
 
         if user_has_it {
-            // Fetch size from metadata (safe — user owns a reference)
-            let size = dedup.get_blob_metadata(&hash).await.map(|m| m.size);
+            // Fetch size from metadata (safe — user owns a reference).
+            // Admins also get the global ref_count for dedup accounting tests.
+            let metadata = dedup.get_blob_metadata(&hash).await;
+            let size = metadata.as_ref().map(|m| m.size);
+            let ref_count = if auth_user.role == "admin" {
+                metadata.map(|m| m.ref_count)
+            } else {
+                None // Never expose global ref_count to regular users
+            };
             let response = HashCheckResponse {
                 exists: true,
                 hash,
                 existing_size: size,
-                ref_count: None, // Never expose global ref_count
+                ref_count,
             };
             Response::builder()
                 .status(StatusCode::OK)
@@ -508,10 +518,10 @@ impl DedupHandler {
     get,
     path = "/api/dedup/check/{hash}",
     params(
-        ("hash" = String, Path, description = "SHA-256 hash (64 hex characters)"),
+        ("hash" = String, Path, description = "BLAKE3 hash (64 hex characters)"),
     ),
     responses(
-        (status = 200, description = "Hash check result (user-scoped)", body = HashCheckResponse),
+        (status = 200, description = "Hash check result. `ref_count` is only present for admin users.", body = HashCheckResponse),
         (status = 400, description = "Invalid hash format"),
     ),
     tag = "dedup",
@@ -564,7 +574,7 @@ pub async fn get_stats(state: State<GlobalState>, auth_user: AuthUser) -> impl I
     get,
     path = "/api/dedup/blob/{hash}",
     params(
-        ("hash" = String, Path, description = "SHA-256 hash of the blob (64 hex characters)"),
+        ("hash" = String, Path, description = "BLAKE3 hash of the blob (64 hex characters)"),
     ),
     responses(
         (status = 200, description = "Raw blob content (user-scoped)"),

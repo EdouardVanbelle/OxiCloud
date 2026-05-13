@@ -11,11 +11,11 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 COMMON="$REPO_ROOT/tests/common"
-API_DIR="$REPO_ROOT/tests/api"
+WEBDAV_DIR="$REPO_ROOT/tests/webdav"
 
 # test.env is the single source of truth for connection details and credentials.
 # shellcheck source=test.env
-source "$API_DIR/test.env"
+source "$WEBDAV_DIR/test.env"
 
 # Derive server port from base_url (e.g. http://localhost:8087 → 8087)
 SERVER_PORT="${base_url##*:}"
@@ -62,9 +62,6 @@ OXICLOUD_SERVER_PORT=$SERVER_PORT
 OXICLOUD_STORAGE_PATH="$REPO_ROOT/tests/api/storage"
 set +a
 
-# ensure storage is empty before starting
-echo "Wipe $OXICLOUD_STORAGE_PATH to ensure clean startup"
-rm -rf "$OXICLOUD_STORAGE_PATH"
 mkdir -p "$OXICLOUD_STORAGE_PATH"
 
 # ── 3. Start OxiCloud server ──────────────────────────────────────────────────
@@ -88,18 +85,14 @@ log "Server is ready."
 # ── 4. Run Hurl tests ─────────────────────────────────────────────────────────
 
 log "Running Hurl tests..."
-hurl --variables-file "$API_DIR/test.env" --file-root "$REPO_ROOT/tests" --test --jobs 1 \
-  "$API_DIR/setup.hurl" \
-  "$API_DIR/files-folders.hurl" \
-  "$API_DIR/favorites.hurl" \
-  "$API_DIR/trash.hurl" \
-  "$API_DIR/recent.hurl" \
-  "$API_DIR/batch_folder_copy.hurl" \
-  "$API_DIR/dedup_blob_cleanup.hurl" \
-  "$API_DIR/contacts.hurl"
-
-#bash "$API_DIR/dedup_bulk_upload.sh"
-
-bash "$API_DIR/storage_cleanup_check.sh"
+for T in "$WEBDAV_DIR"/test_*.sh; do
+    if bash "$T"
+    then
+        echo $'\e[32m'"Success $T"$'\e[0m' >&2
+    else
+        echo $'\e[31m'"Failure $T"$'\e[0m' >&2
+        false
+    fi
+done
 
 log "All tests passed."

@@ -288,7 +288,7 @@ async fn put_file(
     let _ = tokio::fs::remove_file(&temp_path).await;
 
     match result {
-        Ok(_) => StatusCode::OK.into_response(),
+        Ok(_file_dto) => StatusCode::OK.into_response(),
         Err(e) => {
             tracing::error!("WOPI PutFile failed: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR.into_response()

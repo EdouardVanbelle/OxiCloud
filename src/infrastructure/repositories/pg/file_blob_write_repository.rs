@@ -604,8 +604,26 @@ impl FileWritePort for FileBlobWriteRepository {
     }
 
     async fn delete_file_permanently(&self, file_id: &str) -> Result<(), DomainError> {
-        // Same as delete_file — removes from DB and decrements blob ref
-        self.delete_file(file_id).await
+        // Read blob_hash before deletion so we can clean up disk after the
+        // PG trigger has decremented the ref_count.
+        let blob_hash: Option<String> =
+            sqlx::query_scalar("SELECT blob_hash FROM storage.files WHERE id = $1::uuid")
+                .bind(file_id)
+                .fetch_optional(self.pool.as_ref())
+                .await
+                .map_err(|e| {
+                    DomainError::internal_error("FileBlobWrite", format!("fetch blob_hash: {e}"))
+                })?;
+
+        // DELETE fires trg_files_decrement_blob_ref → storage.blobs.ref_count--
+        self.delete_file(file_id).await?;
+
+        // If the blob is now unreferenced, remove disk file + thumbnails.
+        if let Some(hash) = blob_hash {
+            self.dedup.cleanup_if_orphaned(&hash).await;
+        }
+
+        Ok(())
     }
 
     async fn copy_folder_tree(

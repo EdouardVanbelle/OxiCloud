@@ -75,3 +75,4 @@ front-test-update-snapshot:
 # Hurl API functional tests (starts postgres + server, tears down after)
 api-test:
     bash tests/api/run.sh
+    bash tests/webdav/run.sh
