@@ -188,6 +188,11 @@ jobs:
         env:
           BUILD_TARGET: release
 
+      - name: Run Webdav tests
+        run: bash tests/webdav/run.sh
+        env:
+          BUILD_TARGET: release
+
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
