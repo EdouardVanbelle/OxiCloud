@@ -19,6 +19,7 @@ use crate::application::services::nextcloud_file_id_service::NextcloudFileIdServ
 use crate::application::services::nextcloud_login_flow_service::NextcloudLoginFlowService;
 use crate::application::services::recent_service::RecentService;
 use crate::application::services::search_service::SearchService;
+use crate::application::services::share_browse_service::ShareBrowseService;
 use crate::application::services::share_service::ShareService;
 use crate::application::services::trash_service::TrashService;
 use crate::application::services::{
@@ -602,6 +603,15 @@ impl AppServiceFactory {
         let share_service = self.create_share_service(&repos, &pool);
         apps.share_service = share_service.clone();
 
+        let share_browse_service = share_service.as_ref().map(|s| {
+            Arc::new(ShareBrowseService::new(
+                s.clone(),
+                apps.folder_service.clone(),
+                apps.file_retrieval_service.clone(),
+                repos.folder_repository.clone(),
+            ))
+        });
+
         // 6. Database-dependent services (PgPool always available in blob model)
         let favorites_service: Option<Arc<FavoritesService>>;
         let recent_service: Option<Arc<RecentService>>;
@@ -739,6 +749,7 @@ impl AppServiceFactory {
             migration_state: Arc::new(tokio::sync::RwLock::new(MigrationState::default())),
             trash_service,
             share_service,
+            share_browse_service,
             favorites_service,
             recent_service,
             storage_usage_service,
@@ -1047,6 +1058,7 @@ pub struct AppState {
     pub migration_state: Arc<tokio::sync::RwLock<MigrationState>>,
     pub trash_service: Option<Arc<TrashService>>,
     pub share_service: Option<Arc<ShareService>>,
+    pub share_browse_service: Option<Arc<ShareBrowseService>>,
     pub favorites_service: Option<Arc<FavoritesService>>,
     pub recent_service: Option<Arc<RecentService>>,
     pub storage_usage_service: Option<Arc<StorageUsageService>>,
