@@ -44,8 +44,8 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-use crate::application::ports::blob_storage_ports::BlobStorageBackend;
 use crate::application::ports::blob_lifecycle::BlobDeletionHook;
+use crate::application::ports::blob_storage_ports::BlobStorageBackend;
 use crate::application::ports::dedup_ports::{
     BlobMetadataDto, DedupPort, DedupResultDto, DedupStatsDto,
 };

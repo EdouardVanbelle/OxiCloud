@@ -61,6 +61,7 @@ pub struct TrashService {
 }
 
 impl TrashService {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         trash_repository: Arc<TrashDbRepository>,
         file_read_port: Arc<FileBlobReadRepository>,

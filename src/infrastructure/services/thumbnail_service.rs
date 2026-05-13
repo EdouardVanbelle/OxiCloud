@@ -25,8 +25,8 @@ use tokio::time::timeout;
 use crate::application::ports::thumbnail_ports::{
     ThumbnailPort, ThumbnailSize as PortThumbnailSize, ThumbnailStatsDto,
 };
-use crate::infrastructure::services::dedup_service::DedupService;
 use crate::domain::errors::{DomainError, ErrorKind};
+use crate::infrastructure::services::dedup_service::DedupService;
 
 /// Thumbnail sizes supported by the system
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -456,7 +456,6 @@ impl AppServiceFactory {
             Some(core.file_content_cache.clone()),
         ));
 
-
         // Initialize cleanup service (bulk-deletes expired items in 2 SQL queries)
         let cleanup_service = TrashCleanupService::new(
             trash_repo.clone(),
