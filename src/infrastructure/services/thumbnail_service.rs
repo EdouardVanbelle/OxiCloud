@@ -25,6 +25,7 @@ use tokio::time::timeout;
 use crate::application::ports::thumbnail_ports::{
     ThumbnailPort, ThumbnailSize as PortThumbnailSize, ThumbnailStatsDto,
 };
+use crate::infrastructure::services::dedup_service::DedupService;
 use crate::domain::errors::{DomainError, ErrorKind};
 
 /// Thumbnail sizes supported by the system
@@ -831,9 +832,21 @@ impl ThumbnailService {
         file_id: String,
         blob_hash: String,
         original_data: Bytes,
+        dedup: Arc<DedupService>,
     ) {
         tokio::spawn(async move {
             tracing::info!("🖼️ Background thumbnail generation starting: {}", file_id);
+
+            // Guard: if the blob was deleted before this task ran, cleanup_if_orphaned
+            // already fired with no thumbnails on disk — writing them now would leak them.
+            // Use the DB check (manifest + blobs tables) as the authoritative source.
+            if !dedup.blob_exists(&blob_hash).await {
+                tracing::debug!(
+                    "Blob {}… deleted before thumbnail task ran, skipping",
+                    &blob_hash[..blob_hash.len().min(12)]
+                );
+                return;
+            }
 
             let all_exist = {
                 let mut ok = true;
@@ -968,6 +981,17 @@ impl ThumbnailService {
             cache_size_bytes: self.cache.weighted_size() as usize,
             max_cache_bytes: self.max_cache_bytes as usize,
         }
+    }
+}
+
+// ─── BlobDeletionHook ────────────────────────────────────────────────────────
+
+impl crate::application::ports::blob_lifecycle::BlobDeletionHook for ThumbnailService {
+    fn on_blob_deleted<'a>(
+        &'a self,
+        blob_hash: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move { self.delete_blob_thumbnails(blob_hash).await })
     }
 }
 

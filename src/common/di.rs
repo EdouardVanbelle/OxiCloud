@@ -264,7 +264,7 @@ impl AppServiceFactory {
                 db_pool.clone(),
                 maintenance_pool.clone(),
             )
-            .with_thumbnail_service(thumbnail_service.clone()),
+            .add_blob_hook(thumbnail_service.clone()),
         );
         dedup_service.initialize().await?;
 
@@ -451,9 +451,11 @@ impl AppServiceFactory {
             repos.file_write_repository.clone(),
             repos.folder_repository.clone(),
             self.config.storage.trash_retention_days,
+            core.dedup_service.clone(),
             Some(core.thumbnail_service.clone()),
             Some(core.file_content_cache.clone()),
         ));
+
 
         // Initialize cleanup service (bulk-deletes expired items in 2 SQL queries)
         let cleanup_service = TrashCleanupService::new(
@@ -1010,7 +1012,7 @@ impl CoreServices {
         tokio::spawn(async move {
             match ds.read_blob_bytes(&hash).await {
                 Ok(bytes) => {
-                    ts.generate_all_sizes_background_from_bytes(file_id, hash, bytes);
+                    ts.generate_all_sizes_background_from_bytes(file_id, hash, bytes, ds.clone());
                 }
                 Err(e) => {
                     tracing::warn!(

@@ -45,11 +45,11 @@ use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::application::ports::blob_storage_ports::BlobStorageBackend;
+use crate::application::ports::blob_lifecycle::BlobDeletionHook;
 use crate::application::ports::dedup_ports::{
     BlobMetadataDto, DedupPort, DedupResultDto, DedupStatsDto,
 };
 use crate::domain::errors::{DomainError, ErrorKind};
-use crate::infrastructure::services::thumbnail_service::ThumbnailService;
 
 // ── CDC Constants ────────────────────────────────────────────────────────────
 
@@ -84,9 +84,8 @@ pub struct DedupService {
     /// Isolated maintenance pool for long-running operations
     /// (verify_integrity, garbage_collect) that must never starve the primary.
     maintenance_pool: Arc<PgPool>,
-    /// Optional thumbnail service — when set, blob-hash thumbnails are deleted
-    /// from disk whenever a blob's ref_count reaches zero.
-    thumbnail_service: Option<Arc<ThumbnailService>>,
+    /// Hooks notified when a blob's ref_count reaches zero and it is deleted.
+    blob_hooks: Vec<Arc<dyn BlobDeletionHook>>,
 }
 
 impl DedupService {
@@ -104,15 +103,22 @@ impl DedupService {
             backend,
             pool,
             maintenance_pool,
-            thumbnail_service: None,
+            blob_hooks: vec![],
         }
     }
 
-    /// Attach a thumbnail service so that disk thumbnails are cleaned up when
-    /// a blob's ref_count drops to zero.
-    pub fn with_thumbnail_service(mut self, svc: Arc<ThumbnailService>) -> Self {
-        self.thumbnail_service = Some(svc);
+    /// Register a [`BlobDeletionHook`] to be called whenever a blob's
+    /// ref_count reaches zero.  Hooks are called in registration order.
+    pub fn add_blob_hook(mut self, hook: Arc<dyn BlobDeletionHook>) -> Self {
+        self.blob_hooks.push(hook);
         self
+    }
+
+    /// Fire all registered hooks for a deleted blob.
+    async fn fire_blob_hooks(&self, hash: &str) {
+        for hook in &self.blob_hooks {
+            hook.on_blob_deleted(hash).await;
+        }
     }
 
     /// Creates a stub instance for testing — never hits PG or the filesystem.
@@ -129,7 +135,7 @@ impl DedupService {
             backend: Arc::new(LocalBlobBackend::new(Path::new("/tmp/oxicloud_stub_blobs"))),
             pool: stub_pool.clone(),
             maintenance_pool: stub_pool,
-            thumbnail_service: None,
+            blob_hooks: vec![],
         }
     }
 
@@ -600,7 +606,7 @@ impl DedupService {
     /// references the blob identified by `hash`.
     pub async fn user_owns_blob_reference(&self, hash: &str, user_id: &str) -> bool {
         sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM storage.files WHERE blob_hash = $1 AND user_id = $2 AND NOT is_trashed)",
+            "SELECT EXISTS(SELECT 1 FROM storage.files WHERE blob_hash = $1 AND user_id = $2::uuid AND NOT is_trashed)",
         )
         .bind(hash)
         .bind(user_id)
@@ -785,10 +791,8 @@ impl DedupService {
                 }
             }
 
-            // Bug 4 fix: delete disk thumbnails keyed by file_hash (last reference gone)
-            if let Some(ts) = &self.thumbnail_service {
-                ts.delete_blob_thumbnails(file_hash).await;
-            }
+            // Bug 4 fix: notify hooks — e.g. thumbnail cleanup keyed by file_hash
+            self.fire_blob_hooks(file_hash).await;
 
             tracing::info!(
                 "MANIFEST DELETED: {} ({} chunks, {} orphan chunks removed)",
@@ -867,10 +871,8 @@ impl DedupService {
                 tracing::warn!("Failed to delete blob file {}: {}", hash, e);
             }
 
-            // Bug 3 fix: delete disk thumbnails keyed by hash (last reference gone)
-            if let Some(ts) = &self.thumbnail_service {
-                ts.delete_blob_thumbnails(hash).await;
-            }
+            // Bug 3 fix: notify hooks — e.g. thumbnail cleanup keyed by hash
+            self.fire_blob_hooks(hash).await;
 
             tracing::info!("BLOB DELETED: {} (no more references)", &hash[..12]);
             Ok(true)
@@ -894,6 +896,91 @@ impl DedupService {
 
             tracing::debug!("Reference removed from blob {}", &hash[..12]);
             Ok(false)
+        }
+    }
+
+    /// Targeted cleanup for a single blob after the PG trigger has already
+    /// decremented its ref_count.  Deletes the blob row, disk file, and
+    /// blob-keyed thumbnails if ref_count has reached 0.
+    ///
+    /// Handles both the legacy whole-file blob path (storage.blobs) and the
+    /// CDC manifest path (storage.chunk_manifests).  Best-effort: logs
+    /// warnings on failure rather than returning an error.
+    pub async fn cleanup_if_orphaned(&self, hash: &str) {
+        let short = &hash[..hash.len().min(12)];
+
+        // ── CDC manifest path (must run FIRST) ───────────────────
+        // For single-chunk CDC files file_hash == chunk_hash, so the PG
+        // trigger on storage.files already decremented storage.blobs.ref_count
+        // when this function is called.  try_dedup_hit increments
+        // chunk_manifests.ref_count but NOT storage.blobs.ref_count, so
+        // blobs.ref_count can reach 0 while the manifest still has ref_count > 1
+        // (other files sharing the same blob).  Checking the manifest first
+        // prevents premature blob + manifest deletion.
+        let manifest = sqlx::query_as::<_, (i32, Vec<String>)>(
+            "SELECT ref_count, chunk_hashes \
+               FROM storage.chunk_manifests WHERE file_hash = $1",
+        )
+        .bind(hash)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .unwrap_or(None);
+
+        if let Some((ref_count, chunk_hashes)) = manifest {
+            if ref_count <= 1 {
+                // Last reference — remove manifest and all its chunks.
+                if let Err(e) = self
+                    .remove_manifest_reference(hash, ref_count, &chunk_hashes)
+                    .await
+                {
+                    tracing::warn!("cleanup_if_orphaned: manifest cleanup failed for {short}: {e}");
+                }
+            } else {
+                // Other files still share this blob: just decrement the manifest
+                // counter and undo the PG trigger's premature chunk ref_count
+                // decrement (blobs.ref_count is chunk-level; the manifest is the
+                // authoritative file-level counter).
+                sqlx::query(
+                    "UPDATE storage.chunk_manifests \
+                        SET ref_count = ref_count - 1 WHERE file_hash = $1",
+                )
+                .bind(hash)
+                .execute(self.pool.as_ref())
+                .await
+                .ok();
+                // Undo the PG trigger's decrement of storage.blobs.ref_count.
+                // The trigger fired with blob_hash = file_hash, so only the row
+                // WHERE hash = file_hash is affected.  For single-chunk files
+                // file_hash == chunk_hash and that row exists; for multi-chunk
+                // files file_hash is not in storage.blobs, making this a no-op.
+                sqlx::query("UPDATE storage.blobs SET ref_count = ref_count + 1 WHERE hash = $1")
+                    .bind(hash)
+                    .execute(self.pool.as_ref())
+                    .await
+                    .ok();
+                tracing::debug!(
+                    "cleanup_if_orphaned: manifest {short} ref_count {ref_count}→{}",
+                    ref_count - 1
+                );
+            }
+            return;
+        }
+
+        // ── Legacy blob path (no manifest) ───────────────────────
+        let deleted_blob = sqlx::query_scalar::<_, String>(
+            "DELETE FROM storage.blobs WHERE hash = $1 AND ref_count <= 0 RETURNING hash",
+        )
+        .bind(hash)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .unwrap_or(None);
+
+        if deleted_blob.is_some() {
+            if let Err(e) = self.backend.delete_blob(hash).await {
+                tracing::warn!("cleanup_if_orphaned: disk delete failed for {short}: {e}");
+            }
+            self.fire_blob_hooks(hash).await;
+            tracing::info!("cleanup_if_orphaned: removed orphaned blob {short}");
         }
     }
 
@@ -1347,16 +1434,7 @@ impl DedupService {
                 if let Err(e) = self.backend.delete_blob(hash).await {
                     tracing::warn!("Failed to delete orphan blob {hash}: {e}");
                 }
-                // Clean up thumbnails (best-effort, only local backends)
-                if let Some(blob_path) = self.backend.local_blob_path(hash)
-                    && let Some(storage_root) = blob_path.ancestors().nth(3)
-                {
-                    let thumbnails_root = storage_root.join(".thumbnails");
-                    for dir in &["icon", "preview", "large"] {
-                        let thumb = thumbnails_root.join(dir).join(format!("{hash}.jpg"));
-                        let _ = fs::remove_file(&thumb).await;
-                    }
-                }
+                self.fire_blob_hooks(hash).await;
                 total_bytes += *size as u64;
             }
             total_deleted += batch.len() as u64;

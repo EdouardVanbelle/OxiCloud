@@ -62,6 +62,9 @@ OXICLOUD_SERVER_PORT=$SERVER_PORT
 OXICLOUD_STORAGE_PATH="$REPO_ROOT/tests/api/storage"
 set +a
 
+# ensure storage is empty before starting
+echo "Wipe $OXICLOUD_STORAGE_PATH to ensure clean startup"
+rm -rf "$OXICLOUD_STORAGE_PATH"
 mkdir -p "$OXICLOUD_STORAGE_PATH"
 
 # ── 3. Start OxiCloud server ──────────────────────────────────────────────────
@@ -96,5 +99,7 @@ hurl --variables-file "$API_DIR/test.env" --file-root "$REPO_ROOT/tests" --test 
   "$API_DIR/contacts.hurl"
 
 #bash "$API_DIR/dedup_bulk_upload.sh"
+
+bash "$API_DIR/storage_cleanup_check.sh"
 
 log "All tests passed."

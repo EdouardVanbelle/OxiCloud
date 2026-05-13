@@ -16,6 +16,7 @@ use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlob
 use crate::infrastructure::repositories::pg::file_blob_write_repository::FileBlobWriteRepository;
 use crate::infrastructure::repositories::pg::folder_db_repository::FolderDbRepository;
 use crate::infrastructure::repositories::pg::trash_db_repository::TrashDbRepository;
+use crate::infrastructure::services::dedup_service::DedupService;
 use crate::infrastructure::services::file_content_cache::FileContentCache;
 use crate::infrastructure::services::thumbnail_service::ThumbnailService;
 
@@ -45,6 +46,10 @@ pub struct TrashService {
     /// Port for folder operations (get folder, trash, restore, delete)
     folder_storage_port: Arc<FolderDbRepository>,
 
+    /// Dedup service — garbage-collected after bulk trash empty to clean up
+    /// orphaned blob files and thumbnails that the PG trigger cannot reach.
+    dedup_service: Arc<DedupService>,
+
     /// Thumbnail service for cleaning up thumbnails on permanent delete
     thumbnail_service: Option<Arc<ThumbnailService>>,
 
@@ -62,6 +67,7 @@ impl TrashService {
         file_write_port: Arc<FileBlobWriteRepository>,
         folder_storage_port: Arc<FolderDbRepository>,
         retention_days: u32,
+        dedup_service: Arc<DedupService>,
         thumbnail_service: Option<Arc<ThumbnailService>>,
         content_cache: Option<Arc<FileContentCache>>,
     ) -> Self {
@@ -70,6 +76,7 @@ impl TrashService {
             file_read_port,
             file_write_port,
             folder_storage_port,
+            dedup_service,
             thumbnail_service,
             content_cache,
             retention_days,
@@ -713,17 +720,23 @@ impl TrashUseCase for TrashService {
             Vec::new()
         };
 
-        // clear_trash() already performs bulk SQL DELETEs in 2 queries:
+        // clear_trash() performs bulk SQL DELETEs in 2 queries:
         //   1. DELETE FROM storage.files  WHERE user_id = $1 AND is_trashed = TRUE
         //   2. DELETE FROM storage.folders WHERE user_id = $1 AND is_trashed = TRUE
         //
         // Folder deletion cascades (FK ON DELETE CASCADE) to child folders and
         // their files. The PG trigger `trg_files_decrement_blob_ref` automatically
-        // decrements blob ref_counts for every deleted file row — no Rust-side
-        // remove_reference() call is needed.
+        // decrements blob ref_counts for every deleted file row.
         //
         // Finally it clears the trash_items index for the user.
         self.trash_repository.clear_trash(&user_id).await?;
+
+        // The PG trigger decremented ref_counts but cannot delete disk files or
+        // thumbnails.  Run garbage_collect() to remove any blobs whose ref_count
+        // reached 0, along with their blob-keyed thumbnail files.
+        if let Err(e) = self.dedup_service.garbage_collect().await {
+            warn!("empty_trash: garbage_collect failed: {:?}", e);
+        }
 
         // Invalidate content cache for all permanently deleted files.
         if let Some(cc) = &self.content_cache {

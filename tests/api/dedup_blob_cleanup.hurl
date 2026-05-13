@@ -20,6 +20,11 @@
 #       server uses the legacy blob path — so we avoid stats-based
 #       assertions and rely on observable thumbnail behaviour instead.
 #
+# BLAKE3 hash of fixtures/dedup-test.jpg (= dedup-test-2.jpg content):
+#   cde1ca663a2e62e0dadb41c3194e11ecb7d971d84c7451db17063b55c09e8066
+# Used in /api/dedup/check/{hash} calls below to track ref_count lifecycle.
+# ref_count is only returned for admin users; setup.hurl creates an admin.
+#
 # Prerequisites: setup.hurl must have run (admin user exists).
 #
 # Run:
@@ -87,6 +92,16 @@ jsonpath "$.name" == "dedup-test.jpg"
 jsonpath "$.folder_id" == {{test_folder_id}}
 
 
+# ref_count == 1: blob has exactly one file reference after first upload
+GET {{base_url}}/api/dedup/check/cde1ca663a2e62e0dadb41c3194e11ecb7d971d84c7451db17063b55c09e8066
+Authorization: Bearer {{token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$.exists" == true
+jsonpath "$.ref_count" == 1
+
+
 # ─────────────────────────────────────────────────────────────
 # Step 4 – Upload identical content again as dedup-test-2.jpg
 #          Dedup: same blob, new file record, different file ID
@@ -103,6 +118,16 @@ file2_id: jsonpath "$.id"
 [Asserts]
 jsonpath "$.name" == "dedup-test-2.jpg"
 jsonpath "$.id" != "{{file1_id}}"
+
+
+# ref_count == 2: dedup hit — same blob now referenced by two file records
+GET {{base_url}}/api/dedup/check/cde1ca663a2e62e0dadb41c3194e11ecb7d971d84c7451db17063b55c09e8066
+Authorization: Bearer {{token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$.exists" == true
+jsonpath "$.ref_count" == 2
 
 
 # ─────────────────────────────────────────────────────────────
@@ -156,6 +181,16 @@ Authorization: Bearer {{token}}
 HTTP 200
 
 
+# ref_count == 1: blob survives — file2 still holds a reference
+GET {{base_url}}/api/dedup/check/cde1ca663a2e62e0dadb41c3194e11ecb7d971d84c7451db17063b55c09e8066
+Authorization: Bearer {{token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$.exists" == true
+jsonpath "$.ref_count" == 1
+
+
 # ─────────────────────────────────────────────────────────────
 # Step 8 – Blob still alive: file 2 thumbnail is accessible
 #          After file 1 is permanently deleted the blob ref_count
@@ -199,6 +234,15 @@ DELETE {{base_url}}/api/trash/{{trash_item2_id}}
 Authorization: Bearer {{token}}
 
 HTTP 200
+
+
+# ref_count hits 0 → blob and manifest deleted; user no longer owns this hash
+GET {{base_url}}/api/dedup/check/cde1ca663a2e62e0dadb41c3194e11ecb7d971d84c7451db17063b55c09e8066
+Authorization: Bearer {{token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$.exists" == false
 
 
 # ─────────────────────────────────────────────────────────────
