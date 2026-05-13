@@ -86,7 +86,13 @@ log "Server is ready."
 
 log "Running Hurl tests..."
 for T in "$WEBDAV_DIR"/test_*.sh; do
-    bash "$T"
+    if bash "$T"
+    then
+        echo $'\e[32m'"Success $T"$'\e[0m' >&2
+    else
+        echo $'\e[31m'"Failure $T"$'\e[0m' >&2
+        false
+    fi
 done
 
 log "All tests passed."
