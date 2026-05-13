@@ -972,15 +972,6 @@ async fn handle_put(
                 );
             }
 
-            state
-                .core
-                .refresh_thumbnails_after_update(
-                    file_dto.id.clone(),
-                    file_dto.etag.clone(),
-                    &content_type,
-                )
-                .await;
-
             Ok(Response::builder()
                 .status(StatusCode::NO_CONTENT)
                 .body(Body::empty())

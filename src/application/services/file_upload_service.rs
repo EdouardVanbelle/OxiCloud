@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::application::dtos::file_dto::FileDto;
+use crate::application::ports::file_lifecycle::{FileCreatedHook, FileUpdatedHook};
 use crate::application::ports::file_ports::FileUploadUseCase;
 use crate::application::ports::storage_ports::{FileReadPort, FileWritePort};
 use crate::application::services::storage_usage_service::StorageUsageService;
@@ -52,6 +53,10 @@ pub struct FileUploadService {
     storage_usage_service: Option<Arc<StorageUsageService>>,
     /// Content cache — invalidated on file update so stale content is never served.
     content_cache: Option<Arc<FileContentCache>>,
+    /// Hooks fired after a new file record is created.
+    file_created_hooks: Vec<Arc<dyn FileCreatedHook>>,
+    /// Hooks fired after a file's blob is replaced (e.g. thumbnail refresh).
+    file_updated_hooks: Vec<Arc<dyn FileUpdatedHook>>,
 }
 
 impl FileUploadService {
@@ -62,6 +67,8 @@ impl FileUploadService {
             file_read: None,
             storage_usage_service: None,
             content_cache: None,
+            file_created_hooks: Vec::new(),
+            file_updated_hooks: Vec::new(),
         }
     }
 
@@ -75,12 +82,26 @@ impl FileUploadService {
             file_read: Some(file_read),
             storage_usage_service: None,
             content_cache: None,
+            file_created_hooks: Vec::new(),
+            file_updated_hooks: Vec::new(),
         }
     }
 
     /// Configures the content cache for invalidation on file updates.
     pub fn with_content_cache(mut self, cache: Arc<FileContentCache>) -> Self {
         self.content_cache = Some(cache);
+        self
+    }
+
+    /// Registers a hook to fire after a new file record is created.
+    pub fn with_file_created_hook(mut self, hook: Arc<dyn FileCreatedHook>) -> Self {
+        self.file_created_hooks.push(hook);
+        self
+    }
+
+    /// Registers a hook to fire after a file's blob is replaced.
+    pub fn with_file_updated_hook(mut self, hook: Arc<dyn FileUpdatedHook>) -> Self {
+        self.file_updated_hooks.push(hook);
         self
     }
 
@@ -149,6 +170,10 @@ impl FileUploadUseCase for FileUploadService {
             name, size, dto.id
         );
         self.maybe_update_storage_usage(&dto);
+        for hook in &self.file_created_hooks {
+            hook.on_file_created(&dto.id, &dto.etag, &dto.mime_type)
+                .await;
+        }
         Ok(dto)
     }
 
@@ -301,7 +326,12 @@ impl FileUploadUseCase for FileUploadService {
             }
             // Re-read to get fresh DTO with updated etag and timestamps.
             let updated = file_read.get_file(&file_id).await?;
-            return Ok(FileDto::from(updated));
+            let dto = FileDto::from(updated);
+            for hook in &self.file_updated_hooks {
+                hook.on_file_updated(&file_id, &dto.etag, content_type)
+                    .await;
+            }
+            return Ok(dto);
         }
 
         // File doesn't exist — create it via streaming upload

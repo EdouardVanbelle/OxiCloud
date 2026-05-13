@@ -1,6 +1,20 @@
 use std::future::Future;
 use std::pin::Pin;
 
+/// Observer notified by [`DedupService`] when a genuinely new blob is stored
+/// for the first time (no dedup hit).
+///
+/// Register with [`DedupService::add_blob_creation_hook`] during DI wiring.
+pub trait BlobCreationHook: Send + Sync {
+    /// Called after the new blob's chunks and manifest have been written.
+    /// `blob_hash` is the BLAKE3 hex, `content_type` is the MIME type if known.
+    /// Must be best-effort — must not propagate errors.
+    fn on_blob_created<'a>(
+        &'a self,
+        blob_hash: &'a str,
+        content_type: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+}
 /// Observer notified by [`DedupService`] when a blob's ref_count reaches zero
 /// and it is permanently removed from storage.
 ///

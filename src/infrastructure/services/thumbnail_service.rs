@@ -995,6 +995,111 @@ impl crate::application::ports::blob_lifecycle::BlobDeletionHook for ThumbnailSe
     }
 }
 
+// ─── FileUpdatedHook ─────────────────────────────────────────────────────────
+
+/// Wires thumbnail invalidation + regeneration into the file-update lifecycle.
+///
+/// Registered on [`FileUploadService`] during DI. Fires whenever a file's blob
+/// is replaced (WebDAV PUT overwrite, WOPI PutFile, Nextcloud chunked upload).
+pub struct ThumbnailRefreshHook {
+    thumbnail: Arc<ThumbnailService>,
+    dedup: Arc<DedupService>,
+}
+
+impl ThumbnailRefreshHook {
+    pub fn new(thumbnail: Arc<ThumbnailService>, dedup: Arc<DedupService>) -> Self {
+        Self { thumbnail, dedup }
+    }
+}
+
+impl crate::application::ports::file_lifecycle::FileUpdatedHook for ThumbnailRefreshHook {
+    fn on_file_updated<'a>(
+        &'a self,
+        file_id: &'a str,
+        blob_hash: &'a str,
+        content_type: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            if !ThumbnailService::is_supported_image(content_type) {
+                return;
+            }
+            if let Err(e) = self.thumbnail.delete_thumbnails(file_id).await {
+                tracing::warn!(
+                    "Failed to invalidate thumbnail cache for {}: {}",
+                    file_id,
+                    e
+                );
+            }
+            Self::spawn_thumbnail_generation(
+                self.thumbnail.clone(),
+                self.dedup.clone(),
+                file_id.to_string(),
+                blob_hash.to_string(),
+            );
+        })
+    }
+}
+
+impl crate::application::ports::file_lifecycle::FileCreatedHook for ThumbnailRefreshHook {
+    fn on_file_created<'a>(
+        &'a self,
+        file_id: &'a str,
+        blob_hash: &'a str,
+        content_type: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            if !ThumbnailService::is_supported_image(content_type) {
+                return;
+            }
+            Self::spawn_thumbnail_generation(
+                self.thumbnail.clone(),
+                self.dedup.clone(),
+                file_id.to_string(),
+                blob_hash.to_string(),
+            );
+        })
+    }
+}
+
+impl ThumbnailRefreshHook {
+    fn spawn_thumbnail_generation(
+        ts: Arc<ThumbnailService>,
+        ds: Arc<DedupService>,
+        file_id: String,
+        hash: String,
+    ) {
+        tokio::spawn(async move {
+            match ds.read_blob_bytes(&hash).await {
+                Ok(bytes) => {
+                    ts.generate_all_sizes_background_from_bytes(file_id, hash, bytes, ds.clone());
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to read blob for thumbnail generation {}: {}",
+                        file_id,
+                        e
+                    );
+                }
+            }
+        });
+    }
+}
+
+// ─── FileDeletedHook ─────────────────────────────────────────────────────────
+
+impl crate::application::ports::file_lifecycle::FileDeletedHook for ThumbnailService {
+    fn on_file_deleted<'a>(
+        &'a self,
+        file_id: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            if let Err(e) = self.delete_thumbnails(file_id).await {
+                tracing::warn!("Failed to delete thumbnails for file {}: {}", file_id, e);
+            }
+        })
+    }
+}
+
 // ─── Port implementation ─────────────────────────────────────────────────────
 
 /// Convert port ThumbnailSize to infra ThumbnailSize.

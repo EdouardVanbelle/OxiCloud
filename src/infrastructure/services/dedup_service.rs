@@ -44,7 +44,7 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-use crate::application::ports::blob_lifecycle::BlobDeletionHook;
+use crate::application::ports::blob_lifecycle::{BlobCreationHook, BlobDeletionHook};
 use crate::application::ports::blob_storage_ports::BlobStorageBackend;
 use crate::application::ports::dedup_ports::{
     BlobMetadataDto, DedupPort, DedupResultDto, DedupStatsDto,
@@ -84,6 +84,8 @@ pub struct DedupService {
     /// Isolated maintenance pool for long-running operations
     /// (verify_integrity, garbage_collect) that must never starve the primary.
     maintenance_pool: Arc<PgPool>,
+    /// Hooks notified when a genuinely new blob is stored (no dedup hit).
+    blob_creation_hooks: Vec<Arc<dyn BlobCreationHook>>,
     /// Hooks notified when a blob's ref_count reaches zero and it is deleted.
     blob_hooks: Vec<Arc<dyn BlobDeletionHook>>,
 }
@@ -103,8 +105,16 @@ impl DedupService {
             backend,
             pool,
             maintenance_pool,
+            blob_creation_hooks: vec![],
             blob_hooks: vec![],
         }
+    }
+
+    /// Register a [`BlobCreationHook`] to be called whenever a genuinely new
+    /// blob is stored.  Hooks are called in registration order.
+    pub fn add_blob_creation_hook(mut self, hook: Arc<dyn BlobCreationHook>) -> Self {
+        self.blob_creation_hooks.push(hook);
+        self
     }
 
     /// Register a [`BlobDeletionHook`] to be called whenever a blob's
@@ -112,6 +122,13 @@ impl DedupService {
     pub fn add_blob_hook(mut self, hook: Arc<dyn BlobDeletionHook>) -> Self {
         self.blob_hooks.push(hook);
         self
+    }
+
+    /// Fire all registered creation hooks for a new blob.
+    async fn fire_blob_creation_hooks(&self, hash: &str, content_type: Option<&str>) {
+        for hook in &self.blob_creation_hooks {
+            hook.on_blob_created(hash, content_type).await;
+        }
     }
 
     /// Fire all registered hooks for a deleted blob.
@@ -135,6 +152,7 @@ impl DedupService {
             backend: Arc::new(LocalBlobBackend::new(Path::new("/tmp/oxicloud_stub_blobs"))),
             pool: stub_pool.clone(),
             maintenance_pool: stub_pool,
+            blob_creation_hooks: vec![],
             blob_hooks: vec![],
         }
     }
@@ -352,6 +370,9 @@ impl DedupService {
             file_size,
             chunk_hashes.len()
         );
+
+        self.fire_blob_creation_hooks(&file_hash, content_type.as_deref())
+            .await;
 
         Ok(DedupResultDto::NewBlob {
             hash: file_hash,

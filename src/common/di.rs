@@ -61,7 +61,7 @@ use crate::infrastructure::services::image_transcode_service::ImageTranscodeServ
 use crate::infrastructure::services::jwt_service::JwtTokenService;
 use crate::infrastructure::services::password_hasher::Argon2PasswordHasher;
 use crate::infrastructure::services::path_resolver_service::PathResolverService;
-use crate::infrastructure::services::thumbnail_service::ThumbnailService;
+use crate::infrastructure::services::thumbnail_service::{ThumbnailRefreshHook, ThumbnailService};
 use crate::infrastructure::services::wopi_discovery_service::WopiDiscoveryService;
 use crate::infrastructure::services::zip_service::ZipService;
 
@@ -355,12 +355,18 @@ impl AppServiceFactory {
 
         // Refactored services with all infrastructure ports
         // In blob model, dedup is handled by the repository — no separate write-behind needed
+        let thumbnail_refresh_hook = Arc::new(ThumbnailRefreshHook::new(
+            core.thumbnail_service.clone(),
+            core.dedup_service.clone(),
+        ));
         let file_upload_service = Arc::new(
             FileUploadService::new_with_read(
                 repos.file_write_repository.clone(),
                 repos.file_read_repository.clone(),
             )
-            .with_content_cache(core.file_content_cache.clone()),
+            .with_content_cache(core.file_content_cache.clone())
+            .with_file_created_hook(thumbnail_refresh_hook.clone())
+            .with_file_updated_hook(thumbnail_refresh_hook),
         );
 
         let file_retrieval_service = Arc::new(FileRetrievalService::new_with_cache(
@@ -370,14 +376,16 @@ impl AppServiceFactory {
         ));
 
         // FileManagementService — ref_count handled by PG trigger, no dedup port needed
-        let file_management_service = Arc::new(FileManagementService::with_trash(
-            repos.file_write_repository.clone(),
-            trash_service.clone(),
-            Some(repos.file_read_repository.clone()),
-            Some(repos.folder_repository.clone()),
-            Some(core.thumbnail_service.clone()),
-            Some(core.file_content_cache.clone()),
-        ));
+        let file_management_service = Arc::new(
+            FileManagementService::with_trash(
+                repos.file_write_repository.clone(),
+                trash_service.clone(),
+                Some(repos.file_read_repository.clone()),
+                Some(repos.folder_repository.clone()),
+                Some(core.file_content_cache.clone()),
+            )
+            .with_file_deleted_hook(core.thumbnail_service.clone()),
+        );
 
         let file_use_case_factory = Arc::new(AppFileUseCaseFactory::new(
             repos.file_read_repository.clone(),
@@ -981,48 +989,6 @@ pub struct CoreServices {
     pub dedup_service: Arc<DedupService>,
     pub zip_service: Option<Arc<ZipService>>,
     pub config: AppConfig,
-}
-
-impl CoreServices {
-    /// Invalidate a file's moka thumbnail cache and kick off background regeneration.
-    ///
-    /// Call this after any write that swaps the blob for an existing file.
-    /// Safe to call for new files too (no-op on empty cache).
-    /// Skips everything if the MIME type is not a supported image.
-    pub async fn refresh_thumbnails_after_update(
-        &self,
-        file_id: String,
-        blob_hash: String,
-        content_type: &str,
-    ) {
-        if !ThumbnailService::is_supported_image(content_type) {
-            return;
-        }
-        if let Err(e) = self.thumbnail_service.delete_thumbnails(&file_id).await {
-            tracing::warn!(
-                "Failed to invalidate thumbnail cache for {}: {}",
-                file_id,
-                e
-            );
-        }
-        let ts = self.thumbnail_service.clone();
-        let ds = self.dedup_service.clone();
-        let hash = blob_hash.clone();
-        tokio::spawn(async move {
-            match ds.read_blob_bytes(&hash).await {
-                Ok(bytes) => {
-                    ts.generate_all_sizes_background_from_bytes(file_id, hash, bytes, ds.clone());
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to read blob for thumbnail regeneration {}: {}",
-                        file_id,
-                        e
-                    );
-                }
-            }
-        });
-    }
 }
 
 /// Container for repository services
