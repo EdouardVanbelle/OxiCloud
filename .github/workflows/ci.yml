@@ -157,7 +157,7 @@ jobs:
           retention-days: 1
 
   api-test:
-    name: API tests (via Hurl)
+    name: API & Webdav tests
     needs: build
     if: github.event_name == 'pull_request'
     timeout-minutes: 30
@@ -173,7 +173,7 @@ jobs:
       - name: Set execute bit on pre-built binary
         run: chmod +x target/release/oxicloud
 
-      - name: Install Hurl
+      - name: Install Hurl and b3sum
         env:
           HURL_MAJOR: "8"
         run: |
@@ -181,7 +181,7 @@ jobs:
             https://api.github.com/repos/Orange-OpenSource/hurl/releases \
             | jq -r "map(select(.tag_name | startswith(\"${HURL_MAJOR}.\"))) | first | .tag_name")
           curl -fLO "https://github.com/Orange-OpenSource/hurl/releases/download/${HURL_VERSION}/hurl_${HURL_VERSION}_amd64.deb"
-          sudo apt-get install -y "./hurl_${HURL_VERSION}_amd64.deb"
+          sudo apt-get install -y "./hurl_${HURL_VERSION}_amd64.deb" b3sum
 
       - name: Run Hurl API tests
         run: bash tests/api/run.sh
