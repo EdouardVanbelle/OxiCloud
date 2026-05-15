@@ -54,6 +54,65 @@ use interfaces::{
     create_api_routes, create_health_routes, create_public_api_routes, web::create_web_routes,
 };
 
+fn parse_addr(host: &str, port: u16) -> Result<SocketAddr, String> {
+    // Strip surrounding brackets from IPv6: [::1] -> ::1
+    let host = host.trim();
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+
+    // Try parsing as IPv6 first, then IPv4
+    // and format the address string accordingly
+    //   - IPv6: "[::1]:8080"
+    //   - IPv4: "127.0.0.1:8080"
+    let addr_str = if host.contains(':') {
+        format!("[{host}]:{port}") // IPv6
+    } else {
+        format!("{host}:{port}") // IPv4
+    };
+
+    addr_str
+        .parse::<SocketAddr>()
+        .map_err(|e| format!("Invalid address '{}': {}", addr_str, e))
+}
+
+fn make_socket(addr: &SocketAddr) -> std::io::Result<Socket> {
+    let domain = if addr.is_ipv6() {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
+    // Allow multiple workers on the same port (future-ready)
+    #[cfg(not(windows))]
+    socket.set_reuse_port(true)?;
+    // Disable Nagle's algorithm — send small responses (JSON, PROPFIND)
+    // immediately instead of waiting up to 40ms for coalescing.
+    socket.set_tcp_nodelay(true)?;
+    // Detect dead connections within 60s instead of hours
+    socket.set_keepalive(true)?;
+    socket.set_tcp_keepalive(
+        &TcpKeepalive::new()
+            .with_time(Duration::from_secs(60))
+            .with_interval(Duration::from_secs(10)),
+    )?;
+    socket.set_nonblocking(true)?;
+
+    // For IPv6: disable dual-stack to be explicit about what you're binding
+    // (set true to restrict to IPv6-only, false to also accept IPv4-mapped)
+    if addr.is_ipv6() {
+        socket.set_only_v6(true)?; // explicit: one socket = one protocol
+    }
+
+    socket.bind(&(*addr).into())?;
+    // High backlog for connection bursts (WebDAV clients open many parallel connections)
+    socket.listen(2048)?;
+
+    Ok(socket)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load .env file if present (for local development)
@@ -503,28 +562,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Start server — tuned socket for low-latency responses
-    let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
+    // TODO: suport multiple addresses ?
+    let addr = parse_addr(&config.server_host, config.server_port)?;
     tracing::info!("Starting OxiCloud server on http://{}", addr);
 
-    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
-    socket.set_reuse_address(true)?;
-    // Allow multiple workers on the same port (future-ready)
-    #[cfg(not(windows))]
-    socket.set_reuse_port(true)?;
-    // Disable Nagle's algorithm — send small responses (JSON, PROPFIND)
-    // immediately instead of waiting up to 40ms for coalescing.
-    socket.set_tcp_nodelay(true)?;
-    // Detect dead connections within 60s instead of hours
-    socket.set_keepalive(true)?;
-    socket.set_tcp_keepalive(
-        &TcpKeepalive::new()
-            .with_time(Duration::from_secs(60))
-            .with_interval(Duration::from_secs(10)),
-    )?;
-    socket.set_nonblocking(true)?;
-    socket.bind(&addr.into())?;
-    // High backlog for connection bursts (WebDAV clients open many parallel connections)
-    socket.listen(2048)?;
+    let socket = make_socket(&addr)?;
 
     let listener = tokio::net::TcpListener::from_std(socket.into())?;
 
