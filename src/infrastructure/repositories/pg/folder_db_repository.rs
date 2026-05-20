@@ -1044,4 +1044,20 @@ impl FolderDbRepository {
             .map_err(|e| DomainError::internal_error("FolderDb", format!("user_id lookup: {e}")))?
             .ok_or_else(|| DomainError::not_found("Folder", folder_id))
     }
+
+    /// Verifies that `folder_id` is owned by `owner_id`.
+    ///
+    /// Returns `DomainError::not_found(...)` for both "folder missing" and
+    /// "folder owned by someone else" — same error to avoid leaking the
+    /// existence of resources belonging to other users.
+    pub async fn verify_owner(&self, folder_id: &str, owner_id: Uuid) -> Result<(), DomainError> {
+        let actual = self.get_folder_user_id(folder_id).await?;
+        if actual != owner_id {
+            return Err(DomainError::not_found(
+                "Folder",
+                "Target folder not found or access denied",
+            ));
+        }
+        Ok(())
+    }
 }

@@ -13,7 +13,11 @@ use crate::common::errors::DomainError;
 /// Primary port for folder operations
 pub trait FolderUseCase: Send + Sync + 'static {
     /// Creates a new folder
-    async fn create_folder(&self, dto: CreateFolderDto) -> Result<FolderDto, DomainError>;
+    async fn create_folder(
+        &self,
+        dto: CreateFolderDto,
+        caller_id: Uuid,
+    ) -> Result<FolderDto, DomainError>;
 
     /// Gets a folder by its ID
     async fn get_folder(&self, id: &str) -> Result<FolderDto, DomainError>;

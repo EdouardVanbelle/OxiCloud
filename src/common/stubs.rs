@@ -353,7 +353,11 @@ impl I18nService for StubI18nService {
 pub struct StubFolderUseCase;
 
 impl FolderUseCase for StubFolderUseCase {
-    async fn create_folder(&self, _dto: CreateFolderDto) -> Result<FolderDto, DomainError> {
+    async fn create_folder(
+        &self,
+        _dto: CreateFolderDto,
+        _user_id: Uuid,
+    ) -> Result<FolderDto, DomainError> {
         Ok(FolderDto::default())
     }
 

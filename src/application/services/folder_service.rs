@@ -25,7 +25,11 @@ impl FolderService {
         struct FolderServiceStub;
 
         impl FolderUseCase for FolderServiceStub {
-            async fn create_folder(&self, _dto: CreateFolderDto) -> Result<FolderDto, DomainError> {
+            async fn create_folder(
+                &self,
+                _dto: CreateFolderDto,
+                _user_id: Uuid,
+            ) -> Result<FolderDto, DomainError> {
                 Ok(FolderDto::empty())
             }
 
@@ -134,8 +138,11 @@ impl FolderService {
 
 impl FolderUseCase for FolderService {
     /// Creates a new folder
-    async fn create_folder(&self, dto: CreateFolderDto) -> Result<FolderDto, DomainError> {
-        // Input validation
+    async fn create_folder(
+        &self,
+        dto: CreateFolderDto,
+        caller_id: Uuid,
+    ) -> Result<FolderDto, DomainError> {
         if let Err(reason) = validate_storage_name(&dto.name) {
             return Err(DomainError::validation_error(format!(
                 "Invalid folder name '{}': {reason}",
@@ -143,21 +150,19 @@ impl FolderUseCase for FolderService {
             )));
         }
 
-        // If a parent_id is provided, verify it exists
-        if let Some(parent_id) = &dto.parent_id {
-            let parent_exists = self.folder_storage.get_folder(parent_id).await.is_ok();
-            if !parent_exists {
-                return Err(DomainError::not_found("Folder", parent_id));
-            }
-        }
+        let Some(parent_id) = dto.parent_id.as_deref() else {
+            return Err(DomainError::validation_error(
+                "Root folder creation is reserved for registration",
+            ));
+        };
+        self.folder_storage
+            .verify_owner(parent_id, caller_id)
+            .await?;
 
-        // Create the folder
         let folder = self
             .folder_storage
             .create_folder(dto.name, dto.parent_id)
             .await?;
-
-        // Convert to DTO
         Ok(FolderDto::from(folder))
     }
 

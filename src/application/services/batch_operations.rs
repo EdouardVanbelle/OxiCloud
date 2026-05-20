@@ -975,18 +975,11 @@ impl BatchOperationService {
             let folder_service = self.folder_service.clone();
 
             async move {
-                // If a parent is specified, verify the caller owns it
-                if let Some(ref pid) = parent_id
-                    && let Err(e) = folder_service.get_folder_owned(pid, user_id).await
-                {
-                    let id = format!("{}:{}", name, pid);
-                    return (id, Err(e));
-                }
                 let dto = crate::application::dtos::folder_dto::CreateFolderDto {
                     name: name.clone(),
                     parent_id: parent_id.clone(),
                 };
-                let create_result = folder_service.create_folder(dto).await;
+                let create_result = folder_service.create_folder(dto, user_id).await;
                 let id = format!("{}:{}", name, parent_id.unwrap_or_default());
                 (id, create_result)
             }

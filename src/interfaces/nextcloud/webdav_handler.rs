@@ -551,6 +551,7 @@ async fn handle_put(
             .map_err(|e| AppError::internal_error(format!("Failed to update file: {}", e)))?;
 
         // Update audio metadata for supported audio files.
+        // TODO: use notification service or hook
         if let Some(ref audio_service) = state.applications.audio_metadata_service
             && let Ok(file_id) = uuid::Uuid::parse_str(&updated.id)
         {
@@ -655,7 +656,7 @@ async fn handle_mkcol(
                     name: segment.to_string(),
                     parent_id: Some(parent_id.clone()),
                 };
-                match folder_service.create_folder(dto).await {
+                match folder_service.create_folder(dto, user.id).await {
                     Ok(created) => {
                         parent_id = created.id.clone();
                     }

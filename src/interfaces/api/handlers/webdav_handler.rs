@@ -999,6 +999,7 @@ async fn handle_mkcol(
     req: Request<Body>,
     path: String,
 ) -> Result<Response<Body>, AppError> {
+    let user = extract_user(&req)?;
     let folder_service = &state.applications.folder_service;
 
     if path.is_empty() || path == "/" {
@@ -1041,15 +1042,13 @@ async fn handle_mkcol(
                     name: segment.to_string(),
                     parent_id: parent_id.clone(),
                 };
+                // Propagate DomainError -> AppError so NotFound/Conflict map to
+                // their proper HTTP status codes (was: blanket 500 swallowed
+                // ownership-rejection NotFound from verify_owner).
                 let created = folder_service
-                    .create_folder(create_dto)
+                    .create_folder(create_dto, user.id)
                     .await
-                    .map_err(|e| {
-                        AppError::internal_error(format!(
-                            "Failed to create folder '{}': {}",
-                            accumulated_path, e
-                        ))
-                    })?;
+                    .map_err(AppError::from)?;
                 parent_id = Some(created.id);
             }
         }
@@ -1551,7 +1550,7 @@ async fn handle_copy(
                         parent_id: target_parent_id,
                     };
                     folder_service
-                        .create_folder(create_dto)
+                        .create_folder(create_dto, user.id)
                         .await
                         .map_err(|e| {
                             AppError::internal_error(format!(
@@ -1655,7 +1654,7 @@ async fn handle_copy(
                     parent_id: target_parent_id,
                 };
                 folder_service
-                    .create_folder(create_dto)
+                    .create_folder(create_dto, user.id)
                     .await
                     .map_err(|e| {
                         AppError::internal_error(format!(

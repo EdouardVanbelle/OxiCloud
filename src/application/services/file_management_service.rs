@@ -82,33 +82,26 @@ impl FileManagementService {
     }
 
     /// Verifies that the target folder is owned by the caller.
-    /// If folder_id is None (root), ownership is implicitly granted.
+    ///
+    /// `None` means the target is the user's root namespace
+    /// (`storage.files.folder_id IS NULL`) — implicitly owned by the caller, so
+    /// the check is skipped. Fails closed if `folder_repo` was not injected.
     async fn verify_target_folder_owner(
         &self,
-        folder_id: &Option<String>,
+        folder_id: Option<&str>,
         caller_id: Uuid,
     ) -> Result<(), DomainError> {
-        let folder_id = match folder_id {
-            Some(id) => id,
-            None => return Ok(()), // Moving to root is always allowed
+        let Some(target) = folder_id else {
+            // TODO: File creation to root is currently allowed, check is this policy is relevant
+            return Ok(());
         };
-
-        if let Some(folder_repo) = &self.folder_repo {
-            let folder_owner = folder_repo.get_folder_user_id(folder_id).await?;
-            if folder_owner != caller_id {
-                return Err(DomainError::not_found(
-                    "Folder",
-                    "Target folder not found or access denied",
-                ));
-            }
-            Ok(())
-        } else {
-            // Fallback: no folder repo injected — deny by default (fail-closed)
-            Err(DomainError::internal_error(
+        let Some(folder_repo) = &self.folder_repo else {
+            return Err(DomainError::internal_error(
                 "FileManagement",
                 "Folder ownership verification unavailable",
-            ))
-        }
+            ));
+        };
+        folder_repo.verify_owner(target, caller_id).await
     }
 }
 
@@ -151,7 +144,7 @@ impl FileManagementUseCase for FileManagementService {
         // Verify file ownership first
         self.verify_owner(file_id, caller_id).await?;
         // Verify target folder ownership (prevents file from "disappearing")
-        self.verify_target_folder_owner(&folder_id, caller_id)
+        self.verify_target_folder_owner(folder_id.as_deref(), caller_id)
             .await?;
         self.move_file(file_id, folder_id).await
     }
@@ -192,7 +185,7 @@ impl FileManagementUseCase for FileManagementService {
         target_folder_id: Option<String>,
     ) -> Result<FileDto, DomainError> {
         self.verify_owner(file_id, caller_id).await?;
-        self.verify_target_folder_owner(&target_folder_id, caller_id)
+        self.verify_target_folder_owner(target_folder_id.as_deref(), caller_id)
             .await?;
         self.copy_file(file_id, target_folder_id).await
     }
@@ -334,21 +327,11 @@ impl FileManagementUseCase for FileManagementService {
         target_parent_id: Option<String>,
         dest_name: Option<String>,
     ) -> Result<CopyFolderTreeResult, DomainError> {
-        if let Some(folder_repo) = &self.folder_repo {
-            let owner = folder_repo.get_folder_user_id(source_folder_id).await?;
-            if owner != caller_id {
-                return Err(DomainError::not_found(
-                    "Folder",
-                    "Source folder not found or access denied",
-                ));
-            }
-        } else {
-            return Err(DomainError::internal_error(
-                "FileManagement",
-                "Folder ownership verification unavailable",
-            ));
-        }
-        self.verify_target_folder_owner(&target_parent_id, caller_id)
+        // Source ownership: source_folder_id is required (not optional), but reuse the
+        // wrapper which also enforces the fail-closed semantics if folder_repo is absent.
+        self.verify_target_folder_owner(Some(source_folder_id), caller_id)
+            .await?;
+        self.verify_target_folder_owner(target_parent_id.as_deref(), caller_id)
             .await?;
         self.copy_folder_tree(source_folder_id, target_parent_id, dest_name)
             .await
