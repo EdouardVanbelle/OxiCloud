@@ -356,7 +356,7 @@ impl I18nService for StubI18nService {
 pub struct StubFolderUseCase;
 
 impl FolderUseCase for StubFolderUseCase {
-    async fn has_permission(
+    async fn require_permission(
         &self,
         _caller_id: Uuid,
         _permission: Permission,
@@ -637,7 +637,7 @@ impl FileRetrievalUseCase for StubFileRetrievalUseCase {
 pub struct StubFileManagementUseCase;
 
 impl FileManagementUseCase for StubFileManagementUseCase {
-    async fn has_permission(
+    async fn require_permission(
         &self,
         _caller_id: Uuid,
         _permission: Permission,

@@ -9,7 +9,7 @@ use crate::common::errors::DomainError;
 use crate::domain::services::authorization::Permission;
 
 pub trait FolderUseCase: Send + Sync + 'static {
-    async fn has_permission(
+    async fn require_permission(
         &self,
         caller_id: Uuid,
         permission: Permission,

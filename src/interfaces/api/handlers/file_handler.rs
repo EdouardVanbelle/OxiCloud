@@ -124,7 +124,7 @@ impl FileHandler {
                     && let Err(err) = state
                         .applications
                         .folder_service_concrete
-                        .has_permission(auth_user.id, Permission::Create, fid)
+                        .require_permission(auth_user.id, Permission::Create, fid)
                         .await
                 {
                     tracing::warn!(
@@ -333,7 +333,7 @@ impl FileHandler {
         if let Err(err) = state
             .applications
             .file_management_service
-            .has_permission(auth_user.id, Permission::Read, &id)
+            .require_permission(auth_user.id, Permission::Read, &id)
             .await
         {
             return AppError::from(err).into_response();
@@ -493,7 +493,7 @@ impl FileHandler {
         if let Err(err) = state
             .applications
             .file_management_service
-            .has_permission(auth_user.id, Permission::Update, &id)
+            .require_permission(auth_user.id, Permission::Update, &id)
             .await
         {
             return AppError::from(err).into_response();
@@ -855,7 +855,7 @@ impl FileHandler {
         if let Err(err) = state
             .applications
             .file_management_service
-            .has_permission(auth_user.id, Permission::Read, &file_id)
+            .require_permission(auth_user.id, Permission::Read, &file_id)
             .await
         {
             return AppError::from(err).into_response();

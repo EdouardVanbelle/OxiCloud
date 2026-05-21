@@ -257,7 +257,7 @@ pub trait FileRetrievalUseCase: Send + Sync + 'static {
 
 /// Primary port for file management operations
 pub trait FileManagementUseCase: Send + Sync + 'static {
-    async fn has_permission(
+    async fn require_permission(
         &self,
         caller_id: Uuid,
         permission: Permission,

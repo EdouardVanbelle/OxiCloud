@@ -225,7 +225,7 @@ impl FileManagementService {
 }
 
 impl FileManagementUseCase for FileManagementService {
-    async fn has_permission(
+    async fn require_permission(
         &self,
         caller_id: Uuid,
         permission: Permission,

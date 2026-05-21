@@ -320,7 +320,7 @@ jsonpath "$" count == 0
 #             · GET /{id}/metadata · GET /{id}/thumbnail/{size}
 #             · PUT /{id}/thumbnail/{size} (push, Update)
 #             · PUT /{id}/rename · PUT /{id}/move · DELETE /{id}
-#             · POST /upload (via folder has_permission)
+#             · POST /upload (via folder require_permission)
 #
 # Listing endpoints that are still owner-scoped (GET /api/folders root,
 # GET /api/folders/paginated) are NOT covered here — they don't
@@ -476,7 +476,7 @@ Authorization: Bearer {{adam_token}}
 HTTP 404
 
 # ── Chunked upload: cannot start session in alice's folder ──
-# create_upload_impl pre-checks Permission::Create via has_permission.
+# create_upload_impl pre-checks Permission::Create via require_permission.
 POST {{base_url}}/api/uploads
 Authorization: Bearer {{adam_token}}
 Content-Type: application/json

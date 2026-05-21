@@ -41,7 +41,7 @@ impl FolderService {
         struct FolderServiceStub;
 
         impl FolderUseCase for FolderServiceStub {
-            async fn has_permission(
+            async fn require_permission(
                 &self,
                 _caller_id: Uuid,
                 _permission: Permission,
@@ -175,7 +175,7 @@ impl FolderUseCase for FolderService {
     /// large request bodies (file upload, chunked upload). The authoritative
     /// check happens again inside the upload/management services before any
     /// DB write — this is a UX/resource optimization, not a security boundary.
-    async fn has_permission(
+    async fn require_permission(
         &self,
         caller_id: Uuid,
         permission: Permission,
