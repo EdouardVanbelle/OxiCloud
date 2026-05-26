@@ -22,6 +22,7 @@ import { getAuthHeaders } from './fileOperations.js';
 /**
  * @import {ItemTypeEnum, LightItem} from '../../core/types.js'
  * @import {BatchResult} from './fileOperations.js'
+ * @import {ResourceListComponent} from '../../components/resourceList.js'
  */
 
 const batchToolbar = {
@@ -34,6 +35,23 @@ const batchToolbar = {
 
     /** Whether the selection bar is currently visible */
     _barVisible: false,
+
+    /**
+     * The `ResourceListComponent` currently managing the active view.
+     * When set, keyboard shortcuts (Ctrl+A, Escape) delegate to the component
+     * so its internal selection state stays consistent.
+     * @type {ResourceListComponent | null}
+     */
+    _activeComponent: null,
+
+    /**
+     * Register (or unregister) the component that owns the current view's
+     * selection state.  Pass `null` when leaving a component-managed view.
+     * @param {ResourceListComponent | null} component
+     */
+    setActiveComponent(component) {
+        this._activeComponent = component;
+    },
 
     // ── Public API ──────────────────────────────────────────
 
@@ -514,15 +532,23 @@ const batchToolbar = {
             if (target.closest('input, textarea, [contenteditable], .rename-dialog, .share-dialog, .confirm-dialog')) return;
 
             const selectAllCheckbox = /** @type {HTMLInputElement} */ (document.getElementById('select-all-checkbox'));
-            // ctrl+a cmd+a
+            // ctrl+a / cmd+a — delegate to active component when present
             if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
-                if (selectAllCheckbox) selectAllCheckbox.checked = true;
-                this.selectAll();
+                if (this._activeComponent) {
+                    this._activeComponent.selectAll();
+                } else {
+                    if (selectAllCheckbox) selectAllCheckbox.checked = true;
+                    this.selectAll();
+                }
                 e.preventDefault();
             }
-            if (e.key === 'Escape' && this.hasSelection) {
-                this.clear();
-                if (selectAllCheckbox) selectAllCheckbox.checked = false;
+            if (e.key === 'Escape') {
+                if (this._activeComponent && this._activeComponent._selected.size > 0) {
+                    this._activeComponent.clearSelection();
+                } else if (this.hasSelection) {
+                    this.clear();
+                    if (selectAllCheckbox) selectAllCheckbox.checked = false;
+                }
             }
             if (e.key === 'Delete' && this.hasSelection) this.batchDelete();
         });

@@ -828,59 +828,10 @@ const ui = {
         };
 
         /** @param {FileItem} file */
-        const openFile = async (file) => {
-            if (!file) return;
-            if (recent) {
-                document.dispatchEvent(new CustomEvent('file-accessed', { detail: { file } }));
-            }
-            // WOPI editor intercept: open Office documents in the WOPI editor
-            // But NOT image files - those should be previewed in the inline viewer
-            const ext = (file.name || '').split('.').pop().toLowerCase();
-            const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'bmp', 'ico', 'heic', 'heif', 'avif', 'tiff'];
-            const isImage = file.mime_type?.startsWith('image/') || imageExts.includes(ext);
-            try {
-                if (!isImage && wopiEditor && (await wopiEditor.canEdit(file.name))) {
-                    await wopiEditor.openInModal(file.id, file.name, 'edit');
-                    return;
-                }
-            } catch (e) {
-                console.warn(`WOPI Editor failed, falling bck to classic view `, e);
-            }
-
-            if (this.isViewableFile(file) || isImage) {
-                if (inlineViewer) {
-                    inlineViewer.openFile(file);
-                    // update history
-                    app.viewFile = file.id;
-                    updateHistory(false);
-                } else {
-                    fileOps.downloadFile(file.id, file.name);
-                }
-            } else {
-                fileOps.downloadFile(file.id, file.name);
-            }
-        };
+        const openFile = async (file) => this._openFile(file);
 
         /** @param {HTMLElement} card */
-        const navigateFolder = (card) => {
-            const folderId = card.dataset.folderId;
-            const folderName = card.dataset.folderName;
-            if (app.currentSection === 'favorites' || app.currentSection === 'recent') {
-                switchToFilesSection();
-                app.currentPath = folderId;
-                loadFiles();
-                return;
-            }
-            if (app.currentSection === 'sharedwithme') {
-                // Activate Files UI (nav, breadcrumb, actions bar) without
-                // resetting the path — the shared folder becomes the entry point.
-                activateFilesUI();
-            }
-            app.breadcrumbPath.push({ id: folderId, name: folderName });
-            app.currentPath = folderId;
-            this.updateBreadcrumb();
-            loadFiles();
-        };
+        const navigateFolder = (card) => this._navigateToFolder(card.dataset.folderId, card.dataset.folderName);
 
         /**
          * @param {HTMLElement} card
@@ -906,6 +857,8 @@ const ui = {
 
         // ──  click (open / navigate; select only via checkbox) ──
         filesList.addEventListener('click', (e) => {
+            // ResourceListComponent manages its own delegation when mounted here
+            if (filesList.dataset.managedBy) return;
             const card = /** @type {HTMLDivElement | null} */ (/** @type {HTMLElement} */ (e.target).closest('.file-item'));
             if (!card) return;
 
@@ -963,6 +916,7 @@ const ui = {
         // ── shared events ──────────────────────
 
         filesList.addEventListener('contextmenu', (e) => {
+            if (filesList.dataset.managedBy) return;
             const card = /** @type {HTMLDivElement | null} */ (/** @type {HTMLElement} */ (e.target).closest('.file-item'));
             if (!card) return;
             e.preventDefault();
@@ -1134,6 +1088,124 @@ const ui = {
             const action = e.dataTransfer.dropEffect;
             await this._dropToFolder(action, targetFolderId, e.dataTransfer);
         });
+    },
+
+    /* ================================================================
+     *  Item open / navigate — shared by ui.js delegation and component
+     *  callbacks so the same logic fires regardless of which view renders
+     *  the items.
+     * ================================================================ */
+
+    /**
+     * Open a file: dispatch a recent-access event, try WOPI, fall back to
+     * inline viewer or download.
+     * @param {FileItem} file
+     */
+    async _openFile(file) {
+        if (!file) return;
+        if (recent) {
+            document.dispatchEvent(new CustomEvent('file-accessed', { detail: { file } }));
+        }
+        // WOPI editor intercept: open Office documents in the WOPI editor
+        // But NOT image files - those should be previewed in the inline viewer
+        const ext = (file.name || '').split('.').pop().toLowerCase();
+        const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'bmp', 'ico', 'heic', 'heif', 'avif', 'tiff'];
+        const isImage = file.mime_type?.startsWith('image/') || imageExts.includes(ext);
+        try {
+            if (!isImage && wopiEditor && (await wopiEditor.canEdit(file.name))) {
+                await wopiEditor.openInModal(file.id, file.name, 'edit');
+                return;
+            }
+        } catch (e) {
+            console.warn(`WOPI Editor failed, falling back to classic view`, e);
+        }
+        if (this.isViewableFile(file) || isImage) {
+            if (inlineViewer) {
+                inlineViewer.openFile(file);
+                app.viewFile = file.id;
+                updateHistory(false);
+            } else {
+                fileOps.downloadFile(file.id, file.name);
+            }
+        } else {
+            fileOps.downloadFile(file.id, file.name);
+        }
+    },
+
+    /**
+     * Navigate into a folder, handling section transitions (SharedWithMe,
+     * Favorites, Recent → Files).
+     * @param {string|undefined} folderId
+     * @param {string|undefined} folderName
+     */
+    _navigateToFolder(folderId, folderName) {
+        if (!folderId) return;
+        if (app.currentSection === 'favorites' || app.currentSection === 'recent') {
+            switchToFilesSection();
+            app.currentPath = folderId;
+            loadFiles();
+            return;
+        }
+        if (app.currentSection === 'sharedwithme') {
+            // Activate Files UI (nav, breadcrumb, actions bar) without
+            // resetting the path — the shared folder becomes the entry point.
+            activateFilesUI();
+        }
+        app.breadcrumbPath.push({ id: folderId, name: folderName || '' });
+        app.currentPath = folderId;
+        this.updateBreadcrumb();
+        loadFiles();
+    },
+
+    /**
+     * Open a file or navigate into a folder.
+     * Used as the `onOpen` callback for `ResourceListComponent`.
+     * @param {FileItem|FolderItem} item
+     */
+    async openItem(item) {
+        if ('mime_type' in item) {
+            await this._openFile(/** @type {FileItem} */ (item));
+        } else {
+            const folder = /** @type {FolderItem} */ (item);
+            this._navigateToFolder(folder.id, folder.name);
+        }
+    },
+
+    /**
+     * Set the context-menu target and show the appropriate menu.
+     * Used as the `onContextMenu` callback for `ResourceListComponent`.
+     * @param {FileItem|FolderItem} item
+     * @param {MouseEvent}          e
+     */
+    showContextMenuForItem(item, e) {
+        const trigger = /** @type {HTMLElement | null} */ (/** @type {HTMLElement} */ (e.target).closest('.file-actions'));
+        if ('mime_type' in item) {
+            app.contextMenuTargetFile = /** @type {FileItem} */ (item);
+            if (trigger) {
+                showContextMenuAtElement(trigger, 'file-context-menu');
+            } else {
+                const menu = document.getElementById('file-context-menu');
+                if (menu) {
+                    menu.style.left = `${e.pageX}px`;
+                    menu.style.top = `${e.pageY}px`;
+                    contextMenus.sync();
+                    menu.classList.remove('hidden');
+                }
+            }
+        } else {
+            app.contextMenuTargetFolder = /** @type {FolderItem} */ (item);
+            if (trigger) {
+                showContextMenuAtElement(trigger, 'folder-context-menu');
+            } else {
+                const menu = document.getElementById('folder-context-menu');
+                if (menu) {
+                    menu.style.left = `${e.pageX}px`;
+                    menu.style.top = `${e.pageY}px`;
+                    contextMenus.sync();
+                    menu.classList.remove('hidden');
+                }
+            }
+        }
     },
 
     /* ================================================================
@@ -1375,6 +1447,8 @@ const ui = {
         const filesContainerError = document.getElementById('files-container-error');
 
         if (!filesList) return;
+        // Let ui.js delegation handle this container again
+        delete filesList.dataset.managedBy;
 
         filesList.innerHTML = `
             <div class="list-header">

@@ -115,6 +115,9 @@ export class ResourceListComponent {
         this._items.clear();
         this._lastClickedIndex = -1;
 
+        // Prevent ui.js global delegation from firing on this container
+        this._container.dataset.managedBy = 'resource-list';
+
         this._appendItems(folders, files, groupFn);
         this._wireSelectAll();
     }
@@ -138,6 +141,8 @@ export class ResourceListComponent {
         this._selected.clear();
         this._items.clear();
         this._lastClickedIndex = -1;
+        // Hand delegation back to ui.js
+        delete this._container.dataset.managedBy;
     }
 
     /**

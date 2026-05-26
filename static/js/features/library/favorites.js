@@ -9,6 +9,7 @@
 import { ui } from '../../app/ui.js';
 import { getCsrfHeaders } from '../../core/csrf.js';
 import { i18n } from '../../core/i18n.js';
+import { ResourceListComponent } from '../../components/resourceList.js';
 import { batchToolbar } from '../files/batchToolbar.js';
 import * as pathTooltip from '../pathTooltip.js';
 
@@ -20,6 +21,9 @@ const favorites = {
 
     /** Whether the initial fetch from the server has completed */
     _ready: false,
+
+    /** @type {ResourceListComponent|null} */
+    _component: null,
 
     // ───────────────────── helpers ─────────────────────
 
@@ -105,7 +109,7 @@ const favorites = {
      * @param {string} id
      * @param {string} name
      * @param {string} type
-     * @param {string} _parentId
+     * @param {string | null} _parentId
      */
     async addToFavorites(id, name, type, _parentId) {
         try {
@@ -178,11 +182,8 @@ const favorites = {
         try {
             await this._fetchFromServer();
 
-            ui.resetFilesList(); // ensure also list visible & error hidden
-            // wire buttons & select-all-checkbox as list header has changed in ui.resetFilesList()
-            // FIXME: this case is not easy to understand, should apply better implementation
+            ui.resetFilesList();
             batchToolbar.init();
-
             ui.updateBreadcrumb();
 
             if (this._cache.size === 0) {
@@ -201,11 +202,10 @@ const favorites = {
             const files = [];
 
             for (const item of this._cache.values()) {
-                // owner_id comes from the backend JOIN (actual file/folder owner, not the favoriter)
+                // owner_id comes from the backend JOIN (actual file/folder owner)
                 if (item.item_type === 'folder') {
                     folders.push(
-                        // FIXME: better to grab the real values
-                        /** @type {FolderItem} */ {
+                        /** @type {FolderItem} */ ({
                             id: item.item_id,
                             name: item.item_name || item.item_id,
                             parent_id: item.parent_id || '',
@@ -217,12 +217,11 @@ const favorites = {
                             icon_special_class: item.icon_special_class,
                             owner_id: item.owner_id ?? '',
                             is_root: false
-                        }
+                        })
                     );
                 } else {
                     files.push(
-                        // FIXME: better to grab the real values
-                        /** @type {FileItem} */ {
+                        /** @type {FileItem} */ ({
                             id: item.item_id,
                             name: item.item_name || item.item_id,
                             folder_id: item.parent_id || '',
@@ -237,15 +236,60 @@ const favorites = {
                             owner_id: item.owner_id ?? '',
                             created_at: item.created_at,
                             sort_date: item.created_at
-                        }
+                        })
                     );
                 }
             }
-            if (folders.length) ui.renderFolders(folders);
-            if (files.length) ui.renderFiles(files);
 
             const filesList = document.getElementById('files-list');
-            if (filesList) pathTooltip.init(filesList);
+            if (filesList) {
+                if (!this._component) {
+                    this._component = new ResourceListComponent(
+                        /** @type {HTMLElement} */ (filesList),
+                        {
+                            selectable: true,
+                            showFavorite: true,
+                            showOwner: true,
+                            showShareBadge: true,
+                            draggable: false,
+                            showContextMenu: true,
+                            itemModifierClass: 'favorite-item',
+                            isFavorite: (id, type) => this.isFavorite(id, type),
+                            onOpen: (item) => ui.openItem(item),
+                            onFavoriteToggle: async (item) => {
+                                const isFile = 'mime_type' in item;
+                                const type = isFile ? 'file' : 'folder';
+                                if (this.isFavorite(item.id, type)) {
+                                    await this.removeFromFavorites(item.id, type);
+                                    this._component?.setFavoriteVisualState(item.id, type, false);
+                                } else {
+                                    await this.addToFavorites(item.id, item.name, type, null);
+                                    this._component?.setFavoriteVisualState(item.id, type, true);
+                                }
+                            },
+                            onContextMenu: (item, e) => ui.showContextMenuForItem(item, e),
+                            onSelectionChange: (selectedItems) => {
+                                batchToolbar._selected.clear();
+                                for (const sel of selectedItems) {
+                                    const isFile = 'mime_type' in sel;
+                                    batchToolbar._selected.set(sel.id, {
+                                        id: sel.id,
+                                        name: sel.name,
+                                        type: isFile ? 'file' : 'folder',
+                                        parentId: isFile
+                                            ? (/** @type {FileItem} */ (sel)).folder_id || ''
+                                            : (/** @type {FolderItem} */ (sel)).parent_id || ''
+                                    });
+                                }
+                                batchToolbar._syncUI();
+                            }
+                        }
+                    );
+                }
+                batchToolbar.setActiveComponent(this._component);
+                this._component.render(folders, files);
+                pathTooltip.init(filesList);
+            }
 
             await ui.resolveOwnerCells();
         } catch (error) {

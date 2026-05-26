@@ -5,18 +5,16 @@
  * current user access to, using the cursor-paginated
  * `GET /api/grants/incoming/resources` endpoint.
  *
- * Reuses the existing `#files-list` container and `ui.renderFolders` /
- * `ui.renderFiles` so the grid ↔ list toggle and all card components work
- * out of the box. A "Load more" button is injected below the files container
- * for cursor-based pagination.
- *
- * NOTE: the grid/list container will be extracted into a reusable component
- * in a future refactor — this view is intentionally kept thin.
+ * Uses `ResourceListComponent` so the grid ↔ list toggle and all card
+ * components work out of the box. A "Load more" button is injected below
+ * the files container for cursor-based pagination.
  */
 
 import { ui } from '../../app/ui.js';
 import { i18n } from '../../core/i18n.js';
+import { ResourceListComponent } from '../../components/resourceList.js';
 import { batchToolbar } from '../../features/files/batchToolbar.js';
+import { favorites } from '../../features/library/favorites.js';
 import { ownerTooltip } from '../../features/ownerTooltip.js';
 import { grants } from '../../model/grants.js';
 import { systemUsers } from '../../model/systemUsers.js';
@@ -34,6 +32,9 @@ const sharedWithMeView = {
 
     _loading: false,
 
+    /** @type {ResourceListComponent|null} */
+    _component: null,
+
     // ── Public API ────────────────────────────────────────────────────────────
 
     /**
@@ -50,10 +51,59 @@ const sharedWithMeView = {
         // by the time the user hovers over an item.
         systemUsers.prefetch();
 
-        // Standard files-view setup: clear list, show container, init multiselect
+        // Standard files-view setup: clear list, show container
         ui.resetFilesList();
         batchToolbar.init();
         ui.updateBreadcrumb();
+
+        // Create (or re-use) the component bound to #files-list.
+        const filesList = document.getElementById('files-list');
+        if (filesList) {
+            if (!this._component) {
+                this._component = new ResourceListComponent(
+                    /** @type {HTMLElement} */ (filesList),
+                    {
+                        selectable: true,
+                        showFavorite: true,
+                        showOwner: true,
+                        showShareBadge: false,
+                        draggable: false,
+                        showContextMenu: true,
+                        isFavorite: (id, type) => favorites.isFavorite(id, type),
+                        isShared: () => false,
+                        onOpen: (item) => ui.openItem(item),
+                        onFavoriteToggle: async (item) => {
+                            const isFile = 'mime_type' in item;
+                            const type = isFile ? 'file' : 'folder';
+                            if (favorites.isFavorite(item.id, type)) {
+                                await favorites.removeFromFavorites(item.id, type);
+                                this._component?.setFavoriteVisualState(item.id, type, false);
+                            } else {
+                                await favorites.addToFavorites(item.id, item.name, type, null);
+                                this._component?.setFavoriteVisualState(item.id, type, true);
+                            }
+                        },
+                        onContextMenu: (item, e) => ui.showContextMenuForItem(item, e),
+                        onSelectionChange: (selectedItems) => {
+                            batchToolbar._selected.clear();
+                            for (const sel of selectedItems) {
+                                const isFile = 'mime_type' in sel;
+                                batchToolbar._selected.set(sel.id, {
+                                    id: sel.id,
+                                    name: sel.name,
+                                    type: isFile ? 'file' : 'folder',
+                                    parentId: isFile
+                                        ? (/** @type {FileItem} */ (sel)).folder_id || ''
+                                        : (/** @type {FolderItem} */ (sel)).parent_id || ''
+                                });
+                            }
+                            batchToolbar._syncUI();
+                        }
+                    }
+                );
+            }
+            batchToolbar.setActiveComponent(this._component);
+        }
 
         await this._loadPage();
     },
@@ -66,6 +116,8 @@ const sharedWithMeView = {
         const w = document.getElementById(LOAD_MORE_ID);
         if (w) w.classList.add('hidden');
 
+        batchToolbar.setActiveComponent(null);
+
         const filesList = document.getElementById('files-list');
         if (filesList) ownerTooltip.destroy(filesList);
     },
@@ -74,12 +126,16 @@ const sharedWithMeView = {
 
     /**
      * Fetch one page, map items → FileItem / FolderItem, render them, then
-     * stamp `data-owner-id` and wire the owner tooltip.
+     * wire the owner tooltip.
      * @returns {Promise<void>}
      */
     async _loadPage() {
         if (this._loading) return;
         this._loading = true;
+
+        // Remember whether this is a fresh first-page load (cursor was null on
+        // entry) so we know whether to replace or append items.
+        const isFirstPage = this._nextCursor === null;
 
         try {
             const data = await grants.fetchSharedWithMe({
@@ -90,7 +146,7 @@ const sharedWithMeView = {
 
             this._nextCursor = data.next_cursor ?? null;
 
-            if (data.items.length === 0 && !this._nextCursor) {
+            if (data.items.length === 0 && isFirstPage) {
                 // First page came back empty
                 ui.showError(`
                     <i class="fas fa-share-alt empty-state-icon"></i>
@@ -101,16 +157,17 @@ const sharedWithMeView = {
                 return;
             }
 
-            const { folders, files, ownerMap } = this._mapItems(data.items);
-            if (folders.length) ui.renderFolders(folders);
-            if (files.length) ui.renderFiles(files);
+            const { folders, files } = this._mapItems(data.items);
 
-            // Stamp data-owner-id on the freshly-rendered cards and attach tooltips.
-            const filesList = document.getElementById('files-list');
-            if (filesList) {
-                this._stampOwnerIds(filesList, ownerMap);
-                ownerTooltip.init(filesList);
+            if (isFirstPage) {
+                this._component?.render(folders, files);
+            } else {
+                this._component?.append(folders, files);
             }
+
+            // Wire owner tooltips after items are in the DOM
+            const filesList = document.getElementById('files-list');
+            if (filesList) ownerTooltip.init(filesList);
 
             // Fill the Owner column cells (idempotent: skips already-resolved rows).
             await ui.resolveOwnerCells();
@@ -128,16 +185,12 @@ const sharedWithMeView = {
     },
 
     /**
-     * Map `SharedWithMeItem[]` to separate arrays for rendering plus an
-     * `ownerMap` (itemId → grantedBy userId) used to stamp `data-owner-id`
-     * after the cards are in the DOM.
-     *
-     * The backend already includes all display fields (`icon_class`,
-     * `icon_special_class`, `category`, `size_formatted`) inside the nested
-     * `file` / `folder` objects, so no client-side enrichment is needed.
+     * Map `SharedWithMeItem[]` to separate arrays for rendering.
+     * Sets `owner_id` to `item.granted_by` so the component stamps
+     * `data-owner-id` with the granter's user ID automatically.
      *
      * @param {SharedWithMeItem[]} items
-     * @returns {{ folders: FolderItem[], files: FileItem[], ownerMap: Map<string,string> }}
+     * @returns {{ folders: FolderItem[], files: FileItem[] }}
      */
     _mapItems(items) {
         /** @type {FolderItem[]} */
@@ -145,9 +198,6 @@ const sharedWithMeView = {
 
         /** @type {FileItem[]} */
         const files = [];
-
-        /** @type {Map<string, string>} itemId → grantedBy userId */
-        const ownerMap = new Map();
 
         for (const item of items) {
             if (item.resource_type === 'folder') {
@@ -158,7 +208,9 @@ const sharedWithMeView = {
                         name: f.name,
                         path: f.path ?? '',
                         parent_id: f.parent_id ?? '',
-                        owner_id: f.owner_id ?? '',
+                        // Use granted_by as owner_id so the component populates
+                        // data-owner-id with the sharing user's ID.
+                        owner_id: item.granted_by,
                         is_root: f.is_root ?? false,
                         created_at: f.created_at,
                         modified_at: f.modified_at,
@@ -167,7 +219,6 @@ const sharedWithMeView = {
                         category: 'folder'
                     })
                 );
-                ownerMap.set(f.id, item.granted_by);
             } else if (item.resource_type === 'file') {
                 const f = /** @type {FileItem} */ (item.resource);
                 files.push(
@@ -176,7 +227,9 @@ const sharedWithMeView = {
                         name: f.name,
                         path: f.path ?? '',
                         folder_id: f.folder_id ?? '',
-                        owner_id: f.owner_id ?? '',
+                        // Use granted_by as owner_id so the component populates
+                        // data-owner-id with the sharing user's ID.
+                        owner_id: item.granted_by,
                         mime_type: f.mime_type,
                         size: f.size,
                         size_formatted: f.size_formatted,
@@ -188,27 +241,10 @@ const sharedWithMeView = {
                         category: f.category
                     })
                 );
-                ownerMap.set(f.id, item.granted_by);
             }
         }
 
-        return { folders, files, ownerMap };
-    },
-
-    /**
-     * Walk `ownerMap` and set `data-owner-id` on matching `.file-item` cards
-     * inside `container`.  Must be called after `renderFolders`/`renderFiles`.
-     *
-     * @param {HTMLElement}        container
-     * @param {Map<string,string>} ownerMap  itemId → grantedBy userId
-     */
-    _stampOwnerIds(container, ownerMap) {
-        for (const [itemId, ownerId] of ownerMap) {
-            const el = container.querySelector(`[data-folder-id="${itemId}"], [data-file-id="${itemId}"]`);
-            if (el instanceof HTMLElement) {
-                el.dataset.ownerId = ownerId;
-            }
-        }
+        return { folders, files };
     },
 
     // ── "Load more" button ────────────────────────────────────────────────────
