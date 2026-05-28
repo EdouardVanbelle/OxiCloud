@@ -187,8 +187,6 @@ cargo clippy --all-features --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-Contributor guide: [CONTRIBUTING.md](CONTRIBUTING.md)
-
 ## Contributing
 
 Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations.
