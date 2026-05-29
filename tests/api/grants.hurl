@@ -391,7 +391,7 @@ Authorization: Bearer {{adam_token}}
 
 HTTP 404
 
-GET {{base_url}}/api/folders/{{perm_folder_id}}/contents/paginated
+GET {{base_url}}/api/folders/{{perm_folder_id}}/resources
 Authorization: Bearer {{adam_token}}
 
 HTTP 404
@@ -514,7 +514,7 @@ HTTP 200
 jsonpath "$" count == 1
 jsonpath "$[0].id" == "{{perm_child_id}}"
 
-GET {{base_url}}/api/folders/{{perm_folder_id}}/contents/paginated
+GET {{base_url}}/api/folders/{{perm_folder_id}}/resources
 Authorization: Bearer {{adam_token}}
 
 HTTP 200

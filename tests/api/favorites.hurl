@@ -30,13 +30,13 @@ jsonpath "$.access_token" isString
 # ─────────────────────────────────────────────────────────────
 # Step 2 – No favorites yet
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/favorites
+GET {{base_url}}/api/favorites/resources
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" isCollection
-jsonpath "$" count == 0
+jsonpath "$.items" isCollection
+jsonpath "$.items" count == 0
 
 
 # ─────────────────────────────────────────────────────────────
@@ -85,15 +85,15 @@ HTTP 201
 # ─────────────────────────────────────────────────────────────
 # Step 5 – Favorites contains only hello-renamed.txt
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/favorites
+GET {{base_url}}/api/favorites/resources
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" count == 1
-jsonpath "$[0].item_id" == {{file_id}}
-jsonpath "$[0].item_type" == "file"
-jsonpath "$[0].item_name" == "hello-renamed.txt"
+jsonpath "$.items" count == 1
+jsonpath "$.items[0].resource.id" == {{file_id}}
+jsonpath "$.items[0].resource_type" == "file"
+jsonpath "$.items[0].resource.name" == "hello-renamed.txt"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -108,14 +108,14 @@ HTTP 201
 # ─────────────────────────────────────────────────────────────
 # Step 7 – Favorites contains both items (order-independent)
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/favorites
+GET {{base_url}}/api/favorites/resources
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" count == 2
-jsonpath "$[*].item_id" contains {{file_id}}
-jsonpath "$[*].item_id" contains {{test1_id}}
+jsonpath "$.items" count == 2
+jsonpath "$.items[*].resource.id" contains {{file_id}}
+jsonpath "$.items[*].resource.id" contains {{test1_id}}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -130,15 +130,15 @@ HTTP 200
 # ─────────────────────────────────────────────────────────────
 # Step 9 – Favorites contains only test1 folder
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/favorites
+GET {{base_url}}/api/favorites/resources
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" count == 1
-jsonpath "$[0].item_id" == {{test1_id}}
-jsonpath "$[0].item_type" == "folder"
-jsonpath "$[0].item_name" == "test1"
+jsonpath "$.items" count == 1
+jsonpath "$.items[0].resource.id" == {{test1_id}}
+jsonpath "$.items[0].resource_type" == "folder"
+jsonpath "$.items[0].resource.name" == "test1"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -153,9 +153,9 @@ HTTP 200
 # ─────────────────────────────────────────────────────────────
 # Step 11 – Favorites is empty again
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/favorites
+GET {{base_url}}/api/favorites/resources
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" count == 0
+jsonpath "$.items" count == 0

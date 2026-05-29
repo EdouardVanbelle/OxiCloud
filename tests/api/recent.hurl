@@ -71,14 +71,14 @@ HTTP 200
 # ─────────────────────────────────────────────────────────────
 # Step 4 – Recent list contains hello-renamed.txt
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/recent
+GET {{base_url}}/api/recent/resources
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" count == 1
-jsonpath "$[0].item_type" == "file"
-jsonpath "$[0].item_name" == "hello-renamed.txt"
+jsonpath "$.items" count == 1
+jsonpath "$.items[0].resource_type" == "file"
+jsonpath "$.items[0].resource.name" == "hello-renamed.txt"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -93,10 +93,10 @@ HTTP 200
 # ─────────────────────────────────────────────────────────────
 # Step 6 – Recent list is empty after clear
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/recent
+GET {{base_url}}/api/recent/resources
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" isCollection
-jsonpath "$" count == 0
+jsonpath "$.items" isCollection
+jsonpath "$.items" count == 0
