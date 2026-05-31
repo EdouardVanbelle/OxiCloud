@@ -570,7 +570,11 @@ const shareModal = {
      */
     _renderMemberGroupsInto(container) {
         container.replaceChildren();
-        const groups = /** @type {ShareRoleEnum[]} */ (['viewer', 'editor', 'admin']);
+        // Highest-privilege role first ("Can manage" → "Can edit" → "Can view"),
+        // matching the UX contract and the kebab-menu / role-select dropdown
+        // order. Renaming the labels from "Manager"/"Editor"/"Viewer" to
+        // "Can manage"/"Can edit"/"Can view" left this iteration order stale.
+        const groups = /** @type {ShareRoleEnum[]} */ (['admin', 'editor', 'viewer']);
         let memberIndex = 0;
 
         for (const role of groups) {
