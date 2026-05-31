@@ -380,3 +380,153 @@ fn map_repo_err(e: SubjectGroupRepositoryError) -> DomainError {
     };
     DomainError::new(kind, "SubjectGroup", msg)
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Integration tests — service layer behaviours that need a live DB.
+//
+// How to run:
+//   bash tests/common/spawn-db.sh
+//   RUSTFLAGS='--cfg integration_tests' cargo test \
+//       -p oxicloud --lib subject_group_service::integration_tests
+// ────────────────────────────────────────────────────────────────────────────
+#[cfg(integration_tests)]
+#[allow(dead_code)]
+mod integration_tests {
+    use super::*;
+    // INTERNAL_GROUP_ID is already in scope via `super::*` (re-exported
+    // through the file's top-level `use crate::domain::entities::subject_group::…`).
+    use sqlx::Row;
+    use sqlx::postgres::PgPoolOptions;
+
+    const DEFAULT_TEST_DB: &str =
+        "postgres://oxicloud_test:oxicloud_test@localhost:5433/oxicloud_test";
+
+    async fn make_service() -> SubjectGroupService {
+        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_TEST_DB.to_string());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to test DB — run tests/common/spawn-db.sh first");
+        let pool = Arc::new(pool);
+        let repo = Arc::new(SubjectGroupPgRepository::new(pool.clone()));
+        SubjectGroupService::new(repo, pool)
+    }
+
+    async fn first_admin(pool: &sqlx::PgPool) -> Uuid {
+        let row = sqlx::query("SELECT id FROM auth.users LIMIT 1")
+            .fetch_optional(pool)
+            .await
+            .expect("query")
+            .expect("seed an admin user before running these tests");
+        row.get::<Uuid, _>("id")
+    }
+
+    fn rand_name(test: &str) -> String {
+        format!("rust-test-svc-{}-{}", test, &Uuid::new_v4().to_string()[..8])
+    }
+
+    // ── 9. Virtual group cannot be deleted ─────────────────────────────────
+    #[tokio::test]
+    async fn test_virtual_group_cannot_be_deleted() {
+        let svc = make_service().await;
+        let admin = first_admin(&svc.pool).await;
+
+        let err = svc
+            .delete(INTERNAL_GROUP_ID, admin)
+            .await
+            .expect_err("delete on Internal must be rejected");
+        assert_eq!(err.kind, ErrorKind::AccessDenied);
+    }
+
+    #[tokio::test]
+    async fn test_virtual_group_cannot_be_renamed() {
+        let svc = make_service().await;
+        let admin = first_admin(&svc.pool).await;
+
+        let err = svc
+            .rename(INTERNAL_GROUP_ID, "renamed", admin)
+            .await
+            .expect_err("rename on Internal must be rejected");
+        assert_eq!(err.kind, ErrorKind::AccessDenied);
+    }
+
+    #[tokio::test]
+    async fn test_virtual_group_cannot_add_member() {
+        let svc = make_service().await;
+        let admin = first_admin(&svc.pool).await;
+
+        let err = svc
+            .add_member(INTERNAL_GROUP_ID, GroupMember::User(admin), admin)
+            .await
+            .expect_err("add_member on Internal must be rejected");
+        assert_eq!(err.kind, ErrorKind::AccessDenied);
+    }
+
+    // ── 13. Grants are revoked atomically when a group is deleted ──────────
+    //
+    // The plan said "FK CASCADE", but there's no FK between `access_grants`
+    // and `subject_groups` (different schemas; the cascade is handled by the
+    // service's transactional DELETE). This test pins that behaviour.
+    #[tokio::test]
+    async fn test_grants_revoked_when_group_deleted() {
+        let svc = make_service().await;
+        let admin = first_admin(&svc.pool).await;
+
+        // Create a group and a fake grant referencing it.
+        let group = svc
+            .create(&rand_name("cleanup"), None, admin)
+            .await
+            .unwrap();
+        let resource_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO storage.access_grants \
+             (subject_type, subject_id, resource_type, resource_id, \
+              permission, granted_by) \
+             VALUES ('group', $1, 'folder', $2, 'read', $3)",
+        )
+        .bind(group.id)
+        .bind(resource_id)
+        .bind(admin)
+        .execute(svc.pool.as_ref())
+        .await
+        .expect("insert grant row");
+
+        // Sanity: the grant exists.
+        let pre: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM storage.access_grants \
+              WHERE subject_type = 'group' AND subject_id = $1",
+        )
+        .bind(group.id)
+        .fetch_one(svc.pool.as_ref())
+        .await
+        .unwrap();
+        assert_eq!(pre, 1);
+
+        // Delete the group — the same transaction nukes the grant.
+        svc.delete(group.id, admin).await.unwrap();
+
+        let post: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM storage.access_grants \
+              WHERE subject_type = 'group' AND subject_id = $1",
+        )
+        .bind(group.id)
+        .fetch_one(svc.pool.as_ref())
+        .await
+        .unwrap();
+        assert_eq!(post, 0, "grants must be revoked atomically with the group");
+    }
+
+    // Bonus: service-layer name validation runs before the DB round-trip.
+    #[tokio::test]
+    async fn test_service_rejects_invalid_name_locally() {
+        let svc = make_service().await;
+        let admin = first_admin(&svc.pool).await;
+
+        let err = svc
+            .create("name with space", None, admin)
+            .await
+            .expect_err("space must be rejected");
+        assert_eq!(err.kind, ErrorKind::InvalidInput);
+    }
+}

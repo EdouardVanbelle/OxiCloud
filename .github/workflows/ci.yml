@@ -125,7 +125,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Initialize test database
-        run: psql -h localhost -U postgres -d oxicloud_test -f migrations/20260307000000_initial_schema.sql
+        # Apply every migration in lexical order so the schema matches what
+        # the running server would set up (the app applies sqlx migrations on
+        # startup, but `cargo test` runs without going through main()).
+        run: |
+          set -e
+          for f in migrations/*.sql; do
+            echo "Applying $f"
+            psql -h localhost -U postgres -d oxicloud_test -v ON_ERROR_STOP=1 -f "$f"
+          done
         env:
           PGPASSWORD: postgres
 
@@ -133,6 +141,26 @@ jobs:
         run: cargo test --all-features --workspace
         env:
           DATABASE_URL: "postgres://postgres:postgres@localhost/oxicloud_test"
+
+      # ── Integration tests (PG-backed, gated on `--cfg integration_tests`) ──
+      # These tests connect to the live postgres service above to exercise
+      # CITEXT, XOR, recursive-CTE cycle/depth checks, and transactional
+      # grant-cleanup. They depend on at least one row in `auth.users` so
+      # the `first_admin()` helper resolves to a real UUID.
+      - name: Seed admin row for integration tests
+        run: |
+          psql -h localhost -U postgres -d oxicloud_test -v ON_ERROR_STOP=1 -c "
+            INSERT INTO auth.users (username, email, password_hash, role)
+            VALUES ('ci-admin', 'ci-admin@example.test', 'placeholder-not-validated', 'admin')
+            ON CONFLICT (username) DO NOTHING;"
+        env:
+          PGPASSWORD: postgres
+
+      - name: Run integration tests
+        run: cargo test --all-features --workspace --tests
+        env:
+          DATABASE_URL: "postgres://postgres:postgres@localhost/oxicloud_test"
+          RUSTFLAGS: "-Dwarnings --cfg integration_tests"
 
   rust-audit:
     name: Security Audit

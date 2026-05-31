@@ -574,3 +574,367 @@ impl SubjectGroupRepository for SubjectGroupPgRepository {
         Ok(rows.iter().map(|r| r.get::<Uuid, _>("group_id")).collect())
     }
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Integration tests — DB-dependent. Gated on `--cfg integration_tests` so
+// they don't break the default `cargo test` run.
+//
+// How to run:
+//   bash tests/common/spawn-db.sh                          # one-time
+//   sqlx migrate run --database-url $TEST_DB               # if needed
+//   RUSTFLAGS='--cfg integration_tests' cargo test \
+//       -p oxicloud --lib subject_group_pg_repository::integration_tests
+//
+// `TEST_DB` defaults to `postgres://oxicloud_test:oxicloud_test@localhost:5433/
+// oxicloud_test` — the same DB used by `tests/api/run.sh`.
+//
+// Each test uses uniquely-suffixed group names (`rust-test-<uuid8>`) so
+// concurrent runs and re-runs don't collide on the CITEXT unique constraint.
+// Cleanup is by-id at the end of each test.
+// ────────────────────────────────────────────────────────────────────────────
+#[cfg(integration_tests)]
+#[allow(dead_code)]
+mod integration_tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    const DEFAULT_TEST_DB: &str =
+        "postgres://oxicloud_test:oxicloud_test@localhost:5433/oxicloud_test";
+
+    async fn test_pool() -> Arc<PgPool> {
+        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_TEST_DB.to_string());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to test DB — run tests/common/spawn-db.sh first");
+        Arc::new(pool)
+    }
+
+    async fn make_repo() -> SubjectGroupPgRepository {
+        SubjectGroupPgRepository::new(test_pool().await)
+    }
+
+    /// Find any existing admin or create a throw-away one, so memberships'
+    /// `added_by` FK is satisfied. Returns the admin's UUID.
+    async fn ensure_admin(pool: &PgPool) -> Uuid {
+        if let Ok(Some(row)) = sqlx::query("SELECT id FROM auth.users LIMIT 1")
+            .fetch_optional(pool)
+            .await
+        {
+            return row.get::<Uuid, _>("id");
+        }
+        // Fallback: build a minimal user. Schema permitting — if the test DB
+        // is fresh, the operator should have run the server once to seed.
+        panic!(
+            "no rows in auth.users — start the server against the test DB \
+             once (cargo run with DATABASE_URL=…) to seed the schema and \
+             create the initial admin, then re-run."
+        );
+    }
+
+    /// Unique name scoped to a single test invocation.
+    fn rand_name(test: &str) -> String {
+        let id = Uuid::new_v4();
+        format!("rust-test-{}-{}", test, &id.to_string()[..8])
+    }
+
+    /// Idempotent cleanup of a group by id (cascades to members via FK).
+    async fn drop_group(pool: &PgPool, id: Uuid) {
+        let _ = sqlx::query("DELETE FROM auth.subject_groups WHERE id = $1")
+            .bind(id)
+            .execute(pool)
+            .await;
+    }
+
+    // ── 1. CITEXT unique enforcement ────────────────────────────────────────
+    #[tokio::test]
+    async fn test_group_name_unique_case_insensitive() {
+        let repo = make_repo().await;
+        let name_lower = rand_name("citext-lower");
+        let name_upper = name_lower.to_uppercase();
+
+        let g1 = SubjectGroup::new(&name_lower, None).expect("valid name");
+        let created = repo.create(&g1).await.expect("first create succeeds");
+
+        // Second create with same name in different case must collide.
+        let g2 = SubjectGroup::new(&name_upper, None).expect("valid name shape");
+        let err = repo
+            .create(&g2)
+            .await
+            .expect_err("CITEXT must collide on different case");
+        assert!(
+            matches!(err, SubjectGroupRepositoryError::NameAlreadyExists(_)),
+            "expected NameAlreadyExists, got {:?}",
+            err
+        );
+
+        drop_group(repo.pool.as_ref(), created.id).await;
+    }
+
+    // ── 2. XOR constraint on members table ──────────────────────────────────
+    #[tokio::test]
+    async fn test_member_xor_check_at_db_level() {
+        let repo = make_repo().await;
+        let admin = ensure_admin(repo.pool.as_ref()).await;
+
+        let g = SubjectGroup::new(&rand_name("xor"), None).unwrap();
+        let group = repo.create(&g).await.unwrap();
+        let some_uuid = Uuid::new_v4();
+
+        // Both columns NULL → CHECK violation.
+        let res = sqlx::query(
+            "INSERT INTO auth.subject_group_members \
+             (group_id, member_user_id, member_group_id, added_by) \
+             VALUES ($1, NULL, NULL, $2)",
+        )
+        .bind(group.id)
+        .bind(admin)
+        .execute(repo.pool.as_ref())
+        .await;
+        assert!(res.is_err(), "both-null insert must fail XOR check");
+
+        // Both columns set → CHECK violation.
+        let res = sqlx::query(
+            "INSERT INTO auth.subject_group_members \
+             (group_id, member_user_id, member_group_id, added_by) \
+             VALUES ($1, $2, $3, $2)",
+        )
+        .bind(group.id)
+        .bind(admin)
+        .bind(some_uuid)
+        .execute(repo.pool.as_ref())
+        .await;
+        assert!(res.is_err(), "both-set insert must fail XOR check");
+
+        drop_group(repo.pool.as_ref(), group.id).await;
+    }
+
+    // ── 3. Direct loop: A∋A rejected ────────────────────────────────────────
+    #[tokio::test]
+    async fn test_cycle_check_rejects_direct_loop() {
+        let repo = make_repo().await;
+        let admin = ensure_admin(repo.pool.as_ref()).await;
+
+        let g = SubjectGroup::new(&rand_name("cycle-self"), None).unwrap();
+        let group = repo.create(&g).await.unwrap();
+
+        let err = repo
+            .add_member(group.id, GroupMember::Group(group.id), admin)
+            .await
+            .expect_err("self-add must be rejected");
+        // The `no_self` DB CHECK is the row-level guard for the degenerate
+        // case; it surfaces here as a StorageError. Longer cycles take the
+        // CTE/`Cycle` path. Accept either flavour.
+        assert!(
+            matches!(
+                err,
+                SubjectGroupRepositoryError::Cycle(_)
+                    | SubjectGroupRepositoryError::StorageError(_)
+            ),
+            "expected cycle/storage rejection, got {:?}",
+            err
+        );
+
+        drop_group(repo.pool.as_ref(), group.id).await;
+    }
+
+    // ── 4. Two-step loop: A∋B, B∋C, attempted C∋A rejected ──────────────────
+    #[tokio::test]
+    async fn test_cycle_check_rejects_two_step_loop() {
+        let repo = make_repo().await;
+        let admin = ensure_admin(repo.pool.as_ref()).await;
+
+        let a = repo
+            .create(&SubjectGroup::new(&rand_name("cyc2-a"), None).unwrap())
+            .await
+            .unwrap();
+        let b = repo
+            .create(&SubjectGroup::new(&rand_name("cyc2-b"), None).unwrap())
+            .await
+            .unwrap();
+        let c = repo
+            .create(&SubjectGroup::new(&rand_name("cyc2-c"), None).unwrap())
+            .await
+            .unwrap();
+
+        repo.add_member(a.id, GroupMember::Group(b.id), admin)
+            .await
+            .unwrap();
+        repo.add_member(b.id, GroupMember::Group(c.id), admin)
+            .await
+            .unwrap();
+
+        // C∋A would close the loop A→B→C→A.
+        let err = repo
+            .add_member(c.id, GroupMember::Group(a.id), admin)
+            .await
+            .expect_err("two-step cycle must be rejected");
+        assert!(matches!(err, SubjectGroupRepositoryError::Cycle(_)));
+
+        for id in [c.id, b.id, a.id] {
+            drop_group(repo.pool.as_ref(), id).await;
+        }
+    }
+
+    // ── 5. Long-chain cycle: chain of 8 + closing edge rejected ─────────────
+    #[tokio::test]
+    async fn test_cycle_check_rejects_eight_step_loop() {
+        let repo = make_repo().await;
+        let admin = ensure_admin(repo.pool.as_ref()).await;
+
+        let mut ids = Vec::with_capacity(8);
+        for i in 0..8 {
+            let g = repo
+                .create(
+                    &SubjectGroup::new(&rand_name(&format!("cyc8-{i}")), None).unwrap(),
+                )
+                .await
+                .unwrap();
+            ids.push(g.id);
+        }
+        // Build the chain 0→1→2→…→7.
+        for i in 0..7 {
+            repo.add_member(ids[i], GroupMember::Group(ids[i + 1]), admin)
+                .await
+                .unwrap();
+        }
+        // Closing edge 7→0 should be rejected as a cycle.
+        let err = repo
+            .add_member(ids[7], GroupMember::Group(ids[0]), admin)
+            .await
+            .expect_err("eight-step cycle must be rejected");
+        assert!(
+            matches!(
+                err,
+                SubjectGroupRepositoryError::Cycle(_)
+                    | SubjectGroupRepositoryError::DepthExceeded(_)
+            ),
+            "expected cycle/depth rejection, got {:?}",
+            err
+        );
+
+        for id in ids.into_iter().rev() {
+            drop_group(repo.pool.as_ref(), id).await;
+        }
+    }
+
+    // ── 6. Depth cap at 8 ───────────────────────────────────────────────────
+    //
+    // Depth is enforced **per mutation, on the subtree under the parent being
+    // mutated** — not as a global chain-length invariant. A new edge is
+    // rejected when its proposed subtree under the parent would reach
+    // depth > MAX_GROUP_DEPTH. Top-down chain construction can therefore grow
+    // arbitrarily deep one edge at a time; the rejection fires when an
+    // existing deep subtree is *lifted* under a new outer parent.
+    //
+    // This test pins that behaviour:
+    //   1. Build a chain g[0] → g[1] → … → g[8] (9 nodes, 8 edges, max
+    //      subtree depth 8 — exactly at the cap, still allowed).
+    //   2. Create an outer group `h`.
+    //   3. Attempt to add g[0] as a member of `h` — the subtree under `h`
+    //      would now be 9 deep → DepthExceeded.
+    #[tokio::test]
+    async fn test_depth_cap_at_8() {
+        let repo = make_repo().await;
+        let admin = ensure_admin(repo.pool.as_ref()).await;
+
+        let len = (MAX_GROUP_DEPTH as usize) + 1;
+        let mut ids = Vec::with_capacity(len);
+        for i in 0..len {
+            let g = repo
+                .create(
+                    &SubjectGroup::new(&rand_name(&format!("depth-{i}")), None).unwrap(),
+                )
+                .await
+                .unwrap();
+            ids.push(g.id);
+        }
+        // Build top-down: each insert only adds depth 1 under its parent, so
+        // every edge is allowed by the per-mutation depth check.
+        for i in 0..(len - 1) {
+            repo.add_member(ids[i], GroupMember::Group(ids[i + 1]), admin)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("edge {i} should fit in the depth budget: {:?}", e)
+                });
+        }
+
+        // Lift the whole chain under a new outer group → subtree depth 9.
+        let outer = repo
+            .create(&SubjectGroup::new(&rand_name("depth-outer"), None).unwrap())
+            .await
+            .unwrap();
+        let err = repo
+            .add_member(outer.id, GroupMember::Group(ids[0]), admin)
+            .await
+            .expect_err("depth-9 subtree must be rejected");
+        assert!(
+            matches!(err, SubjectGroupRepositoryError::DepthExceeded(_)),
+            "expected DepthExceeded, got {:?}",
+            err
+        );
+
+        drop_group(repo.pool.as_ref(), outer.id).await;
+        for id in ids.into_iter().rev() {
+            drop_group(repo.pool.as_ref(), id).await;
+        }
+    }
+
+    // ── 7. Transitive expansion: A∋B, B∋C, U∈C → groups_for_user(U) ⊇ {A,B,C}
+    #[tokio::test]
+    async fn test_transitive_expansion_includes_indirect_groups() {
+        let repo = make_repo().await;
+        let admin = ensure_admin(repo.pool.as_ref()).await;
+
+        let a = repo
+            .create(&SubjectGroup::new(&rand_name("tx-a"), None).unwrap())
+            .await
+            .unwrap();
+        let b = repo
+            .create(&SubjectGroup::new(&rand_name("tx-b"), None).unwrap())
+            .await
+            .unwrap();
+        let c = repo
+            .create(&SubjectGroup::new(&rand_name("tx-c"), None).unwrap())
+            .await
+            .unwrap();
+
+        repo.add_member(a.id, GroupMember::Group(b.id), admin)
+            .await
+            .unwrap();
+        repo.add_member(b.id, GroupMember::Group(c.id), admin)
+            .await
+            .unwrap();
+        repo.add_member(c.id, GroupMember::User(admin), admin)
+            .await
+            .unwrap();
+
+        let expanded = repo.groups_for_user(admin).await.unwrap();
+        assert!(expanded.contains(&a.id), "expansion must include outer A");
+        assert!(expanded.contains(&b.id), "expansion must include middle B");
+        assert!(
+            expanded.contains(&c.id),
+            "expansion must include direct parent C"
+        );
+
+        drop_group(repo.pool.as_ref(), c.id).await;
+        drop_group(repo.pool.as_ref(), b.id).await;
+        drop_group(repo.pool.as_ref(), a.id).await;
+    }
+
+    // ── 8. Internal virtual group is seeded with the well-known UUID ────────
+    #[tokio::test]
+    async fn test_internal_group_is_seeded() {
+        use crate::domain::entities::subject_group::INTERNAL_GROUP_ID;
+
+        let repo = make_repo().await;
+        let row = repo
+            .get_by_id(INTERNAL_GROUP_ID)
+            .await
+            .expect("query OK")
+            .expect("Internal group row must exist");
+        assert!(row.is_virtual, "Internal must be flagged virtual");
+        assert_eq!(row.name, "Internal");
+    }
+}

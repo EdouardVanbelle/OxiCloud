@@ -23,6 +23,13 @@ test:
 test-mocks:
     cargo test --features test_utils
 
+# DB-dependent integration tests gated on `--cfg integration_tests`.
+# Spins up the test postgres on port 5433 first. Requires one row in
+# auth.users (start the server against the test DB once to seed).
+test-integration:
+    bash tests/common/spawn-db.sh
+    RUSTFLAGS='--cfg integration_tests' cargo test --workspace --tests
+
 test-one name:
     cargo test {{name}}
 
