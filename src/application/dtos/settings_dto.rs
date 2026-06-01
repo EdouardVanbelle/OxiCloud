@@ -91,9 +91,15 @@ pub struct AdminCreateUserDto {
     /// "admin" or "user"; defaults to "user"
     pub role: Option<String>,
     /// Storage quota in bytes; 0 = unlimited. If omitted, uses role default.
+    /// Ignored when `is_external = true` (external users have no storage).
     pub quota_bytes: Option<i64>,
     /// Whether the account is active; defaults to true
     pub active: Option<bool>,
+    /// `true` to create a grant-only external user (no home folder, no
+    /// storage quota). Defaults to `false` (internal user). External
+    /// users authenticate via magic-link / OIDC / OCM federation —
+    /// password is set but never used.
+    pub is_external: Option<bool>,
 }
 
 /// Request body for admin password reset

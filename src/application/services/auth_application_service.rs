@@ -858,21 +858,60 @@ impl AuthApplicationService {
             _ => UserRole::User,
         };
 
-        // Determine quota, capped to available disk space
-        let quota = dto.quota_bytes.unwrap_or_else(|| self.capped_quota(&role));
+        let is_external = dto.is_external.unwrap_or(false);
 
-        // Hash password
+        // Forbid external + admin combo. The DB `users_external_not_admin`
+        // CHECK constraint would catch this too, but a 400 with an
+        // explanatory message is friendlier than a generic 500 from a
+        // constraint violation. See the CHECK definition in
+        // migrations/20260612000002_auth_users_is_external.sql for the
+        // rationale.
+        if is_external && matches!(role, UserRole::Admin) {
+            return Err(DomainError::new(
+                ErrorKind::InvalidInput,
+                "User",
+                "External users cannot be admins. To promote an external user to admin, \
+                 first convert them to internal (set is_external = false), then update \
+                 the role separately."
+                    .to_string(),
+            ));
+        }
+
+        // External users never own storage. The DB `users_external_no_storage`
+        // CHECK constraint enforces this; setting quota=0 here keeps the
+        // domain consistent and matches `User::new_external`.
+        let quota = if is_external {
+            0
+        } else {
+            dto.quota_bytes.unwrap_or_else(|| self.capped_quota(&role))
+        };
+
+        // Hash password (kept for both internal and external users — for
+        // external users it's currently unused since they authenticate via
+        // magic-link / OIDC, but the DB column is NOT NULL).
         let password_hash = self.password_hasher.hash_password(&dto.password).await?;
 
-        // Create domain entity
-        let user =
-            User::new(dto.username.clone(), email, password_hash, role, quota).map_err(|e| {
-                DomainError::new(
-                    ErrorKind::InvalidInput,
-                    "User",
-                    format!("Error creating user: {}", e),
-                )
-            })?;
+        // Create domain entity. External path uses `new_external` so the
+        // is_external flag is set + the EXTERNAL placeholder password
+        // marker is applied for clarity in DB inspection. `new_external`
+        // forces role=User (the admin+external combo was rejected above).
+        let user = if is_external {
+            User::new_external(dto.username.clone(), email).map(|mut u| {
+                // The hashed password from the request is unused for auth
+                // but is persisted so audit-trail integrity is preserved.
+                u.update_password_hash(password_hash);
+                u
+            })
+        } else {
+            User::new(dto.username.clone(), email, password_hash, role, quota)
+        }
+        .map_err(|e| {
+            DomainError::new(
+                ErrorKind::InvalidInput,
+                "User",
+                format!("Error creating user: {}", e),
+            )
+        })?;
 
         // Persist
         let created = self.user_storage.create_user(user).await?;
@@ -890,11 +929,20 @@ impl AuthApplicationService {
             lc.dispatch_created(&created).await;
         }
 
-        // Create personal folder
-        self.create_personal_folder(&dto.username, created.id())
-            .await;
+        // External users have no home folder by design. Internal users
+        // get one — PR 3 will move this provisioning into the lifecycle
+        // hook (which short-circuits on `is_external` itself).
+        if !created.is_external() {
+            self.create_personal_folder(&dto.username, created.id())
+                .await;
+        }
 
-        tracing::info!("Admin created user: {} ({})", dto.username, created.id());
+        tracing::info!(
+            "Admin created user: {} ({}, is_external={})",
+            dto.username,
+            created.id(),
+            created.is_external()
+        );
         Ok(UserDto::from(created))
     }
 

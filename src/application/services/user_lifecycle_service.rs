@@ -145,6 +145,7 @@ impl UserLifecycleHook for AuditLifecycleHook {
             event = "user.created",
             user_id = %user.id(),
             username = %user.username(),
+            is_external = user.is_external(),
         );
         Ok(())
     }
@@ -155,6 +156,7 @@ impl UserLifecycleHook for AuditLifecycleHook {
             event = "user.login",
             user_id = %user.id(),
             username = %user.username(),
+            is_external = user.is_external(),
             first_login = user.last_login_at().is_none(),
         );
         Ok(())
@@ -166,6 +168,7 @@ impl UserLifecycleHook for AuditLifecycleHook {
             event = "user.logout",
             user_id = %user.id(),
             username = %user.username(),
+            is_external = user.is_external(),
             reason = ?reason,
         );
         Ok(())
@@ -177,6 +180,7 @@ impl UserLifecycleHook for AuditLifecycleHook {
             event = "user.deleted",
             user_id = %user.id(),
             username = %user.username(),
+            is_external = user.is_external(),
             mode = ?mode,
         );
         Ok(())

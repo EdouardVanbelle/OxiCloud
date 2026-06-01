@@ -36,6 +36,13 @@ pub struct User {
     oidc_provider: Option<String>,
     oidc_subject: Option<String>,
     image: Option<String>,
+    /// TRUE = grant-only external recipient (magic-link, OIDC-only, OCM
+    /// federated). FALSE = storage-owning internal user. Hooks that
+    /// provision per-user resources (home folder, default calendar, …)
+    /// must short-circuit when `is_external` is TRUE — see tip #2 in
+    /// `application/ports/user_lifecycle.rs`. The DB CHECK constraint
+    /// `users_external_no_storage` is the schema-level safety net.
+    is_external: bool,
 }
 
 impl User {
@@ -85,6 +92,7 @@ impl User {
             oidc_provider: None,
             oidc_subject: None,
             image: None,
+            is_external: false,
         })
     }
 
@@ -115,6 +123,48 @@ impl User {
             oidc_provider: Some(oidc_provider),
             oidc_subject: Some(oidc_subject),
             image: None,
+            is_external: false,
+        })
+    }
+
+    /// Create a new external user — magic-link / OIDC-only / OCM-federated
+    /// recipient who does NOT own storage. The `CHECK (NOT is_external OR
+    /// storage_used_bytes = 0)` DB constraint enforces the no-storage rule
+    /// at the schema level.
+    ///
+    /// **External users are always `UserRole::User`** — there is no role
+    /// parameter because admin + external is an explicitly forbidden
+    /// combination enforced by the `users_external_not_admin` DB CHECK
+    /// constraint. Granting admin to a federated principal would let
+    /// external identity providers indirectly manage the local instance.
+    /// To make an external user an admin: first convert them to internal
+    /// (`UPDATE auth.users SET is_external = FALSE`), then update role.
+    /// The two-step process is intentional friction.
+    ///
+    /// Quota is set to 0 because external users can't upload content
+    /// into any folder they own (they have no folder). They can only
+    /// act on grants the resource owner provides — which counts against
+    /// the owner's quota, not theirs.
+    pub fn new_external(username: String, email: String) -> UserResult<Self> {
+        Self::validate_username(&username)?;
+        Self::validate_email(&email)?;
+        let now = Utc::now();
+        Ok(Self {
+            id: Uuid::new_v4(),
+            username,
+            email,
+            password_hash: "__EXTERNAL_NO_PASSWORD__".to_string(),
+            role: UserRole::User,
+            storage_quota_bytes: 0,
+            storage_used_bytes: 0,
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            active: true,
+            oidc_provider: None,
+            oidc_subject: None,
+            image: None,
+            is_external: true,
         })
     }
 
@@ -147,6 +197,13 @@ impl User {
             oidc_provider: None,
             oidc_subject: None,
             image: None,
+            // `from_data` is the minimal-args reconstruction path used by
+            // tests and JWT-claim-based principal hydration (which doesn't
+            // carry `is_external`). Default to FALSE — JWT-validated
+            // principals are existing internal users; magic-link external
+            // sessions take a different path that hydrates from DB via
+            // `from_data_full`.
+            is_external: false,
         }
     }
 
@@ -166,6 +223,7 @@ impl User {
         oidc_provider: Option<String>,
         oidc_subject: Option<String>,
         image: Option<String>,
+        is_external: bool,
     ) -> Self {
         Self {
             id,
@@ -182,6 +240,7 @@ impl User {
             oidc_provider,
             oidc_subject,
             image,
+            is_external,
         }
     }
 
@@ -240,6 +299,14 @@ impl User {
 
     pub fn image(&self) -> Option<&str> {
         self.image.as_deref()
+    }
+
+    /// `TRUE` for grant-only external recipients (magic-link, OIDC-only,
+    /// OCM federated). Hooks provisioning per-user resources must
+    /// short-circuit when this returns `true` — see tip #2 in
+    /// `application/ports/user_lifecycle.rs`.
+    pub fn is_external(&self) -> bool {
+        self.is_external
     }
 
     pub fn set_image(&mut self, image: Option<String>) {

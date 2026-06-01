@@ -19,6 +19,11 @@ pub struct UserDto {
     pub auth_provider: String,
     pub image: Option<String>,
     pub can_edit_image: bool,
+    /// `true` for grant-only external recipients (magic-link, OIDC-only,
+    /// future OCM federated). External users have no home folder and
+    /// can't own storage; their quota is always 0. Internal users
+    /// default to `false`.
+    pub is_external: bool,
 }
 
 impl From<User> for UserDto {
@@ -37,6 +42,7 @@ impl From<User> for UserDto {
             auth_provider: user.oidc_provider().unwrap_or("local").to_string(),
             image: user.image().map(|s| s.to_string()),
             can_edit_image: !user.is_oidc_user(),
+            is_external: user.is_external(),
         }
     }
 }

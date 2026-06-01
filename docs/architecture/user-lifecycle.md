@@ -99,7 +99,13 @@ These are codified in the module-level docstring of `application/ports/user_life
 
 1. **First-ever login detection.** `on_user_login` fires *before* `user.register_login()` is called, so `user.last_login_at().is_none()` is a reliable "this is the user's first login since account creation" signal. Use it for welcome emails, one-shot default-resource seeding, "complete your profile" prompts.
 
-2. **Idempotency is mandatory.** `on_user_login` fires on every successful authentication, not just the first. A hook that creates a resource must check whether the resource already exists before creating it. Cache invalidation, audit deduplication, etc., must all tolerate redundant calls.
+2. **External-user short-circuit.** Hooks that provision per-user resources (home folder, default calendar, address book, GPG keys, …) must start with `if user.is_external() { return Ok(()); }`. External users (`is_external = TRUE`) are grant-only recipients — they have no home folder and don't consume storage quota. The DB `CHECK (NOT is_external OR storage_used_bytes = 0)` constraint catches code paths that bypass this short-circuit.
+
+   **Subtle but important rule**: external users can **never** be admins. The DB enforces this via `CHECK (NOT (is_external AND role = 'admin'))`. `User::new_external(...)` doesn't accept a role parameter — it always sets `UserRole::User`. To make an existing external user an admin, an admin must first convert them to internal (`UPDATE auth.users SET is_external = FALSE`) and *then* update the role. The two-step process is intentional friction: granting admin to a federated principal would let external identity providers indirectly manage the local instance.
+
+3. **Idempotency is mandatory.** `on_user_login` fires on every successful authentication, not just the first. A hook that creates a resource must check whether the resource already exists before creating it. Cache invalidation, audit deduplication, etc., must all tolerate redundant calls.
+
+4. **External → internal conversion needs no special event.** When an admin flips `is_external = FALSE`, the user's next login fires `on_user_login` with the new flag value. Idempotent hooks see `!is_external` and missing resources → provision. No `on_user_converted` method needed; the safety-net pattern carries the load.
 
 3. **Failure swallowing on create/login.** If your hook returns `Err`, the user is still created/logged in; only your hook's effect is delayed. Log enough detail via `tracing::error!` that subsequent investigation can identify the user. The next successful login's `on_user_login` will retry idempotently.
 
