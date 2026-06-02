@@ -133,7 +133,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     oxicloud::interfaces::middleware::trusted_proxy::log_config();
 
-    tracing::info!("OxiCloud v{}", env!("CARGO_PKG_VERSION"));
+    tracing::info!(
+        "OxiCloud v{} | branch={} commit={}",
+        env!("CARGO_PKG_VERSION"),
+        env!("GIT_BRANCH"),
+        env!("GIT_HASH")
+    );
 
     // Load configuration from environment variables
     let config = common::config::AppConfig::from_env();
