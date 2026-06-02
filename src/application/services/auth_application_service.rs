@@ -904,23 +904,29 @@ impl AuthApplicationService {
     /// attacker probing random UUIDs cannot distinguish "user doesn't
     /// exist" from "exists but you can't see them".
     ///
-    /// External callers (`is_external = TRUE`) are locked out of the
-    /// endpoint entirely. They have no legitimate need to enumerate
-    /// users — their session exists only to interact with resources
-    /// they were explicitly granted. Returns `AccessDenied`, which the
-    /// handler surfaces as 403; the external caller's own role is not
-    /// a secret to themselves, so the honest status is appropriate.
+    /// Visibility rule, evaluated top-to-bottom:
+    ///   1. **Self lookup** — `caller_id == target_id` always succeeds.
+    ///   2. **Shared-grant relationship** — caller and target appear
+    ///      together on at least one row of `storage.access_grants`,
+    ///      either direction (caller-as-granter / target-as-subject,
+    ///      or target-as-granter / caller-as-subject). Applies to both
+    ///      internal and external callers. This is what lets an
+    ///      external user resolve the display name + photo of the
+    ///      internal user who shared a folder with them — the
+    ///      `granted_by` column on the grant Bob received is Alice's
+    ///      user_id, and SharedWithMe needs to render her vignette.
+    ///   3. **External callers stop here.** Any remaining check would
+    ///      let them enumerate the user directory; they have no
+    ///      legitimate need beyond resolving people they're already in
+    ///      a grant relationship with.
+    ///   4. *(Internal callers only)* Target is internal AND
+    ///      `expose_system_users` is on → already broadly visible via
+    ///      the system address book; no extra check.
+    ///   5. *(Internal callers only)* Caller is admin → always visible.
+    ///   6. Anything else → `NotFound`.
     ///
-    /// Visibility rule for internal callers:
-    ///   1. caller_id == target_id → always visible (self).
-    ///   2. caller is admin → always visible (admin needs every user).
-    ///   3. target is internal AND `expose_system_users` is on → already
-    ///      broadly visible via the system address book; no extra check.
-    ///   4. caller and target share at least one grant — either
-    ///      direction, either as subject or granter. Subject-group
-    ///      co-membership is intentionally NOT included in v1; can be
-    ///      added later if a concrete need surfaces.
-    ///   5. Anything else → `NotFound`.
+    /// Subject-group co-membership is intentionally NOT a visibility
+    /// path in v1; can be added later if a concrete need surfaces.
     pub async fn get_user_profile(
         &self,
         caller_id: Uuid,
@@ -928,22 +934,9 @@ impl AuthApplicationService {
         expose_system_users: bool,
         pool: &sqlx::PgPool,
     ) -> Result<UserDto, DomainError> {
-        // External-caller lockout. Load the caller eagerly so the
-        // is_external check covers every branch (including self-lookup
-        // — an external user reading their own profile via this route
-        // is still off-limits; the frontend should rely on the existing
-        // /api/auth/me endpoint for that).
         let caller = self.user_storage.get_user_by_id(caller_id).await?;
-        if caller.is_external() {
-            return Err(DomainError::new(
-                ErrorKind::AccessDenied,
-                "User",
-                "External users cannot query /api/users/{id}",
-            ));
-        }
 
-        // Self: always (now that the external lockout already filtered
-        // external self-lookups above).
+        // (1) Self.
         if caller_id == target_id {
             return Ok(UserDto::from(caller));
         }
@@ -963,20 +956,9 @@ impl AuthApplicationService {
             Err(e) => return Err(e),
         };
 
-        // Internal target + system-address-book exposed: already public.
-        if !target.is_external() && expose_system_users {
-            return Ok(UserDto::from(target));
-        }
-
-        // Admin caller: always visible.
-        if caller.role() == UserRole::Admin {
-            return Ok(UserDto::from(target));
-        }
-
-        // Shared grant: caller and target appear together in at least one
-        // access_grants row (either as the granted-by + user-subject pair,
-        // or symmetrically). LIMIT 1 + the (granted_by) + (subject_type,
-        // subject_id) indexes keep this cheap.
+        // (2) Shared-grant relationship — works for both internal and
+        // external callers. LIMIT 1 + the (granted_by) and
+        // (subject_type, subject_id) indexes keep this cheap.
         let related: Option<i32> = sqlx::query_scalar(
             r#"
             SELECT 1
@@ -998,7 +980,26 @@ impl AuthApplicationService {
             return Ok(UserDto::from(target));
         }
 
-        // No relationship — anti-enumeration NotFound.
+        // (3) External callers stop here — no directory enumeration.
+        if caller.is_external() {
+            return Err(DomainError::new(
+                ErrorKind::NotFound,
+                "User",
+                "User not found",
+            ));
+        }
+
+        // (4) Internal target + system-address-book exposed: already public.
+        if !target.is_external() && expose_system_users {
+            return Ok(UserDto::from(target));
+        }
+
+        // (5) Admin caller: always visible.
+        if caller.role() == UserRole::Admin {
+            return Ok(UserDto::from(target));
+        }
+
+        // (6) No relationship — anti-enumeration NotFound.
         Err(DomainError::new(
             ErrorKind::NotFound,
             "User",

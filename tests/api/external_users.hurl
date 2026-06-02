@@ -23,6 +23,7 @@ Content-Type: application/json
 HTTP 200
 [Captures]
 alice_token: jsonpath "$.access_token"
+alice_user_id: jsonpath "$.user.id"
 
 GET {{base_url}}/api/folders
 Authorization: Bearer {{alice_token}}
@@ -209,12 +210,34 @@ Authorization: Bearer {{bob_access_token}}
 
 HTTP 403
 
-# 11c — /api/users/{id}: bob cannot query anyone's profile, not even
-#       Alice's. Service-level external lockout in get_user_profile.
+# 11c — /api/users/{id}: bob CAN look up his own profile (self-lookup
+#        is the first allow rule) so the SharedWithMe view can show
+#        his own avatar in the user menu.
 GET {{base_url}}/api/users/{{bob_user_id}}
 Authorization: Bearer {{bob_access_token}}
 
-HTTP 403
+HTTP 200
+[Asserts]
+jsonpath "$.id" == "{{bob_user_id}}"
+jsonpath "$.is_external" == true
+
+# 11d — bob CAN look up Alice (his granter) — shared-grant relationship
+#        lets the external recipient resolve the sharer's display name +
+#        photo for the SharedWithMe view's owner column.
+GET {{base_url}}/api/users/{{alice_user_id}}
+Authorization: Bearer {{bob_access_token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$.id" == "{{alice_user_id}}"
+jsonpath "$.is_external" == false
+
+# 11e — bob CANNOT enumerate unrelated users. A random UUID returns 404
+#        (anti-enumeration; same response as "user doesn't exist").
+GET {{base_url}}/api/users/00000000-0000-0000-0000-baadbeef1234
+Authorization: Bearer {{bob_access_token}}
+
+HTTP 404
 
 
 # ─────────────────────────────────────────────────────────────
