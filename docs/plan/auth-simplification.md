@@ -100,6 +100,7 @@ Forward-only migrations. The previous `…000003_users_username_email_login.sql`
 | **20** | Anti-enumeration `register`: uniform 200 regardless of outcome, real reasons in audit channel. | Closes the username/email enumeration oracle that survives from the original schema. |
 | **21** | `docs/architecture/auth-model.md` (~250 lines) + sidebar + cross-references. Acceptance gate. | Big-picture documentation of the final identity / credential / login surface. |
 | **22** | Device-bound magic-link redemption (challenge cookie) + asymmetric TTLs: login-via-email tokens live 10 minutes, invitation tokens live 24 hours. | Closes the mailbox-as-bearer-token attack class on the login flow. Invitations stay cross-device (recipient has no prior browser context with the server). |
+| **23** | `auth.users.email_verified_at` column + flip-to-verified on magic-link redemption / OIDC-with-verified-claim. Read-only API surface for now (future PRs gate features on it). | Establishes a verified-control-of-inbox signal so later policy can require it (e.g. block uploads / shares for unverified users). |
 
 ## Critical files
 
@@ -221,6 +222,82 @@ Items the conversation explicitly deferred. Each has a clear future trigger.
 - **Open Cloud Mesh (OCM) federation.** Third source for external provisioning. The `ExternalIdentityLifecycleHook::on_user_created` design accommodates the `source` discriminator (`magic_link` / `oidc` / `ocm`).
 - **Recovery codes / passkey enrolment.** Tied to native 2FA above.
 - **Per-user opt-out of magic-link when lenient mode is on.** Today the env flag is instance-wide. A future per-account toggle (e.g. high-privilege admins disabling magic-link for themselves) would need an `auth.users.magic_link_disabled BOOLEAN` column and one extra branch in eligibility. Listed in `auth-model.md`.
+
+### PR 23 — Email-verified signal (design recap)
+
+**Goal**: track whether the user has demonstrated control of their email address. The signal is data-only in PR 23 — future PRs will gate features (uploads, shares, sensitive operations) on it via an env switch.
+
+**Schema migration**:
+
+```sql
+ALTER TABLE auth.users
+    ADD COLUMN email_verified_at TIMESTAMPTZ NULL;
+
+-- Backfill: anyone who has successfully been through a flow that
+-- proves email control gets stamped retroactively. OIDC implies the
+-- IdP confirmed the email; external users who've logged in at least
+-- once must have clicked an invitation link.
+UPDATE auth.users
+   SET email_verified_at = COALESCE(last_login_at, created_at)
+ WHERE oidc_subject IS NOT NULL
+    OR (is_external = TRUE AND last_login_at IS NOT NULL);
+
+COMMENT ON COLUMN auth.users.email_verified_at IS
+    'When the user demonstrated control of their email. NULL = unverified
+     (password-only signup whose user never clicked a verification link, or
+     admin-created user who hasn''t logged in via magic-link). Set on
+     successful magic-link redemption OR OIDC JIT with email_verified=true claim.';
+```
+
+**Entity additions** (`domain/entities/user.rs`):
+
+```rust
+pub email_verified_at: Option<DateTime<Utc>>,
+
+impl User {
+    pub fn is_email_verified(&self) -> bool {
+        self.email_verified_at.is_some()
+    }
+    /// Stamp the verification time. Idempotent — keeps the first
+    /// verification timestamp on re-verification to preserve the
+    /// "first proof of control" semantics.
+    pub fn mark_email_verified(&mut self) {
+        if self.email_verified_at.is_none() {
+            self.email_verified_at = Some(Utc::now());
+            self.updated_at = Utc::now();
+        }
+    }
+}
+```
+
+**Trigger points** (one call per flow):
+
+1. `magic_link_invite_service::redeem` — after successful token consumption (clicking the link IS the proof). Set on **every** magic-link redemption regardless of whether it's an invitation or a login-via-email.
+2. `auth_application_service::oidc_callback` JIT-create branch — when claims include `email_verified=true`. The existing `email_verified` check (around line 1666) already enforces this for OIDC; we just persist the timestamp.
+3. `auth_application_service::oidc_callback` existing-user branch — if the IdP STILL says verified AND our column is NULL (e.g. user predates this PR), upgrade them retroactively.
+
+**Trigger points that do NOT set it** (worth being explicit):
+
+- Classic password registration via `/api/auth/register` with both email + password — the user gave us an email but hasn't proven it works.
+- Admin-create-user via the admin panel — admin asserts the email; user hasn't.
+- The email-only signup welcome path: the FIRST magic-link redemption stamps the flag (PR 23 hook). So between "user signed up email-only" and "user clicked welcome link", they're unverified.
+
+**API surface**:
+
+- `UserDto.email_verified_at: Option<DateTime<Utc>>` (with `#[serde(skip_serializing_if = "Option::is_none")]` to match the existing optional fields).
+- `GET /api/auth/me` and `GET /api/users/{id}` carry it through transparently. No new endpoints in PR 23.
+
+**Hurl coverage**:
+
+- After bob redeems his invitation: `GET /api/users/{bob_user_id}` returns `email_verified_at` set.
+- After charlie (classic password registration): `GET /api/auth/me` returns no `email_verified_at` (omitted from JSON).
+- After charlie later runs through magic-link (lenient mode): flag flips to non-NULL.
+
+**What PR 23 does NOT do** (deferred):
+
+- The env switch `OXICLOUD_REQUIRE_EMAIL_VERIFICATION` that gates uploads/shares/etc. — that's a future feature PR. PR 23 just establishes the signal.
+- UI affordances ("verify your email" banner, resend button) — future frontend PR.
+- Per-feature thresholds (e.g. "verified users can share publicly, unverified can only share with internal users") — future policy PRs.
 
 ### PR 22 — Device-bound magic-link redemption (design recap)
 
