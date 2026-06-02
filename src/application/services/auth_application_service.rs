@@ -1641,6 +1641,8 @@ impl AuthApplicationService {
                     email: user_info.email.or(claims.email),
                     preferred_username: user_info.preferred_username.or(claims.preferred_username),
                     name: user_info.name.or(claims.name),
+                    given_name: user_info.given_name.or(claims.given_name),
+                    family_name: user_info.family_name.or(claims.family_name),
                     email_verified: user_info.email_verified.or(claims.email_verified),
                     groups: if user_info.groups.is_empty() {
                         claims.groups
@@ -1797,6 +1799,8 @@ impl AuthApplicationService {
                     )
                 })?;
                 new_user.set_image(claims.picture.clone());
+                new_user.set_given_name(claims.given_name.clone());
+                new_user.set_family_name(claims.family_name.clone());
 
                 let created_user = self.user_storage.create_user(new_user).await?;
 

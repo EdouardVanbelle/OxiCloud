@@ -182,14 +182,25 @@ fn if_match_passes(if_match: Option<&str>, stored_etag: &str) -> bool {
 
 /// Map a `UserDto` to a `ContactDto` so OxiCloud users appear as contacts
 /// inside the virtual system address book.
+///
+/// `given_name`/`family_name` come from OIDC standard claims at JIT
+/// provisioning (or NULL for password-only or pre-OIDC users). When
+/// they're present, prefer a "First Last" full name; otherwise fall
+/// back to the username (which is always present).
 fn user_to_contact(user: UserDto) -> ContactDto {
+    let full_name = match (user.given_name.as_deref(), user.family_name.as_deref()) {
+        (Some(g), Some(f)) => format!("{g} {f}"),
+        (Some(g), None) => g.to_string(),
+        (None, Some(f)) => f.to_string(),
+        (None, None) => user.username.clone(),
+    };
     ContactDto {
         id: user.id.clone(),
         address_book_id: SYSTEM_BOOK_ID.to_string(),
         uid: format!("{}@oxicloud", user.id),
-        full_name: Some(user.username.clone()),
-        first_name: None,
-        last_name: None,
+        full_name: Some(full_name),
+        first_name: user.given_name.clone(),
+        last_name: user.family_name.clone(),
         nickname: None,
         email: vec![EmailDto {
             email: user.email,

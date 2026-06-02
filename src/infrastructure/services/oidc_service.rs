@@ -65,6 +65,8 @@ struct IdTokenClaims {
     email_verified: Option<bool>,
     preferred_username: Option<String>,
     name: Option<String>,
+    given_name: Option<String>,
+    family_name: Option<String>,
     groups: Option<Vec<String>>,
     nonce: Option<String>,
     picture: Option<String>,
@@ -90,6 +92,8 @@ struct UserInfoResponse {
     email_verified: Option<bool>,
     preferred_username: Option<String>,
     name: Option<String>,
+    given_name: Option<String>,
+    family_name: Option<String>,
     groups: Option<Vec<String>>,
     picture: Option<String>,
 }
@@ -461,6 +465,8 @@ impl OidcServicePort for OidcService {
             email_verified: claims.email_verified,
             preferred_username: claims.preferred_username,
             name: claims.name,
+            given_name: claims.given_name,
+            family_name: claims.family_name,
             groups: claims.groups.unwrap_or_default(),
             picture: claims.picture,
         })
@@ -513,6 +519,8 @@ impl OidcServicePort for OidcService {
             email_verified: info.email_verified,
             preferred_username: info.preferred_username,
             name: info.name,
+            given_name: info.given_name,
+            family_name: info.family_name,
             groups: info.groups.unwrap_or_default(),
             picture: info.picture,
         })

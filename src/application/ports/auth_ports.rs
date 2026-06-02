@@ -164,6 +164,13 @@ pub struct OidcIdClaims {
     pub email_verified: Option<bool>,
     pub preferred_username: Option<String>,
     pub name: Option<String>,
+    /// Standard OpenID claim `given_name` (first name). Populated on the
+    /// `User` row at JIT provisioning so the share-modal autocomplete and
+    /// the system address book can surface real names instead of just the
+    /// (often-cryptic) `preferred_username`.
+    pub given_name: Option<String>,
+    /// Standard OpenID claim `family_name` (last name). See `given_name`.
+    pub family_name: Option<String>,
     pub groups: Vec<String>,
     pub picture: Option<String>,
 }
