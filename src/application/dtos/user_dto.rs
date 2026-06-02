@@ -24,6 +24,16 @@ pub struct UserDto {
     /// can't own storage; their quota is always 0. Internal users
     /// default to `false`.
     pub is_external: bool,
+    /// Optional first/given name. Populated from the OIDC `given_name`
+    /// claim at JIT provisioning, or via a profile-edit endpoint.
+    /// `None` until explicitly set — `skip_serializing_if = "Option::is_none"`
+    /// keeps the wire format compact for the common case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub given_name: Option<String>,
+    /// Optional last/family name. Same provenance + serde rules as
+    /// `given_name`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub family_name: Option<String>,
 }
 
 impl From<User> for UserDto {
@@ -43,6 +53,8 @@ impl From<User> for UserDto {
             image: user.image().map(|s| s.to_string()),
             can_edit_image: !user.is_oidc_user(),
             is_external: user.is_external(),
+            given_name: user.given_name().map(str::to_string),
+            family_name: user.family_name().map(str::to_string),
         }
     }
 }

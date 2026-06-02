@@ -897,6 +897,115 @@ impl AuthApplicationService {
         self.get_user(user_id).await
     }
 
+    /// Visibility-checked profile lookup for `GET /api/users/{id}`.
+    ///
+    /// Returns `NotFound` (not `AccessDenied`) when the caller has no
+    /// legitimate relationship with the target — anti-enumeration: an
+    /// attacker probing random UUIDs cannot distinguish "user doesn't
+    /// exist" from "exists but you can't see them".
+    ///
+    /// External callers (`is_external = TRUE`) are locked out of the
+    /// endpoint entirely. They have no legitimate need to enumerate
+    /// users — their session exists only to interact with resources
+    /// they were explicitly granted. Returns `AccessDenied`, which the
+    /// handler surfaces as 403; the external caller's own role is not
+    /// a secret to themselves, so the honest status is appropriate.
+    ///
+    /// Visibility rule for internal callers:
+    ///   1. caller_id == target_id → always visible (self).
+    ///   2. caller is admin → always visible (admin needs every user).
+    ///   3. target is internal AND `expose_system_users` is on → already
+    ///      broadly visible via the system address book; no extra check.
+    ///   4. caller and target share at least one grant — either
+    ///      direction, either as subject or granter. Subject-group
+    ///      co-membership is intentionally NOT included in v1; can be
+    ///      added later if a concrete need surfaces.
+    ///   5. Anything else → `NotFound`.
+    pub async fn get_user_profile(
+        &self,
+        caller_id: Uuid,
+        target_id: Uuid,
+        expose_system_users: bool,
+        pool: &sqlx::PgPool,
+    ) -> Result<UserDto, DomainError> {
+        // External-caller lockout. Load the caller eagerly so the
+        // is_external check covers every branch (including self-lookup
+        // — an external user reading their own profile via this route
+        // is still off-limits; the frontend should rely on the existing
+        // /api/auth/me endpoint for that).
+        let caller = self.user_storage.get_user_by_id(caller_id).await?;
+        if caller.is_external() {
+            return Err(DomainError::new(
+                ErrorKind::AccessDenied,
+                "User",
+                "External users cannot query /api/users/{id}",
+            ));
+        }
+
+        // Self: always (now that the external lockout already filtered
+        // external self-lookups above).
+        if caller_id == target_id {
+            return Ok(UserDto::from(caller));
+        }
+
+        // Anti-enumeration: NotFound for everything that doesn't pass.
+        // Convert a real NotFound on `target` to the same anonymous 404,
+        // so existence isn't leaked through differential responses.
+        let target = match self.user_storage.get_user_by_id(target_id).await {
+            Ok(u) => u,
+            Err(e) if e.kind == ErrorKind::NotFound => {
+                return Err(DomainError::new(
+                    ErrorKind::NotFound,
+                    "User",
+                    "User not found",
+                ));
+            }
+            Err(e) => return Err(e),
+        };
+
+        // Internal target + system-address-book exposed: already public.
+        if !target.is_external() && expose_system_users {
+            return Ok(UserDto::from(target));
+        }
+
+        // Admin caller: always visible.
+        if caller.role() == UserRole::Admin {
+            return Ok(UserDto::from(target));
+        }
+
+        // Shared grant: caller and target appear together in at least one
+        // access_grants row (either as the granted-by + user-subject pair,
+        // or symmetrically). LIMIT 1 + the (granted_by) + (subject_type,
+        // subject_id) indexes keep this cheap.
+        let related: Option<i32> = sqlx::query_scalar(
+            r#"
+            SELECT 1
+              FROM storage.access_grants
+             WHERE (granted_by = $1 AND subject_type = 'user' AND subject_id = $2)
+                OR (granted_by = $2 AND subject_type = 'user' AND subject_id = $1)
+             LIMIT 1
+            "#,
+        )
+        .bind(caller_id)
+        .bind(target_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| {
+            DomainError::internal_error("UserProfile", format!("visibility query: {}", e))
+        })?;
+
+        if related.is_some() {
+            return Ok(UserDto::from(target));
+        }
+
+        // No relationship — anti-enumeration NotFound.
+        Err(DomainError::new(
+            ErrorKind::NotFound,
+            "User",
+            "User not found",
+        ))
+    }
+
     // New method to get user by username - needed for admin user handling
     pub async fn get_user_by_username(&self, username: &str) -> Result<UserDto, DomainError> {
         let user = self.user_storage.get_user_by_username(username).await?;

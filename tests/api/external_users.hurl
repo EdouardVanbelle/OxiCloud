@@ -187,8 +187,63 @@ body contains "{{ext_folder_id}}"
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 11 — Second redemption of the same token is rejected.
-#           single-use is enforced by the SQL UPDATE in
+# Step 11 — External-user lockouts (PR 11.1 + ContactsHandler).
+#           Bob (external) must NOT reach the system address book
+#           or the per-user profile endpoint. Defense-in-depth on
+#           top of the PR 6 service-level filter.
+# ─────────────────────────────────────────────────────────────
+
+# 11a — system address book: visible at the catalog level
+# (`GET /api/address-books`) for bob? It must NOT list the system entry.
+GET {{base_url}}/api/address-books
+Authorization: Bearer {{bob_access_token}}
+
+HTTP 200
+[Asserts]
+body not contains "OxiCloud Users"
+body not contains "\"id\":\"system\""
+
+# 11b — system contacts listing: 403 for bob.
+GET {{base_url}}/api/address-books/system/contacts
+Authorization: Bearer {{bob_access_token}}
+
+HTTP 403
+
+# 11c — /api/users/{id}: bob cannot query anyone's profile, not even
+#       Alice's. Service-level external lockout in get_user_profile.
+GET {{base_url}}/api/users/{{bob_user_id}}
+Authorization: Bearer {{bob_access_token}}
+
+HTTP 403
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 12 — /api/users/{id} happy path (Alice → Bob).
+#           Visibility rule: they share a grant, so Alice sees
+#           Bob's profile (with is_external=true).
+# ─────────────────────────────────────────────────────────────
+GET {{base_url}}/api/users/{{bob_user_id}}
+Authorization: Bearer {{alice_token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$.id" == "{{bob_user_id}}"
+jsonpath "$.is_external" == true
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 13 — /api/users/{id} 404 anti-enumeration for an
+#           unrelated UUID (random Uuid that doesn't exist).
+# ─────────────────────────────────────────────────────────────
+GET {{base_url}}/api/users/00000000-0000-0000-0000-deadbeefcafe
+Authorization: Bearer {{alice_token}}
+
+HTTP 404
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 14 — Second redemption of the same magic-link token is
+#           rejected — single-use is enforced by the SQL UPDATE in
 #           magic_link_token_pg_repository::mark_used.
 # ─────────────────────────────────────────────────────────────
 GET {{magic_url}}

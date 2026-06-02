@@ -925,6 +925,13 @@ impl AppServiceFactory {
             email_sender: None,              // populated below
             mock_email_sender: None,         // populated below
             magic_link_invite_service: None, // populated below
+            // 60 lookups / minute / caller; cap at 50 000 tracked
+            // callers to bound memory. The same limiter instance is
+            // shared by every clone of AppState since it lives in an
+            // Arc.
+            user_profile_rate_limiter: Arc::new(
+                crate::interfaces::middleware::rate_limit::RateLimiter::new(60, 60, 50_000),
+            ),
         };
         let email_bundle = build_email_sender(&self.config.smtp);
         app_state.email_sender = email_bundle.sender;
@@ -1302,6 +1309,13 @@ pub struct AppState {
     pub magic_link_invite_service: Option<
         Arc<crate::application::services::magic_link_invite_service::MagicLinkInviteService>,
     >,
+    /// Per-caller sliding-window limiter for `GET /api/users/{id}`. The
+    /// endpoint's primary defense is the visibility check, but a stale
+    /// JWT could in theory iterate UUIDs against the related-by-grant
+    /// branch of that check. 60 lookups per minute keyed on the
+    /// authenticated caller covers any legitimate UI rendering while
+    /// throttling enumeration.
+    pub user_profile_rate_limiter: Arc<crate::interfaces::middleware::rate_limit::RateLimiter>,
 }
 
 // All AppState construction is done via struct literal in build_app_state().

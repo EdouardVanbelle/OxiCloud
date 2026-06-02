@@ -571,6 +571,13 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
             .with_state(app_state.clone());
     router = router.nest("/groups", group_router);
 
+    // Per-user profile lookup `/api/users/{id}` — authenticated only,
+    // throttled by a per-caller limiter inside the handler. External
+    // callers are 403'd in the service layer.
+    let users_router = crate::interfaces::api::handlers::users_handler::user_routes()
+        .with_state(app_state.clone());
+    router = router.nest("/users", users_router);
+
     // Transparent compression (gzip + brotli) for all API responses.
     // tower-http negotiates via Accept-Encoding and skips already-compressed
     // content types automatically. No manual compression in handlers.

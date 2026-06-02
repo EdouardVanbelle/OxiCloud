@@ -254,7 +254,22 @@ pub async fn list_address_books(
                 })
                 .collect();
 
-            if state.expose_system_users && state.auth_service.is_some() {
+            // Skip the system address book for external callers so they
+            // don't see an internal-user directory entry (let alone its
+            // contents). The system book is only useful to internal
+            // users picking sharees out of the directory.
+            let hide_system_for_external = match state.auth_service.as_ref() {
+                Some(svc) => {
+                    crate::interfaces::middleware::user::require_internal_user(svc, auth_user.id)
+                        .await
+                        .is_err()
+                }
+                None => false,
+            };
+            if state.expose_system_users
+                && state.auth_service.is_some()
+                && !hide_system_for_external
+            {
                 let now = Utc::now();
                 response.push(AddressBookResponse {
                     id: SYSTEM_BOOK_ID.to_string(),
@@ -451,6 +466,14 @@ pub async fn list_contacts(
         let Some(auth_service) = &state.auth_service else {
             return system_book_unavailable();
         };
+        // External callers must not enumerate the internal-user
+        // directory through the system address book.
+        if let Err(e) =
+            crate::interfaces::middleware::user::require_internal_user(auth_service, auth_user.id)
+                .await
+        {
+            return e.into_response();
+        }
         let caller_id = auth_user.id.to_string();
         match auth_service.list_users(params.limit, params.offset).await {
             Ok(users) => {
@@ -562,6 +585,12 @@ pub async fn get_contact(
         let Some(auth_service) = &state.auth_service else {
             return system_book_unavailable();
         };
+        if let Err(e) =
+            crate::interfaces::middleware::user::require_internal_user(auth_service, auth_user.id)
+                .await
+        {
+            return e.into_response();
+        }
         let Ok(uuid) = Uuid::parse_str(&contact_id) else {
             return (
                 StatusCode::BAD_REQUEST,
