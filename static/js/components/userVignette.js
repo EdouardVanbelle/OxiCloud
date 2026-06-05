@@ -155,14 +155,25 @@ export function createUserVignette(userId, size = 'sm', { showName = true, showE
     // longer existed in the DOM, leaving the badge invisible until
     // the next render. Creating-then-appending keeps the icon system
     // and our reveal step in agreement.
+    //
+    // We always fetch the email — when `showEmail` is false (the common
+    // case) it's still used as the hover-tooltip on the vignette so the
+    // recipient identifier stays discoverable without visual clutter.
     Promise.all([
         systemUsers.getDisplayName(userId),
         systemUsers.getPhoto(userId),
-        emailEl ? systemUsers.getEmail(userId) : Promise.resolve(null),
+        systemUsers.getEmail(userId),
         showOrigin ? systemUsers.getIsExternal(userId) : Promise.resolve(false)
     ]).then(([name, photo, email, isExternal]) => {
         if (nameEl) nameEl.textContent = name;
         if (emailEl) emailEl.textContent = email ?? '';
+        // Tooltip: surface the email on hover when it's not already
+        // rendered as the visible label (showEmail mode) and isn't
+        // already the displayed name (the fallback case where the user
+        // has no given/family/username and the label IS the email).
+        if (email && !showEmail && email !== name) {
+            wrapper.title = email;
+        }
         if (photo) {
             _applyPhoto(avatar, photo, name);
         } else {

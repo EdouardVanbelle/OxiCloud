@@ -54,6 +54,31 @@ function _nameFor(c) {
 }
 
 /**
+ * Derive the best display name from a `User` shape (i.e. the
+ * `/api/users/{id}` payload OR the `oxicloud_user` localStorage blob).
+ * Priority — matches the server-side `User::display_full()` rule sans
+ * the email decoration; the `<email>` part is added in the vignette
+ * layer as a tooltip when the email isn't already in the displayed
+ * label:
+ *
+ *   1. `"Given Family"` — both names set
+ *   2. `username`       — handle (the typical case for password / OIDC
+ *                         users with no profile claims)
+ *   3. `email`          — last resort but unambiguous
+ *   4. shortened UUID   — failure mode (e.g. /api/users/{id} returned
+ *                         nothing usable)
+ *
+ * @param {{id?: string, given_name?: string|null, family_name?: string|null, username?: string|null, email?: string|null}} u
+ * @returns {string}
+ */
+function _displayNameFromUser(u) {
+    if (u.given_name && u.family_name) return `${u.given_name} ${u.family_name}`;
+    if (u.username) return u.username;
+    if (u.email) return u.email;
+    return u.id ? `${u.id.slice(0, 8)}…` : '?';
+}
+
+/**
  * Ensure both indexes are built (idempotent).
  * After loading contacts from the system address book, the current user
  * (from localStorage) is injected so owner cells resolve correctly even
@@ -93,13 +118,13 @@ async function _ensureIndex() {
     try {
         const raw = localStorage.getItem('oxicloud_user');
         if (raw) {
-            const u = /** @type {{id?:string, display_name?:string, username?:string, email?:string, image?:string|null, is_external?:boolean}} */ (
-                JSON.parse(raw)
-            );
+            const u =
+                /** @type {{id?:string, given_name?:string|null, family_name?:string|null, username?:string|null, email?:string|null, image?:string|null, is_external?:boolean}} */ (
+                    JSON.parse(raw)
+                );
             if (u?.id) {
                 if (!_index.has(u.id)) {
-                    const name = u.display_name || u.username || u.email || `${u.id.slice(0, 8)}…`;
-                    _index.set(u.id, name);
+                    _index.set(u.id, _displayNameFromUser(u));
                 }
                 if (!_photoIndex.has(u.id)) {
                     _photoIndex.set(u.id, u.image ?? null);
@@ -143,7 +168,7 @@ async function _resolveMissing(userId) {
             if (!resp.ok) return;
             /** @type {User} */
             const u = await resp.json();
-            _index?.set(u.id, u.username || u.email || `${u.id.slice(0, 8)}…`);
+            _index?.set(u.id, _displayNameFromUser(u));
             _photoIndex?.set(u.id, u.image ?? null);
             _emailIndex?.set(u.id, u.email ?? null);
             _externalIndex?.set(u.id, !!u.is_external);
