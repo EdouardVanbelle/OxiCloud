@@ -867,7 +867,10 @@
         "member_count_other": "{count} أعضاء",
         "delete_confirm_label": "اكتب اسم المجموعة للتأكيد:",
         "delete_confirm_mismatch": "اكتب اسم المجموعة كما هو للتأكيد.",
-        "virtual_internal_name": "داخلي"
+        "virtual_internal_name": "داخلي",
+        "members_loading": "جارٍ تحميل الأعضاء…",
+        "members_empty": "لا يوجد أعضاء",
+        "virtual_internal_explanation": "كل مستخدم داخلي على هذا الخادم"
     },
     "myshares": {
         "copyLink": "نسخ الرابط",

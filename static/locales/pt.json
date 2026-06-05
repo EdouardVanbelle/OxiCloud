@@ -867,7 +867,10 @@
         "member_count_other": "{count} membros",
         "delete_confirm_label": "Digite o nome do grupo para confirmar:",
         "delete_confirm_mismatch": "Digite o nome do grupo exatamente para confirmar.",
-        "virtual_internal_name": "Interno"
+        "virtual_internal_name": "Interno",
+        "members_loading": "A carregar membros…",
+        "members_empty": "Sem membros",
+        "virtual_internal_explanation": "Todos os utilizadores internos neste servidor"
     },
     "myshares": {
         "copyLink": "Copiar link",

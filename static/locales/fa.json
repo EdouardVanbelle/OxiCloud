@@ -867,7 +867,10 @@
         "member_count_other": "{count} عضو",
         "delete_confirm_label": "نام گروه را برای تأیید وارد کنید:",
         "delete_confirm_mismatch": "نام گروه را دقیقاً برای تأیید وارد کنید.",
-        "virtual_internal_name": "داخلی"
+        "virtual_internal_name": "داخلی",
+        "members_loading": "در حال بارگیری اعضا…",
+        "members_empty": "بدون عضو",
+        "virtual_internal_explanation": "هر کاربر داخلی روی این سرور"
     },
     "myshares": {
         "copyLink": "کپی پیوند",

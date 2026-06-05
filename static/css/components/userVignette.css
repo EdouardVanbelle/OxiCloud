@@ -21,6 +21,12 @@
     overflow: hidden;
 }
 
+/* The on-hover email tooltip (used by `createUserVignette` when the
+   email is set) and the rich group-members popover both live in
+   `components/tooltip.css` and are attached at runtime via
+   `static/js/utils/tooltip.js` — kept generic so other surfaces
+   (role chips, link chips, action buttons) can opt in the same way. */
+
 .user-vignette__avatar {
     border-radius: 50%;
     display: flex;

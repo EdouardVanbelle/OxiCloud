@@ -867,7 +867,10 @@
         "member_count_other": "구성원 {count}명",
         "delete_confirm_label": "확인을 위해 그룹 이름을 입력하세요:",
         "delete_confirm_mismatch": "확인을 위해 그룹 이름을 정확히 입력하세요.",
-        "virtual_internal_name": "내부"
+        "virtual_internal_name": "내부",
+        "members_loading": "구성원 로딩 중…",
+        "members_empty": "구성원 없음",
+        "virtual_internal_explanation": "이 서버의 모든 내부 사용자"
     },
     "myshares": {
         "copyLink": "링크 복사",

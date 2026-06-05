@@ -867,7 +867,10 @@
         "member_count_other": "{count} 个成员",
         "delete_confirm_label": "请输入群组名称以确认：",
         "delete_confirm_mismatch": "请准确输入群组名称以确认。",
-        "virtual_internal_name": "内部"
+        "virtual_internal_name": "内部",
+        "members_loading": "正在加载成员…",
+        "members_empty": "无成员",
+        "virtual_internal_explanation": "本服务器上的所有内部用户"
     },
     "myshares": {
         "copyLink": "复制链接",

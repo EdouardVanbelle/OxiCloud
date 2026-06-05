@@ -1,0 +1,95 @@
+/* ── Tooltip primitive ─────────────────────────────────────────────
+ *
+ * Generic on-hover tooltip used app-wide. Two flavours:
+ *
+ *  1. Single-line label, content from `data-tooltip="…"` on the trigger.
+ *     Use `attachTooltip(el, text)` from `static/js/utils/tooltip.js`.
+ *  2. Rich popover with a DOM subtree, populated lazily on first hover.
+ *     Use `attachRichTooltip(el, populateAsync)` for things like the
+ *     group-vignette member list.
+ *
+ * Both are portal'd to `document.body` (the JS helper creates a child
+ * of body and positions it with `position: fixed`) so they escape the
+ * `overflow: hidden` clipping that lives on lane wrappers, list rows,
+ * and any other "contain my children" ancestor. Without the portal,
+ * tooltips near the edges of those containers get cropped — exactly
+ * the bug that prompted this refactor.
+ *
+ * Hover-intent timing is asymmetric on purpose:
+ *  - Entry: 250 ms delay before the fade-in starts. Short enough to
+ *    feel responsive (much faster than the browser-native `title`
+ *    delay, which is ~500–1500 ms), long enough to suppress flicker
+ *    on accidental mouseovers.
+ *  - Exit: 0 ms delay. The tooltip dismisses immediately when the
+ *    user moves away.
+ *
+ * The class toggle is JS-driven (mouseenter/leave + focusin/out
+ * listeners on the trigger); the visible transition lives entirely
+ * in CSS so a setTimeout never gates the visual change.
+ */
+
+.oxi-tooltip-popover {
+    position: fixed;
+    min-width: 0;
+    max-width: 280px;
+    padding: 6px 10px;
+    background-color: var(--color-text);
+    color: var(--color-bg-page);
+    font-size: 12px;
+    line-height: 1.5;
+    text-align: left;
+    border-radius: 6px;
+    box-shadow: 0 2px 8px var(--color-shadow);
+    pointer-events: none;
+    opacity: 0;
+    /* Default (no `--visible`): fast hide, no delay. */
+    transition: opacity 100ms ease-out 0ms;
+    z-index: 10000;
+}
+
+/* Simple (data-tooltip) flavour — keeps the label on one line so it
+   reads as a short caption, not a paragraph. Used by short labels
+   like a user vignette's email-on-hover. */
+.oxi-tooltip-popover--simple {
+    white-space: nowrap;
+    max-width: none;
+}
+
+/* Visible state overrides the transition to add the hover-intent
+   delay on the *entry* path. Removing the class falls back to
+   the default rule above (no delay → immediate fade-out). */
+.oxi-tooltip-popover--visible {
+    opacity: 1;
+    transition: opacity 100ms ease-out 250ms;
+}
+
+/* ── Rich-popover layout helpers ────────────────────────────────── */
+
+.oxi-tooltip-popover__line {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* "+N" overflow badge — small pill at the end of a list of items when
+   there are more than the tooltip cares to show. Lighter background
+   so the count reads as meta-information, not just another line. */
+.oxi-tooltip-popover__overflow {
+    display: inline-block;
+    margin-top: 4px;
+    padding: 1px 7px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-bg-page);
+    background-color: var(--color-text-faint);
+    border-radius: 9999px;
+}
+
+/* Placeholder line shown briefly between the first hover and the
+   populate() callback's resolve (e.g. while `/api/groups/{id}/members`
+   is in flight). Italic + dimmed so the user perceives it as a
+   transitional state, not real content. */
+.oxi-tooltip-popover__placeholder {
+    color: var(--color-text-faint);
+    font-style: italic;
+}

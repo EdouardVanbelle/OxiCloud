@@ -867,7 +867,10 @@
         "member_count_other": "{count} członków",
         "delete_confirm_label": "Wpisz nazwę grupy, aby potwierdzić:",
         "delete_confirm_mismatch": "Wpisz nazwę grupy dokładnie, aby potwierdzić.",
-        "virtual_internal_name": "Wewnętrzni"
+        "virtual_internal_name": "Wewnętrzni",
+        "members_loading": "Ładowanie członków…",
+        "members_empty": "Brak członków",
+        "virtual_internal_explanation": "Każdy użytkownik wewnętrzny na tym serwerze"
     },
     "myshares": {
         "copyLink": "Skopiuj link",

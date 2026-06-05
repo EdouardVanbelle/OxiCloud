@@ -867,7 +867,10 @@
         "member_count_other": "{count} メンバー",
         "delete_confirm_label": "確認のためにグループ名を入力してください:",
         "delete_confirm_mismatch": "確認のためにグループ名を正確に入力してください。",
-        "virtual_internal_name": "内部"
+        "virtual_internal_name": "内部",
+        "members_loading": "メンバーを読み込み中…",
+        "members_empty": "メンバーなし",
+        "virtual_internal_explanation": "このサーバー上のすべての内部ユーザー"
     },
     "myshares": {
         "copyLink": "リンクをコピー",

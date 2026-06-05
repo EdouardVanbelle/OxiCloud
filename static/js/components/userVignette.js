@@ -20,6 +20,7 @@
  */
 
 import { systemUsers } from '../model/systemUsers.js';
+import { attachTooltip } from '../utils/tooltip.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -167,12 +168,23 @@ export function createUserVignette(userId, size = 'sm', { showName = true, showE
     ]).then(([name, photo, email, isExternal]) => {
         if (nameEl) nameEl.textContent = name;
         if (emailEl) emailEl.textContent = email ?? '';
-        // Tooltip: surface the email on hover when it's not already
-        // rendered as the visible label (showEmail mode) and isn't
-        // already the displayed name (the fallback case where the user
-        // has no given/family/username and the label IS the email).
-        if (email && !showEmail && email !== name) {
-            wrapper.title = email;
+        // Tooltip: surface the email on hover for every vignette that
+        // has one — including external users whose visible label IS
+        // the email already. The redundant "alice@x.com → alice@x.com"
+        // hover is a small price for keeping the interaction uniform:
+        // every user row in a list reacts to hover the same way, so
+        // the user doesn't learn "internal rows have tooltips, external
+        // rows are silent". Suppressed only in `showEmail` mode, where
+        // the email is already a permanent line below the name.
+        //
+        // `attachTooltip` portals the popover to `document.body` and
+        // applies the shared 250 ms hover-intent delay (much faster
+        // than the native `title` attribute's ~500–1500 ms wait).
+        // `aria-label` is set in parallel so screen readers still get
+        // the email — popover content is mouse/keyboard-hover only.
+        if (email && !showEmail) {
+            wrapper.setAttribute('aria-label', email);
+            attachTooltip(wrapper, email);
         }
         if (photo) {
             _applyPhoto(avatar, photo, name);

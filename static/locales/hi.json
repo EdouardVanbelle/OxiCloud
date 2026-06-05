@@ -867,7 +867,10 @@
         "member_count_other": "{count} सदस्य",
         "delete_confirm_label": "पुष्टि के लिए समूह का नाम लिखें:",
         "delete_confirm_mismatch": "पुष्टि के लिए समूह का नाम बिल्कुल वैसा ही लिखें।",
-        "virtual_internal_name": "आंतरिक"
+        "virtual_internal_name": "आंतरिक",
+        "members_loading": "सदस्य लोड हो रहे हैं…",
+        "members_empty": "कोई सदस्य नहीं",
+        "virtual_internal_explanation": "इस सर्वर पर हर आंतरिक उपयोगकर्ता"
     },
     "myshares": {
         "copyLink": "लिंक कॉपी करें",

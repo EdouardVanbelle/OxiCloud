@@ -270,7 +270,8 @@ class MySharesList {
         }
         if (swimKey.startsWith('group:')) {
             return createGroupVignette(this._groupName(grant.subject_id), 'list', {
-                icon: this._groupIcon(grant.subject_id)
+                icon: this._groupIcon(grant.subject_id),
+                groupId: grant.subject_id
             });
         }
         const el = document.createElement('div');
@@ -347,7 +348,8 @@ class MySharesList {
         } else if (grant.subject_type === 'group') {
             el.appendChild(
                 createGroupVignette(this._groupName(grant.subject_id), 'xs', {
-                    icon: this._groupIcon(grant.subject_id)
+                    icon: this._groupIcon(grant.subject_id),
+                    groupId: grant.subject_id
                 })
             );
         } else {

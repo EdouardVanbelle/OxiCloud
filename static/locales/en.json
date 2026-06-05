@@ -862,6 +862,8 @@
         "name_placeholder": "engineering",
         "description_label": "Description (optional)",
         "members_section": "Members",
+        "members_loading": "Loading members…",
+        "members_empty": "No members",
         "add_member_placeholder": "Add a user or group…",
         "no_members": "No members yet.",
         "remove_member": "Remove",
@@ -877,6 +879,7 @@
         "member_count_other": "{count} members",
         "delete_confirm_label": "Type the group name to confirm:",
         "delete_confirm_mismatch": "Type the group name exactly to confirm.",
-        "virtual_internal_name": "Internal"
+        "virtual_internal_name": "Internal",
+        "virtual_internal_explanation": "Every internal user on this server"
     }
 }
