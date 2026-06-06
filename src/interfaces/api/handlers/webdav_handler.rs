@@ -69,6 +69,37 @@ pub(crate) fn encode_uri_path(path: &str) -> String {
         .join("/")
 }
 
+/// Build the `<D:href>` value for a non-collection (file) resource.
+///
+/// RFC 4918 §5.2 distinguishes collection (folder) URLs from
+/// non-collection URLs by a trailing `/`. Files use NO trailing
+/// slash. Mirror of [`webdav_collection_href`] — keep both arms
+/// of the choice on the same screen so an "is it a file or a
+/// folder?" reviewer can verify both branches at once.
+fn webdav_href(path: &str) -> String {
+    format!("/webdav/{}", encode_uri_path(path))
+}
+
+/// Build the `<D:href>` value for a collection (folder) resource.
+///
+/// Always terminates with `/` — RFC 4918 §5.2 requires collection
+/// URLs to end in a slash, and strict WebDAV clients (notably the
+/// NextCloud desktop sync engine, which also speaks to this
+/// endpoint) abort multi-status parses with
+/// `Invalid href "<…>" expected starting with "<requested-url>"`
+/// when the response's own-entry href is missing the trailing `/`.
+/// PROPPATCH and LOCK responses on folders MUST use this — using
+/// [`webdav_href`] for a folder is the bug class this helper
+/// exists to prevent.
+fn webdav_collection_href(path: &str) -> String {
+    let h = webdav_href(path);
+    if h.ends_with('/') {
+        h
+    } else {
+        format!("{}/", h)
+    }
+}
+
 // Create a custom DAV header since it's not in the standard headers
 const HEADER_DAV: HeaderName = HeaderName::from_static("dav");
 const HEADER_LOCK_TOKEN: HeaderName = HeaderName::from_static("lock-token");
@@ -605,11 +636,34 @@ async fn build_streaming_propfind_response(
  * @return XML response with property modification results
  */
 async fn handle_proppatch(
-    _state: Arc<AppState>,
+    state: Arc<AppState>,
     req: Request<Body>,
     path: String,
 ) -> Result<Response<Body>, AppError> {
     let _user = extract_user(&req)?;
+
+    // Resolve the target resource type BEFORE consuming the body so
+    // we can pick the correct href shape in the multi-status
+    // response. RFC 4918 §5.2 + strict WebDAV-client parser rules
+    // require a trailing `/` for collection hrefs; emitting
+    // `/webdav/foo` for a folder breaks NC-desktop / Cyberduck /
+    // other multi-status consumers the same way the NC PROPFIND
+    // bug did. An empty / `/` path is the root, always a
+    // collection. A path that resolves to neither file nor folder
+    // (e.g. PROPPATCH on a resource that doesn't exist) defaults
+    // to non-collection — matches the request-line shape the
+    // client used, since collection paths conventionally arrive
+    // with trailing `/` already trimmed by routing.
+    let is_collection = if path.is_empty() || path == "/" {
+        true
+    } else {
+        state
+            .applications
+            .folder_service
+            .get_folder_by_path(&path)
+            .await
+            .is_ok()
+    };
 
     // Read request body (XML — bounded to 1 MB)
     let body_bytes = body::to_bytes(req.into_body(), MAX_XML_BODY)
@@ -636,8 +690,12 @@ async fn handle_proppatch(
         results.push((prop, true));
     }
 
-    // Generate response
-    let href = format!("/webdav/{}", encode_uri_path(&path));
+    // Generate response — collection vs file href chosen above.
+    let href = if is_collection {
+        webdav_collection_href(&path)
+    } else {
+        webdav_href(&path)
+    };
     let mut response_body = Vec::new();
     WebDavAdapter::generate_proppatch_response(&mut response_body, &href, &results).map_err(
         |e| AppError::internal_error(format!("Failed to generate PROPPATCH response: {}", e)),
@@ -1715,6 +1773,24 @@ async fn handle_lock(
 ) -> Result<Response<Body>, AppError> {
     let user = extract_user(&req)?;
 
+    // Determine collection-vs-file for href shape. Root + known
+    // folders → collection; everything else (existing files,
+    // lock-null on a non-existent path) → file. RFC 4918 §9.10.1
+    // allows LOCK on a non-existent resource (the "lock-null
+    // resource" pattern used by Office save flows) — that arm
+    // falls through to the file href shape, matching the
+    // request-line shape clients send.
+    let is_collection = if path.is_empty() || path == "/" {
+        true
+    } else {
+        state
+            .applications
+            .folder_service
+            .get_folder_by_path(&path)
+            .await
+            .is_ok()
+    };
+
     // Get the headers that we need
     let depth = req
         .headers()
@@ -1764,8 +1840,12 @@ async fn handle_lock(
                 AppError::precondition_failed(format!("Lock token not found or expired: {}", token))
             })?;
 
-        // Generate response
-        let href = format!("/webdav/{}", encode_uri_path(&path));
+        // Generate response — collection vs file href chosen above.
+        let href = if is_collection {
+            webdav_collection_href(&path)
+        } else {
+            webdav_href(&path)
+        };
         let mut response_body = Vec::new();
         WebDavAdapter::generate_lock_response(&mut response_body, &entry.info, &href).map_err(
             |e| AppError::internal_error(format!("Failed to generate LOCK response: {}", e)),
@@ -1800,8 +1880,12 @@ async fn handle_lock(
             ))
         })?;
 
-        // Generate response
-        let href = format!("/webdav/{}", encode_uri_path(&path));
+        // Generate response — collection vs file href chosen above.
+        let href = if is_collection {
+            webdav_collection_href(&path)
+        } else {
+            webdav_href(&path)
+        };
         let mut response_body = Vec::new();
         WebDavAdapter::generate_lock_response(&mut response_body, &entry.info, &href).map_err(
             |e| AppError::internal_error(format!("Failed to generate LOCK response: {}", e)),
@@ -1864,4 +1948,50 @@ async fn handle_unlock(
         .status(StatusCode::NO_CONTENT)
         .body(Body::empty())
         .unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_webdav_href_no_trailing_slash() {
+        assert_eq!(
+            webdav_href("Documents/report.pdf"),
+            "/webdav/Documents/report.pdf"
+        );
+        assert_eq!(webdav_href("file.txt"), "/webdav/file.txt");
+    }
+
+    #[test]
+    fn test_webdav_collection_href_appends_slash_when_missing() {
+        assert_eq!(webdav_collection_href("Documents"), "/webdav/Documents/");
+        assert_eq!(
+            webdav_collection_href("Documents/subfolder"),
+            "/webdav/Documents/subfolder/"
+        );
+    }
+
+    #[test]
+    fn test_webdav_collection_href_idempotent_when_already_slashed() {
+        // `encode_uri_path` never emits a trailing `/` of its own
+        // because the path argument is already trimmed by routing,
+        // but the helper still has to be robust to a path that
+        // happens to end in `/` — exercise the idempotence path.
+        assert_eq!(webdav_collection_href("Documents/"), "/webdav/Documents/");
+    }
+
+    #[test]
+    fn test_webdav_href_preserves_url_encoding() {
+        // Spaces and Unicode must percent-encode at the segment level,
+        // not get a verbatim `%20` re-encoded as `%2520`.
+        assert_eq!(
+            webdav_href("My Photos/vacation pic.jpg"),
+            "/webdav/My%20Photos/vacation%20pic.jpg"
+        );
+        assert_eq!(
+            webdav_collection_href("My Photos/2024"),
+            "/webdav/My%20Photos/2024/"
+        );
+    }
 }
