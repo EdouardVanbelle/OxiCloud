@@ -8,7 +8,7 @@
 //! [`LogBadRequest`] — emits a WARN for every HTTP 400 response, inheriting
 //! all span fields so the log line includes request ID, IP, user, method, URI.
 
-use axum::http::{HeaderValue, Request, Response, StatusCode};
+use axum::http::{HeaderValue, Request, Response};
 use std::time::Duration;
 use tower_http::request_id::{MakeRequestId, RequestId};
 use tower_http::trace::{MakeSpan, OnResponse};
@@ -51,6 +51,7 @@ impl<B> MakeSpan<B> for ClientIpMakeSpan {
             .get("x-request-id")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("-");
+
         tracing::info_span!(
             "req",
             request_id = request_id,
@@ -58,6 +59,7 @@ impl<B> MakeSpan<B> for ClientIpMakeSpan {
             method     = %request.method(),
             uri        = %request.uri().path(),
             user_id    = tracing::field::Empty,
+
         )
     }
 }
@@ -70,11 +72,29 @@ pub struct LogBadRequest;
 
 impl<B> OnResponse<B> for LogBadRequest {
     fn on_response(self, response: &Response<B>, latency: Duration, _span: &Span) {
-        if response.status() == StatusCode::BAD_REQUEST {
-            tracing::warn!(
-                status = 400,
+        if response.status().is_informational()
+            || response.status().is_success()
+            || response.status().is_redirection()
+        {
+            tracing::debug!(
+                target: "http",
+                event = "http.success",
+                status = response.status().as_u16(),
                 latency_ms = latency.as_millis(),
-                "bad request",
+            );
+        } else if response.status().is_client_error() {
+            tracing::info!(
+                target: "http",
+                event = "http.client_error",
+                status = response.status().as_u16(),
+                latency_ms = latency.as_millis(),
+            );
+        } else if response.status().is_server_error() {
+            tracing::warn!(
+                target: "http",
+                event = "http.server_error",
+                status = response.status().as_u16(),
+                latency_ms = latency.as_millis(),
             );
         }
     }
