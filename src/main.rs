@@ -12,9 +12,8 @@ use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
-use oxicloud::interfaces::middleware::trace_span::{
-    ClientIpMakeSpan, LogBadRequest, UuidRequestId,
-};
+use oxicloud::access_log;
+use oxicloud::interfaces::middleware::trace_span::{ClientIpMakeSpan, UuidRequestId};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::{PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -123,10 +122,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load .env file if present (for local development)
     dotenvy::dotenv().ok();
 
-    // Initialize tracing
+    // Initialize tracing.
+    //
+    // Default `RUST_LOG=info,http=warn`:
+    //   - Everything else at info.
+    //   - All `http::*` access-log targets at warn — only 5xx
+    //     responses are emitted by default. Operators who want
+    //     visibility into 4xx (login failures, etc.) can bump it
+    //     with `RUST_LOG=info,http::api::auth=info` etc. Setting
+    //     `RUST_LOG` explicitly fully overrides this default; the
+    //     `http=warn` fallback is only applied when the env var
+    //     is unset.
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info,http=warn".into()),
         ))
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -432,38 +441,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let magic_link_router = interfaces::api::handlers::magic_link_handler::magic_link_routes()
             .with_state(app_state.clone());
 
+        // Access-log targets are declared per-mount via `access_log!(…)`
+        // — see `interfaces/middleware/trace_span.rs` for the catalogue.
         app = Router::new()
             // Health / readiness probes — no auth, mounted at root
-            .merge(health_routes)
+            .merge(health_routes.layer(access_log!("http::probe")))
             // Magic-link redemption — top-level, no `/api/` prefix
-            .merge(magic_link_router)
+            .merge(magic_link_router.layer(access_log!("http::web")))
             // Rate-limited auth endpoints (login, register, refresh)
-            .nest("/api/auth", auth_login)
-            .nest("/api/auth", auth_register)
-            .nest("/api/auth", auth_refresh)
+            .nest(
+                "/api/auth",
+                auth_login.layer(access_log!("http::api::auth")),
+            )
+            .nest(
+                "/api/auth",
+                auth_register.layer(access_log!("http::api::auth")),
+            )
+            .nest(
+                "/api/auth",
+                auth_refresh.layer(access_log!("http::api::auth")),
+            )
             // Public auth endpoints (status, OIDC)
-            .nest("/api/auth", auth_public)
+            .nest(
+                "/api/auth",
+                auth_public.layer(access_log!("http::api::auth")),
+            )
             // Protected auth endpoints (/me, /change-password, /logout)
-            .nest("/api/auth", auth_protected)
+            .nest(
+                "/api/auth",
+                auth_protected.layer(access_log!("http::api::auth")),
+            )
             // App password management (create, list, revoke)
-            .nest("/api/auth", app_pw_protected)
+            .nest(
+                "/api/auth",
+                app_pw_protected.layer(access_log!("http::api::auth")),
+            )
             // One-time setup endpoint — public, rate-limited
-            .nest("/api", setup_router)
+            .nest("/api", setup_router.layer(access_log!("http::api")))
             // Device Auth Grant public endpoints (authorize + token polling)
-            .nest("/api/auth/device", device_public)
+            .nest(
+                "/api/auth/device",
+                device_public.layer(access_log!("http::api::auth")),
+            )
             // Device Auth Grant protected endpoints (verify + device management)
-            .nest("/api/auth/device", device_protected)
+            .nest(
+                "/api/auth/device",
+                device_protected.layer(access_log!("http::api::auth")),
+            )
             // Public API routes (share access, i18n) — no auth required
-            .nest("/api", public_api_routes)
+            .nest("/api", public_api_routes.layer(access_log!("http::api")))
             // All other API routes are protected by auth middleware
-            .nest("/api", protected_api)
+            .nest("/api", protected_api.layer(access_log!("http::api")))
             // RFC 6764 well-known discovery (public, no auth — just redirects)
-            .merge(well_known_router.clone())
+            .merge(well_known_router.clone().layer(access_log!("http::dav")))
             // CalDAV/CardDAV/WebDAV protocols merged at top-level for client compatibility
-            .merge(caldav_protected)
-            .merge(carddav_protected)
-            .merge(webdav_protected)
-            .merge(web_routes);
+            .merge(caldav_protected.layer(access_log!("http::dav")))
+            .merge(carddav_protected.layer(access_log!("http::dav")))
+            .merge(webdav_protected.layer(access_log!("http::dav")))
+            // Web (HTML pages) — also the ServeDir fallback root, so
+            // static asset hits land here. We keep them on the `web`
+            // target for simplicity; switch to `http::static` when
+            // the static surface is split into its own router.
+            .merge(web_routes.layer(access_log!("http::web")));
 
         // Mount Nextcloud routes (uses its own Basic Auth middleware).
         // **Merged BEFORE the trace + request-id layers** so NC requests
@@ -471,7 +510,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // fields as every other surface — see
         // `interfaces/middleware/trace_span.rs::ClientIpMakeSpan`.
         if let Some(nc_router) = nextcloud_router {
-            app = app.merge(nc_router.with_state(app_state.clone()));
+            app = app.merge(
+                nc_router
+                    .with_state(app_state.clone())
+                    .layer(access_log!("http::nextcloud")),
+            );
         }
 
         // Mount WOPI routes (protocol routes use own token auth, API routes behind auth middleware).
@@ -485,8 +528,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     auth_middleware,
                 ));
             app = app
-                .nest("/wopi", wopi_protocol)
-                .nest("/api/wopi", wopi_api_protected);
+                .nest("/wopi", wopi_protocol.layer(access_log!("http::wopi")))
+                .nest(
+                    "/api/wopi",
+                    wopi_api_protected.layer(access_log!("http::api")),
+                );
         }
 
         // ── Trace + request-id layers applied LAST so every route
@@ -495,11 +541,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         //    only have to be merged before this point to get tracing
         //    for free — no second site to remember to update.
         app = app
-            .layer(
-                TraceLayer::new_for_http()
-                    .make_span_with(ClientIpMakeSpan)
-                    .on_response(LogBadRequest),
-            )
+            .layer(TraceLayer::new_for_http().make_span_with(ClientIpMakeSpan))
             .layer(PropagateRequestIdLayer::x_request_id())
             .layer(SetRequestIdLayer::x_request_id(UuidRequestId));
     } else {
@@ -507,38 +549,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("Authentication is DISABLED — all API routes are publicly accessible");
         app = Router::new()
             // Health / readiness probes — no auth, mounted at root
-            .merge(health_routes)
-            .nest("/api", public_api_routes)
-            .nest("/api", api_routes)
+            .merge(health_routes.layer(access_log!("http::probe")))
+            .nest("/api", public_api_routes.layer(access_log!("http::api")))
+            .nest("/api", api_routes.layer(access_log!("http::api")))
             // RFC 6764 well-known discovery (just redirects)
-            .merge(well_known_router)
+            .merge(well_known_router.layer(access_log!("http::dav")))
             // CalDAV/CardDAV/WebDAV protocols merged at top-level
-            .merge(caldav_router)
-            .merge(carddav_router)
-            .merge(webdav_router)
-            .merge(web_routes);
+            .merge(caldav_router.layer(access_log!("http::dav")))
+            .merge(carddav_router.layer(access_log!("http::dav")))
+            .merge(webdav_router.layer(access_log!("http::dav")))
+            .merge(web_routes.layer(access_log!("http::web")));
 
         // Mount Nextcloud routes — merged BEFORE the trace + request-id
         // layers so NC requests get the same span fields as every
         // other surface (matches the auth-enabled branch above).
         if let Some(nc_router) = nextcloud_router {
-            app = app.merge(nc_router.with_state(app_state.clone()));
+            app = app.merge(
+                nc_router
+                    .with_state(app_state.clone())
+                    .layer(access_log!("http::nextcloud")),
+            );
         }
 
         // Mount WOPI routes (no auth middleware when auth is disabled).
         // Same reasoning: merge before the trace layer.
         if let Some((wopi_protocol, wopi_api)) = wopi_routes {
-            app = app.nest("/wopi", wopi_protocol).nest("/api/wopi", wopi_api);
+            app = app
+                .nest("/wopi", wopi_protocol.layer(access_log!("http::wopi")))
+                .nest("/api/wopi", wopi_api.layer(access_log!("http::api")));
         }
 
         // ── Trace + request-id layers applied LAST. See the
         //    auth-enabled branch above for the rationale.
         app = app
-            .layer(
-                TraceLayer::new_for_http()
-                    .make_span_with(ClientIpMakeSpan)
-                    .on_response(LogBadRequest),
-            )
+            .layer(TraceLayer::new_for_http().make_span_with(ClientIpMakeSpan))
             .layer(PropagateRequestIdLayer::x_request_id())
             .layer(SetRequestIdLayer::x_request_id(UuidRequestId));
     }

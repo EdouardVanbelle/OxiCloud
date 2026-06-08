@@ -1,17 +1,52 @@
-//! Custom [`MakeSpan`], [`OnResponse`], and [`MakeRequestId`] for request tracing.
+//! Per-request tracing primitives + the [`access_log!`] macro.
 //!
-//! [`UuidRequestId`] — generates a UUID v4 per request for `SetRequestIdLayer`.
+//! ## What lives here
 //!
-//! [`ClientIpMakeSpan`] — records `request_id`, `client_ip`, `method`, `uri`,
-//! and a placeholder `user_id` (filled by auth middleware) on every request span.
+//! - [`UuidRequestId`] — generates a UUID v7 per request for
+//!   `tower_http::request_id::SetRequestIdLayer`.
+//! - [`ClientIpMakeSpan`] — creates the per-request `req` span with
+//!   `request_id`, `client_ip`, `method`, `uri`, and deferred
+//!   `user_id` / `chroot_id` fields. The auth middlewares fill the
+//!   deferred fields via `Span::current().record(...)`.
+//! - [`access_log!`] — macro that produces an `axum::middleware`
+//!   layer emitting one log event per request at a fixed tracing
+//!   target. Attach to each sub-router at its mount site.
 //!
-//! [`LogBadRequest`] — emits a WARN for every HTTP 400 response, inheriting
-//! all span fields so the log line includes request ID, IP, user, method, URI.
+//! ## Why targets are declared at mount sites (not by URI prefix)
+//!
+//! The router topology — `Router::nest`, `merge`, `route` — already
+//! describes "this group of routes belongs to surface X". Re-deriving
+//! that grouping inside the middleware by URI-prefix matching would
+//! duplicate the topology and silently drift when routes are added,
+//! moved, or renamed. Declaring the target right next to the
+//! `nest()` / `merge()` call keeps the two in lockstep: a route
+//! group can't be reached except through its mount site, and the
+//! mount site is now the single source of truth for its log target.
+//!
+//! ## Available targets
+//!
+//! Targets use Rust's `::` module-path separator so
+//! `tracing_subscriber::EnvFilter` recognises the hierarchy:
+//! `RUST_LOG=http=info` enables every sub-target; override a single
+//! one with `RUST_LOG=http=warn,http::api::auth=debug`.
+//!
+//! Conventional targets:
+//! - `http::api` — REST API under `/api/*`.
+//! - `http::api::auth` — auth surface (login, refresh, app-pw, OIDC,
+//!   device-auth). High-value for security operators.
+//! - `http::nextcloud` — NextCloud-flavoured surface (`/remote.php`,
+//!   `/ocs`, `/status.php`, `/login/v2`, `/index.php/204`).
+//! - `http::dav` — CalDAV / CardDAV / WebDAV + RFC 6764 discovery.
+//! - `http::wopi` — WOPI host protocol (M365 / Collabora).
+//! - `http::probe` — `/health`, `/ready`, `/version`, `/openapi.json`.
+//! - `http::web` — HTML pages + magic-link redemption.
+//! - `http::static` — `ServeDir` fallback (CSS/JS/images at bare URLs).
+//! - `http` — bare catch-all for routes that didn't get an explicit
+//!   layer (loud signal that wiring is missing).
 
-use axum::http::{HeaderValue, Request, Response, StatusCode};
 use std::time::Duration;
 use tower_http::request_id::{MakeRequestId, RequestId};
-use tower_http::trace::{MakeSpan, OnResponse};
+use tower_http::trace::MakeSpan;
 use tracing::Span;
 use uuid::Uuid;
 
@@ -27,16 +62,19 @@ use uuid::Uuid;
 pub struct UuidRequestId;
 
 impl MakeRequestId for UuidRequestId {
-    fn make_request_id<B>(&mut self, _request: &Request<B>) -> Option<RequestId> {
+    fn make_request_id<B>(&mut self, _request: &axum::http::Request<B>) -> Option<RequestId> {
         let id = Uuid::now_v7().to_string();
-        HeaderValue::from_str(&id).ok().map(RequestId::new)
+        axum::http::HeaderValue::from_str(&id)
+            .ok()
+            .map(RequestId::new)
     }
 }
 
 // ─── Span factory ────────────────────────────────────────────────────────────
 
-/// Implements [`MakeSpan`] so that every HTTP request span carries
-/// `request_id`, `client_ip`, `method`, `uri`, and a deferred `user_id`.
+/// Implements [`MakeSpan`] so every HTTP request span carries
+/// `request_id`, `client_ip`, `method`, `uri`, and deferred
+/// `user_id` / `chroot_id` slots.
 ///
 /// `request_id` is read from the `x-request-id` header set by
 /// [`tower_http::request_id::SetRequestIdLayer`] (which must wrap this layer).
@@ -44,13 +82,14 @@ impl MakeRequestId for UuidRequestId {
 pub struct ClientIpMakeSpan;
 
 impl<B> MakeSpan<B> for ClientIpMakeSpan {
-    fn make_span(&mut self, request: &Request<B>) -> Span {
+    fn make_span(&mut self, request: &axum::http::Request<B>) -> Span {
         let ip = super::trusted_proxy::client_ip(request, true);
         let request_id = request
             .headers()
             .get("x-request-id")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("-");
+
         tracing::info_span!(
             "req",
             request_id = request_id,
@@ -58,24 +97,183 @@ impl<B> MakeSpan<B> for ClientIpMakeSpan {
             method     = %request.method(),
             uri        = %request.uri().path(),
             user_id    = tracing::field::Empty,
+            // The Nextcloud chroot folder id, set by `basic_auth_middleware`.
+            chroot_id  = tracing::field::Empty,
         )
     }
 }
 
-// ─── Response observer ───────────────────────────────────────────────────────
+// ─── Access log macro ────────────────────────────────────────────────────────
 
-/// Implements [`OnResponse`]: emits a WARN log for every HTTP 400 response.
-#[derive(Clone, Debug, Default)]
-pub struct LogBadRequest;
+/// Returns an [`axum::middleware`] layer that emits one log event
+/// per request at a fixed tracing `target`.
+///
+/// **Attach at the mount site of each route group**, so the target
+/// is declared next to the `nest()` / `merge()` it applies to:
+///
+/// ```ignore
+/// use oxicloud::access_log;
+///
+/// app = app
+///     .merge(health_routes.layer(access_log!("http::probe")))
+///     .merge(magic_link_router.layer(access_log!("http::web")))
+///     .nest("/api/auth", auth_router.layer(access_log!("http::api::auth")))
+///     .nest("/api",      api_router.layer(access_log!("http::api")))
+///     .merge(webdav_router.layer(access_log!("http::dav")))
+///     .nest("/wopi",     wopi_protocol.layer(access_log!("http::wopi")))
+///     .merge(web_routes.layer(access_log!("http::web")));
+/// ```
+///
+/// Level by status class: `2xx`/`3xx` → `DEBUG`, `4xx` → `INFO`,
+/// `5xx` → `WARN`. Each event inherits `request_id`, `client_ip`,
+/// `method`, `uri`, `user_id`, `chroot_id` from the surrounding `req`
+/// span (created by [`ClientIpMakeSpan`] at the `TraceLayer` site).
+///
+/// ## Why a macro
+///
+/// `tracing::info!(target: …)` requires the target argument to be a
+/// **literal** at the macro expansion site — runtime variables are
+/// rejected. The macro embeds the literal target into a `from_fn`
+/// closure, so no runtime dispatch table is needed; the call site
+/// is also the literal site.
+#[macro_export]
+macro_rules! access_log {
+    ($target:literal) => {
+        ::axum::middleware::from_fn(
+            |req: ::axum::extract::Request, next: ::axum::middleware::Next| async move {
+                // Cheaply hold the `user-agent` HeaderValue (a
+                // `bytes::Bytes` clone — one atomic increment, no
+                // allocation) so we can still read it after `req` is
+                // moved into `next.run`. The `&str` view + format is
+                // deferred to inside the per-level `enabled!`
+                // branches, so no work is wasted when the filter
+                // rejects the event (default `RUST_LOG=…,http=warn`
+                // → 2xx/3xx never format).
+                let user_agent_hv = req
+                    .headers()
+                    .get(::axum::http::header::USER_AGENT)
+                    .cloned();
+                let start = ::std::time::Instant::now();
+                let response = next.run(req).await;
+                let status = response.status().as_u16();
+                let latency_ms = start.elapsed().as_millis() as u64;
 
-impl<B> OnResponse<B> for LogBadRequest {
-    fn on_response(self, response: &Response<B>, latency: Duration, _span: &Span) {
-        if response.status() == StatusCode::BAD_REQUEST {
-            tracing::warn!(
-                status = 400,
-                latency_ms = latency.as_millis(),
-                "bad request",
-            );
-        }
+                // Per-status-class emission. `enabled!` is an
+                // ~5 ns atomic-load + comparison; below it we
+                // extract `&str` views from the still-live
+                // HeaderValues without allocating.
+                //
+                // `content_length` is 0 for streamed bodies
+                // (chunked transfer-encoding sets no Content-Length)
+                // — operators reading the log should interpret `0`
+                // as "empty OR streamed", not literally zero bytes.
+                if status >= 500 {
+                    if ::tracing::enabled!(target: $target, ::tracing::Level::WARN) {
+                        let user_agent = user_agent_hv
+                            .as_ref()
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("");
+                        let content_type = response
+                            .headers()
+                            .get(::axum::http::header::CONTENT_TYPE)
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("");
+                        let content_length = response
+                            .headers()
+                            .get(::axum::http::header::CONTENT_LENGTH)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .unwrap_or(0);
+                        ::tracing::warn!(
+                            target: $target,
+                            status,
+                            latency_ms,
+                            content_length,
+                            content_type,
+                            user_agent,
+                            "server_error"
+                        );
+                    }
+                } else if status >= 400 {
+                    if ::tracing::enabled!(target: $target, ::tracing::Level::INFO) {
+                        let user_agent = user_agent_hv
+                            .as_ref()
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("");
+                        let content_type = response
+                            .headers()
+                            .get(::axum::http::header::CONTENT_TYPE)
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("");
+                        let content_length = response
+                            .headers()
+                            .get(::axum::http::header::CONTENT_LENGTH)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .unwrap_or(0);
+                        ::tracing::info!(
+                            target: $target,
+                            status,
+                            latency_ms,
+                            content_length,
+                            content_type,
+                            user_agent,
+                            "client_error"
+                        );
+                    }
+                } else if ::tracing::enabled!(target: $target, ::tracing::Level::DEBUG) {
+                    let user_agent = user_agent_hv
+                        .as_ref()
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    let content_type = response
+                        .headers()
+                        .get(::axum::http::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    let content_length = response
+                        .headers()
+                        .get(::axum::http::header::CONTENT_LENGTH)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    ::tracing::debug!(
+                        target: $target,
+                        status,
+                        latency_ms,
+                        content_length,
+                        content_type,
+                        user_agent,
+                        "ok"
+                    );
+                }
+                response
+            },
+        )
+    };
+}
+
+// Re-export the macro at this module path so `use
+// crate::interfaces::middleware::trace_span::access_log` works in
+// addition to `crate::access_log` (which `#[macro_export]` provides).
+pub use access_log;
+
+// Convenience for tests / callers that want the same latency unit
+// the macro uses.
+#[doc(hidden)]
+pub fn latency_ms(d: Duration) -> u64 {
+    d.as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::latency_ms;
+    use std::time::Duration;
+
+    #[test]
+    fn latency_ms_is_millis() {
+        assert_eq!(latency_ms(Duration::from_millis(0)), 0);
+        assert_eq!(latency_ms(Duration::from_millis(7)), 7);
+        assert_eq!(latency_ms(Duration::from_secs(3)), 3000);
     }
 }
