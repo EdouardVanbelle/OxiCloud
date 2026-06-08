@@ -85,6 +85,18 @@ log "Waiting for server at $base_url..."
 wait_for_http "$base_url/ready" 120
 log "Server is ready."
 
+# ── 3.5. Generate ephemeral test fixtures ─────────────────────────────────────
+# chunked_upload_cap.hurl needs a body > OXICLOUD_CHUNK_MAX_BYTES (4 MiB) to
+# trigger the 413. Committing a 5 MiB binary to the repo would bloat git for
+# every clone; generating it at run time is reproducible and the file is in
+# `.gitignore`.
+
+OVER_CAP_FIXTURE="$REPO_ROOT/tests/fixtures/chunk-over-cap-5mb.bin"
+if [[ ! -s "$OVER_CAP_FIXTURE" ]]; then
+  log "Generating 5 MiB fixture for chunk-cap test → $OVER_CAP_FIXTURE"
+  dd if=/dev/zero of="$OVER_CAP_FIXTURE" bs=1024 count=5120 status=none
+fi
+
 # ── 4. Run Hurl tests ─────────────────────────────────────────────────────────
 
 log "Running Hurl tests..."
@@ -104,7 +116,8 @@ hurl --variables-file "$API_DIR/test.env" --file-root "$REPO_ROOT/tests" --test 
   "$API_DIR/grants.hurl" \
   "$API_DIR/subject_groups.hurl" \
   "$API_DIR/grants_nested_groups.hurl" \
-  "$API_DIR/external_users.hurl"
+  "$API_DIR/external_users.hurl" \
+  "$API_DIR/chunked_upload_cap.hurl"
 
 #bash "$API_DIR/dedup_bulk_upload.sh"
 

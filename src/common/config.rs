@@ -211,6 +211,13 @@ pub struct StorageConfig {
     /// Maximum upload file size in bytes (default: 10 GB).
     /// Applied as a hard limit to WebDAV PUT and streaming uploads.
     pub max_upload_size: usize,
+    /// Maximum size of a single chunk in a chunked-upload session, in bytes
+    /// (default: 100 MB). Distinct from [`max_upload_size`] (which bounds the
+    /// total file size): NC desktop and other clients split large files into
+    /// many smaller PUTs against `/dav/uploads/…`, so the per-chunk cap can
+    /// be far tighter than the whole-file cap and prevents one HTTP request
+    /// from monopolising server memory or disk. Env: `OXICLOUD_CHUNK_MAX_BYTES`.
+    pub chunk_max_bytes: usize,
     /// Directory for upload spool temp files. When `Some`, large uploads are
     /// spooled here instead of the OS default temp dir (often tmpfs/RAM in
     /// containers, where the spool's page-cache counts against the cgroup
@@ -359,6 +366,7 @@ impl Default for StorageConfig {
             parallel_threshold: 100 * 1024 * 1024, // 100 MB
             trash_retention_days: 30,              // 30 days
             max_upload_size: MAX_UPLOAD_SIZE,
+            chunk_max_bytes: 100 * 1024 * 1024, // 100 MB — sane upper bound for a single chunked-upload PUT
             upload_temp_dir: None,
             usage_reconcile_secs: 600, // 10 minutes
             backend: StorageBackendType::Local,
@@ -1223,6 +1231,11 @@ impl AppConfig {
             && let Ok(val) = max_upload
         {
             config.storage.max_upload_size = val;
+        }
+        if let Ok(chunk_max) = env::var("OXICLOUD_CHUNK_MAX_BYTES").map(|v| v.parse::<usize>())
+            && let Ok(val) = chunk_max
+        {
+            config.storage.chunk_max_bytes = val;
         }
 
         // Upload spool directory — keep large upload temp files off tmpfs/RAM

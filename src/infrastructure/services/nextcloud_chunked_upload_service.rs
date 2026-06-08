@@ -52,7 +52,30 @@ impl NextcloudChunkedUploadService {
         Ok(())
     }
 
-    /// Store a chunk in the session directory.
+    /// Resolve and validate the filesystem path for a chunk file.
+    ///
+    /// Public so the interface layer can stream an HTTP body straight into
+    /// the chunk file without copying through the service. The service
+    /// retains responsibility for path-component validation; the caller
+    /// owns the I/O (open, write, fsync, size enforcement, cleanup on
+    /// failure). All three `validate_path_component` calls run before the
+    /// path is constructed, so a returned `PathBuf` is always inside
+    /// `base_dir/{user}/{upload_id}`.
+    pub fn safe_chunk_path(
+        &self,
+        user: &str,
+        upload_id: &str,
+        chunk_name: &str,
+    ) -> Result<PathBuf> {
+        Self::validate_path_component(chunk_name, "chunk_name")?;
+        Ok(self.safe_session_dir(user, upload_id)?.join(chunk_name))
+    }
+
+    /// Store a chunk in the session directory. Buffers `data` in memory —
+    /// use [`safe_chunk_path`](Self::safe_chunk_path) + the
+    /// `interfaces/upload_spool::stream_body_to_path` helper to stream the
+    /// HTTP body directly to disk and avoid materialising the whole chunk
+    /// in RAM.
     pub async fn store_chunk(
         &self,
         user: &str,
@@ -60,8 +83,7 @@ impl NextcloudChunkedUploadService {
         chunk_name: &str,
         data: &[u8],
     ) -> Result<()> {
-        Self::validate_path_component(chunk_name, "chunk_name")?;
-        let chunk_path = self.safe_session_dir(user, upload_id)?.join(chunk_name);
+        let chunk_path = self.safe_chunk_path(user, upload_id, chunk_name)?;
         let mut file = fs::File::create(&chunk_path)
             .await
             .map_err(|e| DomainError::internal_error("ChunkedUpload", e.to_string()))?;

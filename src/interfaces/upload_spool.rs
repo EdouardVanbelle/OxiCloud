@@ -6,7 +6,7 @@
 //! file (off tmpfs when [`StorageConfig::upload_temp_dir`] is configured) and
 //! BLAKE3-hashed on the fly so the dedup layer can short-circuit on a hit.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use axum::body::Body;
 use http_body_util::BodyStream;
@@ -83,4 +83,68 @@ pub async fn spool_body_to_temp(
         hash,
         size: total_bytes as u64,
     })
+}
+
+/// Stream an HTTP request body directly to a known destination file,
+/// enforcing `max_bytes` as a hard size limit.
+///
+/// Used by the chunked-upload PUT handlers — each chunk has a deterministic
+/// on-disk path (computed by `NextcloudChunkedUploadService::safe_chunk_path`
+/// or the equivalent REST helper), so there's no need for a spool/move
+/// dance. Peak heap is ~one HTTP frame regardless of chunk size or `max_bytes`.
+///
+/// **No hashing** — chunked uploads dedup at the assembled-file level, not
+/// the chunk level, so computing BLAKE3 here would be wasted work.
+///
+/// On size overflow the partial file is removed before the function returns,
+/// so a client retry against the same chunk name starts from a clean slate.
+/// On any other I/O error the partial file is also removed and the error
+/// surfaces — callers can assume the path is either fully written or absent.
+pub async fn stream_body_to_path(
+    body: Body,
+    path: &Path,
+    max_bytes: usize,
+) -> Result<u64, AppError> {
+    let mut file = tokio::fs::File::create(path)
+        .await
+        .map_err(|e| AppError::internal_error(format!("Failed to open chunk file: {e}")))?;
+
+    let mut total_bytes: usize = 0;
+    let mut stream = BodyStream::new(body);
+
+    while let Some(frame_result) = stream.next().await {
+        let frame = match frame_result {
+            Ok(f) => f,
+            Err(e) => {
+                drop(file);
+                let _ = tokio::fs::remove_file(path).await;
+                return Err(AppError::bad_request(format!(
+                    "Failed to read request body: {e}"
+                )));
+            }
+        };
+        if let Some(chunk) = frame.data_ref() {
+            total_bytes += chunk.len();
+            if total_bytes > max_bytes {
+                drop(file);
+                let _ = tokio::fs::remove_file(path).await;
+                return Err(AppError::payload_too_large(format!(
+                    "Chunk exceeds maximum size of {max_bytes} bytes"
+                )));
+            }
+            if let Err(e) = file.write_all(chunk).await {
+                drop(file);
+                let _ = tokio::fs::remove_file(path).await;
+                return Err(AppError::internal_error(format!(
+                    "Failed to write chunk: {e}"
+                )));
+            }
+        }
+    }
+    file.flush()
+        .await
+        .map_err(|e| AppError::internal_error(format!("Failed to flush chunk file: {e}")))?;
+    drop(file);
+
+    Ok(total_bytes as u64)
 }

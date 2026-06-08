@@ -1,5 +1,5 @@
 use axum::{
-    body::{self, Body},
+    body::Body,
     http::{Request, StatusCode, header},
     response::Response,
 };
@@ -10,6 +10,7 @@ use crate::common::di::AppState;
 use crate::common::mime_detect::{filename_from_path, refine_content_type_from_file};
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::{AuthUser, CurrentUser};
+use crate::interfaces::upload_spool::stream_body_to_path;
 
 /// Dispatch Nextcloud chunked upload WebDAV requests.
 ///
@@ -164,6 +165,14 @@ async fn handle_mkcol(
 }
 
 /// PUT — store a chunk.
+///
+/// Streams the request body straight to the chunk file with peak heap of
+/// ~one HTTP frame, regardless of chunk size or the configured cap. The
+/// `storage.chunk_max_bytes` config (env `OXICLOUD_CHUNK_MAX_BYTES`,
+/// default 100 MB) bounds a single PUT — separate from `max_upload_size`
+/// which governs whole-file uploads. Without this separation, a client
+/// could submit a chunk up to the whole-file cap (10 GB default) and
+/// monopolise server memory.
 async fn handle_put_chunk(
     state: Arc<AppState>,
     req: Request<Body>,
@@ -181,15 +190,13 @@ async fn handle_put_chunk(
         return Err(AppError::bad_request("Missing chunk name"));
     }
 
-    let max_upload = state.core.config.storage.max_upload_size;
-    let body_bytes = body::to_bytes(req.into_body(), max_upload)
-        .await
-        .map_err(|e| AppError::bad_request(format!("Failed to read chunk body: {}", e)))?;
+    let chunk_path = nc
+        .chunked_uploads
+        .safe_chunk_path(&user.username, upload_id, chunk_name)
+        .map_err(|e| AppError::bad_request(format!("Invalid chunk path: {}", e)))?;
 
-    nc.chunked_uploads
-        .store_chunk(&user.username, upload_id, chunk_name, &body_bytes)
-        .await
-        .map_err(|e| AppError::internal_error(format!("Failed to store chunk: {}", e)))?;
+    let max_chunk = state.core.config.storage.chunk_max_bytes;
+    stream_body_to_path(req.into_body(), &chunk_path, max_chunk).await?;
 
     Ok(Response::builder()
         .status(StatusCode::CREATED)

@@ -420,29 +420,68 @@ pub async fn create_upload(
     params(
         ("upload_id" = String, Path, description = "Upload session ID"),
         ("chunk_index" = usize, Query, description = "Zero-based chunk index"),
-        ("checksum" = Option<String>, Query, description = "Optional MD5 checksum for integrity verification"),
+        (
+            "checksum" = Option<String>,
+            Query,
+            description = "Optional hex-encoded checksum for integrity verification. \
+                Computed incrementally during the streaming write. \
+                Algorithm is selected by `checksumalg` (default `md5`). \
+                Also accepted via the legacy `Content-MD5` request header."
+        ),
+        (
+            "checksumalg" = Option<String>,
+            Query,
+            description = "Algorithm used by `checksum`. One of: `md5` (default, legacy), `sha256` / `sha-256`, `blake3`. \
+                Unknown values return 400."
+        ),
     ),
     request_body(content_type = "application/octet-stream", description = "Raw chunk bytes"),
     responses(
         (status = 200, description = "Chunk received", body = crate::application::ports::chunked_upload_ports::ChunkUploadResponseDto),
-        (status = 400, description = "Invalid chunk or checksum mismatch"),
+        (status = 400, description = "Invalid chunk, size mismatch, checksum mismatch, or unknown `checksumalg`"),
         (status = 404, description = "Upload session not found"),
+        (status = 413, description = "Chunk exceeds `storage.chunk_max_bytes` cap"),
     ),
     tag = "uploads",
     security(("bearerAuth" = []))
 )]
 pub async fn upload_chunk(
-    state: State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     auth_user: AuthUser,
     path: Path<String>,
     query: Query<ChunkUploadParams>,
     headers: HeaderMap,
     request: Request,
 ) -> impl IntoResponse {
-    let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+    // Cap the chunk body at `storage.chunk_max_bytes` (env
+    // `OXICLOUD_CHUNK_MAX_BYTES`, default 100 MB). Previous code used
+    // `usize::MAX` and `unwrap_or_default()` — two compounding bugs:
+    //  - No upper bound → an oversized chunk OOMs the server.
+    //  - Silent fallback to an empty body on transport error → the
+    //    inner size check would either reject (good case) or — if the
+    //    declared chunk_size was 0 (illegal but conceivable) — accept
+    //    an empty upload as success. Either way the client got no
+    //    actionable error.
+    let max_chunk = state.core.config.storage.chunk_max_bytes;
+    let body = match axum::body::to_bytes(request.into_body(), max_chunk).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                upload_id = %path.0,
+                max_chunk,
+                "Chunked upload PATCH rejected — body read failed (size cap or transport error)"
+            );
+            return AppError::payload_too_large(format!(
+                "Chunk read failed (cap {} bytes): {}",
+                max_chunk, e
+            ))
+            .into_response();
+        }
+    };
+    ChunkedUploadHandler::upload_chunk_impl(State(state), auth_user, path, query, headers, body)
         .await
-        .unwrap_or_default();
-    ChunkedUploadHandler::upload_chunk_impl(state, auth_user, path, query, headers, body).await
+        .into_response()
 }
 
 #[utoipa::path(
