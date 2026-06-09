@@ -103,18 +103,16 @@ impl StoragePath {
         Self { segments }
     }
 
-    /// Appends a segment to the path.
+    /// Appends a segment to the path, consuming `self` so the existing
+    /// segment buffer is reused instead of deep-cloned.
     ///
     /// Traversal segments (`.`, `..`) and segments containing `/` are
     /// silently ignored to prevent path-traversal attacks.
-    pub fn join(&self, segment: &str) -> Self {
-        let mut new_segments = self.segments.clone();
+    pub fn join(mut self, segment: &str) -> Self {
         if Self::is_safe_segment(segment) {
-            new_segments.push(segment.to_string());
+            self.segments.push(segment.to_string());
         }
-        Self {
-            segments: new_segments,
-        }
+        self
     }
 
     /// Gets the file name (last segment)

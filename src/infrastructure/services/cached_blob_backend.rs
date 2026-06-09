@@ -96,9 +96,11 @@ impl BlobStorageBackend for CachedBlobBackend {
                 DomainError::internal_error("BlobCache", format!("mkdir cache_dir: {e}"))
             })?;
 
-            // Scan existing cache to rebuild index
+            // Scan existing cache to rebuild index.  Collect entries WITHOUT
+            // holding the index lock — a large cache directory walk must not
+            // serialize concurrent blob operations behind the mutex.
             let mut total_bytes = 0u64;
-            let mut idx = index.lock().await;
+            let mut entries: Vec<(String, u64)> = Vec::new();
             if let Ok(mut read_dir) = fs::read_dir(&cache_dir).await {
                 while let Ok(Some(prefix_entry)) = read_dir.next_entry().await {
                     if !prefix_entry.path().is_dir() {
@@ -111,14 +113,20 @@ impl BlobStorageBackend for CachedBlobBackend {
                                 && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
                             {
                                 let size = fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
-                                idx.put(stem.to_string(), CacheEntry { size });
+                                entries.push((stem.to_string(), size));
                                 total_bytes += size;
                             }
                         }
                     }
                 }
             }
-            drop(idx);
+            // Bulk-insert the rebuilt index under a single brief lock.
+            {
+                let mut idx = index.lock().await;
+                for (stem, size) in entries {
+                    idx.put(stem, CacheEntry { size });
+                }
+            }
             current_size.store(total_bytes, Ordering::Relaxed);
             tracing::info!(
                 "Blob cache initialized: {} bytes in cache at {}",
@@ -196,19 +204,18 @@ impl BlobStorageBackend for CachedBlobBackend {
         let max_cache_bytes = self.max_cache_bytes;
         let current_size = self.current_size.clone();
         Box::pin(async move {
-            // Check cache
-            {
-                let mut idx = index.lock().await;
-                if idx.get(&hash).is_some() {
-                    if let Ok(file) = fs::File::open(&cached).await {
-                        let stream: BlobStream =
-                            Box::pin(ReaderStream::with_capacity(file, STREAM_CHUNK_SIZE));
-                        return Ok(stream);
-                    }
-                    // Cache entry stale — remove
-                    if let Some(entry) = idx.pop(&hash) {
-                        current_size.fetch_sub(entry.size, Ordering::Relaxed);
-                    }
+            // Check cache presence (and bump LRU recency) under a brief lock,
+            // then release it BEFORE touching the filesystem so concurrent
+            // readers don't serialize behind a single open() syscall.
+            if index.lock().await.get(&hash).is_some() {
+                if let Ok(file) = fs::File::open(&cached).await {
+                    let stream: BlobStream =
+                        Box::pin(ReaderStream::with_capacity(file, STREAM_CHUNK_SIZE));
+                    return Ok(stream);
+                }
+                // Cache entry stale (file vanished) — drop it from the index.
+                if let Some(entry) = index.lock().await.pop(&hash) {
+                    current_size.fetch_sub(entry.size, Ordering::Relaxed);
                 }
             }
 
@@ -243,25 +250,24 @@ impl BlobStorageBackend for CachedBlobBackend {
         let max_cache_bytes = self.max_cache_bytes;
         let current_size = self.current_size.clone();
         Box::pin(async move {
-            // Try cache first
-            {
-                let mut idx = index.lock().await;
-                if idx.get(&hash).is_some() {
-                    if let Ok(mut file) = fs::File::open(&cached).await {
-                        file.seek(std::io::SeekFrom::Start(start))
-                            .await
-                            .map_err(|e| {
-                                DomainError::internal_error("BlobCache", format!("seek: {e}"))
-                            })?;
-                        let take_len = end.map(|e| e - start + 1).unwrap_or(u64::MAX);
-                        let limited = file.take(take_len);
-                        let stream: BlobStream =
-                            Box::pin(ReaderStream::with_capacity(limited, STREAM_CHUNK_SIZE));
-                        return Ok(stream);
-                    }
-                    if let Some(entry) = idx.pop(&hash) {
-                        current_size.fetch_sub(entry.size, Ordering::Relaxed);
-                    }
+            // Check cache presence (and bump LRU recency) under a brief lock,
+            // then release it BEFORE the open()/seek() syscalls so concurrent
+            // range readers don't serialize behind the index mutex.
+            if index.lock().await.get(&hash).is_some() {
+                if let Ok(mut file) = fs::File::open(&cached).await {
+                    file.seek(std::io::SeekFrom::Start(start))
+                        .await
+                        .map_err(|e| {
+                            DomainError::internal_error("BlobCache", format!("seek: {e}"))
+                        })?;
+                    let take_len = end.map(|e| e - start + 1).unwrap_or(u64::MAX);
+                    let limited = file.take(take_len);
+                    let stream: BlobStream =
+                        Box::pin(ReaderStream::with_capacity(limited, STREAM_CHUNK_SIZE));
+                    return Ok(stream);
+                }
+                if let Some(entry) = index.lock().await.pop(&hash) {
+                    current_size.fetch_sub(entry.size, Ordering::Relaxed);
                 }
             }
 
@@ -298,9 +304,9 @@ impl BlobStorageBackend for CachedBlobBackend {
         let current_size = self.current_size.clone();
         Box::pin(async move {
             inner.delete_blob(&hash).await?;
-            // Remove from cache
-            let mut idx = index.lock().await;
-            if let Some(entry) = idx.pop(&hash) {
+            // Remove from cache — drop the index lock before the unlink()
+            // syscall so deletes don't serialize concurrent cache lookups.
+            if let Some(entry) = index.lock().await.pop(&hash) {
                 current_size.fetch_sub(entry.size, Ordering::Relaxed);
             }
             let _ = fs::remove_file(&cached).await;
@@ -402,6 +408,26 @@ impl CachedRef {
         self.cache_dir.join(prefix).join(format!("{hash}.blob"))
     }
 
+    /// Pop LRU entries until the cache is back within its byte budget,
+    /// returning the on-disk paths of the evicted blobs.
+    ///
+    /// Only the in-memory index is touched here (atomic counter + LRU map);
+    /// the caller MUST unlink the returned paths AFTER releasing the index
+    /// lock so the `remove_file` syscalls never run while the mutex is held.
+    fn collect_evictions(&self, idx: &mut LruCache<String, CacheEntry>) -> Vec<PathBuf> {
+        let mut victims = Vec::new();
+        while self.current_size.load(Ordering::Relaxed) > self.max_cache_bytes {
+            if let Some((evicted_hash, evicted_entry)) = idx.pop_lru() {
+                self.current_size
+                    .fetch_sub(evicted_entry.size, Ordering::Relaxed);
+                victims.push(self.cached_path(&evicted_hash));
+            } else {
+                break;
+            }
+        }
+        victims
+    }
+
     async fn insert_into_cache_static(
         &self,
         hash: &str,
@@ -423,21 +449,19 @@ impl CachedRef {
             DomainError::internal_error("BlobCache", format!("cache copy failed: {e}"))
         })?;
 
-        let mut idx = self.index.lock().await;
-        if let Some(old) = idx.put(hash.to_string(), CacheEntry { size }) {
-            self.current_size.fetch_sub(old.size, Ordering::Relaxed);
-        }
-        self.current_size.fetch_add(size, Ordering::Relaxed);
-
-        while self.current_size.load(Ordering::Relaxed) > self.max_cache_bytes {
-            if let Some((evicted_hash, evicted_entry)) = idx.pop_lru() {
-                self.current_size
-                    .fetch_sub(evicted_entry.size, Ordering::Relaxed);
-                let evicted_path = self.cached_path(&evicted_hash);
-                let _ = fs::remove_file(&evicted_path).await;
-            } else {
-                break;
+        // Update the index and pick eviction victims under a single brief
+        // lock, then unlink the evicted files AFTER releasing it — file
+        // removal must not run while the index mutex is held.
+        let to_evict = {
+            let mut idx = self.index.lock().await;
+            if let Some(old) = idx.put(hash.to_string(), CacheEntry { size }) {
+                self.current_size.fetch_sub(old.size, Ordering::Relaxed);
             }
+            self.current_size.fetch_add(size, Ordering::Relaxed);
+            self.collect_evictions(&mut idx)
+        };
+        for path in to_evict {
+            let _ = fs::remove_file(&path).await;
         }
         Ok(())
     }
@@ -482,21 +506,16 @@ impl CachedRef {
             .await
             .map_err(|e| DomainError::internal_error("BlobCache", format!("rename: {e}")))?;
 
-        let mut idx = self.index.lock().await;
-        if let Some(old) = idx.put(hash.to_string(), CacheEntry { size: total }) {
-            self.current_size.fetch_sub(old.size, Ordering::Relaxed);
-        }
-        self.current_size.fetch_add(total, Ordering::Relaxed);
-
-        while self.current_size.load(Ordering::Relaxed) > self.max_cache_bytes {
-            if let Some((evicted_hash, evicted_entry)) = idx.pop_lru() {
-                self.current_size
-                    .fetch_sub(evicted_entry.size, Ordering::Relaxed);
-                let evicted_path = self.cached_path(&evicted_hash);
-                let _ = fs::remove_file(&evicted_path).await;
-            } else {
-                break;
+        let to_evict = {
+            let mut idx = self.index.lock().await;
+            if let Some(old) = idx.put(hash.to_string(), CacheEntry { size: total }) {
+                self.current_size.fetch_sub(old.size, Ordering::Relaxed);
             }
+            self.current_size.fetch_add(total, Ordering::Relaxed);
+            self.collect_evictions(&mut idx)
+        };
+        for path in to_evict {
+            let _ = fs::remove_file(&path).await;
         }
 
         Ok(dest)

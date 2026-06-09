@@ -21,6 +21,14 @@ use std::sync::Arc;
  * formatting) is performed server-side. These handlers are thin HTTP
  * adapters that delegate to the SearchUseCase.
  */
+/// Hard cap on the search page size. The default is 100; without a ceiling a
+/// client could pass `?limit=<huge>`, which flows straight into the SQL `LIMIT`
+/// and would pull that many rows into memory (and into the result cache). 500
+/// is a generous page for a search UI — `total_count` still reflects the full
+/// match set, so deeper results stay reachable via `offset`. Mirrors the
+/// suggestions endpoint, which already clamps with `.min(20)`.
+const MAX_SEARCH_LIMIT: usize = 500;
+
 pub struct SearchHandler;
 
 impl SearchHandler {
@@ -62,7 +70,7 @@ impl SearchHandler {
             max_size: params.max_size,
             folder_id: params.folder_id,
             recursive: params.recursive.unwrap_or(true),
-            limit: params.limit.unwrap_or(100),
+            limit: params.limit.unwrap_or(100).min(MAX_SEARCH_LIMIT),
             offset: params.offset.unwrap_or(0),
             sort_by: params.sort_by.unwrap_or_else(|| "relevance".to_string()),
         };

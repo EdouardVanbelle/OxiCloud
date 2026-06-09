@@ -64,7 +64,9 @@ impl PathService {
 
     /// Creates a file path within a folder
     pub fn create_file_path(&self, folder_path: &StoragePath, file_name: &str) -> StoragePath {
-        folder_path.join(file_name)
+        // `join` consumes its receiver to reuse the buffer; we only hold a
+        // borrow here, so clone first — the same copy the old `&self` join did.
+        folder_path.clone().join(file_name)
     }
 
     /// Checks if a path is a direct child of another

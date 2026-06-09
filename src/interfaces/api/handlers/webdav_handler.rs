@@ -63,10 +63,23 @@ fn encode_path_segment(segment: &str) -> String {
 
 /// Percent-encode a full slash-separated path, encoding each segment individually.
 pub(crate) fn encode_uri_path(path: &str) -> String {
-    path.split('/')
-        .map(encode_path_segment)
-        .collect::<Vec<_>>()
-        .join("/")
+    use std::fmt::Write as _;
+    // `utf8_percent_encode` returns a `Display` adapter, so write each encoded
+    // segment straight into `out` — avoids a String per segment and the joined
+    // Vec the previous `.map(...).collect::<Vec<_>>().join("/")` allocated on
+    // every PROPFIND href.
+    let mut out = String::with_capacity(path.len() + 8);
+    for (i, segment) in path.split('/').enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        let _ = write!(
+            out,
+            "{}",
+            utf8_percent_encode(segment, PATH_SEGMENT_ENCODE_SET)
+        );
+    }
+    out
 }
 
 /// Build the `<D:href>` value for a non-collection (file) resource.

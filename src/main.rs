@@ -541,25 +541,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     app = app.layer(DefaultBodyLimit::max(BODY_LIMIT));
 
     // ── HTTP compression (gzip + Brotli) ─────────────────────────────────
-    // Negotiates the best encoding via Accept-Encoding.  Skips responses
-    // that are already compressed or wouldn't benefit (images, video, etc.).
-    // Compatible with a future reverse proxy — if the proxy sees
-    // `Content-Encoding` it will pass the response through untouched.
+    // Negotiates the best encoding via Accept-Encoding. Policy: compress
+    // everything by default so no shrinkable response is ever missed (text,
+    // JSON, JS/CSS, XML, SVG, fonts ttf/otf, WASM…), and skip ONLY content
+    // that is already compressed — where a second pass burns CPU and adds
+    // latency for ~0 bytes saved.
+    //
+    // We deliberately do NOT blanket-exclude `image/*`: `image/svg+xml` is
+    // plain text and compresses ~70%, so the genuinely-compressed raster
+    // formats are listed individually instead, leaving SVG compressible.
+    //
+    // This is the single, global compression layer (the `/api` router used to
+    // add its own predicate-less one, which silently compressed media). It is
+    // reverse-proxy friendly: a proxy that sees `Content-Encoding` passes
+    // the response through untouched.
     {
         use tower_http::compression::CompressionLayer;
         use tower_http::compression::predicate::{NotForContentType, Predicate, SizeAbove};
 
         let predicate = SizeAbove::new(256)
             .and(NotForContentType::GRPC)
-            .and(NotForContentType::IMAGES)
             .and(NotForContentType::SSE)
-            .and(NotForContentType::const_new("application/octet-stream"))
+            // ── already-compressed raster images (SVG intentionally absent) ──
+            .and(NotForContentType::const_new("image/jpeg"))
+            .and(NotForContentType::const_new("image/png"))
+            .and(NotForContentType::const_new("image/gif"))
+            .and(NotForContentType::const_new("image/webp"))
+            .and(NotForContentType::const_new("image/avif"))
+            .and(NotForContentType::const_new("image/heic"))
+            .and(NotForContentType::const_new("image/heif"))
+            .and(NotForContentType::const_new("image/jp2"))
+            .and(NotForContentType::const_new("image/x-icon"))
+            .and(NotForContentType::const_new("image/vnd.microsoft.icon"))
+            // ── audio / video families (already compressed) ──
+            .and(NotForContentType::const_new("video/"))
+            .and(NotForContentType::const_new("audio/"))
+            // ── already-compressed web fonts; ttf/otf left compressible ──
+            .and(NotForContentType::const_new("font/woff"))
+            .and(NotForContentType::const_new("application/font-woff"))
+            // ── archives & compressed containers ──
             .and(NotForContentType::const_new("application/zip"))
             .and(NotForContentType::const_new("application/gzip"))
+            .and(NotForContentType::const_new("application/x-gzip"))
             .and(NotForContentType::const_new("application/x-tar"))
+            .and(NotForContentType::const_new("application/x-7z-compressed"))
+            .and(NotForContentType::const_new("application/x-rar-compressed"))
+            .and(NotForContentType::const_new("application/x-bzip2"))
+            .and(NotForContentType::const_new("application/zstd"))
+            .and(NotForContentType::const_new("application/x-xz"))
+            // ── zip-based document / app bundles (docx/xlsx/pptx, odf, epub…) ──
+            .and(NotForContentType::const_new(
+                "application/vnd.openxmlformats-officedocument",
+            ))
+            .and(NotForContentType::const_new(
+                "application/vnd.oasis.opendocument",
+            ))
+            .and(NotForContentType::const_new("application/epub+zip"))
+            .and(NotForContentType::const_new("application/java-archive"))
+            .and(NotForContentType::const_new(
+                "application/vnd.android.package-archive",
+            ))
+            // ── PDF: streams are usually already deflated; often large ──
             .and(NotForContentType::const_new("application/pdf"))
-            .and(NotForContentType::const_new("video/"))
-            .and(NotForContentType::const_new("audio/"));
+            // ── opaque binary we couldn't identify ──
+            .and(NotForContentType::const_new("application/octet-stream"));
 
         app = app.layer(CompressionLayer::new().compress_when(predicate));
     }

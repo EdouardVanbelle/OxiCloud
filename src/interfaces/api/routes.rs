@@ -9,7 +9,7 @@ use axum::{
 };
 use serde_json::json;
 use std::sync::Arc;
-use tower_http::{compression::CompressionLayer, trace::TraceLayer};
+use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 
 /// Liveness probe — returns 200 if the process is running, no DB check.
@@ -579,10 +579,10 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
         .with_state(app_state.clone());
     router = router.nest("/users", users_router);
 
-    // Transparent compression (gzip + brotli) for all API responses.
-    // tower-http negotiates via Accept-Encoding and skips already-compressed
-    // content types automatically. No manual compression in handlers.
-    router
-        .layer(CompressionLayer::new().br(true).gzip(true))
-        .layer(TraceLayer::new_for_http())
+    // Compression is applied once, globally, in `main.rs` with a content-type
+    // aware predicate that skips already-compressed media. Re-applying it here
+    // would double-wrap `/api`: this inner layer (no predicate) would compress
+    // media downloads, burning CPU for ~0 gain and stripping `Content-Length`.
+    // So this router only adds tracing; compression is the global layer's job.
+    router.layer(TraceLayer::new_for_http())
 }

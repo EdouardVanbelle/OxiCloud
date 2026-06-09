@@ -459,8 +459,12 @@ impl DedupService {
     /// exist in `storage.blobs`.
     /// Phase 1: Reads only *new* chunks from the source file (the biggest
     /// I/O saving for versioned files where most chunks are unchanged).
-    /// Phase 2: Parallel operations — uploads new chunks, bumps ref_count
-    /// for existing ones — with up to [`CHUNK_UPLOAD_CONCURRENCY`] in flight.
+    /// Uploads each new chunk and bumps `ref_count` for chunks that already
+    /// exist, with up to [`CHUNK_UPLOAD_CONCURRENCY`] uploads in flight.
+    ///
+    /// `ref_count` is incremented once per *distinct* chunk (one reference per
+    /// manifest), staying symmetric with `remove_manifest_reference` so a file
+    /// that repeats a chunk cannot over-count and leak the blob forever.
     async fn store_chunks(
         &self,
         source_path: &Path,
@@ -469,20 +473,22 @@ impl DedupService {
         let pool = &self.pool;
         let backend = &self.backend;
 
-        // ── Phase 0: Batch-check which chunks already exist ──────
-        let unique_hashes: Vec<String> = {
-            let mut seen = std::collections::HashSet::new();
-            chunks
-                .iter()
-                .filter_map(|c| {
-                    if seen.insert(c.hash.as_str()) {
-                        Some(c.hash.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
+        // ── Phase 0: de-duplicate chunk hashes, then batch-check existence ──
+        // A single file can legitimately repeat the same chunk many times
+        // (zero-filled regions in disk/VM images, repeated document structures,
+        // concatenated archives). `ref_count` is tracked per *distinct* chunk —
+        // one reference per manifest — to stay symmetric with
+        // `remove_manifest_reference`, which decrements via
+        // `WHERE hash = ANY(chunk_hashes)` (matching each row once). Counting
+        // per-occurrence here would over-increment and leak the blob forever.
+        // Keep the first occurrence of each hash so new chunks know where to
+        // read their bytes.
+        let mut seen = std::collections::HashSet::new();
+        let unique_chunks: Vec<&ChunkMeta> = chunks
+            .iter()
+            .filter(|c| seen.insert(c.hash.as_str()))
+            .collect();
+        let unique_hashes: Vec<String> = unique_chunks.iter().map(|c| c.hash.clone()).collect();
 
         let existing_hashes: std::collections::HashSet<String> =
             sqlx::query_scalar::<_, String>("SELECT hash FROM storage.blobs WHERE hash = ANY($1)")
@@ -498,98 +504,86 @@ impl DedupService {
                 .into_iter()
                 .collect();
 
-        // ── Phase 1+2 (fused): upload NEW chunks just-in-time ────
-        // Read each new chunk by positioned I/O immediately before its
-        // upload, instead of first materializing every new chunk's *data* in
-        // a Vec.  Peak heap for file content is bounded to
-        // ~CHUNK_UPLOAD_CONCURRENCY × CDC_MAX_CHUNK (≈ 8 MiB) — proportional
-        // to the chunk size, never the file size, so storing a large
-        // brand-new file no longer spikes RAM.  Existing chunks skip all disk
-        // I/O and just bump ref_count.
-        //
-        // We first collect *owned* per-chunk metadata (hash + offset + length
-        // + existence flag — no file data) so the stream below does not borrow
-        // the `chunks` parameter across an `.await` (which would make this
-        // future non-`Send` and break the upload handlers).
-        let chunk_ops: Vec<(String, u64, usize, bool)> = chunks
+        // ── Phase 1: bump ref_count for every existing chunk in ONE query ──
+        // (was one UPDATE per occurrence — now a single batched round-trip).
+        let existing: Vec<String> = unique_hashes
             .iter()
-            .map(|chunk| {
-                let exists = existing_hashes.contains(&chunk.hash);
-                (
-                    chunk.hash.clone(),
-                    chunk.offset as u64,
-                    chunk.length,
-                    exists,
-                )
-            })
+            .filter(|h| existing_hashes.contains(*h))
+            .cloned()
+            .collect();
+        if !existing.is_empty() {
+            sqlx::query("UPDATE storage.blobs SET ref_count = ref_count + 1 WHERE hash = ANY($1)")
+                .bind(&existing)
+                .execute(pool.as_ref())
+                .await
+                .map_err(|e| {
+                    DomainError::internal_error("Dedup", format!("Failed to bump ref_count: {}", e))
+                })?;
+        }
+
+        // ── Phase 2: upload each NEW chunk once, concurrently ──────────────
+        // Read each new chunk by positioned I/O immediately before its upload
+        // instead of materializing every chunk's *data* up front. Peak heap for
+        // file content stays bounded to ~CHUNK_UPLOAD_CONCURRENCY × CDC_MAX_CHUNK
+        // (≈ 8 MiB) — proportional to the chunk size, never the file size.
+        //
+        // Owned metadata (hash + offset + length, no file data) so the stream
+        // below does not borrow `chunks` across an `.await` (which would make
+        // this future non-`Send` and break the upload handlers).
+        let new_ops: Vec<(String, u64, usize)> = unique_chunks
+            .iter()
+            .filter(|c| !existing_hashes.contains(&c.hash))
+            .map(|c| (c.hash.clone(), c.offset as u64, c.length))
             .collect();
 
         let source = Arc::new(std::fs::File::open(source_path).map_err(|e| {
             DomainError::internal_error("Dedup", format!("Failed to open source file: {}", e))
         })?);
 
-        let results: Vec<Result<(), DomainError>> = stream::iter(chunk_ops)
-            .map(|(hash, offset, length, exists)| {
+        let results: Vec<Result<(), DomainError>> = stream::iter(new_ops)
+            .map(|(hash, offset, length)| {
                 let source = source.clone();
                 let pool = pool.clone();
                 let backend = backend.clone();
                 async move {
-                    if exists {
-                        // Existing chunk: bump ref_count, no disk I/O.
-                        sqlx::query(
-                            "UPDATE storage.blobs
-                                SET ref_count = ref_count + 1
-                              WHERE hash = $1",
-                        )
-                        .bind(&hash)
-                        .execute(pool.as_ref())
-                        .await
-                        .map_err(|e| {
-                            DomainError::internal_error(
-                                "Dedup",
-                                format!("Failed to bump ref_count: {}", e),
-                            )
-                        })?;
-                    } else {
-                        // New chunk: positioned read of just this chunk
-                        // (≤ CDC_MAX_CHUNK) off the async runtime, then upload.
-                        let bytes = tokio::task::spawn_blocking(move || {
-                            use std::os::unix::fs::FileExt;
-                            let mut buf = vec![0u8; length];
-                            source.read_exact_at(&mut buf, offset)?;
-                            Ok::<Vec<u8>, std::io::Error>(buf)
-                        })
-                        .await
-                        .map_err(|e| {
-                            DomainError::internal_error("Dedup", format!("Read task failed: {}", e))
-                        })?
-                        .map_err(|e| {
-                            DomainError::internal_error(
-                                "Dedup",
-                                format!("Failed to read chunk: {}", e),
-                            )
-                        })?;
+                    // Positioned read of just this chunk (≤ CDC_MAX_CHUNK) off
+                    // the async runtime, then upload.
+                    let bytes = tokio::task::spawn_blocking(move || {
+                        use std::os::unix::fs::FileExt;
+                        let mut buf = vec![0u8; length];
+                        source.read_exact_at(&mut buf, offset)?;
+                        Ok::<Vec<u8>, std::io::Error>(buf)
+                    })
+                    .await
+                    .map_err(|e| {
+                        DomainError::internal_error("Dedup", format!("Read task failed: {}", e))
+                    })?
+                    .map_err(|e| {
+                        DomainError::internal_error("Dedup", format!("Failed to read chunk: {}", e))
+                    })?;
 
-                        backend
-                            .put_blob_from_bytes(&hash, Bytes::from(bytes))
-                            .await?;
-                        sqlx::query(
-                            "INSERT INTO storage.blobs (hash, size, ref_count)
-                             VALUES ($1, $2, 1)
-                             ON CONFLICT (hash) DO UPDATE
-                               SET ref_count = storage.blobs.ref_count + 1",
+                    backend
+                        .put_blob_from_bytes(&hash, Bytes::from(bytes))
+                        .await?;
+                    // ON CONFLICT covers a concurrent uploader inserting the
+                    // same brand-new chunk between the existence check above and
+                    // this INSERT.
+                    sqlx::query(
+                        "INSERT INTO storage.blobs (hash, size, ref_count)
+                         VALUES ($1, $2, 1)
+                         ON CONFLICT (hash) DO UPDATE
+                           SET ref_count = storage.blobs.ref_count + 1",
+                    )
+                    .bind(&hash)
+                    .bind(length as i64)
+                    .execute(pool.as_ref())
+                    .await
+                    .map_err(|e| {
+                        DomainError::internal_error(
+                            "Dedup",
+                            format!("Failed to upsert chunk: {}", e),
                         )
-                        .bind(&hash)
-                        .bind(length as i64)
-                        .execute(pool.as_ref())
-                        .await
-                        .map_err(|e| {
-                            DomainError::internal_error(
-                                "Dedup",
-                                format!("Failed to upsert chunk: {}", e),
-                            )
-                        })?;
-                    }
+                    })?;
                     Ok(())
                 }
             })
@@ -597,13 +591,12 @@ impl DedupService {
             .collect()
             .await;
 
-        // All operations must succeed.  Order preservation is not needed
-        // here — chunk_hashes/chunk_sizes are derived from the input
-        // `chunks` slice which keeps the original CDC order.
         for result in results {
             result?;
         }
 
+        // chunk_hashes/chunk_sizes keep the full per-occurrence CDC sequence —
+        // the manifest needs every chunk, in order, to reassemble the file.
         let chunk_hashes: Vec<String> = chunks.iter().map(|c| c.hash.clone()).collect();
         let chunk_sizes: Vec<u64> = chunks.iter().map(|c| c.length as u64).collect();
 

@@ -388,45 +388,36 @@ impl File {
     // Methods to create new versions of the file (immutable)
 
     /// Creates a new version of the file with updated name
-    pub fn with_name(&self, new_name: String) -> FileResult<Self> {
+    pub fn with_name(mut self, new_name: String) -> FileResult<Self> {
         let new_name = normalize_storage_name(&new_name);
         if let Err(reason) = validate_storage_name(&new_name) {
             return Err(FileError::InvalidFileName(format!("{new_name}: {reason}")));
         }
 
-        // Update path based on name
-        let parent_path = self.storage_path.parent();
-        let new_storage_path = match parent_path {
+        // Recompute the path from the unchanged parent + the new name.
+        let new_storage_path = match self.storage_path.parent() {
             Some(parent) => parent.join(&new_name),
             None => StoragePath::from_string(&new_name),
         };
-
-        // Update string representation
-        let new_path_string = new_storage_path.to_string();
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
-        Ok(Self {
-            id: self.id.clone(),
-            name: new_name,
-            storage_path: new_storage_path,
-            path_string: new_path_string,
-            size: self.size,
-            mime_type: self.mime_type.clone(),
-            folder_id: self.folder_id.clone(),
-            created_at: self.created_at,
-            modified_at: now,
-            owner_id: self.owner_id,
-            blob_hash: self.blob_hash.clone(),
-        })
+        // Consume `self` and mutate in place — only the path, name and mtime
+        // change; id / mime_type / folder_id / blob_hash are carried over
+        // without the per-field clone the old `&self` builder paid.
+        self.path_string = new_storage_path.to_string();
+        self.storage_path = new_storage_path;
+        self.name = new_name;
+        self.modified_at = now;
+        Ok(self)
     }
 
     /// Creates a new version of the file with updated folder
     pub fn with_folder(
-        &self,
+        mut self,
         folder_id: Option<String>,
         folder_path: Option<StoragePath>,
     ) -> FileResult<Self> {
@@ -436,49 +427,30 @@ impl File {
             None => StoragePath::from_string(&self.name), // Root
         };
 
-        // Update string representation
-        let new_path_string = new_storage_path.to_string();
-
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
-        Ok(Self {
-            id: self.id.clone(),
-            name: self.name.clone(),
-            storage_path: new_storage_path,
-            path_string: new_path_string,
-            size: self.size,
-            mime_type: self.mime_type.clone(),
-            folder_id,
-            created_at: self.created_at,
-            modified_at: now,
-            owner_id: self.owner_id,
-            blob_hash: self.blob_hash.clone(),
-        })
+        // Consume `self`: only the path, folder_id and mtime change.
+        self.path_string = new_storage_path.to_string();
+        self.storage_path = new_storage_path;
+        self.folder_id = folder_id;
+        self.modified_at = now;
+        Ok(self)
     }
 
     /// Creates a new version of the file with updated size
-    pub fn with_size(&self, new_size: u64) -> Self {
+    pub fn with_size(mut self, new_size: u64) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
-        Self {
-            id: self.id.clone(),
-            name: self.name.clone(),
-            storage_path: self.storage_path.clone(),
-            path_string: self.path_string.clone(),
-            size: new_size,
-            mime_type: self.mime_type.clone(),
-            folder_id: self.folder_id.clone(),
-            created_at: self.created_at,
-            modified_at: now,
-            owner_id: self.owner_id,
-            blob_hash: self.blob_hash.clone(),
-        }
+        // Consume `self`: only size and mtime change — no per-field clone.
+        self.size = new_size;
+        self.modified_at = now;
+        self
     }
 }
 

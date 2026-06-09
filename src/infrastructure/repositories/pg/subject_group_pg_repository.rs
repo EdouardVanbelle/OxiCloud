@@ -126,30 +126,26 @@ impl SubjectGroupRepository for SubjectGroupPgRepository {
         offset: u32,
         name_query: Option<&str>,
     ) -> Result<(Vec<SubjectGroup>, u64), SubjectGroupRepositoryError> {
-        // Two queries: one for the page, one for the total count. The query
-        // is small and frequent; a window function would add complexity for
-        // no measurable win.
-        let (sql_page, sql_count, pattern) = match name_query {
-            Some(q) => {
-                let pat = like_escape(q);
-                (
-                    "SELECT id, name, description, is_virtual, created_at, updated_at
-                     FROM auth.subject_groups
-                     WHERE name ILIKE $1
-                     ORDER BY is_virtual DESC, name
-                     LIMIT $2 OFFSET $3"
-                        .to_string(),
-                    "SELECT COUNT(*) FROM auth.subject_groups WHERE name ILIKE $1".to_string(),
-                    Some(pat),
-                )
-            }
+        // Single query: the page plus `COUNT(*) OVER()` for the total matching
+        // count, folding what used to be a separate COUNT round-trip into one.
+        let (sql_page, pattern) = match name_query {
+            Some(q) => (
+                "SELECT id, name, description, is_virtual, created_at, updated_at,
+                        COUNT(*) OVER() AS total_count
+                 FROM auth.subject_groups
+                 WHERE name ILIKE $1
+                 ORDER BY is_virtual DESC, name
+                 LIMIT $2 OFFSET $3"
+                    .to_string(),
+                Some(like_escape(q)),
+            ),
             None => (
-                "SELECT id, name, description, is_virtual, created_at, updated_at
+                "SELECT id, name, description, is_virtual, created_at, updated_at,
+                        COUNT(*) OVER() AS total_count
                  FROM auth.subject_groups
                  ORDER BY is_virtual DESC, name
                  LIMIT $1 OFFSET $2"
                     .to_string(),
-                "SELECT COUNT(*) FROM auth.subject_groups".to_string(),
                 None,
             ),
         };
@@ -170,19 +166,9 @@ impl SubjectGroupRepository for SubjectGroupPgRepository {
         }
         .map_err(|e| Self::map_sqlx_err("list page", e))?;
 
-        let total: i64 = if let Some(ref p) = pattern {
-            sqlx::query_scalar(&sql_count)
-                .bind(p)
-                .fetch_one(self.pool.as_ref())
-                .await
-        } else {
-            sqlx::query_scalar(&sql_count)
-                .fetch_one(self.pool.as_ref())
-                .await
-        }
-        .map_err(|e| Self::map_sqlx_err("list count", e))?;
-
-        Ok((rows.iter().map(Self::row_to_group).collect(), total as u64))
+        // total_count is identical in every row; 0 when the page is empty.
+        let total = rows.first().map_or(0, |r| r.get::<i64, _>("total_count")) as u64;
+        Ok((rows.iter().map(Self::row_to_group).collect(), total))
     }
 
     async fn list_with_counts(
@@ -191,38 +177,35 @@ impl SubjectGroupRepository for SubjectGroupPgRepository {
         offset: u32,
         name_query: Option<&str>,
     ) -> Result<(Vec<(SubjectGroup, i64)>, u64), SubjectGroupRepositoryError> {
-        // Single SQL: groups + COUNT of direct members per group, via LEFT JOIN
-        // on `auth.subject_group_members`. No N+1; one round-trip for the
-        // page, a second for the unfiltered total (matches `list`).
-        let (sql_page, sql_count, pattern) = match name_query {
-            Some(q) => {
-                let pat = like_escape(q);
-                (
-                    "SELECT g.id, g.name, g.description, g.is_virtual,
-                            g.created_at, g.updated_at,
-                            COUNT(m.group_id) AS member_count
-                     FROM auth.subject_groups g
-                     LEFT JOIN auth.subject_group_members m ON m.group_id = g.id
-                     WHERE g.name ILIKE $1
-                     GROUP BY g.id
-                     ORDER BY g.is_virtual DESC, g.name
-                     LIMIT $2 OFFSET $3"
-                        .to_string(),
-                    "SELECT COUNT(*) FROM auth.subject_groups WHERE name ILIKE $1".to_string(),
-                    Some(pat),
-                )
-            }
+        // Single SQL: groups + per-group member COUNT via LEFT JOIN on
+        // `auth.subject_group_members`, plus `COUNT(*) OVER()` for the total
+        // group count. No N+1 and no separate COUNT round-trip — one query.
+        let (sql_page, pattern) = match name_query {
+            Some(q) => (
+                "SELECT g.id, g.name, g.description, g.is_virtual,
+                        g.created_at, g.updated_at,
+                        COUNT(m.group_id) AS member_count,
+                        COUNT(*) OVER() AS total_count
+                 FROM auth.subject_groups g
+                 LEFT JOIN auth.subject_group_members m ON m.group_id = g.id
+                 WHERE g.name ILIKE $1
+                 GROUP BY g.id
+                 ORDER BY g.is_virtual DESC, g.name
+                 LIMIT $2 OFFSET $3"
+                    .to_string(),
+                Some(like_escape(q)),
+            ),
             None => (
                 "SELECT g.id, g.name, g.description, g.is_virtual,
                         g.created_at, g.updated_at,
-                        COUNT(m.group_id) AS member_count
+                        COUNT(m.group_id) AS member_count,
+                        COUNT(*) OVER() AS total_count
                  FROM auth.subject_groups g
                  LEFT JOIN auth.subject_group_members m ON m.group_id = g.id
                  GROUP BY g.id
                  ORDER BY g.is_virtual DESC, g.name
                  LIMIT $1 OFFSET $2"
                     .to_string(),
-                "SELECT COUNT(*) FROM auth.subject_groups".to_string(),
                 None,
             ),
         };
@@ -243,24 +226,14 @@ impl SubjectGroupRepository for SubjectGroupPgRepository {
         }
         .map_err(|e| Self::map_sqlx_err("list_with_counts page", e))?;
 
-        let total: i64 = if let Some(ref p) = pattern {
-            sqlx::query_scalar(&sql_count)
-                .bind(p)
-                .fetch_one(self.pool.as_ref())
-                .await
-        } else {
-            sqlx::query_scalar(&sql_count)
-                .fetch_one(self.pool.as_ref())
-                .await
-        }
-        .map_err(|e| Self::map_sqlx_err("list_with_counts total", e))?;
-
+        // total_count is identical in every row; 0 when the page is empty.
+        let total = rows.first().map_or(0, |r| r.get::<i64, _>("total_count")) as u64;
         let items = rows
             .iter()
             .map(|r| (Self::row_to_group(r), r.get::<i64, _>("member_count")))
             .collect();
 
-        Ok((items, total as u64))
+        Ok((items, total))
     }
 
     async fn count_members(&self, id: Uuid) -> Result<i64, SubjectGroupRepositoryError> {

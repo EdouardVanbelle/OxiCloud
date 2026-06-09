@@ -114,6 +114,12 @@ async fn create_pool_with_retries(
             .acquire_timeout(Duration::from_secs(connect_timeout_secs))
             .idle_timeout(Duration::from_secs(idle_timeout_secs))
             .max_lifetime(Duration::from_secs(max_lifetime_secs))
+            // Skip the liveness ping sqlx issues on every acquire() (on by
+            // default): with warm min_connections and a bounded max_lifetime,
+            // that extra round-trip per checkout costs more than the rare dead
+            // connection it catches. A stale socket surfaces as a query error
+            // and the pool recycles it either way.
+            .test_before_acquire(false)
             .connect(connection_string)
             .await
         {

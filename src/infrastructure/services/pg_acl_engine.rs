@@ -61,6 +61,18 @@ struct QueryCounters {
     expanded_groups: AtomicU32,
 }
 
+/// Defensive upper bound on the number of grant rows the *unbounded* list
+/// methods (`list_incoming_grants`, `list_grants_on_resource`) will pull into
+/// memory. These back management surfaces ("Manage sharing", "Shared with
+/// me"), not the hot `require()` path, so a single resource or subject
+/// realistically accumulates orders of magnitude fewer grants than this.
+///
+/// We fetch `MAX_GRANT_ROWS + 1` and *reject* when the cap is exceeded rather
+/// than silently truncating: `apply_role` computes an add/remove diff from the
+/// returned set, so a partial list would be acted on as if complete. Hitting
+/// the cap signals pathological data and is surfaced to operators via audit.
+const MAX_GRANT_ROWS: i64 = 10_000;
+
 pub struct PgAclEngine {
     pool: Arc<PgPool>,
     folder_repo: Arc<FolderDbRepository>,
@@ -406,6 +418,29 @@ impl PgAclEngine {
         })
     }
 
+    /// Reject an over-cap grant listing rather than returning a truncated set.
+    /// The unbounded list methods fetch `MAX_GRANT_ROWS + 1` and pass the row
+    /// count here; callers diff against the full result, so silently dropping
+    /// rows would corrupt that diff. Emits an audit line before failing so the
+    /// pathological resource/subject is visible to operators.
+    fn guard_grant_row_cap(returned: usize, op: &str) -> Result<(), DomainError> {
+        if returned as i64 > MAX_GRANT_ROWS {
+            tracing::info!(
+                target: "audit",
+                event = "authz.grant_list_rejected",
+                reason = "over_row_cap",
+                op,
+                cap = MAX_GRANT_ROWS,
+                "👮🏻‍♂️ grant listing exceeded the row safety cap; refusing to return a partial set",
+            );
+            return Err(DomainError::internal_error(
+                "PgAcl",
+                format!("{op}: too many grants (cap {})", MAX_GRANT_ROWS),
+            ));
+        }
+        Ok(())
+    }
+
     /// The actual permission decision. Wrapped by `check()` which adds
     /// per-call instrumentation.
     async fn check_inner(
@@ -525,15 +560,18 @@ impl AuthorizationEngine for PgAclEngine {
                AND subject_id   = ANY($2)
                AND ($3::text IS NULL OR permission = $3)
              ORDER BY granted_at DESC
+             LIMIT $4
             "#,
         )
         .bind(&subject_types)
         .bind(&subject_ids)
         .bind(perm_str)
+        .bind(MAX_GRANT_ROWS + 1)
         .fetch_all(self.pool.as_ref())
         .await
         .map_err(|e| DomainError::internal_error("PgAcl", format!("list incoming: {e}")))?;
 
+        Self::guard_grant_row_cap(rows.len(), "list_incoming_grants")?;
         rows.into_iter().map(Self::row_to_grant).collect()
     }
 
@@ -855,14 +893,17 @@ impl AuthorizationEngine for PgAclEngine {
              WHERE resource_type = $1
                AND resource_id   = $2
              ORDER BY granted_at DESC
+             LIMIT $3
             "#,
         )
         .bind(resource.type_str())
         .bind(resource.id())
+        .bind(MAX_GRANT_ROWS + 1)
         .fetch_all(self.pool.as_ref())
         .await
         .map_err(|e| DomainError::internal_error("PgAcl", format!("list on resource: {e}")))?;
 
+        Self::guard_grant_row_cap(rows.len(), "list_grants_on_resource")?;
         rows.into_iter().map(Self::row_to_grant).collect()
     }
 
