@@ -225,6 +225,15 @@ impl ChunkedUploadService {
         // Ensure the base directory exists
         let _ = fs::create_dir_all(&temp_base_dir).await;
 
+        // One-shot migration of pre-prefix session directories to the
+        // `oxi-chunk-{uuid}/` layout. Without this, any chunked upload
+        // in flight at the moment an admin upgrades from a pre-prefix
+        // build to this one would be orphaned — the recovery scan
+        // filters strictly on the `oxi-chunk-` prefix and would skip
+        // legacy `{uuid}/` directories. Idempotent: subsequent boots
+        // find no legacy dirs left to rename and do nothing.
+        Self::migrate_pre_prefix_sessions(&temp_base_dir).await;
+
         // Recover sessions that survived a restart
         let recovered = Self::recover_sessions(&temp_base_dir).await;
         let recovered_count = recovered.len();
@@ -254,6 +263,84 @@ impl ChunkedUploadService {
         Self {
             sessions: Arc::new(DashMap::new()),
             temp_base_dir,
+        }
+    }
+
+    // ── Upgrade migration ────────────────────────────────────────────────
+
+    /// One-shot upgrade migration: rename any pre-prefix session
+    /// directory to the new `oxi-chunk-{uuid}/` layout so the recovery
+    /// scan picks it up.
+    ///
+    /// A pre-prefix session is identified by: a directory under
+    /// `temp_base_dir` whose name does NOT start with
+    /// `SESSION_DIR_PREFIX` but whose contents include `session.json`.
+    /// That signature can only come from a chunked upload created by
+    /// a pre-prefix OxiCloud build — admins don't normally drop
+    /// session.json files into the chunk dir.
+    ///
+    /// Idempotent: on a fresh boot all dirs are already prefixed, the
+    /// scan finds nothing to rename, no-op. Safe against concurrent
+    /// boots: `fs::rename` is atomic, so a racing migration sees the
+    /// source disappear and proceeds.
+    async fn migrate_pre_prefix_sessions(base: &Path) {
+        let mut entries = match fs::read_dir(base).await {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        let mut migrated_count = 0usize;
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let dir_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if dir_name.starts_with(SESSION_DIR_PREFIX) {
+                continue; // already migrated
+            }
+            // Identify pre-prefix sessions by `session.json` presence.
+            // Avoids touching the NC subtree (`nextcloud/` — no
+            // session.json at that level) and any operator-placed
+            // sibling directories without the marker.
+            if !fs::try_exists(path.join(SESSION_META_FILE))
+                .await
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
+            let new_path = base.join(session_dir_name(&dir_name));
+            match fs::rename(&path, &new_path).await {
+                Ok(()) => {
+                    migrated_count += 1;
+                    tracing::info!(
+                        old = %path.display(),
+                        new = %new_path.display(),
+                        "Migrated pre-prefix chunked-upload session to new layout"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        old = %path.display(),
+                        "Failed to migrate pre-prefix session — left orphaned on disk; \
+                         next chunk PATCH from the client will 404 and the client should \
+                         restart its upload session. Manual rm safe."
+                    );
+                }
+            }
+        }
+
+        if migrated_count > 0 {
+            tracing::info!(
+                count = migrated_count,
+                "🔧 Upgraded chunked-upload session layout (one-shot migration)"
+            );
         }
     }
 
@@ -1538,6 +1625,141 @@ mod tests {
             "Missing chunk file must be downgraded to Pending"
         );
         assert_eq!(s.bytes_received, 512);
+
+        let _ = fs::remove_dir_all(&base).await;
+    }
+
+    /// Upgrade-path scenario: a pre-prefix session directory (the layout
+    /// used by builds before the `oxi-chunk-` prefix change) gets renamed
+    /// in place when the service starts, then recovered normally. Without
+    /// the migration, the upgrade would orphan every in-flight REST
+    /// chunked upload because recovery filters strictly on the prefix.
+    #[tokio::test]
+    async fn test_migrate_pre_prefix_session_on_boot() {
+        let base = std::env::temp_dir().join(format!("oxicloud_test_{}", Uuid::new_v4()));
+        let _ = fs::create_dir_all(&base).await;
+
+        // Pre-upgrade layout: `{base}/legacy-upload-id/session.json`
+        // (no `oxi-chunk-` prefix on the directory name).
+        let legacy_id = "legacy-upload-id";
+        let legacy_dir = base.join(legacy_id);
+        let _ = fs::create_dir_all(&legacy_dir).await;
+
+        let session = UploadSession {
+            id: legacy_id.into(),
+            user_id: "user-1".into(),
+            filename: "in-flight.bin".into(),
+            folder_id: None,
+            content_type: "application/octet-stream".into(),
+            total_size: 1024,
+            chunk_size: 1024,
+            chunks: vec![ChunkInfo {
+                index: 0,
+                offset: 0,
+                size: 1024,
+                status: ChunkStatus::Pending,
+                checksum: None,
+            }],
+            created_at: Utc::now(),
+            last_activity: Utc::now(),
+            // `temp_dir` here is the legacy path — after migration the
+            // session.json's path won't match the new location on disk,
+            // but recovery doesn't use temp_dir for lookups; chunk
+            // I/O within commit_chunk computes paths from the current
+            // session dir, which is the renamed location.
+            temp_dir: legacy_dir.clone(),
+            bytes_received: 0,
+        };
+        fs::write(
+            legacy_dir.join(SESSION_META_FILE),
+            serde_json::to_vec(&session).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // Boot the service — migration runs as part of `new`.
+        let svc = ChunkedUploadService::new(base.clone()).await;
+
+        // Legacy path must be gone, prefixed path must exist + carry the
+        // session.json.
+        assert!(
+            !legacy_dir.exists(),
+            "Legacy un-prefixed dir should have been renamed away"
+        );
+        let new_dir = base.join(session_dir_name(legacy_id));
+        assert!(
+            new_dir.exists(),
+            "Prefixed dir should exist post-migration at {}",
+            new_dir.display()
+        );
+        assert!(
+            new_dir.join(SESSION_META_FILE).exists(),
+            "session.json must travel with the rename"
+        );
+
+        // Recovery picks it up — the session is now in the live map
+        // keyed by its original upload_id.
+        assert!(
+            svc.sessions.contains_key(legacy_id),
+            "Recovered session must be keyed by its original upload_id"
+        );
+
+        let _ = fs::remove_dir_all(&base).await;
+    }
+
+    /// Idempotency: running migration twice (a second boot after a
+    /// successful migration) must be a no-op. The already-prefixed
+    /// directory is left untouched, no spurious double-prefixing.
+    #[tokio::test]
+    async fn test_migration_is_idempotent() {
+        let base = std::env::temp_dir().join(format!("oxicloud_test_{}", Uuid::new_v4()));
+        let _ = fs::create_dir_all(&base).await;
+
+        let upload_id = "already-prefixed";
+        let prefixed_dir = base.join(session_dir_name(upload_id));
+        let _ = fs::create_dir_all(&prefixed_dir).await;
+
+        // Minimal session.json — just enough to count as a session for
+        // the migration's identification heuristic.
+        let session = UploadSession {
+            id: upload_id.into(),
+            user_id: "user-1".into(),
+            filename: "x.bin".into(),
+            folder_id: None,
+            content_type: "application/octet-stream".into(),
+            total_size: 1,
+            chunk_size: 1,
+            chunks: vec![ChunkInfo {
+                index: 0,
+                offset: 0,
+                size: 1,
+                status: ChunkStatus::Pending,
+                checksum: None,
+            }],
+            created_at: Utc::now(),
+            last_activity: Utc::now(),
+            temp_dir: prefixed_dir.clone(),
+            bytes_received: 0,
+        };
+        fs::write(
+            prefixed_dir.join(SESSION_META_FILE),
+            serde_json::to_vec(&session).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // Two migration runs in a row.
+        ChunkedUploadService::migrate_pre_prefix_sessions(&base).await;
+        ChunkedUploadService::migrate_pre_prefix_sessions(&base).await;
+
+        // The dir is still there, with the SAME (single) prefix —
+        // not `oxi-chunk-oxi-chunk-already-prefixed/`.
+        assert!(prefixed_dir.exists());
+        let double_prefixed = base.join(session_dir_name(&session_dir_name(upload_id)));
+        assert!(
+            !double_prefixed.exists(),
+            "Migration must not double-prefix an already-prefixed dir"
+        );
 
         let _ = fs::remove_dir_all(&base).await;
     }
