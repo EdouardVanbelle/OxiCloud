@@ -36,9 +36,9 @@ pub struct RateLimiter {
 impl RateLimiter {
     /// Create a new rate limiter.
     ///
-    /// * `max_requests` — ceiling per IP within the window
-    /// * `window_secs`  — sliding window duration
-    /// * `max_entries`  — upper bound on tracked IPs (evicts LRU when exceeded)
+    /// * `max_requests`, ceiling per IP within the window
+    /// * `window_secs` , sliding window duration
+    /// * `max_entries` , upper bound on tracked IPs (evicts LRU when exceeded)
     pub fn new(max_requests: u32, window_secs: u64, max_entries: u64) -> Self {
         let cache = Cache::builder()
             .time_to_live(Duration::from_secs(window_secs))
@@ -65,7 +65,7 @@ impl RateLimiter {
         // the *existing* value when the key was already present, we must always
         // re-insert so the counter actually advances. The TTL of the **first**
         // insert still governs eviction because moka uses insert-time TTL.
-        // However, on re-insert moka resets the TTL — for rate limiting this
+        // However, on re-insert moka resets the TTL, for rate limiting this
         // is fine because it means the window "slides" forward on activity.
         self.cache.insert(ip.to_string(), count);
 

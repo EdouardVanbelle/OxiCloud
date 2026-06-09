@@ -143,11 +143,22 @@ pub fn client_ip<B>(req: &Request<B>, include_port: bool) -> String {
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0);
 
+    client_ip_from_parts(req.headers(), peer, include_port)
+}
+
+/// Same as [`client_ip`], but operates on already-extracted parts (headers
+/// plus an optional TCP peer).  Handlers that don't take a full `Request<B>`,
+/// e.g. those that consume the body via `Json<…>`, can still derive a stable
+/// client identifier with this entry point.
+pub fn client_ip_from_parts(
+    headers: &axum::http::HeaderMap,
+    peer: Option<SocketAddr>,
+    include_port: bool,
+) -> String {
     if let Some(peer_addr) = peer {
         if is_trusted_proxy(peer_addr.ip()) {
             // Try X-Forwarded-For first (leftmost = original client)
-            if let Some(xff) = req
-                .headers()
+            if let Some(xff) = headers
                 .get("x-forwarded-for")
                 .and_then(|v| v.to_str().ok())
                 && let Some(ip) = xff
@@ -160,8 +171,7 @@ pub fn client_ip<B>(req: &Request<B>, include_port: bool) -> String {
             }
 
             // Then X-Real-Ip
-            if let Some(xri) = req
-                .headers()
+            if let Some(xri) = headers
                 .get("x-real-ip")
                 .and_then(|v| v.to_str().ok())
                 .map(str::trim)

@@ -1,10 +1,11 @@
 use axum::{
     Router,
-    extract::{Json, Query, State},
+    extract::{ConnectInfo, Json, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post, put},
 };
+use std::net::SocketAddr;
 use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -18,9 +19,10 @@ use crate::common::di::AppState;
 use crate::interfaces::api::cookie_auth;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::CurrentUserId;
+use crate::interfaces::middleware::trusted_proxy::client_ip_from_parts;
 use serde::Deserialize;
 
-/// Public auth routes — no authentication required.
+/// Public auth routes, no authentication required.
 pub fn auth_public_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/status", get(get_system_status))
@@ -34,7 +36,7 @@ pub fn auth_public_routes() -> Router<Arc<AppState>> {
         .route("/magic-link/send", post(send_magic_link))
 }
 
-/// Protected auth routes — require authentication (auth + CSRF middleware
+/// Protected auth routes, require authentication (auth + CSRF middleware
 /// must be applied by the caller in main.rs).
 pub fn auth_protected_routes() -> Router<Arc<AppState>> {
     use axum::routing::patch;
@@ -46,7 +48,7 @@ pub fn auth_protected_routes() -> Router<Arc<AppState>> {
         .route("/logout", post(logout))
 }
 
-/// Rate-limited auth routes — split out so main.rs can apply per-endpoint
+/// Rate-limited auth routes, split out so main.rs can apply per-endpoint
 /// rate limiting middleware independently.
 pub fn login_route() -> Router<Arc<AppState>> {
     Router::new().route("/login", post(login))
@@ -60,7 +62,7 @@ pub fn refresh_route() -> Router<Arc<AppState>> {
     Router::new().route("/refresh", post(refresh_token))
 }
 
-/// Public setup route — only active before the first admin is created.
+/// Public setup route, only active before the first admin is created.
 pub fn setup_route() -> Router<Arc<AppState>> {
     Router::new().route("/setup", post(setup_admin))
 }
@@ -260,6 +262,7 @@ pub async fn register(
 )]
 pub async fn login(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(dto): Json<LoginDto>,
 ) -> Result<Response, AppError> {
@@ -281,13 +284,24 @@ pub async fn login(
     };
 
     // ── Account lockout check ──────────────────────────────────────────
-    // Reject immediately if the account has too many consecutive failures.
-    // This runs BEFORE Argon2 to save CPU under brute-force attacks.
-    if let Err(lockout_secs) = auth_service.login_lockout.check(&dto.username) {
+    // Reject immediately if (this account, this IP) has too many consecutive
+    // failures. The IP is part of the key so an attacker flooding bad
+    // passwords from one address cannot lock a legitimate user out of the
+    // same account from a different address (issue #323). The check runs
+    // BEFORE Argon2 to save CPU under brute-force attacks.
+    let client_ip = client_ip_from_parts(&headers, Some(peer), false);
+    if let Err(lockout_secs) = auth_service
+        .login_lockout
+        .check(&dto.username, &client_ip)
+    {
         tracing::warn!(
+            target: "audit",
+            event = "auth.login",
+            reason = "account_ip_locked",
             username = %dto.username,
+            ip = %client_ip,
             lockout_secs = lockout_secs,
-            "Login rejected — account temporarily locked"
+            "Login rejected: account temporarily locked for this IP"
         );
         return Err(AppError::new(
             StatusCode::TOO_MANY_REQUESTS,
@@ -316,8 +330,10 @@ pub async fn login(
         .await
     {
         Ok(auth_response) => {
-            // ── Successful login — reset lockout counter ──
-            auth_service.login_lockout.record_success(&dto.username);
+            // ── Successful login, reset lockout counter ──
+            auth_service
+                .login_lockout
+                .record_success(&dto.username, &client_ip);
 
             tracing::info!("Login successful for user: {}", dto.username);
             // Log the response structure for debugging
@@ -346,7 +362,7 @@ pub async fn login(
             cookie_auth::append_csrf_cookie(response.headers_mut(), auth_response.expires_in);
 
             // Diagnostic: warn when Secure cookies are set but the request
-            // arrived over plain HTTP — the browser will reject them (#241).
+            // arrived over plain HTTP, the browser will reject them (#241).
             if cookie_auth::is_cookie_secure() {
                 let is_tls = headers
                     .get("x-forwarded-proto")
@@ -367,7 +383,9 @@ pub async fn login(
         }
         Err(err) => {
             // ── Record failed attempt for lockout tracking ──
-            auth_service.login_lockout.record_failure(&dto.username);
+            auth_service
+                .login_lockout
+                .record_failure(&dto.username, &client_ip);
             tracing::error!("Login failed for user {}: {}", dto.username, err);
             Err(err.into())
         }
@@ -672,7 +690,7 @@ pub async fn setup_admin(
         ));
     }
 
-    // 4. ATOMIC: claim initialization — only one concurrent request can win.
+    // 4. ATOMIC: claim initialization, only one concurrent request can win.
     //    We use Uuid::nil() as a placeholder because the admin user
     //    doesn't exist yet. It will be updated to the real id below.
     let claimed = admin_svc
@@ -708,7 +726,7 @@ pub async fn setup_admin(
     // 5. Update the initialization record with the real admin user_id
     let real_user_id = Uuid::parse_str(&user.id).unwrap_or_default();
     if let Err(e) = admin_svc.mark_system_initialized(real_user_id).await {
-        // Not fatal — the claim already prevents concurrent re-initialization,
+        // Not fatal, the claim already prevents concurrent re-initialization,
         // and the "pending" marker is still "true" so the system stays locked.
         tracing::error!(
             "Created admin but failed to update initialized_by with real user id: {}",
@@ -919,7 +937,7 @@ pub async fn oidc_callback(
 
     match result {
         OidcCallbackResult::WebLogin { exchange_code } => {
-            // Regular web login — redirect to frontend with exchange code
+            // Regular web login, redirect to frontend with exchange code
             let config = auth_app.oidc_config().unwrap();
             let frontend_url = config.frontend_url.trim_end_matches('/');
             let redirect_url = format!("{}/?oidc_code={}", frontend_url, exchange_code);
@@ -931,7 +949,7 @@ pub async fn oidc_callback(
             user_id,
             username,
         } => {
-            // Nextcloud Login Flow v2 — create app password and complete flow
+            // Nextcloud Login Flow v2, create app password and complete flow
             let nextcloud = state
                 .nextcloud
                 .as_ref()
