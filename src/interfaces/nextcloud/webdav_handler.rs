@@ -596,7 +596,14 @@ async fn handle_put(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<i64>().ok());
 
-    let max_upload = state.core.config.storage.max_upload_size;
+    // ── Direct PUT cap ───────────────────────────────────────────────
+    // We use `direct_put_max_bytes` (default 1 GiB), not `max_upload_size`
+    // (default 10 GB). Larger files must come through the chunked upload
+    // protocol (`/dav/uploads/...`) which is resumable on failure and
+    // bounded per-request by `chunk_max_bytes`. Trying to stream a
+    // multi-GB body through a single PUT is a footgun: a connection drop
+    // at 95 % loses everything.
+    let max_upload = state.core.config.storage.direct_put_max_bytes;
 
     // Stream the body to a temp file + incremental hash — never buffer the
     // full upload in RAM.  The old `body::to_bytes` path loaded the entire

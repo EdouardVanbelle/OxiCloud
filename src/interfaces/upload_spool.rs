@@ -70,7 +70,10 @@ pub async fn spool_body_to_temp(
                 drop(file);
                 let _ = tokio::fs::remove_file(&temp_path).await;
                 return Err(AppError::payload_too_large(format!(
-                    "Upload exceeds maximum size of {max_upload} bytes"
+                    "Upload body exceeds the direct-PUT cap ({max_upload} bytes). \
+                     Use the chunked-upload protocol (REST: `/api/uploads/...`, \
+                     NextCloud: `/remote.php/dav/uploads/...`) for files larger than this. \
+                     Chunked uploads are resumable on transient failure."
                 )));
             }
             hasher.update(chunk);

@@ -927,8 +927,10 @@ async fn handle_put(
     //  another user — acceptable risk since PathResolver should always
     //  be enabled in production)
 
-    // Hard upload size limit from config
-    let max_upload = state.core.config.storage.max_upload_size;
+    // Direct PUT cap — see `nextcloud/webdav_handler::handle_put` for
+    // the reasoning. Files above `direct_put_max_bytes` must go through
+    // the chunked-upload protocol (`/api/uploads/…`) which is resumable.
+    let max_upload = state.core.config.storage.direct_put_max_bytes;
 
     // Extract content type before consuming the request
     let content_type = req

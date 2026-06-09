@@ -50,60 +50,85 @@ Two practical consequences:
 
 Three independent caps control how large an upload OxiCloud will
 accept. Pick them with disk and tmpfs sizing in mind: the spool/chunk
-directories must be able to hold the worst case (max cap × concurrent
+directories must be able to hold the worst case (cap × concurrent
 uploads).
 
-| Variable | Default | What it caps |
-|---|---|---|
-| `OXICLOUD_MAX_UPLOAD_SIZE` | 10 GB | Total file size — whether uploaded as one `PUT` or assembled from many chunks. The hard ceiling on any single file. |
-| `OXICLOUD_CHUNK_MAX_BYTES` | 100 MB | A single chunked-PUT request body (`PATCH /api/uploads/{id}` or `PUT /dav/uploads/.../chunk`). Independent of the whole-file cap — a 5 GB file uploaded in 100 MB chunks needs ~50 PUTs, each bounded by this. |
-| `OXICLOUD_MAX_UPLOAD_SIZE` (again, for the PUT path) | 10 GB | A single non-chunked PUT body. Same env var as the whole-file cap because for non-chunked uploads they're equivalent. |
+| Variable | Default | What it caps | When it fires |
+|---|---|---|---|
+| `OXICLOUD_MAX_UPLOAD_SIZE` | 10 GB | **Whole-file ceiling.** Applies to both direct PUT (per-body) and chunked uploads (declared `total_size`). The absolute upper bound on any single file in OxiCloud. | Chunked: at `POST /api/uploads` against the JSON-declared `total_size`, before any chunk is uploaded. Direct PUT: indirectly via `OXICLOUD_DIRECT_PUT_MAX_BYTES`, which is expected to be ≤ `OXICLOUD_MAX_UPLOAD_SIZE`. |
+| `OXICLOUD_DIRECT_PUT_MAX_BYTES` | 1 GiB | **Non-chunked PUT body.** Per-request cap for `POST /api/files/upload`, `PUT /webdav/...`, and `PUT /remote.php/dav/files/.../...`. Set below `OXICLOUD_MAX_UPLOAD_SIZE` so larger files are pushed onto the chunked protocol — which is resumable on failure. | During body streaming, as a per-frame accumulator. Excess → 413 with a "use chunked upload" hint. |
+| `OXICLOUD_CHUNK_MAX_BYTES` | 100 MB | **Per-chunk body** in a chunked-upload session (`PATCH /api/uploads/{id}` or `PUT /remote.php/dav/uploads/.../chunk`). Independent of the whole-file cap — a 5 GB file in 100 MB chunks is 50 PATCHes each bounded by this. | During chunk-body streaming. Excess → 413. |
 
-### Why these matter for tmpfs sizing
+### Recommendation: prefer chunked uploads for large files
+
+The defaults (`OXICLOUD_DIRECT_PUT_MAX_BYTES` = 1 GiB, well below
+`OXICLOUD_MAX_UPLOAD_SIZE` = 10 GB) are deliberately asymmetric.
+Files between those two caps can only succeed via the chunked
+protocol. Three reasons to keep them that way:
+
+- **Resilience.** A direct PUT at 95 % of 5 GB that drops loses
+  everything. The same drop on a chunked upload loses one ~5 MB
+  chunk; the client retries that chunk and continues.
+- **Memory + disk pressure.** Direct PUT spools the full body to
+  disk per request. Ten concurrent 5 GB direct PUTs use up to 50 GB
+  of transient spool disk. Chunked spreads each upload across many
+  small PATCHes; per-request resource use stays bounded by
+  `OXICLOUD_CHUNK_MAX_BYTES`.
+- **Convention.** NextCloud desktop and the OxiCloud web UI already
+  switch to chunked at ~10 MB (`CHUNKED_UPLOAD_THRESHOLD`).
+
+### Why caps matter for tmpfs sizing
 
 OxiCloud streams bodies frame-by-frame, so **RAM** is bounded to one
 HTTP frame (~64 KB) per request regardless of the caps. **Disk space**,
 however, scales with the caps:
 
-- **Direct PUT** (single-file): each in-flight upload spools the full
-  body to disk under `OXICLOUD_UPLOAD_TMPDIR` until promotion. Worst
-  case disk = `OXICLOUD_MAX_UPLOAD_SIZE × concurrent_PUTs`.
-- **Chunked upload**: each in-flight session accumulates chunks under
-  `OXICLOUD_CHUNK_DIR`, then assembles them into a single temp file
-  before promotion. Worst case disk per session = **2 × file_size**
-  (chunks + assembled file); total disk =
-  `2 × OXICLOUD_MAX_UPLOAD_SIZE × concurrent_sessions`.
+- **Direct PUT**: each in-flight upload spools the full body to disk
+  under `OXICLOUD_UPLOAD_TMPDIR` until promotion. Worst case disk =
+  `OXICLOUD_DIRECT_PUT_MAX_BYTES × concurrent_direct_PUTs`.
+- **Chunked upload**: each in-flight session accumulates chunks
+  under `OXICLOUD_CHUNK_DIR`, then assembles them into a single temp
+  file before promotion. Worst case disk per session = **2 ×
+  file_size** (chunks + assembled file); total disk =
+  `2 × OXICLOUD_MAX_UPLOAD_SIZE × concurrent_chunked_sessions`.
+
+The chunked formula uses `OXICLOUD_MAX_UPLOAD_SIZE` because that's
+what bounds the declared `total_size` at session creation. The
+direct-PUT formula uses the smaller `OXICLOUD_DIRECT_PUT_MAX_BYTES`
+since that's what bounds each direct PUT body.
 
 ### Sizing examples
 
-A 4 GB tmpfs serving a small team (~5 concurrent uploads):
+A 4 GB tmpfs serving a small team (5 concurrent direct PUTs OR 5
+concurrent chunked sessions):
 
-| Setting | Disk worst case | Safe on 4 GB tmpfs? |
-|---|---|---|
-| `MAX_UPLOAD=10 GB`, no `CHUNK_MAX` tweak | 50 GB direct, 100 GB chunked | ❌ no — single upload OOMs the tmpfs |
-| `MAX_UPLOAD=500 MB`, `CHUNK_MAX=50 MB` | 2.5 GB direct, 5 GB chunked | ⚠ direct fits, chunked overflows |
-| `MAX_UPLOAD=300 MB`, `CHUNK_MAX=30 MB` | 1.5 GB direct, 3 GB chunked | ✅ both fit |
+| Settings | Direct-PUT worst case | Chunked worst case | Safe on 4 GB tmpfs? |
+|---|---|---|---|
+| Defaults: `OXICLOUD_MAX_UPLOAD_SIZE`=10 GB, `OXICLOUD_DIRECT_PUT_MAX_BYTES`=1 GiB, `OXICLOUD_CHUNK_MAX_BYTES`=100 MB | 5 GiB (5 × 1 GiB) | 100 GB (5 × 2 × 10 GB) | ❌ chunked overflows |
+| `OXICLOUD_MAX_UPLOAD_SIZE`=500 MB, `OXICLOUD_DIRECT_PUT_MAX_BYTES`=100 MB, `OXICLOUD_CHUNK_MAX_BYTES`=20 MB | 500 MB | 5 GB | ⚠ direct PUT fits, chunked still overflows |
+| `OXICLOUD_MAX_UPLOAD_SIZE`=300 MB, `OXICLOUD_DIRECT_PUT_MAX_BYTES`=50 MB, `OXICLOUD_CHUNK_MAX_BYTES`=10 MB | 250 MB | 3 GB | ✅ both fit |
 
 A real-disk volume (cheap, large):
 
-| Setting | Disk worst case | Comment |
-|---|---|---|
-| `MAX_UPLOAD=10 GB`, `CHUNK_MAX=100 MB` (defaults) | 100 GB chunked worst case | Fine on a 200+ GB volume; almost any real-disk setup |
-| `MAX_UPLOAD=100 GB`, `CHUNK_MAX=500 MB` | 1 TB chunked worst case | Plausible for video archives; needs a dedicated upload volume |
+| Settings | Direct-PUT worst case | Chunked worst case | Comment |
+|---|---|---|---|
+| Defaults (see row above) | 5 GiB | 100 GB | Fine on a 200+ GB volume; almost any real-disk setup |
+| `OXICLOUD_MAX_UPLOAD_SIZE`=100 GB, `OXICLOUD_DIRECT_PUT_MAX_BYTES`=5 GiB, `OXICLOUD_CHUNK_MAX_BYTES`=500 MB | 25 GiB | 1 TB | Plausible for video archives; needs a dedicated upload volume |
 
 ### Choosing tmpfs vs real disk
 
 | Constraint | Choice |
 |---|---|
-| Upload caps × concurrent users ≤ free RAM × 0.5 | tmpfs OK (fast, atomic with `.blobs/` if also tmpfs) |
-| Upload caps × concurrent users > free RAM × 0.5 | **real disk** — same FS as `.blobs/` ideal |
+| `OXICLOUD_DIRECT_PUT_MAX_BYTES × concurrent_direct_PUTs + 2 × OXICLOUD_MAX_UPLOAD_SIZE × concurrent_chunked_sessions ≤ free RAM × 0.5` | tmpfs OK (fast, atomic with `.blobs/` if also tmpfs) |
+| Worst case exceeds half free RAM | **real disk** — same filesystem as `.blobs/` ideal |
 | Container with cgroup memory limit | **real disk** — tmpfs spool counts against the cgroup limit and triggers OOMKill |
 | Multi-GB uploads expected | **real disk** — even small concurrency on tmpfs runs out of space |
 | Small-file workload only (≤ 50 MB), high concurrency | tmpfs gives a noticeable intake speedup |
 
-The defaults (`MAX_UPLOAD=10 GB`, `CHUNK_MAX=100 MB`) assume **real
-disk**. Don't run the defaults against tmpfs unless you've sized it
-for the worst case.
+The defaults (`OXICLOUD_MAX_UPLOAD_SIZE`=10 GB,
+`OXICLOUD_DIRECT_PUT_MAX_BYTES`=1 GiB,
+`OXICLOUD_CHUNK_MAX_BYTES`=100 MB) assume **real disk**. Don't run
+the defaults against tmpfs unless you've sized it for the worst case.
 
 ## TL;DR
 

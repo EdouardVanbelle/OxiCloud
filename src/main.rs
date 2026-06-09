@@ -150,6 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // hardest to spot from chunked-upload tests.
     tracing::info!(
         max_upload_size_mb = config.storage.max_upload_size / (1024 * 1024),
+        direct_put_max_bytes_mb = config.storage.direct_put_max_bytes / (1024 * 1024),
         chunk_max_bytes_mb = config.storage.chunk_max_bytes / (1024 * 1024),
         "Upload limits loaded from config"
     );

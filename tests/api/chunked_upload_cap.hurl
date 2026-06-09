@@ -563,3 +563,120 @@ POST {{base_url}}/api/uploads/{{upload_id_nobody}}/complete
 Authorization: Bearer {{token}}
 
 HTTP 201
+
+
+# ═════════════════════════════════════════════════════════════
+# Whole-file size cap (OXICLOUD_MAX_UPLOAD_SIZE)
+# ═════════════════════════════════════════════════════════════
+# The whole-file cap is checked at session creation against the
+# JSON-declared `total_size` — no upload body required to trip
+# it. Test default `OXICLOUD_MAX_UPLOAD_SIZE` is 10 GiB; we
+# declare 100 GiB to be safely above without bothering with a
+# Hurl `--variables` override.
+#
+# This guards the case where chunks would otherwise accumulate
+# disk space against an oversized declared upload — the reject
+# fires BEFORE any chunk is PATCHed.
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 21 — POST /api/uploads with `total_size` above
+#           OXICLOUD_MAX_UPLOAD_SIZE → 413 Payload Too Large.
+#           No body bytes are sent; the check is purely
+#           against the declared JSON field.
+# ─────────────────────────────────────────────────────────────
+POST {{base_url}}/api/uploads
+Authorization: Bearer {{token}}
+Content-Type: application/json
+{
+  "filename": "way-too-big.bin",
+  "folder_id": "{{home_folder_id}}",
+  "content_type": "application/octet-stream",
+  "total_size": 107374182400,
+  "chunk_size": 5242880
+}
+
+HTTP 413
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 22 — Sanity check: a session JUST BELOW the cap is
+#           accepted. Uses a sub-cap value (32 bytes — same
+#           pattern as earlier steps so no extra fixture is
+#           needed). Confirms that the reject in step 21 was
+#           the size cap, not an unrelated regression.
+# ─────────────────────────────────────────────────────────────
+POST {{base_url}}/api/uploads
+Authorization: Bearer {{token}}
+Content-Type: application/json
+{
+  "filename": "small-and-fine.txt",
+  "folder_id": "{{home_folder_id}}",
+  "content_type": "text/plain",
+  "total_size": 32,
+  "chunk_size": 1048576
+}
+
+HTTP 201
+[Captures]
+upload_id_sanity: jsonpath "$.upload_id"
+
+# Cleanup — cancel without uploading.
+DELETE {{base_url}}/api/uploads/{{upload_id_sanity}}
+Authorization: Bearer {{token}}
+
+HTTP 204
+
+
+# ═════════════════════════════════════════════════════════════
+# Direct-PUT body cap (OXICLOUD_DIRECT_PUT_MAX_BYTES)
+# ═════════════════════════════════════════════════════════════
+# `OXICLOUD_DIRECT_PUT_MAX_BYTES` (4 MiB in the test env) bounds
+# a single non-chunked PUT body. Larger uploads must come through
+# the chunked protocol — the server returns 413 with a hint
+# pointing at `/api/uploads/...` / `/dav/uploads/...`. The cap
+# fires mid-stream via the same accumulator that bounds chunks.
+#
+# Tested via the native REST WebDAV PUT endpoint (`/webdav/...`)
+# because it's JWT-authed (no app-password mint dance) and
+# straightforwardly path-mapped. The cap is wired into the same
+# `spool_body_to_temp` helper from the NextCloud single-file PUT
+# path, so this exercise covers both wirings.
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 23 — Direct PUT of the 5 MiB fixture → 413. The same
+#           fixture used in step 8 for the chunked-PATCH cap;
+#           here it lands against the direct-PUT cap.
+# ─────────────────────────────────────────────────────────────
+PUT {{base_url}}/webdav/test-direct-put-over-cap.bin
+Authorization: Bearer {{token}}
+Content-Type: application/octet-stream
+file,fixtures/chunk-over-cap-5mb.bin;
+
+HTTP 413
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 24 — Sanity: direct PUT WELL under the cap → 201 or 204.
+#           Confirms step 23's reject was the cap, not a route /
+#           auth / handler regression.
+# ─────────────────────────────────────────────────────────────
+PUT {{base_url}}/webdav/test-direct-put-under-cap.txt
+Authorization: Bearer {{token}}
+Content-Type: text/plain
+file,fixtures/hello.txt;
+
+# WebDAV PUT returns 201 on new file, 204 on overwrite. Either
+# value confirms a successful body acceptance.
+HTTP *
+[Asserts]
+status >= 200
+status < 300
+
+# Cleanup so a re-run finds a clean slate (DELETE is idempotent
+# enough for this — 204 on success, 404 if nothing left).
+DELETE {{base_url}}/webdav/test-direct-put-under-cap.txt
+Authorization: Bearer {{token}}
+
+HTTP *

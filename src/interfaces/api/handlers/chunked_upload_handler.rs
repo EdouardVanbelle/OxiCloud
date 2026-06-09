@@ -162,6 +162,33 @@ impl ChunkedUploadHandler {
                 .into_response();
         }
 
+        // ── Whole-file cap ──────────────────────────────────────────
+        // Reject upfront, before any chunk is uploaded — wasting
+        // bandwidth + server disk on an upload that's going to be
+        // rejected at /complete is the worst-of-both-worlds outcome.
+        // `max_upload_size` is the same ceiling that bounds direct
+        // PUTs (per-byte during streaming there; declared per-session
+        // here). When quotas are disabled, this is the only whole-file
+        // limit for chunked uploads — without it a hostile client
+        // could declare `total_size: 1 TB` and accumulate chunks
+        // until disk fills.
+        let max_upload = state.core.config.storage.max_upload_size as u64;
+        if request.total_size > max_upload {
+            tracing::warn!(
+                "⛔ CHUNKED UPLOAD REJECTED (total_size cap): user={}, file={}, declared={}, max={}",
+                auth_user.username,
+                request.filename,
+                request.total_size,
+                max_upload
+            );
+            return AppError::payload_too_large(format!(
+                "Declared total_size {} exceeds the server's `max_upload_size` cap ({} bytes). \
+                 Raise OXICLOUD_MAX_UPLOAD_SIZE on the server if larger uploads are expected.",
+                request.total_size, max_upload
+            ))
+            .into_response();
+        }
+
         // ── Permission pre-check: caller must have Create on the target
         // folder BEFORE we allocate a session and accept chunks. The
         // upload service re-checks at finalize time, but failing here

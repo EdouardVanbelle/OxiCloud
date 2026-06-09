@@ -218,6 +218,16 @@ pub struct StorageConfig {
     /// be far tighter than the whole-file cap and prevents one HTTP request
     /// from monopolising server memory or disk. Env: `OXICLOUD_CHUNK_MAX_BYTES`.
     pub chunk_max_bytes: usize,
+    /// Maximum size of a single non-chunked PUT body, in bytes (default:
+    /// 1 GiB). Set below `max_upload_size` so files larger than this are
+    /// pushed onto the chunked-upload protocol (`/api/uploads/…` or
+    /// `/dav/uploads/…`) — which is resilient to mid-transfer failures,
+    /// resumable, and bounded per-request by `chunk_max_bytes`. Without
+    /// this cap a 10 GB direct PUT spools 10 GB to disk in a single
+    /// request; a connection drop at 95 % loses everything. The server
+    /// returns 413 with a "use chunked upload" hint when a direct PUT
+    /// exceeds this cap. Env: `OXICLOUD_DIRECT_PUT_MAX_BYTES`.
+    pub direct_put_max_bytes: usize,
     /// Directory for upload spool temp files. When `Some`, large uploads are
     /// spooled here instead of the OS default temp dir (often tmpfs/RAM in
     /// containers, where the spool's page-cache counts against the cgroup
@@ -376,6 +386,7 @@ impl Default for StorageConfig {
             trash_retention_days: 30,              // 30 days
             max_upload_size: MAX_UPLOAD_SIZE,
             chunk_max_bytes: 100 * 1024 * 1024, // 100 MB — sane upper bound for a single chunked-upload PUT
+            direct_put_max_bytes: 1024 * 1024 * 1024, // 1 GiB — pushes larger uploads onto the chunked protocol
             upload_temp_dir: None,
             chunk_dir: None,
             usage_reconcile_secs: 600, // 10 minutes
@@ -1246,6 +1257,12 @@ impl AppConfig {
             && let Ok(val) = chunk_max
         {
             config.storage.chunk_max_bytes = val;
+        }
+        if let Ok(direct_max) =
+            env::var("OXICLOUD_DIRECT_PUT_MAX_BYTES").map(|v| v.parse::<usize>())
+            && let Ok(val) = direct_max
+        {
+            config.storage.direct_put_max_bytes = val;
         }
 
         // Upload spool directory — keep large upload temp files off tmpfs/RAM
