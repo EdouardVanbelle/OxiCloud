@@ -160,6 +160,10 @@ const fileOps = {
             if (resp.status === 201) {
                 return /** @type {import('../../core/types.js').FileItem} */ (await resp.json());
             }
+            // Drain the unread body so the underlying socket returns
+            // to the browser's keep-alive pool immediately. The fallback
+            // multipart upload that runs right after will reuse it.
+            resp.body?.cancel().catch(() => {});
             if (resp.status === 409) {
                 // Same (folder_id, name) already exists. The multipart
                 // upload would also 409 — short-circuit so the caller
