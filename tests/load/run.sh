@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Full k6 load-test runner.
 # Starts postgres + OxiCloud server, seeds fixtures, runs k6 scenarios,
-# compares results against baseline.json, tears everything down.
+# compares results against baseline/load.json, tears everything down.
 #
 # Usage (from repo root):
 #   bash tests/load/run.sh
@@ -152,7 +152,7 @@ node "$LOAD_DIR/merge-summaries.mjs" "${PARTIAL_SUMMARIES[@]}" "$SUMMARY_OUT"
 
 log "Comparing against baseline..."
 COMPARE_RC=0
-node "$LOAD_DIR/compare.mjs" "$SUMMARY_OUT" "$LOAD_DIR/baseline/baseline.json" || COMPARE_RC=$?
+node "$LOAD_DIR/compare.mjs" "$SUMMARY_OUT" "$LOAD_DIR/baseline/load.json" || COMPARE_RC=$?
 
 if [[ "$K6_FAILED" -ne 0 ]]; then
   log "k6 reported threshold failures (exit $K6_FAILED)."

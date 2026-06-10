@@ -111,7 +111,7 @@ api-test:
     bash tests/api/run.sh
     bash tests/webdav/run.sh
 
-# k6 load suite — full scenarios + regression diff vs baseline/baseline.json.
+# k6 load suite — full scenarios + regression diff vs baseline/load.json.
 # Used by the nightly workflow and on demand. Release build for fair timings.
 load:
     bash tests/load/run.sh
@@ -120,7 +120,7 @@ load:
 load-smoke:
     bash tests/load/smoke.sh
 
-# Re-run the full suite, then bake the latest summary into baseline.json.
+# Re-run the full suite, then bake the latest summary into baseline/load.json.
 # The leading `-` lets `run.sh`'s regression-exit not abort the bake step;
 # review the diff and commit deliberately:
 #   chore(load): accept new baseline for <reason>

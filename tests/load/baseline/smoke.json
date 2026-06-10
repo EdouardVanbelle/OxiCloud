@@ -1,0 +1,33 @@
+{
+  "_comment": "Baseline for `just load-smoke` — the smoke scenario. Placeholder values; smoke is not currently regression-gated by smoke.sh. When you decide it should be, point compare.mjs at this file from smoke.sh (mirror the run.sh pattern) and re-bake.",
+  "smoke.login": {
+    "p50": 50,
+    "p95": 200,
+    "p99": 400,
+    "tolerance_pct": 15
+  },
+  "smoke.create_folder": {
+    "p50": 20,
+    "p95": 80,
+    "p99": 150,
+    "tolerance_pct": 15
+  },
+  "smoke.upload_tiny": {
+    "p50": 30,
+    "p95": 120,
+    "p99": 250,
+    "tolerance_pct": 15
+  },
+  "smoke.list_root": {
+    "p50": 15,
+    "p95": 60,
+    "p99": 120,
+    "tolerance_pct": 15
+  },
+  "smoke.delete_folder": {
+    "p50": 20,
+    "p95": 80,
+    "p99": 150,
+    "tolerance_pct": 15
+  }
+}

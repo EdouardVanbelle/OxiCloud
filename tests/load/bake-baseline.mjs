@@ -7,8 +7,8 @@
 // new accepted bar, then commit the result deliberately.
 //
 // Usage:
-//   node bake-baseline.mjs                       # auto-pick latest results/run-*.json
-//   node bake-baseline.mjs <summary> <baseline>  # explicit paths
+//   node bake-baseline.mjs                       # auto-pick latest summary, target baseline/load.json
+//   node bake-baseline.mjs <summary> <baseline>  # explicit paths (e.g. baseline/smoke.json)
 
 import { readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
@@ -31,7 +31,7 @@ function latestSummary() {
 }
 
 const summaryPath = argv[2] ? resolve(argv[2]) : latestSummary();
-const baselinePath = argv[3] ? resolve(argv[3]) : join(HERE, 'baseline/baseline.json');
+const baselinePath = argv[3] ? resolve(argv[3]) : join(HERE, 'baseline/load.json');
 
 const summary = JSON.parse(readFileSync(summaryPath, 'utf8'));
 const baseline = JSON.parse(readFileSync(baselinePath, 'utf8'));

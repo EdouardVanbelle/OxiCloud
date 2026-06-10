@@ -9,7 +9,7 @@ each run's p50/p95/p99 against a committed baseline.
   Verifies the harness still builds and the server boots. ~1 minute. Run on
   every PR. No regression gate.
 - **full** — `just load`. Runs every scenario under `scenarios/` against a
-  seeded database. Compares results against `baseline/baseline.json`; exits
+  seeded database. Compares results against `baseline/load.json`; exits
   non-zero on regression beyond the per-metric tolerance. Run nightly on
   `main` and manually.
 
@@ -23,7 +23,7 @@ each run's p50/p95/p99 against a committed baseline.
 | `scenarios/subject_group_nested.js`| Grant via a 3-level nested group chain, then descendants fetched by a member.   |
 
 Add new scenarios as `scenarios/<name>.js`; register their metric names in
-`baseline/baseline.json`.
+`baseline/load.json` (or `baseline/smoke.json` if you wire smoke gating).
 
 ## Seeding
 
@@ -35,22 +35,35 @@ through the REST API at run time — that is the measured hot path.
 
 ## Baseline & regression detection
 
-`baseline/baseline.json` is the source of truth. Shape:
+Baselines live under `baseline/`, split by which runner grades them:
+
+| File                  | Used by                  | Regression-gated? |
+| --------------------- | ------------------------ | ----------------- |
+| `baseline/load.json`  | `just load` (`run.sh`)   | Yes               |
+| `baseline/smoke.json` | `just load-smoke`        | Not yet (see below) |
+
+Both have the same shape — one entry per `<scenario>.<op>`:
 
 ```json
 {
-  "folder_cascade.list_depth8": { "p50": 12.0, "p95": 45.0, "p99": 80.0, "tolerance_pct": 10 }
+  "folder_cascade.list_depth1": { "p50": 0.97, "p95": 2.04, "p99": 4.82, "tolerance_pct": 10 }
 }
 ```
 
-K6 scenarios load this file at startup and set `thresholds` from it, so a
-regression fails the K6 run directly. `compare.mjs` also prints a
+K6 scenarios load the relevant file at startup and set `thresholds` from
+it, so a regression fails the K6 run directly. `compare.mjs` also prints a
 human-readable diff table after the run and exits non-zero if any metric
-exceeds tolerance.
+regresses beyond its tolerance.
 
-**Updating the baseline is deliberate.** Run `just load-baseline` to rewrite
-`baseline.json` from the latest run, then commit it as
-`chore(load): accept new baseline for <reason>`. Never auto-update.
+The smoke scenario is currently **not regression-gated** — `smoke.sh` runs
+the scenario but doesn't call `compare.mjs`. When you decide it should be,
+mirror the `run.sh` pattern and point `compare.mjs` at
+`baseline/smoke.json`.
+
+**Updating a baseline is deliberate.** Run `just load-baseline` to rewrite
+`baseline/load.json` from the latest run, then commit it as
+`chore(load): accept new baseline for <reason>`. Never auto-update. For
+`smoke.json`, pass explicit paths to `bake-baseline.mjs`.
 
 ## Local workflow
 

@@ -10,20 +10,28 @@
 // k6 versions will align open()'s path-resolution with ES module semantics;
 // using import.meta.resolve() future-proofs against the warning logged by
 // k6 ≥ 0.50.
-const BASELINE_PATH = import.meta.resolve('../baseline/baseline.json');
+const LOAD_BASELINE_PATH = import.meta.resolve('../baseline/load.json');
+const SMOKE_BASELINE_PATH = import.meta.resolve('../baseline/smoke.json');
 const MANIFEST_PATH = import.meta.resolve('../results/seed-manifest.json');
 
+// Eagerly load both baseline files at module init (open() is only allowed
+// in init context). Keys are disjoint by scenario prefix, so merging the
+// two maps is safe; `thresholdsFromBaseline(prefix)` filters from the union.
+const BASELINE = {
+  ...JSON.parse(open(LOAD_BASELINE_PATH)),
+  ...JSON.parse(open(SMOKE_BASELINE_PATH)),
+};
+
 /**
- * Read the baseline JSON. K6's `open()` is only valid in init context, so
- * scenarios must call this at module top-level, never inside default().
+ * Return the merged baseline (load + smoke) — convenient for tooling that
+ * wants to inspect everything; scenarios should use `thresholdsFromBaseline`.
  */
 export function loadBaseline() {
-  const raw = open(BASELINE_PATH);
-  return JSON.parse(raw);
+  return BASELINE;
 }
 
 /**
- * Build a k6 `thresholds` object from the baseline file, filtered to the
+ * Build a k6 `thresholds` object from the baseline files, filtered to the
  * given scenario prefix (e.g. 'folder_cascade').
  *
  * Result shape (k6 expects metric-name → threshold-expression-array):
@@ -37,7 +45,7 @@ export function loadBaseline() {
  * @param {string} scenarioPrefix
  */
 export function thresholdsFromBaseline(scenarioPrefix) {
-  const baseline = loadBaseline();
+  const baseline = BASELINE;
   const thresholds = {};
   for (const [key, val] of Object.entries(baseline)) {
     if (key.startsWith('_')) continue; // skip _comment etc.

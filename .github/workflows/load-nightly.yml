@@ -1,7 +1,7 @@
 name: Load Nightly
 
 # Nightly regression gate. Runs every k6 scenario, diffs against
-# baseline.json, opens an issue if any metric regresses.
+# baseline/load.json, opens an issue if any metric regresses.
 #
 # IMPORTANT: shared GitHub-hosted runners produce noisy timings —
 # regression signal is unreliable until this workflow is moved to a
