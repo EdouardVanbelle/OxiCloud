@@ -21,10 +21,18 @@ rootless-compose.yml
 storage/
 
 # Documentation
-doc/
+docs/
 *.md
 LICENSE
 CODEOWNERS
+
+# Project assets and tooling not needed by the build
+# (the Dockerfile only COPYs src, static, migrations, templates, build.rs,
+#  Cargo.*, and entrypoint.sh; everything else is dead weight in the context)
+images/
+charts/
+tools/
+tests/
 
 # Miscellaneous
 .github/
