@@ -474,7 +474,10 @@ async fn build_subtree(
     // Print the count BEFORE each level so it's clear which level is in flight
     // and how many rows are about to be inserted.
     let predicted: u64 = (0..=depth).map(|l| (fanout as u64).pow(l)).sum();
-    println!("  subtree '{}': ~{} folders predicted", root_name, predicted);
+    println!(
+        "  subtree '{}': ~{} folders predicted",
+        root_name, predicted
+    );
 
     // Level 0 — the root folder.
     let root: (Uuid,) = sqlx::query_as(
