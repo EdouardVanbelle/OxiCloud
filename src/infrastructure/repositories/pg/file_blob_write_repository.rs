@@ -7,6 +7,7 @@
 //! File paths are resolved by querying the materialized `storage.folders.path`
 //! column (O(1) per lookup), so no recursive CTEs are needed.
 
+use moka::sync::Cache;
 use sqlx::PgPool;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,6 +27,10 @@ pub struct FileBlobWriteRepository {
     pool: Arc<PgPool>,
     dedup: Arc<DedupService>,
     folder_repo: Arc<FolderDbRepository>,
+    /// Shared handle to `FileBlobReadRepository`'s file_id → blob_hash
+    /// cache. Content swaps and hard deletes invalidate the mapping here
+    /// so the read side can never serve a stale blob after a PUT update.
+    hash_cache: Cache<String, String>,
 }
 
 impl FileBlobWriteRepository {
@@ -33,11 +38,13 @@ impl FileBlobWriteRepository {
         pool: Arc<PgPool>,
         dedup: Arc<DedupService>,
         folder_repo: Arc<FolderDbRepository>,
+        hash_cache: Cache<String, String>,
     ) -> Self {
         Self {
             pool,
             dedup,
             folder_repo,
+            hash_cache,
         }
     }
 
@@ -54,6 +61,7 @@ impl FileBlobWriteRepository {
             ),
             dedup: Arc::new(DedupService::new_stub()),
             folder_repo: Arc::new(super::folder_db_repository::FolderDbRepository::new_stub()),
+            hash_cache: Cache::builder().max_capacity(10_000).build(),
         }
     }
 
@@ -505,6 +513,8 @@ impl FileWritePort for FileBlobWriteRepository {
             return Err(DomainError::not_found("File", id));
         }
 
+        // Drop the read-side file_id → blob_hash mapping for the dead row.
+        self.hash_cache.invalidate(id);
         Ok(())
     }
 
@@ -524,8 +534,14 @@ impl FileWritePort for FileBlobWriteRepository {
             .await?;
         let new_hash = dedup_result.hash().to_string();
 
-        self.swap_blob_hash(file_id, &new_hash, size as i64, modified_at)
-            .await
+        let swapped = self
+            .swap_blob_hash(file_id, &new_hash, size as i64, modified_at)
+            .await?;
+        // The file now maps to a different blob — drop the read-side cache
+        // entry so streaming downloads cannot serve the previous content
+        // for the rest of its TTI window.
+        self.hash_cache.invalidate(file_id);
+        Ok(swapped)
     }
 
     async fn register_file_deferred(

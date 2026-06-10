@@ -258,7 +258,10 @@ impl ThumbnailService {
     /// Get a thumbnail from raw image bytes, generating it if needed.
     ///
     /// This is the storage-model-safe entrypoint for CDC/manifest-backed
-    /// blobs where no single local source file exists on disk.
+    /// blobs where no single local source file exists on disk. Prefer
+    /// [`Self::get_thumbnail_from_blob`] on request paths — it defers the
+    /// full blob read until a decode permit is held, so a stampede of
+    /// cache misses cannot stack one source image per request in RAM.
     pub async fn get_thumbnail_from_bytes(
         &self,
         file_id: &str,
@@ -287,30 +290,12 @@ impl ThumbnailService {
                     return Bytes::from(data);
                 }
 
-                tracing::info!("🎨 Generating thumbnail: {} {:?}", file_id_owned, size);
-                match Self::generate_thumbnail_from_data(
-                    original_data,
-                    size,
-                    self.generation_timeout,
-                )
-                .await
-                {
-                    Ok(bytes) => {
-                        if let Some(parent) = thumb_path.parent() {
-                            let _ = fs::create_dir_all(parent).await;
-                        }
-                        let _ = fs::write(&thumb_path, &bytes).await;
-                        bytes
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Thumbnail generation failed for {} {:?}: {e}",
-                            file_id_owned,
-                            size
-                        );
-                        Bytes::new()
-                    }
-                }
+                let Ok(_permit) = self.decode_semaphore.acquire().await else {
+                    tracing::warn!("Decode semaphore closed, skipping {}", file_id_owned);
+                    return Bytes::new();
+                };
+                self.generate_and_persist(&file_id_owned, &thumb_path, size, original_data)
+                    .await
             })
             .await;
 
@@ -323,6 +308,106 @@ impl ThumbnailService {
 
         tracing::debug!("🔥 Thumbnail served: {} {:?}", file_id, size);
         Ok(bytes)
+    }
+
+    /// Get a thumbnail for a content-addressed blob, generating it if needed.
+    ///
+    /// Request-path entrypoint: on a memory+disk cache miss the source blob
+    /// is read **after** a decode permit is acquired, so peak RAM under a
+    /// thumbnail stampede is `permits × image size` instead of
+    /// `in-flight requests × image size`. moka's per-key init additionally
+    /// collapses concurrent requests for the same thumbnail into one read.
+    pub async fn get_thumbnail_from_blob(
+        &self,
+        file_id: &str,
+        blob_hash: &str,
+        size: ThumbnailSize,
+        dedup: Arc<DedupService>,
+    ) -> Result<Bytes, ThumbnailError> {
+        let cache_key = ThumbnailCacheKey {
+            file_id: file_id.to_string(),
+            size,
+        };
+
+        let thumb_path = self.get_thumbnail_path(blob_hash, size);
+        let file_id_owned = file_id.to_string();
+        let blob_hash_owned = blob_hash.to_string();
+
+        let entry = self
+            .cache
+            .entry(cache_key)
+            .or_insert_with(async move {
+                if let Ok(data) = fs::read(&thumb_path).await {
+                    tracing::debug!(
+                        "💾 Thumbnail loaded from disk: {} {:?}",
+                        file_id_owned,
+                        size
+                    );
+                    return Bytes::from(data);
+                }
+
+                let Ok(_permit) = self.decode_semaphore.acquire().await else {
+                    tracing::warn!("Decode semaphore closed, skipping {}", file_id_owned);
+                    return Bytes::new();
+                };
+                let original_data = match dedup.read_blob_bytes(&blob_hash_owned).await {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to read blob for thumbnail {} {:?}: {e}",
+                            file_id_owned,
+                            size
+                        );
+                        return Bytes::new();
+                    }
+                };
+                self.generate_and_persist(&file_id_owned, &thumb_path, size, original_data)
+                    .await
+            })
+            .await;
+
+        let bytes = entry.into_value();
+        if bytes.is_empty() {
+            return Err(ThumbnailError::ImageError(
+                "Thumbnail generation failed".to_string(),
+            ));
+        }
+
+        tracing::debug!("🔥 Thumbnail served: {} {:?}", file_id, size);
+        Ok(bytes)
+    }
+
+    /// Decode `original_data` into one thumbnail size, persist it to its
+    /// blob-keyed disk path, and return the encoded bytes — empty `Bytes`
+    /// on failure (moka's zero-weight negative-entry convention).
+    ///
+    /// Callers must hold a `decode_semaphore` permit.
+    async fn generate_and_persist(
+        &self,
+        file_id: &str,
+        thumb_path: &Path,
+        size: ThumbnailSize,
+        original_data: Bytes,
+    ) -> Bytes {
+        tracing::info!("🎨 Generating thumbnail: {} {:?}", file_id, size);
+        match Self::generate_thumbnail_from_data(original_data, size, self.generation_timeout).await
+        {
+            Ok(bytes) => {
+                if let Some(parent) = thumb_path.parent() {
+                    let _ = fs::create_dir_all(parent).await;
+                }
+                let _ = fs::write(&thumb_path, &bytes).await;
+                bytes
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Thumbnail generation failed for {} {:?}: {e}",
+                    file_id,
+                    size
+                );
+                Bytes::new()
+            }
+        }
     }
 
     /// Try to serve a thumbnail from cache only (memory → disk).
@@ -823,15 +908,16 @@ impl ThumbnailService {
         });
     }
 
-    /// Generate all thumbnail sizes in the background from raw image bytes.
+    /// Generate all thumbnail sizes in the background for a content-addressed
+    /// blob (CDC/manifest-safe — no physical source file required).
     ///
-    /// This is compatible with CDC/manifest-backed blobs because it does not
-    /// require a single physical source file on disk.
-    pub fn generate_all_sizes_background_from_bytes(
+    /// The source blob is read **after** the decode permit is acquired, so N
+    /// concurrent uploads queue as N small tasks, not N full images in RAM:
+    /// peak memory is `permits × image size` regardless of upload concurrency.
+    pub fn generate_all_sizes_background_from_blob(
         self: Arc<Self>,
         file_id: String,
         blob_hash: String,
-        original_data: Bytes,
         dedup: Arc<DedupService>,
     ) {
         tokio::spawn(async move {
@@ -884,6 +970,20 @@ impl ThumbnailService {
                     tracing::warn!(
                         "Decode semaphore closed, skipping thumbnails for {}",
                         file_id
+                    );
+                    return;
+                }
+            };
+
+            // Read the source only now that a permit bounds how many of
+            // these full-image buffers can exist at once.
+            let original_data = match dedup.read_blob_bytes(&blob_hash).await {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to read blob for thumbnail generation {}: {}",
+                        file_id,
+                        e
                     );
                     return;
                 }
@@ -1013,12 +1113,13 @@ impl crate::application::ports::file_lifecycle::FileLifecycleHook for ThumbnailR
         if !is_new_blob || !ThumbnailService::is_supported_image(content_type) {
             return;
         }
-        Self::spawn_thumbnail_generation(
-            self.thumbnail.clone(),
-            self.dedup.clone(),
-            file_id.to_string(),
-            blob_hash.to_string(),
-        );
+        self.thumbnail
+            .clone()
+            .generate_all_sizes_background_from_blob(
+                file_id.to_string(),
+                blob_hash.to_string(),
+                self.dedup.clone(),
+            );
     }
 
     fn on_file_copied(
@@ -1047,7 +1148,7 @@ impl crate::application::ports::file_lifecycle::FileLifecycleHook for ThumbnailR
                     e
                 );
             }
-            Self::spawn_thumbnail_generation(thumbnail, dedup, file_id, blob_hash);
+            thumbnail.generate_all_sizes_background_from_blob(file_id, blob_hash, dedup);
         });
     }
 
@@ -1065,30 +1166,6 @@ impl crate::application::ports::file_lifecycle::FileLifecycleHook for ThumbnailR
 // BlobLifecycleHook is implemented on ThumbnailService (not ThumbnailRefreshHook)
 // to avoid a circular Arc: DedupService→BlobLifecycleService→ThumbnailRefreshHook→DedupService.
 // ThumbnailService does not hold DedupService so no cycle exists.
-
-impl ThumbnailRefreshHook {
-    fn spawn_thumbnail_generation(
-        ts: Arc<ThumbnailService>,
-        ds: Arc<DedupService>,
-        file_id: String,
-        hash: String,
-    ) {
-        tokio::spawn(async move {
-            match ds.read_blob_bytes(&hash).await {
-                Ok(bytes) => {
-                    ts.generate_all_sizes_background_from_bytes(file_id, hash, bytes, ds.clone());
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to read blob for thumbnail generation {}: {}",
-                        file_id,
-                        e
-                    );
-                }
-            }
-        });
-    }
-}
 
 // ─── BlobLifecycleHook ───────────────────────────────────────────────────────
 

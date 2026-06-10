@@ -380,6 +380,9 @@ impl AppServiceFactory {
                 db_pool.clone(),
                 core.dedup_service.clone(),
                 folder_repo_concrete.clone(),
+                // Shared blob-hash cache: the write side invalidates entries
+                // on content swaps/deletes so reads never serve stale blobs.
+                file_read_repository.blob_hash_cache(),
             ));
 
         // I18n repository — file-system backed, gated by the locale

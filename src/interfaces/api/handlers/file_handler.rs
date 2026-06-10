@@ -442,19 +442,13 @@ impl FileHandler {
                 .into_response();
         }
 
-        let original_bytes = match state.core.dedup_service.read_blob_bytes(&blob_hash).await {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                return AppError::internal_error(format!(
-                    "Failed to load source image for thumbnail generation: {}",
-                    err
-                ))
-                .into_response();
-            }
-        };
-
         match thumbnail_service
-            .get_thumbnail_from_bytes(&id, &blob_hash, thumb_size.into(), original_bytes)
+            .get_thumbnail_from_blob(
+                &id,
+                &blob_hash,
+                thumb_size.into(),
+                state.core.dedup_service.clone(),
+            )
             .await
         {
             Ok(data) => Response::builder()

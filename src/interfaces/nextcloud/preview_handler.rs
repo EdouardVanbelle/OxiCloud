@@ -157,26 +157,18 @@ pub async fn handle_preview(
             .unwrap();
     }
 
-    let original_bytes = match state.core.dedup_service.read_blob_bytes(&blob_hash).await {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            tracing::error!(
-                "Failed to load source image for preview {}: {}",
-                object_id,
-                err
-            );
-            return Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from("Failed to load preview source"))
-                .unwrap();
-        }
-    };
-
-    // Generate/get thumbnail
+    // Generate/get thumbnail — the blob is read inside the service once a
+    // decode permit is held, so preview stampedes cannot stack source
+    // images in RAM.
     match state
         .core
         .thumbnail_service
-        .get_thumbnail_from_bytes(&object_id, &blob_hash, thumb_size.into(), original_bytes)
+        .get_thumbnail_from_blob(
+            &object_id,
+            &blob_hash,
+            thumb_size.into(),
+            state.core.dedup_service.clone(),
+        )
         .await
     {
         Ok(data) => {

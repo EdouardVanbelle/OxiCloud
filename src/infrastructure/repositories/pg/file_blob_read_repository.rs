@@ -59,8 +59,14 @@ pub struct FileBlobReadRepository {
     dedup: Arc<DedupService>,
     /// Lock-free cache: file_id → blob_hash.
     /// Populated by `get_file()` and `resolve_blob_hash()` (slow path).
-    /// Entries persist until TTI expiry (30 s idle) or capacity eviction —
-    /// safe because blob_hash is content-addressed and never mutated.
+    /// Entries persist until TTI expiry (30 s idle) or capacity eviction.
+    /// Content updates DO remap a file_id to a new hash in place
+    /// (`swap_blob_hash`), so the write repository shares this cache (see
+    /// [`Self::blob_hash_cache`]) and invalidates the entry on every
+    /// content swap and hard delete — without that, streaming downloads
+    /// kept serving the previous blob for the TTI window after a PUT
+    /// update (or 500'd once the old blob was garbage-collected), and
+    /// every read refreshed the TTI, extending the window indefinitely.
     hash_cache: Cache<String, String>,
 }
 
@@ -78,6 +84,14 @@ impl FileBlobReadRepository {
                 .time_to_idle(Duration::from_secs(30))
                 .build(),
         }
+    }
+
+    /// Shared handle to the file_id → blob_hash cache (moka clones share
+    /// the underlying storage). Handed to `FileBlobWriteRepository` at DI
+    /// time so content swaps and hard deletes invalidate the mapping the
+    /// moment they commit.
+    pub fn blob_hash_cache(&self) -> Cache<String, String> {
+        self.hash_cache.clone()
     }
 
     /// Returns the user_id (owner) for a given file ID.
@@ -157,9 +171,9 @@ impl FileBlobReadRepository {
     /// subsequent reads for the same file (e.g. Range Requests on a video,
     /// thumbnail + download, browser re-fetch) hit the cache instead of PG.
     ///
-    /// This is safe because `blob_hash` is content-addressed (SHA-256)
-    /// and never mutated — if the file's content changes, a new row with a
-    /// new `blob_hash` is created.
+    /// Staleness safety: content updates remap the file to a new hash in
+    /// place — the write repository invalidates this cache (shared via
+    /// [`Self::blob_hash_cache`]) right after every swap/delete commits.
     async fn resolve_blob_hash(&self, file_id: &str) -> Result<String, DomainError> {
         // Fast path: cached (lock-free read, refreshes TTI automatically)
         if let Some(hash) = self.hash_cache.get(file_id) {

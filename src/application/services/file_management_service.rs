@@ -151,7 +151,7 @@ impl FileManagementService {
 
         let dto = FileDto::from(copied_file);
         if let Some(hook) = &self.file_lifecycle_hook {
-            hook.on_file_copied(&dto.id, &dto.etag, &dto.mime_type, file_id);
+            hook.on_file_copied(&dto.id, &dto.content_hash, &dto.mime_type, file_id);
         }
         Ok(dto)
     }

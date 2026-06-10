@@ -47,6 +47,40 @@ impl TrashDbRepository {
         }
     }
 
+    /// Runs a LIMIT-ed DELETE statement repeatedly until a round affects
+    /// fewer rows than `batch_size`, yielding to the runtime between rounds.
+    ///
+    /// `sql` must bind `$1` = cutoff timestamp and `$2` = batch size; the
+    /// candidate sub-select is served by the `idx_*_trash_expiry` partial
+    /// indexes. Each round is its own implicit transaction, so row locks,
+    /// WAL volume and the statement-trigger transition tables stay bounded
+    /// no matter how many items expired. Partial progress is fine — the
+    /// next retention sweep continues where this one stopped.
+    async fn delete_expired_batch_loop(
+        &self,
+        sql: &'static str,
+        cutoff: DateTime<Utc>,
+        batch_size: i64,
+    ) -> Result<u64> {
+        let mut total: u64 = 0;
+        loop {
+            let affected = sqlx::query(sql)
+                .bind(cutoff)
+                .bind(batch_size)
+                .execute(self.pool.as_ref())
+                .await
+                .map_err(|e| {
+                    DomainError::internal_error("TrashDb", format!("bulk delete batch: {e}"))
+                })?
+                .rows_affected();
+            total += affected;
+            if affected < batch_size as u64 {
+                return Ok(total);
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
     /// Convert a trash_items view row into a TrashedItem entity.
     fn row_to_trashed_item(
         &self,
@@ -180,40 +214,36 @@ impl TrashRepository for TrashDbRepository {
     async fn delete_expired_bulk(&self) -> Result<(u64, u64)> {
         let cutoff = Utc::now() - chrono::Duration::days(self.retention_days);
 
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| DomainError::internal_error("TrashDb", format!("begin tx: {e}")))?;
-
-        // 1. Bulk-delete expired trashed files.
+        // 1. Bulk-delete expired trashed files in batches.
         //    The PG trigger `trg_files_decrement_blob_ref` automatically
         //    decrements blob ref_count for every deleted row.
-        let files_deleted =
-            sqlx::query("DELETE FROM storage.files WHERE is_trashed = TRUE AND trashed_at < $1")
-                .bind(cutoff)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| {
-                    DomainError::internal_error("TrashDb", format!("bulk delete files: {e}"))
-                })?
-                .rows_affected();
+        let files_deleted = self
+            .delete_expired_batch_loop(
+                "DELETE FROM storage.files
+                  WHERE id IN (SELECT id FROM storage.files
+                                WHERE is_trashed = TRUE AND trashed_at < $1
+                                ORDER BY trashed_at
+                                LIMIT $2)",
+                cutoff,
+                1_000,
+            )
+            .await?;
 
-        // 2. Bulk-delete expired trashed folders.
-        //    FK ON DELETE CASCADE handles descendant folders and their files.
-        let folders_deleted =
-            sqlx::query("DELETE FROM storage.folders WHERE is_trashed = TRUE AND trashed_at < $1")
-                .bind(cutoff)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| {
-                    DomainError::internal_error("TrashDb", format!("bulk delete folders: {e}"))
-                })?
-                .rows_affected();
-
-        tx.commit()
-            .await
-            .map_err(|e| DomainError::internal_error("TrashDb", format!("commit tx: {e}")))?;
+        // 2. Bulk-delete expired trashed folders in batches.
+        //    FK ON DELETE CASCADE handles descendant folders and their
+        //    files, so each row can fan out to an entire subtree — hence
+        //    the smaller batch size.
+        let folders_deleted = self
+            .delete_expired_batch_loop(
+                "DELETE FROM storage.folders
+                  WHERE id IN (SELECT id FROM storage.folders
+                                WHERE is_trashed = TRUE AND trashed_at < $1
+                                ORDER BY trashed_at
+                                LIMIT $2)",
+                cutoff,
+                100,
+            )
+            .await?;
 
         Ok((files_deleted, folders_deleted))
     }

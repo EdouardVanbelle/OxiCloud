@@ -177,7 +177,7 @@ impl FileUploadUseCase for FileUploadService {
         );
         self.maybe_update_storage_usage(&dto);
         if let Some(hook) = &self.file_lifecycle_hook {
-            hook.on_file_created(&dto.id, &dto.etag, &dto.mime_type, is_new_blob);
+            hook.on_file_created(&dto.id, &dto.content_hash, &dto.mime_type, is_new_blob);
         }
         Ok(dto)
     }
@@ -260,7 +260,7 @@ impl FileUploadUseCase for FileUploadService {
         let dto = FileDto::from(file);
         self.maybe_update_storage_usage(&dto);
         if let Some(hook) = &self.file_lifecycle_hook {
-            hook.on_file_created(&dto.id, &dto.etag, &dto.mime_type, is_new_blob);
+            hook.on_file_created(&dto.id, &dto.content_hash, &dto.mime_type, is_new_blob);
         }
         Ok(dto)
     }
@@ -356,7 +356,7 @@ impl FileUploadUseCase for FileUploadService {
             })?;
             let dto = FileDto::from(updated);
             if let Some(hook) = &self.file_lifecycle_hook {
-                hook.on_file_updated(&file_id, &dto.etag, content_type);
+                hook.on_file_updated(&file_id, &dto.content_hash, content_type);
             }
             return Ok(dto);
         }
@@ -394,7 +394,7 @@ impl FileUploadUseCase for FileUploadService {
             .await?;
         let dto = FileDto::from(created);
         if let Some(hook) = &self.file_lifecycle_hook {
-            hook.on_file_created(&dto.id, &dto.etag, content_type, is_new_blob);
+            hook.on_file_created(&dto.id, &dto.content_hash, content_type, is_new_blob);
         }
         Ok(dto)
     }
