@@ -1,10 +1,11 @@
 use axum::{
-    extract::{Request, State},
-    http::{HeaderMap, StatusCode, header},
+    extract::{FromRequestParts, Request, State},
+    http::{HeaderMap, StatusCode, header, request::Parts},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use base64::Engine;
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use crate::common::di::AppState;
@@ -18,6 +19,51 @@ pub enum NextcloudAuthError {
     ServiceUnavailable,
     #[error("Internal error: {0}")]
     Internal(String),
+}
+
+/// Drive selector parsed from a composite Basic-Auth username of the
+/// form `{username}~{drive_marker}`. Stored in request extensions by
+/// `basic_auth_middleware` so the route glue can cross-validate it
+/// against the URL's marker. `None` means the caller used the
+/// legacy single-drive (no `~`) login form.
+///
+/// Wrapping `Option<String>` in a named tuple keeps the request
+/// extension type unambiguous: a future middleware can't shadow it
+/// by inserting another bare `Option<String>` with different
+/// semantics.
+#[derive(Debug, Clone)]
+pub struct NcDriveHint(pub Option<String>);
+
+/// Axum extractor for the Basic-Auth-side drive marker. Reads the
+/// [`NcDriveHint`] that `basic_auth_middleware` parks in request
+/// extensions and unwraps it into a plain `Option<String>`. When the
+/// middleware did not run (e.g. on a public route), the extractor
+/// yields `None` rather than failing — handlers that need the marker
+/// should treat its absence as "no drive selector".
+///
+/// Use in any handler that needs to echo the composite username back
+/// (notably OCS `cloud/user`, which NC desktop relies on for path
+/// construction):
+///
+/// ```ignore
+/// pub async fn handle_user_info(
+///     user: AuthUser,
+///     NcDrive(drive): NcDrive,
+/// ) -> Response { ... }
+/// ```
+pub struct NcDrive(pub Option<String>);
+
+impl<S: Sync> FromRequestParts<S> for NcDrive {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(NcDrive(
+            parts
+                .extensions
+                .get::<NcDriveHint>()
+                .and_then(|h| h.0.clone()),
+        ))
+    }
 }
 
 impl IntoResponse for NextcloudAuthError {
@@ -59,13 +105,49 @@ pub async fn basic_auth_middleware(
             NextcloudAuthError::Unauthorized
         })?;
 
-    let (username, password) =
+    let (raw_username, password) =
         parse_basic_auth(auth_header).ok_or(NextcloudAuthError::Unauthorized)?;
+
+    // ── Multi-drive composite-username parse ────────────────────────
+    // POC wire shape: `{username}~{drive_marker}` may appear in the
+    // Basic Auth header. `~` was chosen because it needs no URL
+    // encoding and doesn't collide with UUID hyphens. Split once;
+    // anything to the left of the first `~` is the real username
+    // used for app-password lookup, anything to the right is the
+    // drive selector (opaque to the middleware — the handlers use
+    // it to pick the drive). When no `~` is present, the request is
+    // a plain single-drive ("home") NC sync and behaves identically
+    // to the pre-POC implementation.
+    //
+    // Reject `name~` (empty marker) and `~marker` (empty username)
+    // at the auth boundary rather than treating them as "missing
+    // marker" — they are unambiguous typos that would otherwise
+    // silently fall into a different code path.
+    let (username, drive_marker) = match raw_username.split_once('~') {
+        Some(("", _)) => {
+            tracing::warn!(
+                "[NC] 401 malformed composite username (empty prefix): {}",
+                raw_username
+            );
+            return Err(NextcloudAuthError::Unauthorized);
+        }
+        Some((_, "")) => {
+            tracing::warn!(
+                "[NC] 401 malformed composite username (empty marker): {}",
+                raw_username
+            );
+            return Err(NextcloudAuthError::Unauthorized);
+        }
+        Some((u, m)) => (u.to_string(), Some(m.to_string())),
+        None => (raw_username.clone(), None),
+    };
 
     // Check account lockout before attempting password verification (saves CPU).
     // The lockout is per (account, IP), see #323 for rationale.
     let client_ip =
         crate::interfaces::middleware::rate_limit::extract_client_ip(&request);
+
+    // Check account lockout before attempting password verification (saves CPU)
     if let Some(auth_svc) = state.auth_service.as_ref()
         && let Err(secs) = auth_svc.login_lockout.check(&username, &client_ip)
     {
@@ -133,6 +215,12 @@ pub async fn basic_auth_middleware(
                 email,
                 role,
             }));
+            // Stash the Basic-Auth-side drive marker so the route
+            // glue (`routes.rs::handle_dav_*`) can cross-validate it
+            // against the URL's marker. Kept as a typed wrapper —
+            // never as a bare `Option<String>` — to avoid an
+            // accidental extension-type collision elsewhere.
+            request.extensions_mut().insert(NcDriveHint(drive_marker));
             Ok(next.run(request).await)
         }
         Err(_) => {

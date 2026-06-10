@@ -43,23 +43,32 @@ fn timestamp_to_i64(ts: u64) -> i64 {
 
 const HEADER_DAV: HeaderName = HeaderName::from_static("dav");
 
-/// Resolve the internal OxiCloud path from a Nextcloud DAV subpath.
+/// Resolve the internal OxiCloud path from a NextCloud DAV subpath
+/// and the storage chroot the request is confined to.
 ///
-/// Nextcloud: /remote.php/dav/files/{user}/{subpath}
-/// Internal:  My Folder - {username}/{subpath}
+/// `chroot` is the storage path the request is "jailed" inside —
+/// the route glue (`routes.rs::handle_dav_*`) computes it once per
+/// request:
+/// - Legacy `/files/{user}/…` or explicit `~{home_folder_uuid}` →
+///   `"My Folder - {username}"` (no DB lookup needed).
+/// - `~{some_other_folder_uuid}` → the folder's stored `path` after
+///   a `get_folder_with_perms` check (404 if missing / no access).
 ///
-/// An empty subpath maps to the user's home folder root.
-pub fn nc_to_internal_path(username: &str, subpath: &str) -> Result<String, AppError> {
-    let home = format!("My Folder - {}", username);
+/// By the time we get here `chroot` is known to be a legitimate
+/// target — validation and permission live in the route layer, not
+/// in the path mapper. This function stays sync and free of any
+/// folder-service handle.
+pub fn nc_to_internal_path(chroot: &FolderDto, subpath: &str) -> Result<String, AppError> {
     let subpath = subpath.trim_matches('/');
     if subpath.is_empty() {
-        return Ok(home);
+        return Ok(chroot.path.clone());
     }
     // Reject path traversal attempts.
     if subpath.split('/').any(|seg| seg == ".." || seg == ".") {
         return Err(AppError::bad_request("Invalid path: traversal not allowed"));
     }
-    Ok(format!("{}/{}", home, subpath))
+
+    Ok(format!("{}/{}", chroot.path, subpath))
 }
 
 /// Build the Nextcloud DAV href for a **collection** (folder). Always
@@ -109,26 +118,45 @@ pub fn nc_href(username: &str, subpath: &str) -> String {
 /// Dispatch Nextcloud WebDAV request to the appropriate handler.
 ///
 /// `subpath` is everything after `/remote.php/dav/files/{user}/`.
+/// `chroot` is the storage path the request is confined to — see
+/// [`nc_to_internal_path`] for what gets resolved upstream.
+/// `url_user` is the literal URL `{user}` segment — bare `admin` for
+/// single-drive sync, composite `admin~{drive_uuid}` for multi-drive.
+/// **Hrefs in every response MUST be built from `url_user`, not from
+/// `user.username`** — the NC desktop client validates that
+/// PROPFIND/MOVE response hrefs share the requested URL's prefix and
+/// aborts the parse otherwise (`Invalid href "<…>" expected starting
+/// with "<requested-url>"`). The bare `user.username` is still the
+/// right value for the storage-side owner identity (`oc:owner-id`).
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_nc_webdav(
     state: Arc<AppState>,
     req: Request<Body>,
     user: AuthUser,
+    chroot: FolderDto,
+    url_user: String,
     subpath: String,
 ) -> Result<Response<Body>, AppError> {
+    // Enrich the request-scope span with the resolved chroot id so
+    // every subsequent log line in this request carries it.
+    // `chroot_id` is declared as `field::Empty` on the "req" span in
+    // `interfaces/middleware/trace_span.rs` — same pattern as `user_id`.
+    tracing::Span::current().record("chroot_id", chroot.id.to_string());
+
     let method = req.method().clone();
     match method.as_str() {
         "OPTIONS" => handle_options(),
-        "PROPFIND" => handle_propfind(state, req, &user, &subpath).await,
-        "GET" => handle_get(state, &user, &subpath).await,
-        "PUT" => handle_put(state, req, &user, &subpath).await,
-        "MKCOL" => handle_mkcol(state, &user, &subpath).await,
-        "DELETE" => handle_delete(state, &user, &subpath).await,
-        "MOVE" => handle_move(state, req, &user, &subpath).await,
-        "HEAD" => handle_head(state, &user, &subpath).await,
-        "PROPPATCH" => handle_proppatch(state, req, &user, &subpath).await,
+        "PROPFIND" => handle_propfind(state, req, &user, &chroot, &url_user, &subpath).await,
+        "GET" => handle_get(state, &user, &chroot, &subpath).await,
+        "PUT" => handle_put(state, req, &user, &chroot, &subpath).await,
+        "MKCOL" => handle_mkcol(state, &user, &chroot, &subpath).await,
+        "DELETE" => handle_delete(state, &user, &chroot, &subpath).await,
+        "MOVE" => handle_move(state, req, &user, &chroot, &url_user, &subpath).await,
+        "HEAD" => handle_head(state, &user, &chroot, &subpath).await,
+        "PROPPATCH" => handle_proppatch(state, req, &user, &chroot, &url_user, &subpath).await,
         "REPORT" | "SEARCH" => {
             crate::interfaces::nextcloud::report_handler::handle_nc_report(
-                state, req, &user, &subpath,
+                state, req, &user, &chroot, &url_user, &subpath,
             )
             .await
         }
@@ -168,6 +196,8 @@ async fn handle_propfind(
     state: Arc<AppState>,
     req: Request<Body>,
     user: &CurrentUser,
+    chroot: &FolderDto,
+    url_user: &str,
     subpath: &str,
 ) -> Result<Response<Body>, AppError> {
     let depth = req
@@ -191,7 +221,8 @@ async fn handle_propfind(
             .map_err(|e| AppError::bad_request(format!("Invalid PROPFIND XML: {}", e)))?
     };
 
-    let internal_path = nc_to_internal_path(&user.username, subpath)?;
+    let internal_path = nc_to_internal_path(chroot, subpath)?;
+
     let folder_service = &state.applications.folder_service;
     let file_service = &state.applications.file_retrieval_service;
 
@@ -244,6 +275,7 @@ async fn handle_propfind(
             &subfolders,
             &propfind,
             &depth,
+            url_user,
             &user.username,
             subpath,
             file_id_svc,
@@ -284,6 +316,7 @@ async fn handle_propfind(
             &[],
             &propfind,
             "0",
+            url_user,
             &user.username,
             subpath,
             file_id_svc,
@@ -306,7 +339,8 @@ async fn handle_propfind(
 
 async fn handle_get(
     state: Arc<AppState>,
-    user: &CurrentUser,
+    _user: &CurrentUser,
+    chroot: &FolderDto,
     subpath: &str,
 ) -> Result<Response<Body>, AppError> {
     // GET on root folder — NC clients use this as an existence check
@@ -318,7 +352,7 @@ async fn handle_get(
             .unwrap());
     }
 
-    let internal_path = nc_to_internal_path(&user.username, subpath)?;
+    let internal_path = nc_to_internal_path(chroot, subpath)?;
     let file_service = &state.applications.file_retrieval_service;
     let folder_service = &state.applications.folder_service;
 
@@ -370,7 +404,8 @@ async fn handle_get(
 
 async fn handle_head(
     state: Arc<AppState>,
-    user: &CurrentUser,
+    _user: &CurrentUser,
+    chroot: &FolderDto,
     subpath: &str,
 ) -> Result<Response<Body>, AppError> {
     // HEAD on root folder — NC clients use this as an existence check
@@ -382,7 +417,7 @@ async fn handle_head(
             .unwrap());
     }
 
-    let internal_path = nc_to_internal_path(&user.username, subpath)?;
+    let internal_path = nc_to_internal_path(chroot, subpath)?;
     let file_service = &state.applications.file_retrieval_service;
     let folder_service = &state.applications.folder_service;
 
@@ -427,6 +462,8 @@ async fn handle_proppatch(
     state: Arc<AppState>,
     req: Request<Body>,
     user: &CurrentUser,
+    chroot: &FolderDto,
+    url_user: &str,
     subpath: &str,
 ) -> Result<Response<Body>, AppError> {
     let body_bytes = body::to_bytes(req.into_body(), 64 * 1024)
@@ -450,7 +487,7 @@ async fn handle_proppatch(
     // PROPPATCH path (no favorite directive in the body) — matches
     // the prior behaviour. A PROPPATCH that *does* try to set
     // favorite on a missing resource still returns NotFound.
-    let internal_path = nc_to_internal_path(&user.username, subpath)?;
+    let internal_path = nc_to_internal_path(chroot, subpath)?;
     let file_service = &state.applications.file_retrieval_service;
     let folder_service = &state.applications.folder_service;
     let resource = if let Ok(file) = file_service.get_file_by_path(&internal_path).await {
@@ -494,9 +531,9 @@ async fn handle_proppatch(
     // type to satisfy the RFC 4918 §5.2 trailing-slash invariant —
     // see the comment block at the top of this function.
     let href = if is_collection {
-        nc_collection_href(&user.username, subpath)
+        nc_collection_href(url_user, subpath)
     } else {
-        nc_href(&user.username, subpath)
+        nc_href(url_user, subpath)
     };
     let mut buf = Vec::new();
     {
@@ -576,10 +613,11 @@ fn parse_proppatch_favorite(body: &str) -> Option<u8> {
 async fn handle_put(
     state: Arc<AppState>,
     req: Request<Body>,
-    user: &CurrentUser,
+    _user: &CurrentUser,
+    chroot: &FolderDto,
     subpath: &str,
 ) -> Result<Response<Body>, AppError> {
-    let internal_path = nc_to_internal_path(&user.username, subpath)?;
+    let internal_path = nc_to_internal_path(chroot, subpath)?;
     let file_service = &state.applications.file_retrieval_service;
     let upload_service = &state.applications.file_upload_service;
 
@@ -664,12 +702,13 @@ async fn handle_put(
 async fn handle_mkcol(
     state: Arc<AppState>,
     user: &CurrentUser,
+    chroot: &FolderDto,
     subpath: &str,
 ) -> Result<Response<Body>, AppError> {
     use crate::application::dtos::folder_dto::CreateFolderDto;
 
     let folder_service = &state.applications.folder_service;
-    let internal_path = nc_to_internal_path(&user.username, subpath)?;
+    let internal_path = nc_to_internal_path(chroot, subpath)?;
 
     // If the folder already exists, return 405 per RFC 4918 §9.3.1
     if folder_service
@@ -686,7 +725,7 @@ async fn handle_mkcol(
     // Collect path segments that need to be created (walk from root to leaf)
     let segments: Vec<&str> = subpath.split('/').filter(|s| !s.is_empty()).collect();
 
-    let user_root = nc_to_internal_path(&user.username, "")?;
+    let user_root = nc_to_internal_path(chroot, "")?;
     let mut current_path = user_root.clone();
     let mut parent_id = folder_service
         .get_folder_by_path(&user_root)
@@ -745,9 +784,10 @@ async fn handle_mkcol(
 async fn handle_delete(
     state: Arc<AppState>,
     user: &CurrentUser,
+    chroot: &FolderDto,
     subpath: &str,
 ) -> Result<Response<Body>, AppError> {
-    let internal_path = nc_to_internal_path(&user.username, subpath)?;
+    let internal_path = nc_to_internal_path(chroot, subpath)?;
     let folder_service = &state.applications.folder_service;
     let file_service = &state.applications.file_retrieval_service;
 
@@ -813,6 +853,8 @@ async fn handle_move(
     state: Arc<AppState>,
     req: Request<Body>,
     user: &CurrentUser,
+    chroot: &FolderDto,
+    url_user: &str,
     subpath: &str,
 ) -> Result<Response<Body>, AppError> {
     let destination = req
@@ -823,10 +865,14 @@ async fn handle_move(
         .to_string();
 
     // Parse destination path: extract subpath after /remote.php/dav/files/{user}/
-    let dest_subpath = extract_nc_subpath_from_dest(&destination, &user.username)
+    // — the URL user-segment carries the drive marker on multi-drive
+    // sessions, so we strip the *composite* prefix to find the real
+    // subpath. Using `user.username` here would fail to match for any
+    // request hitting a non-home drive.
+    let dest_subpath = extract_nc_subpath_from_dest(&destination, url_user)
         .ok_or_else(|| AppError::bad_request("Invalid Destination URL"))?;
 
-    let src_internal = nc_to_internal_path(&user.username, subpath)?;
+    let src_internal = nc_to_internal_path(chroot, subpath)?;
     let folder_service = &state.applications.folder_service;
     let file_service = &state.applications.file_retrieval_service;
     let file_mgmt = &state.applications.file_management_service;
@@ -837,7 +883,7 @@ async fn handle_move(
             Some((parent, name)) => (parent, name),
             None => ("", dest_subpath.as_str()),
         };
-        let dest_parent_internal = nc_to_internal_path(&user.username, dest_parent_sub)?;
+        let dest_parent_internal = nc_to_internal_path(chroot, dest_parent_sub)?;
 
         // Rename if only the name changes (same parent).
         let src_parent_sub = match subpath.rsplit_once('/') {
@@ -873,7 +919,7 @@ async fn handle_move(
         }
 
         // Return ETag and OC-ETag so Nextcloud clients can track the moved file.
-        let dest_internal = nc_to_internal_path(&user.username, &dest_subpath)?;
+        let dest_internal = nc_to_internal_path(chroot, &dest_subpath)?;
         let mut builder = Response::builder().status(StatusCode::CREATED);
         if let Ok(moved) = file_service.get_file_by_path(&dest_internal).await {
             // Route through `FileDto::etag` so the MOVE response
@@ -894,7 +940,7 @@ async fn handle_move(
             Some((parent, name)) => (parent, name),
             None => ("", dest_subpath.as_str()),
         };
-        let dest_parent_internal = nc_to_internal_path(&user.username, dest_parent_sub)?;
+        let dest_parent_internal = nc_to_internal_path(chroot, dest_parent_sub)?;
 
         let src_parent_sub = match subpath.rsplit_once('/') {
             Some((parent, _)) => parent,
@@ -988,6 +1034,14 @@ use crate::application::dtos::folder_dto::FolderDto;
 use crate::application::services::nextcloud_file_id_service::NextcloudFileIdService;
 
 /// Generate a complete Nextcloud-compatible multistatus XML response.
+///
+/// `url_user` is the URL `{user}` segment (composite `admin~{uuid}`
+/// for multi-drive sync); all `<d:href>` values are built from it so
+/// NC desktop's href-prefix validation passes. `owner` is the bare
+/// authenticated username and goes into `oc:owner-id` /
+/// `oc:owner-display-name` — those represent the resource's owner
+/// identity, which is independent of which drive view the client is
+/// addressing.
 #[allow(clippy::too_many_arguments)]
 async fn write_nc_multistatus<W: std::io::Write>(
     writer: W,
@@ -996,7 +1050,8 @@ async fn write_nc_multistatus<W: std::io::Write>(
     subfolders: &[FolderDto],
     _request: &PropFindRequest,
     depth: &str,
-    username: &str,
+    url_user: &str,
+    owner: &str,
     subpath: &str,
     file_id_svc: Option<&Arc<NextcloudFileIdService>>,
     favorite_ids: &HashSet<String>,
@@ -1014,7 +1069,7 @@ async fn write_nc_multistatus<W: std::io::Write>(
     // Current folder entry. Collection hrefs MUST end in `/` (RFC 4918
     // §5.2 + strict NC-client enforcement — see `nc_collection_href`).
     if let Some(f) = folder {
-        let href = nc_collection_href(username, subpath);
+        let href = nc_collection_href(url_user, subpath);
         let file_id = resolve_folder_id(file_id_svc, &f.id).await;
         let oc_id = file_id.map(|id| format_oc_id(id, file_id_svc));
         write_folder_response(
@@ -1023,7 +1078,7 @@ async fn write_nc_multistatus<W: std::io::Write>(
             &href,
             file_id,
             oc_id.as_deref(),
-            username,
+            owner,
             favorite_ids,
         )?;
     }
@@ -1044,7 +1099,7 @@ async fn write_nc_multistatus<W: std::io::Write>(
             } else {
                 format!("{}/{}", subpath.trim_end_matches('/'), file.name)
             };
-            let href = nc_href(username, &child_sub);
+            let href = nc_href(url_user, &child_sub);
             let file_id = resolve_file_id(file_id_svc, &file.id).await;
             let oc_id = file_id.map(|id| format_oc_id(id, file_id_svc));
             write_file_response(
@@ -1053,7 +1108,7 @@ async fn write_nc_multistatus<W: std::io::Write>(
                 &href,
                 file_id,
                 oc_id.as_deref(),
-                username,
+                owner,
                 favorite_ids,
             )?;
         }
@@ -1065,7 +1120,7 @@ async fn write_nc_multistatus<W: std::io::Write>(
             } else {
                 format!("{}/{}", subpath.trim_end_matches('/'), sf.name)
             };
-            let href = nc_collection_href(username, &child_sub);
+            let href = nc_collection_href(url_user, &child_sub);
             let file_id = resolve_folder_id(file_id_svc, &sf.id).await;
             let oc_id = file_id.map(|id| format_oc_id(id, file_id_svc));
             write_folder_response(
@@ -1074,7 +1129,7 @@ async fn write_nc_multistatus<W: std::io::Write>(
                 &href,
                 file_id,
                 oc_id.as_deref(),
-                username,
+                owner,
                 favorite_ids,
             )?;
         }
@@ -1301,39 +1356,78 @@ mod tests {
     use super::*;
 
     // ── nc_to_internal_path ──
+    //
+    // The route glue resolves the `chroot` FolderDto once per request
+    // (legacy/home → user's home folder DTO; explicit `~{folder_uuid}` →
+    // folder's stored DTO after permission check). These tests cover only
+    // the path-mapping function itself; the resolver logic lives in
+    // `routes.rs::verify_url_user_and_resolve_chroot`.
 
-    #[test]
-    fn test_empty_subpath_returns_home() {
-        assert_eq!(
-            nc_to_internal_path("alice", "").unwrap(),
-            "My Folder - alice"
-        );
+    /// Build a stub `FolderDto` carrying only the `path` field (all the
+    /// path mapper looks at). Keeps the tests focused on path mapping
+    /// without dragging in folder-construction machinery.
+    fn stub_folder(path: &str) -> FolderDto {
+        FolderDto {
+            id: "00000000-0000-0000-0000-000000000000".to_string(),
+            name: path.rsplit('/').next().unwrap_or("").to_string(),
+            path: path.to_string(),
+            parent_id: None,
+            owner_id: None,
+            created_at: 0,
+            modified_at: 0,
+            is_root: false,
+            icon_class: std::sync::Arc::from("fas fa-folder"),
+            icon_special_class: std::sync::Arc::from("folder-icon"),
+            category: std::sync::Arc::from("Folder"),
+            etag: String::new(),
+        }
     }
 
     #[test]
-    fn test_subpath_appended() {
+    fn test_empty_subpath_returns_chroot() {
+        let home = stub_folder("My Folder - alice");
+        assert_eq!(nc_to_internal_path(&home, "").unwrap(), "My Folder - alice");
+    }
+
+    #[test]
+    fn test_subpath_appended_to_chroot() {
+        let home = stub_folder("My Folder - alice");
         assert_eq!(
-            nc_to_internal_path("alice", "Documents/work").unwrap(),
+            nc_to_internal_path(&home, "Documents/work").unwrap(),
             "My Folder - alice/Documents/work"
         );
     }
 
     #[test]
     fn test_strips_surrounding_slashes() {
+        let home = stub_folder("My Folder - alice");
         assert_eq!(
-            nc_to_internal_path("alice", "/Photos/").unwrap(),
+            nc_to_internal_path(&home, "/Photos/").unwrap(),
             "My Folder - alice/Photos"
         );
     }
 
     #[test]
     fn test_rejects_dot_dot_traversal() {
-        assert!(nc_to_internal_path("alice", "../etc/passwd").is_err());
+        let home = stub_folder("My Folder - alice");
+        assert!(nc_to_internal_path(&home, "../etc/passwd").is_err());
     }
 
     #[test]
     fn test_rejects_single_dot() {
-        assert!(nc_to_internal_path("alice", "foo/./bar").is_err());
+        let home = stub_folder("My Folder - alice");
+        assert!(nc_to_internal_path(&home, "foo/./bar").is_err());
+    }
+
+    /// Confines a subfolder chroot (the multi-drive form once
+    /// resolved). Same path-mapping logic — only the chroot differs.
+    #[test]
+    fn test_subfolder_chroot_with_subpath() {
+        let chroot = stub_folder("My Folder - alice/ext");
+        assert_eq!(
+            nc_to_internal_path(&chroot, "report.pdf").unwrap(),
+            "My Folder - alice/ext/report.pdf"
+        );
     }
 
     // ── nc_href ──

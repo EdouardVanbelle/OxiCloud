@@ -1,3 +1,4 @@
+use askama::Template;
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
@@ -7,8 +8,47 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::application::ports::folder_ports::FolderUseCase;
 use crate::common::di::AppState;
 use crate::common::errors::DomainError;
+use crate::interfaces::middleware::auth::CurrentUser;
+
+/// Drive option rendered on the picker page. `name` is the folder's
+/// display name; `id` is the folder UUID that becomes the `~{marker}`
+/// half of the composite Basic-Auth username if the user picks
+/// anything other than the first (home) row.
+struct DriveOption {
+    id: String,
+    name: String,
+}
+
+#[derive(Template)]
+#[template(path = "nextcloud/drive_picker.html")]
+struct DrivePickerTemplate {
+    form_action: String,
+    drives: Vec<DriveOption>,
+}
+
+/// Find the index of the user's home folder inside `drives`.
+///
+/// Convention: home is the root folder named `"My Folder - {username}"`,
+/// set by `FolderService::ensure_home_folder` at registration. Extra
+/// root folders (POC drive seeding via direct SQL insert) don't follow
+/// this name, so the pattern disambiguates home from sibling drives.
+/// Returns `None` if no folder matches — caller decides whether that
+/// is fatal or just "treat everything as a non-home drive".
+///
+/// Mirrors the same lookup performed in `routes.rs::
+/// verify_url_user_and_resolve_chroot` (legacy no-`~` path); both
+/// sites must agree on which row is home or the URL and the auth
+/// marker will diverge.
+fn find_home_index(
+    drives: &[crate::application::dtos::folder_dto::FolderDto],
+    username: &str,
+) -> Option<usize> {
+    let expected = format!("My Folder - {}", username);
+    drives.iter().position(|f| f.name == expected)
+}
 
 /// Serve an HTML page with a Content-Security-Policy header as defense-in-depth.
 fn html_with_csp(html: &'static str) -> Response {
@@ -175,45 +215,278 @@ pub async fn handle_login_submit(
         Err(e) => return login_failed_response(e),
     };
 
-    let app_password = match nextcloud
-        .app_passwords
-        .create_nc(current_user.id, "Nextcloud")
+    // ── Multi-drive fork ─────────────────────────────────────────────
+    // List the user's root folders. By convention the first row is the
+    // user's home; additional rows are extra drives (POC seeded by
+    // direct DB insert until a drive admin surface exists). With 0 or
+    // 1 drive we go straight to the legacy one-shot completion path so
+    // the common case stays one click. With ≥2 drives we pause the
+    // flow, stash the user_id, and render the picker — drive selection
+    // resumes the flow via `handle_drive_pick`.
+    let mut drives = match state
+        .applications
+        .folder_service
+        .list_folders_with_perms(None, current_user.id)
         .await
     {
-        Ok((_id, password)) => password,
+        Ok(d) => d,
         Err(e) => {
-            tracing::error!(error = %e, user = %current_user.username, "Login Flow v2: failed to create app password");
+            tracing::error!(error = %e, user = %current_user.username, "Login Flow v2: failed to list drives");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
 
-    let base_url = state.core.config.base_url();
-    let completed =
-        nextcloud
+    if drives.len() >= 2 {
+        // Reorder so home is at index 0. The picker template ties
+        // both the default-checked radio and the "Home" badge to
+        // `loop.first`, so placing home first is the single point
+        // that makes the picker UI line up with the home convention.
+        // Other drives keep their original alphabetical order.
+        if let Some(idx) = find_home_index(&drives, &current_user.username)
+            && idx != 0
+        {
+            let home = drives.remove(idx);
+            drives.insert(0, home);
+        }
+        // If no home matched the convention, we fall through with the
+        // raw alphabetical order. The picker will still work but the
+        // first row gets the badge by default — slightly wrong UX but
+        // never breaks the auth flow (`handle_drive_pick` re-runs
+        // `find_home_index` independently).
+
+        if !nextcloud
             .login_flow
-            .complete(&token, &current_user.username, &base_url, &app_password);
+            .mark_awaiting_drive(&token, current_user.id)
+        {
+            // Flow token vanished (TTL?) between password submit and
+            // here — extremely unlikely but treat the same as any
+            // session-expired case.
+            return axum::response::Redirect::to("/nextcloud-error.html?type=session-expired")
+                .into_response();
+        }
+        return render_drive_picker(&token, &drives);
+    }
+
+    complete_flow(&state, &nextcloud.login_flow, &token, &current_user, None).await
+}
+
+/// Render the drive picker page. The form posts to
+/// `/login/v2/flow/{token}/drive`, carrying only the chosen folder
+/// UUID — the authenticated user id is read from the flow's
+/// `pending_user_id` slot (consumed by `take_pending_user`).
+fn render_drive_picker(
+    token: &str,
+    drives: &[crate::application::dtos::folder_dto::FolderDto],
+) -> Response {
+    let template = DrivePickerTemplate {
+        form_action: format!("/login/v2/flow/{}/drive", token),
+        drives: drives
+            .iter()
+            .map(|f| DriveOption {
+                id: f.id.clone(),
+                name: f.name.clone(),
+            })
+            .collect(),
+    };
+
+    match template.render() {
+        Ok(html) => (
+            [(
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; form-action 'self'",
+            )],
+            Html(html),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Login Flow v2: drive picker template render failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Mint an app password, complete the flow, and emit the `nc://` deep
+/// link. Shared by the single-drive path (called from
+/// `handle_login_submit`) and the post-picker path (called from
+/// `handle_drive_pick`).
+///
+/// `drive_id` is `None` for the single-drive shortcut and for the
+/// home-drive choice on the picker; `Some(uuid)` for any other drive,
+/// in which case the NC login name carries the `~{uuid}` marker.
+async fn complete_flow(
+    state: &Arc<AppState>,
+    login_flow: &crate::application::services::nextcloud_login_flow_service::NextcloudLoginFlowService,
+    token: &str,
+    user: &CurrentUser,
+    drive_id: Option<&str>,
+) -> Response {
+    let nextcloud = match state.nextcloud.as_ref() {
+        Some(nc) => nc,
+        None => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+
+    let app_password = match nextcloud
+        .app_passwords
+        .create_nc(user.id, "Nextcloud")
+        .await
+    {
+        Ok((_id, password)) => password,
+        Err(e) => {
+            tracing::error!(error = %e, user = %user.username, "Login Flow v2: failed to create app password");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let login_name = match drive_id {
+        Some(uuid) => format!("{}~{}", user.username, uuid),
+        None => user.username.clone(),
+    };
+
+    let base_url = state.core.config.base_url();
+    let completed = login_flow.complete(token, &login_name, &base_url, &app_password);
 
     if completed {
         tracing::info!(
-            user = %current_user.username,
+            user = %user.username,
+            login_name = %login_name,
             base_url = %base_url,
             "Login Flow v2: flow completed successfully"
         );
-        // Redirect to nc:// deep link so the Nextcloud mobile app receives
-        // the credentials via Android/iOS intent.  Desktop clients use polling
-        // instead, so they will pick up the result from the poll endpoint.
         let nc_url = format!(
             "nc://login/server:{}&user:{}&password:{}",
-            base_url, current_user.username, app_password
+            base_url, login_name, app_password
         );
         axum::response::Redirect::to(&nc_url).into_response()
     } else {
         tracing::error!(
-            user = %current_user.username,
+            user = %user.username,
             "Login Flow v2: complete() returned false — flow token not found"
         );
         axum::response::Redirect::to("/nextcloud-error.html?type=session-expired").into_response()
     }
+}
+
+/// POST `/login/v2/flow/{token}/drive` — finalise a paused login flow
+/// after the user picks a drive on the picker page.
+///
+/// Auth model: the route is **public** (no Basic Auth — this is the
+/// browser-side leg of Login Flow v2, before the app password is
+/// issued). The proof of authentication is the single-use
+/// `pending_user_id` slot on the flow, set by `handle_login_submit`
+/// after password verification and consumed here. Replay is naturally
+/// blocked: a second POST finds nothing to consume.
+pub async fn handle_drive_pick(
+    State(state): State<Arc<AppState>>,
+    Path(token): Path<String>,
+    body: String,
+) -> Response {
+    let nextcloud = match state.nextcloud.as_ref() {
+        Some(nc) => nc,
+        None => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+
+    let drive_id = match parse_form_value(&body, "drive") {
+        Some(v) if !v.is_empty() => v,
+        _ => return StatusCode::BAD_REQUEST.into_response(),
+    };
+
+    let user_id = match nextcloud.login_flow.take_pending_user(&token) {
+        Some(uid) => uid,
+        None => {
+            tracing::warn!(
+                target: "audit",
+                event = "nc_login_flow.drive_pick_rejected",
+                reason = "no_pending_user",
+                "👮🏻‍♂️ NC drive pick rejected: flow has no pending user (replay or unknown token)"
+            );
+            return axum::response::Redirect::to("/nextcloud-error.html?type=session-expired")
+                .into_response();
+        }
+    };
+
+    // Resolve user (for username) and validate drive ownership in one
+    // service call each. `get_folder_with_perms` enforces that the
+    // caller can read the folder — covers "drive doesn't exist" and
+    // "drive belongs to someone else" with the same 404 to defeat
+    // enumeration. We additionally need to differentiate home vs.
+    // non-home so the NC login name carries `~{uuid}` only for
+    // non-home choices.
+    let auth = match state.auth_service.as_ref() {
+        Some(a) => a,
+        None => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let user_dto = match auth.auth_application_service.get_user_by_id(user_id).await {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::error!(error = %e, %user_id, "Login Flow v2: failed to fetch user for drive pick");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    // Username must be present — only password-login users reach this
+    // branch, and password login requires a claimed username. Defensive
+    // check anyway: a username-less user here means an upstream invariant
+    // broke, not something to silently paper over.
+    let Some(username) = user_dto.username.clone() else {
+        tracing::error!(%user_id, "Login Flow v2: pending user has no username — invariant violated");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let user = CurrentUser {
+        id: user_id,
+        username,
+        email: user_dto.email.clone(),
+        role: user_dto.role.clone(),
+    };
+
+    let _folder = match state
+        .applications
+        .folder_service
+        .get_folder_with_perms(&drive_id, user_id)
+        .await
+    {
+        Ok(f) => f,
+        Err(_) => {
+            tracing::warn!(
+                target: "audit",
+                event = "nc_login_flow.drive_pick_rejected",
+                reason = "drive_not_owned_or_missing",
+                %user_id,
+                drive_id = %drive_id,
+                "👮🏻‍♂️ NC drive pick rejected: folder missing or caller has no read access"
+            );
+            return StatusCode::NOT_FOUND.into_response();
+        }
+    };
+
+    // Determine if the pick is home. The previous "first row of
+    // list_folders_with_perms" heuristic was wrong: the underlying
+    // repo query orders by `name`, so any drive named alphabetically
+    // before "My Folder - {username}" stole the first slot and was
+    // mis-classified as home — `login_name` then dropped the `~uuid`
+    // marker and NC desktop rooted at the home folder regardless of
+    // the user's pick. `find_home_index` keys off the registered
+    // home-folder name, which extra drives (POC SQL-seeded) don't
+    // share, so it disambiguates cleanly.
+    let drives = match state
+        .applications
+        .folder_service
+        .list_folders_with_perms(None, user_id)
+        .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!(error = %e, %user_id, "Login Flow v2: failed to list drives for home detection");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let home_id = find_home_index(&drives, &user.username).map(|i| drives[i].id.as_str());
+    let is_home = home_id == Some(drive_id.as_str());
+    let drive_marker = if is_home {
+        None
+    } else {
+        Some(drive_id.as_str())
+    };
+
+    complete_flow(&state, &nextcloud.login_flow, &token, &user, drive_marker).await
 }
 
 /// GET /login/v2/flow/{token}/oidc — Start an OIDC authorization flow that is

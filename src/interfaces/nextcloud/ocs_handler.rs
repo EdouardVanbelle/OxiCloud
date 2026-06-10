@@ -12,6 +12,7 @@ use crate::application::ports::inbound::SearchUseCase;
 use crate::application::ports::storage_ports::StorageUsagePort;
 use crate::common::di::AppState;
 use crate::interfaces::middleware::auth::AuthUser;
+use crate::interfaces::nextcloud::basic_auth_middleware::NcDrive;
 
 /// Build an OCS success response with the given statuscode and data.
 fn ocs_ok(statuscode: u16, data: serde_json::Value) -> serde_json::Value {
@@ -45,7 +46,11 @@ pub async fn handle_capabilities_v2(State(state): State<Arc<AppState>>) -> Respo
     Json(payload).into_response()
 }
 
-pub async fn handle_user_info(State(state): State<Arc<AppState>>, user: AuthUser) -> Response {
+pub async fn handle_user_info(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    NcDrive(drive): NcDrive,
+) -> Response {
     let quota: (i64, i64) = match state.storage_usage_service.as_ref() {
         Some(service) => match service.get_user_storage_info(user.id).await {
             Ok((used, total)) => (used, total),
@@ -61,14 +66,33 @@ pub async fn handle_user_info(State(state): State<Arc<AppState>>, user: AuthUser
         0.0
     };
 
+    // `id` must echo the composite username the client used at Basic
+    // Auth time. NC desktop reads `data.id` from this endpoint and
+    // splices it into every subsequent WebDAV path it builds
+    // (`/remote.php/dav/files/{id}/…`). If we returned bare
+    // `user.username` here on a `~{uuid}` session, the client would
+    // strip the marker and revert to the home drive — which is
+    // exactly the bug the multi-drive POC is meant to avoid.
+    //
+    // The display fields stay as bare `user.username` because they're
+    // shown verbatim in the NC client UI; users don't want to see
+    // `admin~89252ea8-…` in the account selector.
+    let (id, displayname) = match &drive {
+        Some(marker) => (
+            format!("{}~{}", user.username, marker),
+            format!("{} @ {}", user.username, marker), // FIXME should use folder name
+        ),
+        None => (user.username.clone(), user.username.clone()),
+    };
+
     Json(json!({
         "ocs": {
             "meta": { "status": "ok", "statuscode": 200, "message": "OK" },
             "data": {
                 "enabled": true,
-                "id": user.username,
-                "display-name": user.username,
-                "displayname": user.username,
+                "id": id,
+                "display-name": displayname,
+                "displayname": displayname,
                 "email": user.email,
                 "quota": {
                     "used": quota.0,

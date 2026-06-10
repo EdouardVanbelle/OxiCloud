@@ -9,7 +9,6 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::common::di::AppState;
 use crate::interfaces::middleware::auth::{AuthUser, CurrentUser};
 use crate::interfaces::middleware::rate_limit::{RateLimiter, rate_limit_login};
 use crate::interfaces::nextcloud::avatar_handler;
@@ -21,6 +20,7 @@ use crate::interfaces::nextcloud::status_handler;
 use crate::interfaces::nextcloud::trashbin_handler;
 use crate::interfaces::nextcloud::uploads_handler;
 use crate::interfaces::nextcloud::webdav_handler;
+use crate::{application::dtos::folder_dto::FolderDto, common::di::AppState};
 
 /// Build Nextcloud routes with a pre-built `Arc<AppState>` for the middleware layer.
 ///
@@ -57,6 +57,14 @@ pub fn nextcloud_routes_with_state(state: Arc<AppState>) -> Router<Arc<AppState>
                     nc_login_limiter,
                     rate_limit_login,
                 )),
+        )
+        // Drive picker submission — finalises a multi-drive flow that
+        // paused after password verification. Public route by design:
+        // the flow token + single-use `pending_user_id` slot is the
+        // proof of authentication. See `login_v2_handler::handle_drive_pick`.
+        .route(
+            "/login/v2/flow/{token}/drive",
+            post(login_v2_handler::handle_drive_pick),
         )
         // OIDC initiation from Nextcloud login page
         .route(
@@ -178,14 +186,79 @@ pub fn nextcloud_routes_with_state(state: Arc<AppState>) -> Router<Arc<AppState>
 
 // ──────────────── Handler glue ────────────────
 
-/// Reject requests where the URL `{user}` doesn't match the authenticated user.
+/// Parse the URL `{user}` segment as a `{username}~{drive_marker}`
+/// composite, cross-validate both halves against the authenticated
+/// session, and resolve the request's storage chroot.
+///
+/// Validation:
+/// - URL prefix (before the first `~`) must equal the authenticated
+///   `CurrentUser.username`. "URL says someone else" → 403.
+/// - URL marker (after `~`, or `None`) must match the marker stashed
+///   by `basic_auth_middleware`. "Auth says drive A, URL says B" → 403.
+/// - Empty-half forms (`name~`, `~marker`) are already 401'd in the
+///   middleware; here we only see well-formed pairs.
+///
+/// Chroot resolution:
+/// - URL has no marker, OR marker equals `home_folder_id` →
+///   `"My Folder - {username}"` (no DB lookup).
+/// - URL has any other marker → `get_folder_with_perms(marker, user)`
+///   → returns the folder's stored `path`. 404 if the folder is
+///   missing or the caller can't read it (anti-enumeration: same
+///   response for both cases so non-owners can't probe which UUIDs
+///   exist).
 #[allow(clippy::result_large_err)]
-fn verify_url_user(url_user: &str, auth_user: &CurrentUser) -> Result<(), Response> {
-    if url_user != auth_user.username {
-        Err(StatusCode::FORBIDDEN.into_response())
-    } else {
-        Ok(())
+async fn verify_url_user_and_resolve_chroot(
+    state: &Arc<AppState>,
+    url_user: &str,
+    auth_user: &CurrentUser,
+    auth_drive: Option<&str>,
+) -> Result<FolderDto, Response> {
+    let (url_prefix, url_marker) = match url_user.split_once('~') {
+        Some((p, m)) => (p, Some(m)),
+        None => (url_user, None),
+    };
+    if url_prefix != auth_user.username {
+        return Err(StatusCode::FORBIDDEN.into_response());
     }
+    if url_marker != auth_drive {
+        return Err(StatusCode::FORBIDDEN.into_response());
+    }
+    match url_marker {
+        None => {
+            // FIXME this if old way to find home folder
+            let expected = format!("My Folder - {}", auth_user.username);
+            use crate::application::ports::folder_ports::FolderUseCase;
+            let home: FolderDto = state
+                .applications
+                .folder_service
+                .list_folders_with_perms(None, auth_user.id) // parent_id=None → root folders
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?
+                .into_iter()
+                .find(|f| f.name == expected)
+                .ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
+            Ok(home)
+        }
+        //Some(m) if m == home_folder_id => Ok(format!("My Folder - {}", auth_user.username)),
+        Some(folder_id) => {
+            use crate::application::ports::folder_ports::FolderUseCase;
+            let folder = state
+                .applications
+                .folder_service
+                .get_folder_with_perms(folder_id, auth_user.id)
+                .await
+                .map_err(|_| StatusCode::NOT_FOUND.into_response())?;
+            Ok(folder)
+        }
+    }
+}
+
+/// Extract the Basic-Auth-side drive marker (`NcDriveHint`) that
+/// `basic_auth_middleware` stashes in request extensions.
+fn auth_drive_hint(req: &Request<Body>) -> Option<&str> {
+    req.extensions()
+        .get::<crate::interfaces::nextcloud::basic_auth_middleware::NcDriveHint>()
+        .and_then(|h| h.0.as_deref())
 }
 
 async fn handle_dav_files(
@@ -194,8 +267,10 @@ async fn handle_dav_files(
     user_ext: AuthUser,
     req: Request<Body>,
 ) -> Result<Response, Response> {
-    verify_url_user(&url_user, &user_ext)?;
-    webdav_handler::handle_nc_webdav(state, req, user_ext, subpath)
+    let chroot =
+        verify_url_user_and_resolve_chroot(&state, &url_user, &user_ext, auth_drive_hint(&req))
+            .await?;
+    webdav_handler::handle_nc_webdav(state, req, user_ext, chroot, url_user, subpath)
         .await
         .map_err(|e| e.into_response())
 }
@@ -206,8 +281,10 @@ async fn handle_dav_files_root(
     user_ext: AuthUser,
     req: Request<Body>,
 ) -> Result<Response, Response> {
-    verify_url_user(&url_user, &user_ext)?;
-    webdav_handler::handle_nc_webdav(state, req, user_ext, String::new())
+    let chroot =
+        verify_url_user_and_resolve_chroot(&state, &url_user, &user_ext, auth_drive_hint(&req))
+            .await?;
+    webdav_handler::handle_nc_webdav(state, req, user_ext, chroot, url_user, String::new())
         .await
         .map_err(|e| e.into_response())
 }
@@ -218,7 +295,14 @@ async fn handle_dav_uploads(
     user_ext: AuthUser,
     req: Request<Body>,
 ) -> Result<Response, Response> {
-    verify_url_user(&url_user, &user_ext)?;
+    //let home_id = resolve_home_folder_id(&state, user_ext.id).await?;
+    let _chroot =
+        verify_url_user_and_resolve_chroot(&state, &url_user, &user_ext, auth_drive_hint(&req))
+            .await?;
+    // POC: uploads_handler doesn't yet take a drive marker. Chunked
+    // uploads land on the user's home regardless. Plumbing the
+    // chroot through the uploads / trashbin handlers is deferred
+    // until the POC validates the file-DAV wire shape end-to-end.
     uploads_handler::handle_nc_uploads(state, req, user_ext, upload_id, rest)
         .await
         .map_err(|e| e.into_response())
@@ -230,7 +314,9 @@ async fn handle_dav_uploads_root(
     user_ext: AuthUser,
     req: Request<Body>,
 ) -> Result<Response, Response> {
-    verify_url_user(&url_user, &user_ext)?;
+    let _chroot =
+        verify_url_user_and_resolve_chroot(&state, &url_user, &user_ext, auth_drive_hint(&req))
+            .await?;
     uploads_handler::handle_nc_uploads(state, req, user_ext, upload_id, String::new())
         .await
         .map_err(|e| e.into_response())
@@ -261,7 +347,9 @@ async fn handle_dav_trashbin(
     user_ext: AuthUser,
     req: Request<Body>,
 ) -> Result<Response, Response> {
-    verify_url_user(&url_user, &user_ext)?;
+    let _chroot =
+        verify_url_user_and_resolve_chroot(&state, &url_user, &user_ext, auth_drive_hint(&req))
+            .await?;
     trashbin_handler::handle_nc_trashbin(state, req, user_ext, subpath)
         .await
         .map_err(|e| e.into_response())
@@ -273,7 +361,9 @@ async fn handle_dav_trashbin_root(
     user_ext: AuthUser,
     req: Request<Body>,
 ) -> Result<Response, Response> {
-    verify_url_user(&url_user, &user_ext)?;
+    let _chroot =
+        verify_url_user_and_resolve_chroot(&state, &url_user, &user_ext, auth_drive_hint(&req))
+            .await?;
     trashbin_handler::handle_nc_trashbin(state, req, user_ext, String::new())
         .await
         .map_err(|e| e.into_response())

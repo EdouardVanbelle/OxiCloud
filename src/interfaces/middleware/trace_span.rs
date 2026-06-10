@@ -60,6 +60,8 @@ impl<B> MakeSpan<B> for ClientIpMakeSpan {
             uri        = %request.uri().path(),
             user_id    = tracing::field::Empty,
 
+            // this is the folder_uuid used as ROOT path in webdav
+            chroot_id  = tracing::field::Empty,
         )
     }
 }
