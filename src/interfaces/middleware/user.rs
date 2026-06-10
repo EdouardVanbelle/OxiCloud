@@ -4,9 +4,11 @@
 //! so handlers compose them uniformly as one-liners. They assume the
 //! caller has already been authenticated by the
 //! [`AuthUser`](super::auth::AuthUser) extractor, and pull the current
-//! user state from the database via `AuthApplicationService` so role /
-//! external-flag changes take effect on the next request without
-//! waiting for token rotation.
+//! user flags via `AuthApplicationService::get_user_flags` — a
+//! lightweight, short-TTL-cached lookup (no `image` column) — so role /
+//! external-flag changes take effect within seconds without waiting
+//! for token rotation, while the hot DAV paths stop paying one full-row
+//! DB fetch per request.
 //!
 //! ```ignore
 //! let caller_id = auth_user.id;
@@ -30,6 +32,7 @@ use uuid::Uuid;
 
 use crate::application::services::auth_application_service::AuthApplicationService;
 use crate::common::di::AppState;
+use crate::domain::entities::user::UserRole;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::CurrentUser;
 
@@ -56,8 +59,8 @@ pub async fn require_internal_user(
     auth: &AuthApplicationService,
     caller_id: Uuid,
 ) -> Result<(), AppError> {
-    match auth.get_user_by_id(caller_id).await {
-        Ok(dto) if dto.is_external => Err(AppError::new(
+    match auth.get_user_flags(caller_id).await {
+        Ok(flags) if flags.is_external => Err(AppError::new(
             StatusCode::FORBIDDEN,
             "External users cannot access this endpoint",
             "Forbidden",
@@ -70,9 +73,11 @@ pub async fn require_internal_user(
 /// admins, `Err(403)` otherwise.
 ///
 /// The check pulls the role from the user record (not from JWT
-/// claims) so a role change takes effect on the next request without
-/// waiting for token rotation. Mirrors [`require_internal_user`]'s
-/// shape so handlers compose either of them as a one-liner via `?`.
+/// claims) so a role change takes effect within the flags-cache TTL —
+/// or immediately when changed through `change_user_role`, which
+/// invalidates the entry — without waiting for token rotation. Mirrors
+/// [`require_internal_user`]'s shape so handlers compose either of
+/// them as a one-liner via `?`.
 ///
 /// Use this in handlers that already have an
 /// [`AuthUser`](super::auth::AuthUser) extractor (and thus a validated
@@ -82,12 +87,12 @@ pub async fn require_admin_user(
     auth: &AuthApplicationService,
     caller_id: Uuid,
 ) -> Result<(), AppError> {
-    let user = auth
-        .get_user_by_id(caller_id)
+    let flags = auth
+        .get_user_flags(caller_id)
         .await
         .map_err(AppError::from)?;
 
-    if user.role != "admin" {
+    if flags.role != UserRole::Admin {
         return Err(AppError::new(
             StatusCode::FORBIDDEN,
             "Admin access required",

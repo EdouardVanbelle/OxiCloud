@@ -20,6 +20,7 @@ use crate::application::ports::{file_ports::OptimizedFileContent, folder_ports::
 use crate::common::di::AppState;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::AuthUser;
+use crate::interfaces::range_requests::not_modified_response;
 use crate::{application::dtos::file_dto::FileDto, domain::services::authorization::Permission};
 use std::sync::Arc;
 
@@ -600,16 +601,8 @@ impl FileHandler {
         let etag = format!("\"{}\"", file_dto.etag);
 
         // ── ETag (304 Not Modified) ──────────────────────────────────
-        if let Some(inm) = headers.get(header::IF_NONE_MATCH)
-            && let Ok(client_etag) = inm.to_str()
-            && (client_etag == etag || client_etag == "*")
-        {
-            return Response::builder()
-                .status(StatusCode::NOT_MODIFIED)
-                .header(header::ETAG, &etag)
-                .body(Body::empty())
-                .unwrap()
-                .into_response();
+        if let Some(resp) = not_modified_response(&headers, &etag) {
+            return resp.into_response();
         }
 
         // ── Range Requests ───────────────────────────────────────────

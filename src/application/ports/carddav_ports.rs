@@ -71,6 +71,17 @@ pub trait ContactUseCase: Send + Sync + 'static {
     async fn delete_contact(&self, contact_id: &str, user_id: Uuid) -> Result<(), DomainError>;
     async fn get_contact(&self, contact_id: &str, user_id: Uuid)
     -> Result<ContactDto, DomainError>;
+    /// Resolve one contact by its vCard UID (the identifier CardDAV
+    /// object resources are addressed by) with an indexed single-row
+    /// lookup — instead of listing the whole address book (every row
+    /// with its vCard + JSONB columns) and filtering client-side.
+    /// `Ok(None)` when no contact with that UID exists in the book.
+    async fn get_contact_by_uid(
+        &self,
+        address_book_id: &str,
+        uid: &str,
+        user_id: Uuid,
+    ) -> Result<Option<ContactDto>, DomainError>;
     async fn list_contacts(
         &self,
         address_book_id: &str,

@@ -712,6 +712,24 @@ impl ContactUseCase for ContactStorageAdapter {
         Ok(ContactDto::from(contact))
     }
 
+    async fn get_contact_by_uid(
+        &self,
+        address_book_id: &str,
+        uid: &str,
+        user_id: Uuid,
+    ) -> Result<Option<ContactDto>, DomainError> {
+        let uuid = Self::parse_uuid(address_book_id, "AddressBook")?;
+
+        // Check read access
+        self.check_address_book_access(&uuid, user_id).await?;
+
+        let contact = self
+            .contact_repository
+            .get_contact_by_uid(&uuid, uid)
+            .await?;
+        Ok(contact.map(ContactDto::from))
+    }
+
     async fn list_contacts(
         &self,
         address_book_id: &str,

@@ -10,6 +10,8 @@ import { showConfirmDialog, ui } from '../../app/ui.js';
 import { getCsrfHeaders, getCsrfToken } from '../../core/csrf.js';
 import { i18n } from '../../core/i18n.js';
 import { notifications } from '../../core/notifications.js';
+import { invalidateFolderMeta } from '../../model/filesModel.js';
+import { triggerBrowserDownload } from '../../utils/download.js';
 
 /**
  * @typedef {Object} BatchResult
@@ -349,7 +351,9 @@ const fileOps = {
             }
 
             // Filter out unreadable entries (typically dropped folders/placeholders)
+            /** @type {File[]} */
             const readableFiles = [];
+            /** @type {string[]} */
             const skippedEntries = [];
             for (const f of originalFiles) {
                 // eslint-disable-next-line no-await-in-loop
@@ -386,13 +390,21 @@ const fileOps = {
 
             let uploadedCount = 0;
             let successCount = 0;
+            let quotaStop = false;
 
-            for (let i = 0; i < totalFiles; i++) {
-                const file = readableFiles[i];
+            const targetFolderId = app.currentPath || app.userHomeFolderId;
+
+            /**
+             * Upload a single readable file by index. Shared counters are
+             * mutated here; safe because JS runs the workers cooperatively
+             * (no true parallelism between awaits).
+             * @param {number} idx
+             */
+            const uploadOneFile = async (idx) => {
+                if (quotaStop) return;
+                const file = readableFiles[idx];
 
                 const formData = new FormData();
-
-                const targetFolderId = app.currentPath || app.userHomeFolderId;
                 if (targetFolderId) formData.append('folder_id', targetFolderId);
                 formData.append('file', file);
 
@@ -436,6 +448,8 @@ const fileOps = {
                         });
                     }
                     if (result.isQuotaError) {
+                        // Stop pulling new files; in-flight uploads still finish.
+                        quotaStop = true;
                         const msg = result.errorMsg || i18n.t('storage_quota_exceeded');
                         if (notifications) {
                             notifications.addNotification({
@@ -445,10 +459,27 @@ const fileOps = {
                                 text: msg
                             });
                         }
-                        break;
                     }
                 }
+            };
+
+            // Pool-based concurrency: keep up to CONCURRENCY uploads in flight
+            // instead of one at a time (mirrors uploadFolderEntries). Files are
+            // independent, so this is ~CONCURRENCY× faster for many small files.
+            const CONCURRENCY = 10;
+            let nextIdx = 0;
+            const runNext = async () => {
+                while (nextIdx < totalFiles && !quotaStop) {
+                    const idx = nextIdx++;
+                    await uploadOneFile(idx);
+                }
+            };
+
+            const workers = [];
+            for (let w = 0; w < Math.min(CONCURRENCY, totalFiles); w++) {
+                workers.push(runNext());
             }
+            await Promise.all(workers);
 
             // All done
             this._finishUploadToast(successCount, totalFiles);
@@ -862,6 +893,8 @@ const fileOps = {
             });
 
             if (response.ok) {
+                // Parent changed — drop the cached breadcrumb metadata
+                invalidateFolderMeta(folderId);
                 // Reload files after moving
                 await loadFiles();
                 ui.showNotification('Folder moved', 'Folder moved successfully');
@@ -925,6 +958,8 @@ const fileOps = {
                 const data = await res.json();
                 success += data.stats?.successful || 0;
                 errors += data.stats?.failed || 0;
+                // Parents changed — drop the cached breadcrumb metadata
+                for (const id of folderIds) invalidateFolderMeta(id);
             }
         } catch (err) {
             console.error('Batch move error:', err);
@@ -1117,6 +1152,8 @@ const fileOps = {
             console.log('Response status:', response.status);
 
             if (response.ok) {
+                // Name changed — drop the cached breadcrumb metadata
+                invalidateFolderMeta(folderId);
                 ui.showNotification('Folder renamed', `Folder renamed to "${newName}"`);
             } else {
                 const errorText = await response.text();
@@ -1340,32 +1377,13 @@ const fileOps = {
     },
 
     /**
-     * Download a file
+     * Download a file — handed to the browser so it streams to disk with
+     * its native download UI instead of buffering the file in memory.
      * @param {string} fileId - File ID
      * @param {string} fileName - File name
      */
     async downloadFile(fileId, fileName) {
-        try {
-            const response = await fetch(`/api/files/${fileId}`, {
-                headers: getAuthHeaders()
-            });
-            if (response.ok) {
-                const blob = await response.blob();
-                const url = URL.createObjectURL(blob);
-                const link = document.createElement('a');
-                link.href = url;
-                link.download = fileName;
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-                URL.revokeObjectURL(url);
-            } else {
-                ui.showNotification('Error', 'Error downloading the file');
-            }
-        } catch (error) {
-            console.error('Error downloading file:', error);
-            ui.showNotification('Error', 'Error downloading the file');
-        }
+        triggerBrowserDownload(`/api/files/${fileId}`, fileName);
     },
 
     /**
@@ -1374,30 +1392,10 @@ const fileOps = {
      * @param {string} folderName - Folder name
      */
     async downloadFolder(folderId, folderName) {
-        try {
-            // Show notification to user
-            ui.showNotification('Preparing download', 'Preparing the folder for download...');
-
-            const response = await fetch(`/api/folders/${folderId}/download?format=zip`, {
-                headers: getAuthHeaders()
-            });
-            if (response.ok) {
-                const blob = await response.blob();
-                const url = URL.createObjectURL(blob);
-                const link = document.createElement('a');
-                link.href = url;
-                link.download = `${folderName}.zip`;
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-                URL.revokeObjectURL(url);
-            } else {
-                ui.showNotification('Error', 'Error downloading the folder');
-            }
-        } catch (error) {
-            console.error('Error downloading folder:', error);
-            ui.showNotification('Error', 'Error downloading the folder');
-        }
+        // Show notification to user (the server still has to assemble the
+        // ZIP before the browser's own download UI takes over).
+        ui.showNotification('Preparing download', 'Preparing the folder for download...');
+        triggerBrowserDownload(`/api/folders/${folderId}/download?format=zip`, `${folderName}.zip`);
     }
 };
 

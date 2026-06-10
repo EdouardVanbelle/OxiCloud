@@ -25,8 +25,7 @@ use crate::domain::entities::file::File;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::CurrentUser;
 use crate::interfaces::nextcloud::webdav_handler::{
-    format_oc_id, nc_href, resolve_file_id, resolve_folder_id, write_file_response,
-    write_folder_response,
+    batch_resolve_ids, format_oc_id, nc_href, write_file_response, write_folder_response,
 };
 
 /// Handle WebDAV REPORT and SEARCH methods for Nextcloud compatibility.
@@ -87,56 +86,71 @@ async fn handle_filter_files(
 
     let home_prefix = format!("My Folder - {}/", user.username);
 
+    // Pass 1: fetch the favorited DTOs (the per-item fetch is a separate
+    // concern from the oc:fileid resolution batched below).
+    let mut files: Vec<FileDto> = Vec::new();
+    let mut folders: Vec<FolderDto> = Vec::new();
+    for fav in &favorites {
+        match fav.item_type.as_str() {
+            "file" => {
+                if let Ok(f) = file_service.get_file(&fav.item_id).await {
+                    files.push(f);
+                }
+            }
+            "folder" => {
+                if let Ok(f) = folder_service.get_folder(&fav.item_id).await {
+                    folders.push(f);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Pass 2: resolve every oc:fileid in two batch queries (was one per item).
+    let file_uuids: Vec<String> = files.iter().map(|f| f.id.clone()).collect();
+    let folder_uuids: Vec<String> = folders.iter().map(|f| f.id.clone()).collect();
+    let (file_id_map, folder_id_map) =
+        batch_resolve_ids(file_id_svc, &file_uuids, &folder_uuids).await;
+
+    // Pass 3: write the multistatus XML (pure synchronous map lookups).
     let mut buf = Vec::new();
     {
         let mut xml = Writer::new(&mut buf);
 
         write_multistatus_start(&mut xml)?;
 
-        for fav in &favorites {
-            match fav.item_type.as_str() {
-                "file" => {
-                    let file = match file_service.get_file(&fav.item_id).await {
-                        Ok(f) => f,
-                        Err(_) => continue, // Deleted or inaccessible -- skip.
-                    };
-                    let subpath = strip_home_prefix(&file.path, &home_prefix);
-                    let href = nc_href(&user.username, subpath);
-                    let fid = resolve_file_id(file_id_svc, &file.id).await;
-                    let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
-                    write_file_response(
-                        &mut xml,
-                        &file,
-                        &href,
-                        fid,
-                        oc_id.as_deref(),
-                        &user.username,
-                        &favorite_ids,
-                    )
-                    .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
-                }
-                "folder" => {
-                    let folder = match folder_service.get_folder(&fav.item_id).await {
-                        Ok(f) => f,
-                        Err(_) => continue,
-                    };
-                    let subpath = strip_home_prefix(&folder.path, &home_prefix);
-                    let href = format!("{}/", nc_href(&user.username, subpath));
-                    let fid = resolve_folder_id(file_id_svc, &folder.id).await;
-                    let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
-                    write_folder_response(
-                        &mut xml,
-                        &folder,
-                        &href,
-                        fid,
-                        oc_id.as_deref(),
-                        &user.username,
-                        &favorite_ids,
-                    )
-                    .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
-                }
-                _ => continue,
-            }
+        for file in &files {
+            let subpath = strip_home_prefix(&file.path, &home_prefix);
+            let href = nc_href(&user.username, subpath);
+            let fid = file_id_map.get(&file.id).copied();
+            let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
+            write_file_response(
+                &mut xml,
+                file,
+                &href,
+                fid,
+                oc_id.as_deref(),
+                &user.username,
+                &favorite_ids,
+            )
+            .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
+        }
+
+        for folder in &folders {
+            let subpath = strip_home_prefix(&folder.path, &home_prefix);
+            let href = format!("{}/", nc_href(&user.username, subpath));
+            let fid = folder_id_map.get(&folder.id).copied();
+            let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
+            write_folder_response(
+                &mut xml,
+                folder,
+                &href,
+                fid,
+                oc_id.as_deref(),
+                &user.username,
+                &favorite_ids,
+            )
+            .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
         }
 
         xml.write_event(Event::End(BytesEnd::new("d:multistatus")))
@@ -192,6 +206,15 @@ async fn handle_search(
     // No favorite checking for search results -- pass an empty set.
     let favorite_ids: HashSet<String> = HashSet::new();
 
+    // Materialize DTOs, then resolve every oc:fileid in two batch queries
+    // (was one INSERT round-trip per result).
+    let files: Vec<FileDto> = results.files.iter().map(file_dto_from_search).collect();
+    let folders: Vec<FolderDto> = results.folders.iter().map(folder_dto_from_search).collect();
+    let file_uuids: Vec<String> = files.iter().map(|f| f.id.clone()).collect();
+    let folder_uuids: Vec<String> = folders.iter().map(|f| f.id.clone()).collect();
+    let (file_id_map, folder_id_map) =
+        batch_resolve_ids(file_id_svc, &file_uuids, &folder_uuids).await;
+
     let mut buf = Vec::new();
     {
         let mut xml = Writer::new(&mut buf);
@@ -199,15 +222,14 @@ async fn handle_search(
         write_multistatus_start(&mut xml)?;
 
         // Files.
-        for fr in &results.files {
-            let file = file_dto_from_search(fr);
+        for file in &files {
             let subpath = strip_home_prefix(&file.path, &home_prefix);
             let href = nc_href(&user.username, subpath);
-            let fid = resolve_file_id(file_id_svc, &file.id).await;
+            let fid = file_id_map.get(&file.id).copied();
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
             write_file_response(
                 &mut xml,
-                &file,
+                file,
                 &href,
                 fid,
                 oc_id.as_deref(),
@@ -218,15 +240,14 @@ async fn handle_search(
         }
 
         // Folders.
-        for sr in &results.folders {
-            let folder = folder_dto_from_search(sr);
+        for folder in &folders {
             let subpath = strip_home_prefix(&folder.path, &home_prefix);
             let href = format!("{}/", nc_href(&user.username, subpath));
-            let fid = resolve_folder_id(file_id_svc, &folder.id).await;
+            let fid = folder_id_map.get(&folder.id).copied();
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
             write_folder_response(
                 &mut xml,
-                &folder,
+                folder,
                 &href,
                 fid,
                 oc_id.as_deref(),

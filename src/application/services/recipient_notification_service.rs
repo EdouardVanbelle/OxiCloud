@@ -70,6 +70,11 @@ use crate::domain::services::authorization::{Resource, Subject};
 use crate::infrastructure::repositories::pg::UserPgRepository;
 use crate::interfaces::middleware::rate_limit::RateLimiter;
 
+/// Concurrent per-recipient dispatches in flight during a group fan-out.
+/// High enough to collapse a 30-member group's serial SMTP latency,
+/// low enough not to flood the relay (most reject >10 parallel sessions).
+const NOTIFY_DISPATCH_CONCURRENCY: usize = 6;
+
 /// What triggered the notification — purely an audit discriminator.
 /// `GrantCreated` → fired implicitly when a grant lands; `ManualResend`
 /// → granter explicitly clicked "Notify by email" in My Shares.
@@ -268,13 +273,22 @@ impl RecipientNotificationService {
             );
         }
 
-        let mut outcomes = Vec::with_capacity(members.len());
-        for member in &members {
-            let outcome = self
-                .dispatch_to_one_user(granter, member, resource, trigger)
-                .await;
-            outcomes.push(outcome);
-        }
+        // SMTP dispatch dominates each iteration (hundreds of ms per
+        // recipient) and the iterations are independent — coalescing and
+        // rate-limiting key on (granter, recipient), which is distinct per
+        // member. Bounded concurrency keeps a 30-member group grant from
+        // holding the HTTP response for 15+ s of serial sends while still
+        // capping the pressure on the SMTP relay. `buffered` (not
+        // `buffer_unordered`) preserves the member order of the outcomes.
+        use futures::stream::{self, StreamExt};
+        let outcomes: Vec<NotifyOutcome> = stream::iter(members)
+            .map(|member| async move {
+                self.dispatch_to_one_user(granter, &member, resource, trigger)
+                    .await
+            })
+            .buffered(NOTIFY_DISPATCH_CONCURRENCY)
+            .collect()
+            .await;
         Ok(NotifyOutcomeSet { outcomes })
     }
 

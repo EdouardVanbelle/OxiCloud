@@ -34,6 +34,48 @@ async function getFolder(id) {
 }
 
 /**
+ * Session cache of folder metadata for breadcrumb resolution (`id →
+ * FolderItem`). Ancestors of the current folder have almost always been
+ * visited already, so a warm navigation rebuilds the whole crumb trail
+ * with zero fetches instead of one round-trip per depth level.
+ * Invalidated on rename/move via {@link invalidateFolderMeta}.
+ * @type {Map<string, FolderItem>}
+ */
+const _folderMetaCache = new Map();
+
+/**
+ * Resolve breadcrumb metadata for one folder, consulting the session
+ * cache first.
+ * @param {string} id
+ * @returns {Promise<FolderItem>}
+ */
+async function _getFolderMeta(id) {
+    const cached = _folderMetaCache.get(id);
+    if (cached) return cached;
+    const info = await getFolder(id);
+    _folderMetaCache.set(id, info);
+    return info;
+}
+
+/**
+ * Drop the cached breadcrumb metadata for a folder. Call after any
+ * operation that changes its name or parent (rename, move) so the next
+ * breadcrumb rebuild re-fetches the fresh row.
+ * @param {string} folderId
+ */
+function invalidateFolderMeta(folderId) {
+    _folderMetaCache.delete(folderId);
+}
+
+/**
+ * Monotonic token identifying the most recent {@link rebuildBreadCrumb}
+ * call. Rebuilds now run concurrently with the listing fetch, so a rapid
+ * second navigation can supersede one still in flight — the superseded
+ * run must not commit its (stale) trail over the newer one.
+ */
+let _breadcrumbGeneration = 0;
+
+/**
  * Walk up the folder hierarchy to rebuild `app.breadcrumbPath`.
  *
  * Stops gracefully at a permission boundary (shared subtrees) — the partial
@@ -41,29 +83,39 @@ async function getFolder(id) {
  * handles shared folders the user cannot traverse beyond.
  *
  * An error on the target folder itself is treated as a real error and falls
- * back to the home folder.
+ * back to the home folder (resetting `app.currentPath`).
  *
- * @returns {Promise<void>}
+ * The trail is built locally and committed to `app` atomically at the end,
+ * and only when this call is still the most recent one — callers run this
+ * concurrently with the listing fetch.
+ *
+ * @returns {Promise<boolean>} `true` when the trail was committed; `false`
+ *   when this rebuild was superseded by a newer navigation.
  */
 async function rebuildBreadCrumb() {
+    const generation = ++_breadcrumbGeneration;
+
     /** @type {FolderItem|null} */
     let currentFolderInfo = null;
-    app.breadcrumbPath = [];
+    /** @type {Array<{id: string, name: string}>} */
+    const crumbs = [];
 
     /** @type {string|null} */
     let id = app.currentPath;
 
     while (id !== null) {
         try {
-            const folderInfo = await getFolder(id);
+            const folderInfo = await _getFolderMeta(id);
+            if (generation !== _breadcrumbGeneration) return false;
             if (currentFolderInfo === null) currentFolderInfo = folderInfo;
-            app.breadcrumbPath.unshift({ id: folderInfo.id, name: folderInfo.name });
+            crumbs.unshift({ id: folderInfo.id, name: folderInfo.name });
             id = folderInfo.parent_id;
         } catch (_e) {
+            if (generation !== _breadcrumbGeneration) return false;
             if (currentFolderInfo === null) {
                 console.warn(`Cannot access target folder ${app.currentPath}, falling back to home`);
                 uiNotifications.show('error: folder not found or permission denied', 'the given folder is not available or you do not have sufficient rights');
-                app.breadcrumbPath = [];
+                crumbs.length = 0;
                 id = app.userHomeFolderId;
                 if (id) app.currentPath = id;
             } else {
@@ -73,7 +125,10 @@ async function rebuildBreadCrumb() {
         }
     }
 
+    if (generation !== _breadcrumbGeneration) return false;
+    app.breadcrumbPath = crumbs;
     app.currentFolderInfo = currentFolderInfo;
+    return true;
 }
 
 /**
@@ -175,4 +230,4 @@ async function fetchResourcesPage(folderId, { cursor = null, orderBy = 'name', l
     return { items, nextCursor: data.next_cursor ?? null };
 }
 
-export { fetchListing, fetchResourcesPage, getFolder, rebuildBreadCrumb };
+export { fetchListing, fetchResourcesPage, getFolder, invalidateFolderMeta, rebuildBreadCrumb };

@@ -7,8 +7,11 @@
 //! - **Dedicated `rayon` thread pool** for CPU-bound transcoding (never blocks Tokio)
 //! - **`moka` lock-free cache** for hot transcoded images (no write-lock on reads)
 //! - Disk cache for persistence across restarts
-//! - Supports JPEG, PNG, GIF → WebP conversion
-//! - Falls back to original if conversion fails or result is larger
+//! - Supports PNG, GIF → WebP conversion (JPEG excluded — the encoder is
+//!   lossless-only, so photos would come out larger; see `can_transcode`)
+//! - Falls back to original if conversion fails or result is larger, and
+//!   remembers that negative verdict (memory sentinel + disk marker) so the
+//!   decode + encode is never repeated for the same file
 
 use bytes::Bytes;
 use image::ImageFormat;
@@ -188,12 +191,16 @@ impl ImageTranscodeService {
         Ok(())
     }
 
-    /// Check if a mime type can be transcoded
+    /// Check if a mime type can be transcoded.
+    ///
+    /// JPEG is deliberately excluded: the `image` crate's WebP encoder is
+    /// lossless-only, and losslessly re-encoding an already-lossy photo
+    /// almost always produces a LARGER file — so every JPEG download paid
+    /// a full decode + encode (hundreds of ms of CPU) only to discard the
+    /// result. PNG/GIF → lossless WebP genuinely shrinks. Re-add JPEG only
+    /// together with a lossy WebP encoder.
     pub fn can_transcode(mime_type: &str) -> bool {
-        matches!(
-            mime_type,
-            "image/jpeg" | "image/jpg" | "image/png" | "image/gif"
-        )
+        matches!(mime_type, "image/png" | "image/gif")
     }
 
     /// Check if transcoding should be attempted based on file size and type
@@ -216,8 +223,16 @@ impl ImageTranscodeService {
         let cache_key = format!("{}:{}", file_id, target_format.extension());
 
         // ── 1. Check moka memory cache (lock-free read) ──
+        // An empty-Bytes entry is the negative sentinel: "transcoding this
+        // file is not beneficial — serve the original". Without it, every
+        // GET of such an image repeated the full decode + encode just to
+        // discard the result again.
         if let Some(cached) = self.memory_cache.get(&cache_key).await {
             self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
+            if cached.is_empty() {
+                tracing::debug!("🔥 Transcode negative cache HIT: {}", file_id);
+                return Ok((original_content, original_mime.to_string(), false));
+            }
             tracing::debug!("🔥 Transcode memory cache HIT: {}", file_id);
             return Ok((cached, target_format.mime_type().to_string(), true));
         }
@@ -239,6 +254,15 @@ impl ImageTranscodeService {
                     tracing::warn!("Failed to read cached transcode: {}", e);
                 }
             }
+        }
+
+        // ── 2b. Negative verdict persisted on disk (survives restarts) ──
+        let skip_marker = self.get_skip_marker_path(file_id, target_format);
+        if tokio::fs::try_exists(&skip_marker).await.unwrap_or(false) {
+            self.memory_cache.insert(cache_key, Bytes::new()).await;
+            self.stats.disk_hits.fetch_add(1, Ordering::Relaxed);
+            tracing::debug!("💾 Transcode negative disk marker HIT: {}", file_id);
+            return Ok((original_content, original_mime.to_string(), false));
         }
 
         // ── 3. Transcode on dedicated rayon pool (never blocks Tokio) ──
@@ -269,6 +293,20 @@ impl ImageTranscodeService {
                 original_size,
                 transcoded_size
             );
+            // Remember the negative verdict so the next GET doesn't repeat
+            // the decode + encode: empty-Bytes sentinel in memory (expires
+            // with the cache TTL) + zero-byte marker on disk (survives
+            // restarts; removed by `invalidate` when the file changes).
+            self.memory_cache.insert(cache_key, Bytes::new()).await;
+            let marker = self.get_skip_marker_path(file_id, target_format);
+            tokio::spawn(async move {
+                if let Some(parent) = marker.parent() {
+                    let _ = fs::create_dir_all(parent).await;
+                }
+                if let Err(e) = fs::write(&marker, b"").await {
+                    tracing::warn!("Failed to persist transcode skip marker: {}", e);
+                }
+            });
             return Ok((original_content, original_mime.to_string(), false));
         }
 
@@ -319,6 +357,16 @@ impl ImageTranscodeService {
             .join(format!("{}.{}", file_id, format.extension()))
     }
 
+    /// Path of the zero-byte marker recording a negative transcode verdict
+    /// ("result was not smaller — serve the original").
+    fn get_skip_marker_path(&self, file_id: &str, format: OutputFormat) -> PathBuf {
+        self.cache_dir.join(format.extension()).join(format!(
+            "{}.{}.skip",
+            file_id,
+            format.extension()
+        ))
+    }
+
     /// Invalidate cached transcodes for a file
     pub async fn invalidate(&self, file_id: &str) {
         let cache_key = format!("{}:{}", file_id, OutputFormat::WebP.extension());
@@ -326,6 +374,8 @@ impl ImageTranscodeService {
 
         let cache_path = self.get_cache_path(file_id, OutputFormat::WebP);
         let _ = fs::remove_file(&cache_path).await;
+        let skip_marker = self.get_skip_marker_path(file_id, OutputFormat::WebP);
+        let _ = fs::remove_file(&skip_marker).await;
     }
 
     /// Get transcoding statistics
@@ -463,9 +513,10 @@ mod tests {
 
     #[test]
     fn test_can_transcode() {
-        assert!(ImageTranscodeService::can_transcode("image/jpeg"));
         assert!(ImageTranscodeService::can_transcode("image/png"));
         assert!(ImageTranscodeService::can_transcode("image/gif"));
+        // JPEG excluded: the lossless-only WebP encoder makes photos LARGER
+        assert!(!ImageTranscodeService::can_transcode("image/jpeg"));
         assert!(!ImageTranscodeService::can_transcode("image/webp"));
         assert!(!ImageTranscodeService::can_transcode("image/svg+xml"));
         assert!(!ImageTranscodeService::can_transcode("application/pdf"));
@@ -473,16 +524,22 @@ mod tests {
 
     #[test]
     fn test_should_transcode() {
-        // Small JPEG - yes
+        // Small PNG - yes
         assert!(ImageTranscodeService::should_transcode(
-            "image/jpeg",
+            "image/png",
             1024 * 1024
         ));
 
-        // Large JPEG - no (too big)
+        // Large PNG - no (too big)
+        assert!(!ImageTranscodeService::should_transcode(
+            "image/png",
+            10 * 1024 * 1024
+        ));
+
+        // JPEG - no (lossless-only encoder, result would be larger)
         assert!(!ImageTranscodeService::should_transcode(
             "image/jpeg",
-            10 * 1024 * 1024
+            1024 * 1024
         ));
 
         // WebP - no (already optimal)

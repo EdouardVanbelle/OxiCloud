@@ -11,7 +11,7 @@ use crate::common::config::OidcConfig;
 use crate::common::errors::{DomainError, ErrorKind};
 use crate::domain::entities::magic_link_token::{MagicLinkResourceKind, MagicLinkStatus};
 use crate::domain::entities::session::Session;
-use crate::domain::entities::user::{User, UserRole};
+use crate::domain::entities::user::{User, UserFlags, UserRole};
 use crate::domain::repositories::magic_link_token_repository::MagicLinkTokenRepository;
 use crate::infrastructure::repositories::pg::SessionPgRepository;
 use crate::infrastructure::repositories::pg::UserPgRepository;
@@ -140,7 +140,19 @@ pub struct AuthApplicationService {
     /// Magic-link token repository — populated when the magic-link feature
     /// is enabled (PR 8+). `None` means redemption endpoints return 503.
     magic_link_repo: Option<Arc<dyn MagicLinkTokenRepository>>,
+    /// Per-user authorization flags (`role` / `is_external` / `active`),
+    /// consulted by middleware guards on every WebDAV / CalDAV / CardDAV
+    /// request. The short TTL keeps the "role changes apply without token
+    /// rotation" property within seconds while removing one DB round-trip
+    /// per request; the known mutation paths (`change_user_role`,
+    /// `set_user_active`) also invalidate eagerly.
+    user_flags_cache: Cache<Uuid, UserFlags>,
 }
+
+/// TTL for [`AuthApplicationService::user_flags_cache`]. Upper bound on how
+/// long a role / external / active change can take to be observed by the
+/// per-request guards when it bypasses the eager invalidation paths.
+const USER_FLAGS_CACHE_TTL: Duration = Duration::from_secs(30);
 
 impl AuthApplicationService {
     pub fn new(
@@ -170,6 +182,10 @@ impl AuthApplicationService {
                 .time_to_live(Duration::from_secs(60))
                 .build(),
             magic_link_repo: None,
+            user_flags_cache: Cache::builder()
+                .max_capacity(10_000)
+                .time_to_live(USER_FLAGS_CACHE_TTL)
+                .build(),
         }
     }
 
@@ -1141,6 +1157,24 @@ impl AuthApplicationService {
         Ok(UserDto::from(user))
     }
 
+    /// Cached, image-free lookup of the caller's authorization flags
+    /// (`role` / `is_external` / `active`). This is the per-request fast
+    /// path for middleware guards: the full `get_user` row fetch drags the
+    /// `image` column (a data URI of up to 512 KiB) across the wire, which
+    /// a sync client issuing hundreds of DAV requests per minute paid on
+    /// every single one just to read a boolean.
+    ///
+    /// Staleness is bounded by [`USER_FLAGS_CACHE_TTL`]; role and active
+    /// changes made through this service invalidate the entry eagerly.
+    pub async fn get_user_flags(&self, user_id: Uuid) -> Result<UserFlags, DomainError> {
+        if let Some(flags) = self.user_flags_cache.get(&user_id) {
+            return Ok(flags);
+        }
+        let flags = self.user_storage.get_user_flags(user_id).await?;
+        self.user_flags_cache.insert(user_id, flags);
+        Ok(flags)
+    }
+
     /// Apply a profile update on behalf of the calling user (PR 24).
     ///
     /// Hard rules:
@@ -1797,7 +1831,9 @@ impl AuthApplicationService {
     pub async fn set_user_active(&self, user_id: Uuid, active: bool) -> Result<(), DomainError> {
         self.user_storage
             .set_user_active_status(user_id, active)
-            .await
+            .await?;
+        self.user_flags_cache.invalidate(&user_id);
+        Ok(())
     }
 
     /// Change user role (admin only)
@@ -1809,7 +1845,9 @@ impl AuthApplicationService {
                 format!("Invalid role: {}. Must be 'admin' or 'user'", role),
             ));
         }
-        self.user_storage.change_role(user_id, role).await
+        self.user_storage.change_role(user_id, role).await?;
+        self.user_flags_cache.invalidate(&user_id);
+        Ok(())
     }
 
     /// Update user's storage quota (admin only)

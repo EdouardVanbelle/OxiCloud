@@ -472,22 +472,43 @@ const photosView = {
         if (bar_delete) {
             bar_delete.onclick = async () => {
                 if (!confirm('Delete selected items?')) return;
-                for (const fid of this.selected) {
-                    try {
-                        await fetch(`/api/files/${fid}`, {
-                            method: 'DELETE',
+
+                // One batch request per chunk instead of one DELETE per photo.
+                // The photos view is files-only, so every id is a file id.
+                const ids = [...this.selected];
+                const CHUNK_SIZE = 1000; // backend MAX_BATCH_SIZE
+                const trashed = new Set();
+
+                try {
+                    for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+                        const chunk = ids.slice(i, i + CHUNK_SIZE);
+                        const response = await fetch('/api/batch/trash', {
+                            method: 'POST',
                             credentials: 'include',
-                            headers: this._headers()
+                            headers: this._headers(true),
+                            body: JSON.stringify({ file_ids: chunk, folder_ids: [] })
                         });
-                    } catch (err) {
-                        console.error('Delete failed:', fid, err);
+                        // 200 = all trashed, 206 = partial; both carry `successful`.
+                        if (!response.ok && response.status !== 206) {
+                            console.error('Batch trash failed:', response.status);
+                            continue;
+                        }
+                        const data = await response.json();
+                        const ok = Array.isArray(data?.successful) ? data.successful : chunk;
+                        for (const id of ok) trashed.add(id);
                     }
+                } catch (err) {
+                    console.error('Batch trash error:', err);
                 }
-                this.items = this.items.filter((f) => !this.selected.has(f.id));
-                this.selected.clear();
-                this._hideSelectionBar();
-                this._renderedCount = 0;
-                this._renderFull();
+
+                if (trashed.size > 0) {
+                    this.items = this.items.filter((f) => !trashed.has(f.id));
+                    for (const id of trashed) this.selected.delete(id);
+                    this._renderedCount = 0;
+                    this._renderFull();
+                }
+                // Refresh (or hide) the bar to reflect any items left selected.
+                this._updateSelectionBar();
             };
         }
 

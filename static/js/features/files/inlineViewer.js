@@ -6,6 +6,7 @@
 import { updateHistory } from '../../app/main.js';
 import { app } from '../../app/state.js';
 import { isTextViewable } from '../../core/formatters.js';
+import { triggerBrowserDownload } from '../../utils/download.js';
 import { wopiEditor } from './wopiEditor.js';
 
 /** @import {FileItem} from '../../core/types.js' */
@@ -397,111 +398,92 @@ class InlineViewer {
     }
 
     /**
-     * Creates an audio or video player using blob URL (authenticated fetch)
+     * Creates an audio or video player that streams straight from the API.
+     * The element's `src` points at the same-origin endpoint (cookies are
+     * sent automatically), so the browser issues Range requests and starts
+     * playback progressively — the file is never materialized in memory,
+     * and seeking works without downloading everything first.
      * @param {FileItem} file
      * @param {string} mediaType
      * @param {HTMLDivElement} container
      * @param {HTMLDivElement} loader
      */
-    async createMediaViewer(file, mediaType, container, loader) {
-        try {
-            console.log(`Creating ${mediaType} player for:`, file.name);
+    createMediaViewer(file, mediaType, container, loader) {
+        console.log(`Creating ${mediaType} player for:`, file.name);
 
-            // Fetch file (cookie auto-sent)
-            const response = await fetch(`/api/files/${file.id}?inline=true`, {
-                credentials: 'same-origin'
-            });
+        const streamUrl = `/api/files/${file.id}?inline=true`;
 
-            if (!response.ok) {
-                throw new Error(`Error fetching file: ${response.status} ${response.statusText}`);
-            }
+        // The native player has its own buffering UI — drop our spinner now.
+        if (loader?.parentNode) {
+            loader.parentNode.removeChild(loader);
+        }
 
-            const blob = await response.blob();
-            const blobUrl = URL.createObjectURL(blob);
+        if (mediaType === 'audio') {
+            // Wrapper with icon + player
+            const wrapper = document.createElement('div');
+            wrapper.className = 'inline-viewer-audio-wrapper';
 
-            // Remove loader
-            if (loader?.parentNode) {
-                loader.parentNode.removeChild(loader);
-            }
+            const icon = document.createElement('div');
+            icon.className = 'inline-viewer-audio-icon';
+            icon.innerHTML = '<i class="fas fa-music"></i>';
+            wrapper.appendChild(icon);
 
-            if (mediaType === 'audio') {
-                // Wrapper with icon + player
-                const wrapper = document.createElement('div');
-                wrapper.className = 'inline-viewer-audio-wrapper';
+            const nameEl = document.createElement('div');
+            nameEl.className = 'inline-viewer-audio-name';
+            nameEl.textContent = file.name;
+            wrapper.appendChild(nameEl);
 
-                const icon = document.createElement('div');
-                icon.className = 'inline-viewer-audio-icon';
-                icon.innerHTML = '<i class="fas fa-music"></i>';
-                wrapper.appendChild(icon);
+            const audio = document.createElement('audio');
+            audio.className = 'inline-viewer-audio';
+            audio.controls = true;
+            audio.preload = 'metadata';
+            audio.src = streamUrl;
+            wrapper.appendChild(audio);
 
-                const nameEl = document.createElement('div');
-                nameEl.className = 'inline-viewer-audio-name';
-                nameEl.textContent = file.name;
-                wrapper.appendChild(nameEl);
-
-                const audio = document.createElement('audio');
-                audio.className = 'inline-viewer-audio';
-                audio.controls = true;
-                audio.preload = 'metadata';
-                audio.src = blobUrl;
-                wrapper.appendChild(audio);
-
-                // Fallback message for unsupported codecs
-                audio.addEventListener('error', () => {
-                    console.warn('Audio playback error — codec may not be supported');
-                    wrapper.innerHTML = '';
-                    const msg = document.createElement('div');
-                    msg.className = 'inline-viewer-message';
-                    msg.innerHTML = `
+            // Fallback message for unsupported codecs / failed loads
+            audio.addEventListener('error', () => {
+                console.warn('Audio playback error — codec may not be supported');
+                wrapper.innerHTML = '';
+                const msg = document.createElement('div');
+                msg.className = 'inline-viewer-message';
+                msg.innerHTML = `
             <div class="inline-viewer-icon"><i class="fas fa-exclamation-circle"></i></div>
             <div class="inline-viewer-text">
               <p>Your browser cannot play this audio format.</p>
               <p>Click "Download" to save the file.</p>
             </div>
           `;
-                    wrapper.appendChild(msg);
-                });
+                wrapper.appendChild(msg);
+            });
 
-                container.appendChild(wrapper);
-            } else {
-                const video = document.createElement('video');
-                video.className = 'inline-viewer-video';
-                video.controls = true;
-                video.preload = 'metadata';
-                video.src = blobUrl;
-                video.setAttribute('playsinline', 'true');
+            container.appendChild(wrapper);
+        } else {
+            const video = document.createElement('video');
+            video.className = 'inline-viewer-video';
+            video.controls = true;
+            video.preload = 'metadata';
+            video.src = streamUrl;
+            video.setAttribute('playsinline', 'true');
 
-                // Fallback message for unsupported codecs
-                video.addEventListener('error', () => {
-                    console.warn('Video playback error — codec may not be supported');
-                    if (video.parentNode) {
-                        video.parentNode.removeChild(video);
-                    }
-                    const msg = document.createElement('div');
-                    msg.className = 'inline-viewer-message';
-                    msg.innerHTML = `
+            // Fallback message for unsupported codecs / failed loads
+            video.addEventListener('error', () => {
+                console.warn('Video playback error — codec may not be supported');
+                if (video.parentNode) {
+                    video.parentNode.removeChild(video);
+                }
+                const msg = document.createElement('div');
+                msg.className = 'inline-viewer-message';
+                msg.innerHTML = `
             <div class="inline-viewer-icon"><i class="fas fa-exclamation-circle"></i></div>
             <div class="inline-viewer-text">
               <p>Your browser cannot play this video format.</p>
               <p>Click "Download" to save the file.</p>
             </div>
           `;
-                    container.appendChild(msg);
-                });
+                container.appendChild(msg);
+            });
 
-                container.appendChild(video);
-            }
-
-            // Store blob URL for cleanup on close
-            this.currentBlobUrl = blobUrl;
-        } catch (error) {
-            console.error(`Error creating ${mediaType} viewer:`, error);
-
-            if (loader?.parentNode) {
-                loader.parentNode.removeChild(loader);
-            }
-
-            this.showErrorMessage(container);
+            container.appendChild(video);
         }
     }
 
@@ -549,26 +531,12 @@ class InlineViewer {
     }
 
     /**
-     *
+     * Download the file via a browser-native download (streams to disk,
+     * nothing is buffered in page memory).
      * @param {FileItem} file
      */
     downloadFile(file) {
-        fetch(`/api/files/${file.id}`, { credentials: 'same-origin' })
-            .then((res) => {
-                if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                return res.blob();
-            })
-            .then((blob) => {
-                const url = URL.createObjectURL(blob);
-                const link = document.createElement('a');
-                link.href = url;
-                link.download = file.name;
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-                URL.revokeObjectURL(url);
-            })
-            .catch((err) => console.error('Download error:', err));
+        triggerBrowserDownload(`/api/files/${file.id}`, file.name);
     }
 
     /**

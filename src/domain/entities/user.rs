@@ -20,6 +20,18 @@ impl std::fmt::Display for UserRole {
     }
 }
 
+/// Authorization-relevant account flags, fetched without the heavyweight
+/// profile columns. The full user row drags `image` along — a data URI of
+/// up to 512 KiB — which per-request guards (`require_internal_user`,
+/// `require_admin_user`, the NC Basic Auth external check) must never pay
+/// for just to read a boolean or a role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserFlags {
+    pub role: UserRole,
+    pub is_external: bool,
+    pub active: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct User {
     id: Uuid,

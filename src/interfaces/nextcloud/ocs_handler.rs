@@ -5,6 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::application::dtos::search_dto::SearchCriteriaDto;
@@ -384,6 +385,17 @@ pub async fn handle_search(
 
     let file_id_svc = state.nextcloud.as_ref().map(|n| &n.file_ids);
 
+    // Pre-resolve numeric ids for every file result in a single batch query
+    // (was one INSERT round-trip per result).
+    let file_uuids: Vec<String> = results.files.iter().map(|f| f.id.clone()).collect();
+    let file_id_map: HashMap<String, i64> = match file_id_svc {
+        Some(svc) => svc
+            .get_or_create_file_ids(&file_uuids)
+            .await
+            .unwrap_or_default(),
+        None => HashMap::new(),
+    };
+
     let mut entries: Vec<serde_json::Value> = Vec::new();
 
     // Map file results
@@ -394,11 +406,7 @@ pub async fn handle_search(
             .unwrap_or(&file.path);
         let display_path = format!("/{}", display_path);
 
-        let numeric_id = if let Some(svc) = file_id_svc {
-            svc.get_or_create_file_id(&file.id).await.ok()
-        } else {
-            None
-        };
+        let numeric_id = file_id_map.get(&file.id).copied();
 
         let thumbnail_url = match numeric_id {
             Some(nid) => format!("/index.php/core/preview?fileId={}&x=32&y=32", nid),

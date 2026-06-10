@@ -643,7 +643,6 @@ export class ResourceListComponent {
         `;
 
         el.querySelector('.resource-icon-slot')?.replaceWith(buildResourceIcon(folder, 'folder'));
-        this._bindItemEvents(el, folder);
         return el;
     }
 
@@ -693,7 +692,6 @@ export class ResourceListComponent {
         `;
 
         el.querySelector('.resource-icon-slot')?.replaceWith(buildResourceIcon(file, 'file'));
-        this._bindItemEvents(el, file);
         return el;
     }
 
@@ -714,57 +712,6 @@ export class ResourceListComponent {
                 return `<button type="button" class="btn-action${cls}" data-custom-action="${i}" title="${label}" aria-label="${label}">${a.iconHtml}</button>`;
             })
             .join('');
-    }
-
-    /**
-     * Attach direct event listeners to interactive elements inside a .file-item.
-     * This covers buttons that must stop propagation before the delegated listener runs.
-     * @param {HTMLElement}          el
-     * @param {FileItem|FolderItem}  item
-     */
-    _bindItemEvents(el, item) {
-        const cfg = this._cfg;
-
-        // Favorite-star — direct click, stopPropagation so the card open doesn't fire
-        if (cfg.showFavorite && cfg.onFavoriteToggle) {
-            const star = el.querySelector('.favorite-star');
-            star?.addEventListener('click', (e) => {
-                e.stopPropagation();
-                e.stopImmediatePropagation();
-                e.preventDefault();
-                cfg.onFavoriteToggle?.(item);
-            });
-        }
-
-        // Custom inline actions (e.g. restore / delete-permanently on trash) —
-        // bound directly so they stop propagation before the card-open handler.
-        if (cfg.customActions?.length) {
-            el.querySelectorAll('button[data-custom-action]').forEach((btn) => {
-                btn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    e.stopImmediatePropagation();
-                    e.preventDefault();
-                    const idx = Number(/** @type {HTMLElement} */ (btn).dataset.customAction);
-                    const action = cfg.customActions?.[idx];
-                    if (action) action.onClick(item);
-                });
-            });
-        }
-
-        // Shared-badge click → open share modal (or fall back to context menu)
-        if (cfg.showShareBadge && (cfg.onShareBadgeClick || cfg.onContextMenu)) {
-            const badge = el.querySelector('.file-badge-shared');
-            badge?.addEventListener('click', (e) => {
-                e.stopPropagation();
-                e.stopImmediatePropagation();
-                e.preventDefault();
-                if (cfg.onShareBadgeClick) {
-                    cfg.onShareBadgeClick(item);
-                } else {
-                    cfg.onContextMenu?.(item, /** @type {MouseEvent} */ (e));
-                }
-            });
-        }
     }
 
     /** Wire one delegated listener for all pointer events in this container. */
@@ -791,6 +738,39 @@ export class ResourceListComponent {
                 return;
             }
 
+            // Favorite-star button — never opens the card
+            if (target.closest('.favorite-star')) {
+                e.preventDefault();
+                const item = this._itemFromCard(card);
+                if (item) cfg.onFavoriteToggle?.(item);
+                return;
+            }
+
+            // Custom inline actions (e.g. restore / delete-permanently on trash)
+            const customBtn = /** @type {HTMLElement | null} */ (target.closest('button[data-custom-action]'));
+            if (customBtn) {
+                e.preventDefault();
+                const idx = Number(customBtn.dataset.customAction);
+                const action = cfg.customActions?.[idx];
+                const item = this._itemFromCard(card);
+                if (action && item) action.onClick(item);
+                return;
+            }
+
+            // Shared-badge click → open share modal (or fall back to context menu)
+            if (target.closest('.file-badge-shared')) {
+                e.preventDefault();
+                const item = this._itemFromCard(card);
+                if (item) {
+                    if (cfg.onShareBadgeClick) {
+                        cfg.onShareBadgeClick(item);
+                    } else {
+                        cfg.onContextMenu?.(item, /** @type {MouseEvent} */ (e));
+                    }
+                }
+                return;
+            }
+
             // Checkbox cell → selection (shift extends range)
             if (cfg.selectable && target.closest('.checkbox-cell')) {
                 if (e.shiftKey) {
@@ -800,9 +780,6 @@ export class ResourceListComponent {
                 }
                 return;
             }
-
-            // Favorite star is handled by the direct listener in _bindItemEvents
-            if (target.closest('.favorite-star')) return;
 
             // Modifier-key click → selection toggle
             if (e.metaKey || e.altKey || e.ctrlKey) {

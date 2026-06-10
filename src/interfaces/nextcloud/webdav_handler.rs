@@ -3,16 +3,18 @@ use axum::{
     http::{HeaderName, Request, StatusCode, header},
     response::Response,
 };
-use bytes::Buf;
+use bytes::{Buf, Bytes};
 use chrono::Utc;
 use quick_xml::{
     Writer,
     events::{BytesEnd, BytesStart, BytesText, Event},
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::application::adapters::webdav_adapter::{PropFindRequest, WebDavAdapter};
+use crate::application::dtos::pagination::PaginationRequestDto;
 use crate::application::ports::favorites_ports::FavoritesUseCase;
 use crate::application::ports::file_ports::{
     FileManagementUseCase, FileRetrievalUseCase, FileUploadUseCase,
@@ -21,8 +23,10 @@ use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::common::di::AppState;
 use crate::common::mime_detect::{filename_from_path, refine_content_type_from_file};
+use crate::interfaces::api::handlers::webdav_handler::PROPFIND_BATCH_SIZE;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::{AuthUser, CurrentUser};
+use crate::interfaces::range_requests::{not_modified_response, range_response};
 use crate::interfaces::upload_spool::spool_body_to_temp;
 
 /// Extension trait to map XML write errors to `String` concisely.
@@ -118,8 +122,8 @@ pub async fn handle_nc_webdav(
     let method = req.method().clone();
     match method.as_str() {
         "OPTIONS" => handle_options(),
+        "GET" => handle_get(state, &user, &subpath, req.headers()).await,
         "PROPFIND" => handle_propfind(state, req, &user, &subpath).await,
-        "GET" => handle_get(state, &user, &subpath).await,
         "PUT" => handle_put(state, req, &user, &subpath).await,
         "MKCOL" => handle_mkcol(state, &user, &subpath).await,
         "DELETE" => handle_delete(state, &user, &subpath).await,
@@ -182,7 +186,10 @@ async fn handle_propfind(
         .await
         .map_err(|e| AppError::bad_request(format!("Failed to read body: {}", e)))?;
 
-    let propfind = if body_bytes.is_empty() {
+    // Parse (and thereby validate) the PROPFIND body. The NC response
+    // always emits the full property set, so the parsed request is not
+    // consulted further — but malformed XML must still fail with 400.
+    let _propfind = if body_bytes.is_empty() {
         PropFindRequest {
             prop_find_type: crate::application::adapters::webdav_adapter::PropFindType::AllProp,
         }
@@ -199,64 +206,17 @@ async fn handle_propfind(
     let folder_result = folder_service.get_folder_by_path(&internal_path).await;
 
     if let Ok(folder) = folder_result {
-        // It's a folder.
-        let (files, subfolders) = if depth != "0" {
-            let files = file_service
-                .list_files(Some(&folder.id))
-                .await
-                .unwrap_or_default();
-            let subfolders = folder_service
-                .list_folders(Some(&folder.id))
-                .await
-                .unwrap_or_default();
-            (files, subfolders)
-        } else {
-            (vec![], vec![])
-        };
-
-        // Batch-check favorites for all items in this listing.
-        let favorite_ids = if let Some(fav_svc) = state.favorites_service.as_ref() {
-            let mut items: Vec<(&str, &str)> = Vec::new();
-            items.push((&folder.id, "folder"));
-            for f in &files {
-                items.push((&f.id, "file"));
-            }
-            for sf in &subfolders {
-                items.push((&sf.id, "folder"));
-            }
-            fav_svc
-                .batch_check_favorites(user.id, &items)
-                .await
-                .unwrap_or_default()
-        } else {
-            HashSet::new()
-        };
-
-        // Generate Nextcloud-aware XML.
-        let nc = state.nextcloud.as_ref();
-        let file_id_svc = nc.map(|n| &n.file_ids);
-
-        let mut buf = Vec::new();
-        write_nc_multistatus(
-            &mut buf,
-            Some(&folder),
-            &files,
-            &subfolders,
-            &propfind,
-            &depth,
-            &user.username,
-            subpath,
-            file_id_svc,
-            &favorite_ids,
-        )
-        .await
-        .map_err(|e| AppError::internal_error(format!("XML generation failed: {}", e)))?;
-
-        return Ok(Response::builder()
-            .status(StatusCode::MULTI_STATUS)
-            .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
-            .body(Body::from(buf))
-            .unwrap());
+        // It's a folder — stream the multistatus: children are fetched in
+        // pages and serialized chunk by chunk, so memory stays O(batch)
+        // regardless of how many entries the folder holds.
+        return Ok(build_nc_streaming_propfind(
+            state.clone(),
+            folder,
+            depth,
+            user.id,
+            user.username.clone(),
+            subpath.to_string(),
+        ));
     }
 
     // Not a folder — try as a file.
@@ -277,13 +237,9 @@ async fn handle_propfind(
         let file_id_svc = nc.map(|n| &n.file_ids);
 
         let mut buf = Vec::new();
-        write_nc_multistatus(
+        write_nc_file_multistatus(
             &mut buf,
-            None,
-            &[file],
-            &[],
-            &propfind,
-            "0",
+            &file,
             &user.username,
             subpath,
             file_id_svc,
@@ -308,6 +264,7 @@ async fn handle_get(
     state: Arc<AppState>,
     user: &CurrentUser,
     subpath: &str,
+    headers: &axum::http::HeaderMap,
 ) -> Result<Response<Body>, AppError> {
     // GET on root folder — NC clients use this as an existence check
     if subpath.is_empty() || subpath == "/" {
@@ -340,6 +297,25 @@ async fn handle_get(
         .await
         .map_err(|_| AppError::not_found("File not found"))?;
 
+    // ETag comes from `FileDto::etag` (populated from `File::etag()`
+    // in the `From<File>` impl) — single source of truth, so GET,
+    // HEAD, PUT-response, MOVE, and PROPFIND all emit byte-identical
+    // values for the same file. NC's sync engine compares cached
+    // PROPFIND ETags against GET/HEAD responses; using `file.id` here
+    // (a UUID) while PROPFIND emitted the blob hash made NC see
+    // every file as "remotely changed" on first descent.
+    let etag = format!("\"{}\"", file.etag);
+
+    // Conditional GET — sync clients revalidating get a 304, not the body.
+    if let Some(resp) = not_modified_response(headers, &etag) {
+        return Ok(resp);
+    }
+
+    // Range Requests — serve 206/416 instead of the whole file on seeks.
+    if let Some(resp) = range_response(headers, &file, &etag, file_service).await {
+        return Ok(resp);
+    }
+
     let stream = file_service
         .get_file_stream(&file.id)
         .await
@@ -349,18 +325,12 @@ async fn handle_get(
         chrono::DateTime::<Utc>::from_timestamp(timestamp_to_i64(file.modified_at), 0)
             .unwrap_or_else(Utc::now);
 
-    // ETag comes from `FileDto::etag` (populated from `File::etag()`
-    // in the `From<File>` impl) — single source of truth, so GET,
-    // HEAD, PUT-response, MOVE, and PROPFIND all emit byte-identical
-    // values for the same file. NC's sync engine compares cached
-    // PROPFIND ETags against GET/HEAD responses; using `file.id` here
-    // (a UUID) while PROPFIND emitted the blob hash made NC see
-    // every file as "remotely changed" on first descent.
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, file.mime_type.as_ref())
         .header(header::CONTENT_LENGTH, file.size)
-        .header(header::ETAG, format!("\"{}\"", file.etag))
+        .header(header::ETAG, etag)
+        .header(header::ACCEPT_RANGES, "bytes")
         .header(header::LAST_MODIFIED, modified_at.to_rfc2822())
         .body(Body::from_stream(std::pin::Pin::from(stream)))
         .unwrap())
@@ -987,103 +957,220 @@ use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
 use crate::application::services::nextcloud_file_id_service::NextcloudFileIdService;
 
-/// Generate a complete Nextcloud-compatible multistatus XML response.
-#[allow(clippy::too_many_arguments)]
-async fn write_nc_multistatus<W: std::io::Write>(
-    writer: W,
-    folder: Option<&FolderDto>,
-    files: &[FileDto],
-    subfolders: &[FolderDto],
-    _request: &PropFindRequest,
-    depth: &str,
-    username: &str,
-    subpath: &str,
-    file_id_svc: Option<&Arc<NextcloudFileIdService>>,
-    favorite_ids: &HashSet<String>,
-) -> Result<(), String> {
-    let mut xml = Writer::new(writer);
-
-    // Root element with all required namespaces.
+/// Write the `<d:multistatus>` opening tag with the full NC namespace set.
+/// Shared by the streaming folder PROPFIND and the single-file variant so
+/// the namespace list can never diverge between the two.
+fn write_nc_multistatus_open<W: std::io::Write>(xml: &mut Writer<W>) -> Result<(), String> {
     let mut ms = BytesStart::new("d:multistatus");
     ms.push_attribute(("xmlns:d", "DAV:"));
     ms.push_attribute(("xmlns:oc", "http://owncloud.org/ns"));
     ms.push_attribute(("xmlns:nc", "http://nextcloud.org/ns"));
     ms.push_attribute(("xmlns:ocs", "http://open-collaboration-services.org/ns"));
-    xml.write_event(Event::Start(ms)).xml_err()?;
+    xml.write_event(Event::Start(ms)).xml_err()
+}
 
-    // Current folder entry. Collection hrefs MUST end in `/` (RFC 4918
-    // §5.2 + strict NC-client enforcement — see `nc_collection_href`).
-    if let Some(f) = folder {
-        let href = nc_collection_href(username, subpath);
-        let file_id = resolve_folder_id(file_id_svc, &f.id).await;
-        let oc_id = file_id.map(|id| format_oc_id(id, file_id_svc));
-        write_folder_response(
-            &mut xml,
-            f,
-            &href,
-            file_id,
-            oc_id.as_deref(),
-            username,
-            favorite_ids,
-        )?;
-    }
+/// Generate the multistatus XML for a single-file PROPFIND. The folder
+/// case streams via [`build_nc_streaming_propfind`] instead.
+async fn write_nc_file_multistatus<W: std::io::Write>(
+    writer: W,
+    file: &FileDto,
+    username: &str,
+    subpath: &str,
+    file_id_svc: Option<&Arc<NextcloudFileIdService>>,
+    favorite_ids: &HashSet<String>,
+) -> Result<(), String> {
+    let (file_id_map, _) =
+        batch_resolve_ids(file_id_svc, std::slice::from_ref(&file.id), &[]).await;
 
-    // When folder is None, files are the target resource itself (single-file
-    // PROPFIND) and must always be emitted. When folder is Some, files/subfolders
-    // are children and should only be listed when depth > 0.
-    let emit_children = folder.is_none() || depth != "0";
+    let mut xml = Writer::new(writer);
+    write_nc_multistatus_open(&mut xml)?;
 
-    if emit_children {
-        // Files.
-        for file in files {
-            let child_sub = if folder.is_none() {
-                // Single-file PROPFIND — subpath already points to the file.
-                subpath.to_string()
-            } else if subpath.is_empty() {
-                file.name.clone()
-            } else {
-                format!("{}/{}", subpath.trim_end_matches('/'), file.name)
-            };
-            let href = nc_href(username, &child_sub);
-            let file_id = resolve_file_id(file_id_svc, &file.id).await;
-            let oc_id = file_id.map(|id| format_oc_id(id, file_id_svc));
-            write_file_response(
-                &mut xml,
-                file,
-                &href,
-                file_id,
-                oc_id.as_deref(),
-                username,
-                favorite_ids,
-            )?;
-        }
-
-        // Subfolders — also collections, same trailing-slash rule.
-        for sf in subfolders {
-            let child_sub = if subpath.is_empty() {
-                sf.name.clone()
-            } else {
-                format!("{}/{}", subpath.trim_end_matches('/'), sf.name)
-            };
-            let href = nc_collection_href(username, &child_sub);
-            let file_id = resolve_folder_id(file_id_svc, &sf.id).await;
-            let oc_id = file_id.map(|id| format_oc_id(id, file_id_svc));
-            write_folder_response(
-                &mut xml,
-                sf,
-                &href,
-                file_id,
-                oc_id.as_deref(),
-                username,
-                favorite_ids,
-            )?;
-        }
-    }
+    // Single-file PROPFIND — subpath already points to the file.
+    let href = nc_href(username, subpath);
+    let file_id = file_id_map.get(&file.id).copied();
+    let oc_id = file_id.map(|id| format_oc_id(id, file_id_svc));
+    write_file_response(
+        &mut xml,
+        file,
+        &href,
+        file_id,
+        oc_id.as_deref(),
+        username,
+        favorite_ids,
+    )?;
 
     xml.write_event(Event::End(BytesEnd::new("d:multistatus")))
         .xml_err()?;
 
     Ok(())
+}
+
+/// Build a streaming 207 Multi-Status response for a folder PROPFIND.
+///
+/// Mirrors the native WebDAV handler's `build_streaming_propfind_response`:
+/// children are fetched in pages of [`PROPFIND_BATCH_SIZE`], each page's
+/// favorites and `oc:fileid`s are resolved with two batch queries, and the
+/// XML is yielded chunk by chunk — memory stays O(batch) and the response
+/// starts flowing immediately, instead of materializing the full listing
+/// plus its entire multistatus (~2 KB/entry) in RAM before the first byte.
+fn build_nc_streaming_propfind(
+    state: Arc<AppState>,
+    folder: FolderDto,
+    depth: String,
+    user_id: Uuid,
+    username: String,
+    subpath: String,
+) -> Response<Body> {
+    let stream = async_stream::try_stream! {
+        let file_id_svc = state.nextcloud.as_ref().map(|n| &n.file_ids);
+        let fav_svc = state.favorites_service.as_ref();
+        let folder_service = &state.applications.folder_service;
+        let file_service = &state.applications.file_retrieval_service;
+
+        // ── <d:multistatus> + the folder's own entry ─────────────────
+        // Collection hrefs MUST end in `/` (RFC 4918 §5.2 + strict
+        // NC-client enforcement — see `nc_collection_href`).
+        let folder_favs = if let Some(fav) = fav_svc {
+            fav.batch_check_favorites(user_id, &[(folder.id.as_str(), "folder")])
+                .await
+                .unwrap_or_default()
+        } else {
+            HashSet::new()
+        };
+        let (_, folder_id_map) =
+            batch_resolve_ids(file_id_svc, &[], std::slice::from_ref(&folder.id)).await;
+
+        let mut buf = Vec::with_capacity(4096);
+        {
+            let mut xml = Writer::new(&mut buf);
+            write_nc_multistatus_open(&mut xml).map_err(std::io::Error::other)?;
+            let href = nc_collection_href(&username, &subpath);
+            let fid = folder_id_map.get(&folder.id).copied();
+            let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
+            write_folder_response(&mut xml, &folder, &href, fid, oc_id.as_deref(), &username, &folder_favs)
+                .map_err(std::io::Error::other)?;
+        }
+        yield Bytes::from(buf);
+
+        // ── Children (only if Depth != 0) ────────────────────────────
+        if depth != "0" {
+            // Files in pages.
+            let mut offset: i64 = 0;
+            loop {
+                let batch = file_service
+                    .list_files_batch_with_perms(Some(&folder.id), user_id, offset, PROPFIND_BATCH_SIZE)
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                if batch.is_empty() {
+                    break;
+                }
+                let batch_len = batch.len();
+
+                // Per-page enrichment: favorites + oc:fileids, two batch queries.
+                let favs = if let Some(fav) = fav_svc {
+                    let items: Vec<(&str, &str)> =
+                        batch.iter().map(|f| (f.id.as_str(), "file")).collect();
+                    fav.batch_check_favorites(user_id, &items).await.unwrap_or_default()
+                } else {
+                    HashSet::new()
+                };
+                let file_uuids: Vec<String> = batch.iter().map(|f| f.id.clone()).collect();
+                let (file_id_map, _) = batch_resolve_ids(file_id_svc, &file_uuids, &[]).await;
+
+                let mut chunk = Vec::with_capacity(batch_len * 1024);
+                {
+                    let mut xml = Writer::new(&mut chunk);
+                    for file in &batch {
+                        let child_sub = if subpath.is_empty() {
+                            file.name.clone()
+                        } else {
+                            format!("{}/{}", subpath.trim_end_matches('/'), file.name)
+                        };
+                        let href = nc_href(&username, &child_sub);
+                        let fid = file_id_map.get(&file.id).copied();
+                        let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
+                        write_file_response(&mut xml, file, &href, fid, oc_id.as_deref(), &username, &favs)
+                            .map_err(std::io::Error::other)?;
+                    }
+                }
+                yield Bytes::from(chunk);
+
+                if (batch_len as i64) < PROPFIND_BATCH_SIZE {
+                    break;
+                }
+                offset += batch_len as i64;
+            }
+
+            // Subfolders in pages — also collections, same trailing-slash rule.
+            let mut page = 0usize;
+            loop {
+                let pag = PaginationRequestDto {
+                    page,
+                    page_size: PROPFIND_BATCH_SIZE as usize,
+                };
+                let result = folder_service
+                    .list_folders_paginated_with_perms(Some(&folder.id), user_id, &pag)
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                if result.items.is_empty() {
+                    break;
+                }
+
+                let favs = if let Some(fav) = fav_svc {
+                    let items: Vec<(&str, &str)> =
+                        result.items.iter().map(|sf| (sf.id.as_str(), "folder")).collect();
+                    fav.batch_check_favorites(user_id, &items).await.unwrap_or_default()
+                } else {
+                    HashSet::new()
+                };
+                let folder_uuids: Vec<String> = result.items.iter().map(|sf| sf.id.clone()).collect();
+                let (_, sub_id_map) = batch_resolve_ids(file_id_svc, &[], &folder_uuids).await;
+
+                let mut chunk = Vec::with_capacity(result.items.len() * 1024);
+                {
+                    let mut xml = Writer::new(&mut chunk);
+                    for sf in &result.items {
+                        let child_sub = if subpath.is_empty() {
+                            sf.name.clone()
+                        } else {
+                            format!("{}/{}", subpath.trim_end_matches('/'), sf.name)
+                        };
+                        let href = nc_collection_href(&username, &child_sub);
+                        let fid = sub_id_map.get(&sf.id).copied();
+                        let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
+                        write_folder_response(&mut xml, sf, &href, fid, oc_id.as_deref(), &username, &favs)
+                            .map_err(std::io::Error::other)?;
+                    }
+                }
+                let has_more = result.pagination.has_next;
+                yield Bytes::from(chunk);
+
+                if !has_more {
+                    break;
+                }
+                page += 1;
+            }
+        }
+
+        // ── </d:multistatus> ─────────────────────────────────────────
+        let mut buf = Vec::with_capacity(32);
+        {
+            let mut xml = Writer::new(&mut buf);
+            xml.write_event(Event::End(BytesEnd::new("d:multistatus")))
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        yield Bytes::from(buf);
+    };
+
+    use futures::TryStreamExt;
+    let stream = stream
+        .map_err(|e: std::io::Error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) });
+
+    Response::builder()
+        .status(StatusCode::MULTI_STATUS)
+        .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
+        .body(Body::from_stream(stream))
+        .unwrap()
 }
 
 pub fn write_folder_response<W: std::io::Write>(
@@ -1273,20 +1360,24 @@ pub fn write_text_element<W: std::io::Write>(
     Ok(())
 }
 
-pub async fn resolve_file_id(
+/// Resolve every `oc:fileid` for a listing in two batch queries (one per
+/// object type) instead of one INSERT round-trip per child. Returns
+/// `(file_map, folder_map)` keyed by object UUID; entries are absent when the
+/// service is disabled or an id can't be resolved, mirroring the previous
+/// per-call `Option` behaviour. The two batches run concurrently.
+pub async fn batch_resolve_ids(
     svc: Option<&Arc<NextcloudFileIdService>>,
-    file_uuid: &str,
-) -> Option<i64> {
-    let svc = svc?;
-    svc.get_or_create_file_id(file_uuid).await.ok()
-}
-
-pub async fn resolve_folder_id(
-    svc: Option<&Arc<NextcloudFileIdService>>,
-    folder_uuid: &str,
-) -> Option<i64> {
-    let svc = svc?;
-    svc.get_or_create_folder_id(folder_uuid).await.ok()
+    file_uuids: &[String],
+    folder_uuids: &[String],
+) -> (HashMap<String, i64>, HashMap<String, i64>) {
+    let Some(svc) = svc else {
+        return (HashMap::new(), HashMap::new());
+    };
+    let (files, folders) = tokio::join!(
+        svc.get_or_create_file_ids(file_uuids),
+        svc.get_or_create_folder_ids(folder_uuids),
+    );
+    (files.unwrap_or_default(), folders.unwrap_or_default())
 }
 
 pub fn format_oc_id(id: i64, svc: Option<&Arc<NextcloudFileIdService>>) -> String {

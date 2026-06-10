@@ -402,6 +402,26 @@ impl CalendarStoragePort for CalendarStorageAdapter {
         Ok(CalendarEventDto::from(event))
     }
 
+    async fn find_event_by_ical_uid(
+        &self,
+        calendar_id: &str,
+        ical_uid: &str,
+    ) -> Result<Option<CalendarEventDto>, DomainError> {
+        let uuid = Uuid::parse_str(calendar_id).map_err(|_| {
+            DomainError::new(
+                ErrorKind::InvalidInput,
+                "Calendar",
+                "Invalid calendar ID format",
+            )
+        })?;
+
+        let event = self
+            .event_repository
+            .find_event_by_ical_uid(&uuid, ical_uid)
+            .await?;
+        Ok(event.map(CalendarEventDto::from))
+    }
+
     async fn list_events_by_calendar(
         &self,
         calendar_id: &str,

@@ -15,6 +15,7 @@ import { loadFiles } from '../../app/filesView.js';
 import { app } from '../../app/state.js';
 import { showConfirmDialog, ui } from '../../app/ui.js';
 import { i18n } from '../../core/i18n.js';
+import { buildBatchDownloadUrl, triggerBrowserDownload } from '../../utils/download.js';
 import { favorites } from '../library/favorites.js';
 import { contextMenus } from './contextMenus.js';
 import { getAuthHeaders } from './fileOperations.js';
@@ -126,10 +127,14 @@ const batchToolbar = {
     clear() {
         this._selected.clear();
         this._lastClickedIndex = -1;
-        document.querySelectorAll('.file-item.selected').forEach((el) => {
+        // Scope the DOM sweep to the files list — the only container this
+        // toolbar manages (see `selectAll`) — instead of the whole document,
+        // and only touch checkboxes that are actually checked.
+        const list = document.getElementById('files-list');
+        list?.querySelectorAll('.file-item.selected').forEach((el) => {
             el.classList.remove('selected');
         });
-        document.querySelectorAll('.item-checkbox').forEach((cb) => {
+        list?.querySelectorAll('.item-checkbox:checked').forEach((cb) => {
             /** @type {HTMLInputElement} */ (cb).checked = false;
         });
         // Reset the active component's internal selection state without going
@@ -173,15 +178,16 @@ const batchToolbar = {
         /** @type {Array<string>} */
         const folderIds = [];
 
-        // TODO optimize & check if _selected is a better use
-        /** @type {NodeListOf<HTMLDivElement>} */ (document.querySelectorAll(`div.file-item.selected`)).forEach((item) => {
-            if (item.dataset.fileId) {
-                fileIds.push(item.dataset.fileId);
-            } else {
-                // ignore selectedItem if this is the target
-                if (targtFolderId && targtFolderId !== item.dataset.folderId) folderIds.push(item.dataset.folderId);
+        // `_selected` is the source of truth (every selection path keeps it
+        // in sync) — no need to re-derive the selection from a DOM scan.
+        for (const sel of this._selected.values()) {
+            if (sel.type === 'file') {
+                fileIds.push(sel.id);
+            } else if (targtFolderId && targtFolderId !== sel.id) {
+                // ignore the selected folder if it is the drop target itself
+                folderIds.push(sel.id);
             }
-        });
+        }
 
         return {
             fileIds: fileIds,
@@ -454,10 +460,22 @@ const batchToolbar = {
 
         ui.showNotification('Preparing download', 'Creating ZIP archive...');
 
-        try {
-            const fileIds = items.filter((i) => i.type === 'file').map((i) => i.id);
-            const folderIds = items.filter((i) => i.type === 'folder').map((i) => i.id);
+        const fileIds = items.filter((i) => i.type === 'file').map((i) => i.id);
+        const folderIds = items.filter((i) => i.type === 'folder').map((i) => i.id);
+        const zipName = `oxicloud-download-${Date.now()}.zip`;
 
+        // Browser-native download via the GET variant of the endpoint: the
+        // ZIP streams to disk instead of being buffered whole in the tab's
+        // memory (a multi-GB selection used to risk crashing the tab).
+        const url = buildBatchDownloadUrl(fileIds, folderIds);
+        if (url.length <= 4000) {
+            triggerBrowserDownload(url, zipName);
+            return;
+        }
+
+        // Selections too large for a URL (~100+ items) keep the buffered
+        // POST path — the id list only fits in a request body.
+        try {
             const response = await fetch('/api/batch/download', {
                 method: 'POST',
                 headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
@@ -467,14 +485,14 @@ const batchToolbar = {
             if (!response.ok) throw new Error(`Server returned ${response.status}`);
 
             const blob = await response.blob();
-            const url = URL.createObjectURL(blob);
+            const blobUrl = URL.createObjectURL(blob);
             const link = document.createElement('a');
-            link.href = url;
-            link.download = `oxicloud-download-${Date.now()}.zip`;
+            link.href = blobUrl;
+            link.download = zipName;
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-            URL.revokeObjectURL(url);
+            URL.revokeObjectURL(blobUrl);
         } catch (e) {
             console.error('Batch download error:', e);
             ui.showNotification('Error', 'Could not download selected items');

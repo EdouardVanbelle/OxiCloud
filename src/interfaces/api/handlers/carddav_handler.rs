@@ -295,19 +295,14 @@ async fn handle_propfind(
                 .body(Body::from(response_body))
                 .unwrap())
         } else {
-            // Individual contact .vcf
+            // Individual contact .vcf — indexed lookup by vCard UID.
             let contact_file = parts[1];
             let contact_uid = contact_file.trim_end_matches(".vcf");
 
-            // Look up by UID across all contacts in this address book
-            let contacts = contact_svc
-                .list_contacts(address_book_id, user.id)
+            let contact = contact_svc
+                .get_contact_by_uid(address_book_id, contact_uid, user.id)
                 .await
-                .map_err(|e| AppError::internal_error(format!("Failed to list contacts: {}", e)))?;
-
-            let contact = contacts
-                .iter()
-                .find(|c| c.uid == contact_uid)
+                .map_err(|e| AppError::internal_error(format!("Failed to look up contact: {}", e)))?
                 .ok_or_else(|| {
                     AppError::not_found(format!("Contact not found: {}", contact_uid))
                 })?;
@@ -322,8 +317,8 @@ async fn handle_propfind(
             let mut response_body = Vec::new();
             CardDavAdapter::generate_contacts_response(
                 &mut response_body,
-                std::slice::from_ref(contact),
-                &[(contact.uid.clone(), contact_to_vcard(contact))],
+                std::slice::from_ref(&contact),
+                &[(contact.uid.clone(), contact_to_vcard(&contact))],
                 &report,
                 base_href,
             )
@@ -483,13 +478,13 @@ async fn handle_put(
     // Extract UID from vCard
     let vcard_uid = extract_uid_from_vcard(&vcard_data);
 
-    // Check if contact already exists
+    // Check if contact already exists — indexed single-row lookup
+    // (listing the whole address book made imports O(N²)).
     let existing = if let Some(ref uid) = vcard_uid {
-        let contacts = contact_svc
-            .list_contacts(address_book_id, user.id)
+        contact_svc
+            .get_contact_by_uid(address_book_id, uid, user.id)
             .await
-            .unwrap_or_default();
-        contacts.into_iter().find(|c| c.uid == *uid)
+            .unwrap_or_default()
     } else {
         None
     };
@@ -579,21 +574,17 @@ async fn handle_get(
             .body(Body::from(vcf_data))
             .unwrap())
     } else {
-        // GET on individual contact
+        // GET on individual contact — indexed lookup by vCard UID.
         let contact_file = parts[1];
         let contact_uid = contact_file.trim_end_matches(".vcf");
 
-        let contacts = contact_svc
-            .list_contacts(address_book_id, user.id)
+        let contact = contact_svc
+            .get_contact_by_uid(address_book_id, contact_uid, user.id)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to list contacts: {}", e)))?;
-
-        let contact = contacts
-            .iter()
-            .find(|c| c.uid == contact_uid)
+            .map_err(|e| AppError::internal_error(format!("Failed to look up contact: {}", e)))?
             .ok_or_else(|| AppError::not_found(format!("Contact not found: {}", contact_uid)))?;
 
-        let vcard = contact_to_vcard(contact);
+        let vcard = contact_to_vcard(&contact);
 
         Ok(Response::builder()
             .status(StatusCode::OK)
@@ -632,18 +623,14 @@ async fn handle_delete(
                 AppError::internal_error(format!("Failed to delete address book: {}", e))
             })?;
     } else {
-        // Delete contact
+        // Delete contact — indexed lookup by vCard UID.
         let contact_file = parts[1];
         let contact_uid = contact_file.trim_end_matches(".vcf");
 
-        let contacts = contact_svc
-            .list_contacts(address_book_id, user.id)
+        let contact = contact_svc
+            .get_contact_by_uid(address_book_id, contact_uid, user.id)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to list contacts: {}", e)))?;
-
-        let contact = contacts
-            .iter()
-            .find(|c| c.uid == contact_uid)
+            .map_err(|e| AppError::internal_error(format!("Failed to look up contact: {}", e)))?
             .ok_or_else(|| AppError::not_found(format!("Contact not found: {}", contact_uid)))?;
 
         contact_svc

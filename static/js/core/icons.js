@@ -618,26 +618,52 @@ function replaceIconsInElement(container) {
 
 function oxiIconsInit() {
     let raf = 0;
+    /**
+     * Subtree roots added since the last animation frame. Scanning only
+     * these (instead of the whole document) keeps the cost proportional
+     * to what was inserted, not to the total DOM size.
+     * @type {Set<Element>}
+     */
+    let pendingRoots = new Set();
+
     const scan = () => {
         raf = 0;
-        replaceIconsInElement();
+        const roots = pendingRoots;
+        pendingRoots = new Set();
+        for (const root of roots) {
+            if (!root.isConnected) continue; // removed (or replaced) meanwhile
+            if (root.matches('i[class*="fa-"]')) {
+                // The inserted node IS the icon — scan via its parent so the
+                // descendant selector pass picks it up.
+                replaceIconsInElement(root.parentElement || document.body);
+            } else {
+                replaceIconsInElement(root);
+            }
+        }
     };
 
     // Initial sweep once the DOM is ready
+    const fullSweep = () => replaceIconsInElement();
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', scan);
+        document.addEventListener('DOMContentLoaded', fullSweep);
     } else {
-        scan();
+        fullSweep();
     }
 
-    // Observe future mutations (dynamic renders, modals, etc.)
+    // Observe future mutations (dynamic renders, modals, etc.). Only element
+    // insertions can carry icons — text-node churn (progress counters,
+    // notification text) no longer triggers any scan at all.
     new MutationObserver((mutations) => {
-        if (raf) return;
-        for (let i = 0; i < mutations.length; i++) {
-            if (mutations[i].addedNodes.length) {
-                raf = requestAnimationFrame(scan);
-                return;
+        for (const mutation of mutations) {
+            for (let i = 0; i < mutation.addedNodes.length; i++) {
+                const node = mutation.addedNodes[i];
+                if (node.nodeType === Node.ELEMENT_NODE) {
+                    pendingRoots.add(/** @type {Element} */ (node));
+                }
             }
+        }
+        if (!raf && pendingRoots.size) {
+            raf = requestAnimationFrame(scan);
         }
     }).observe(document.documentElement, { childList: true, subtree: true });
 }

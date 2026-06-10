@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::application::ports::auth_ports::UserStoragePort;
 use crate::common::errors::DomainError;
-use crate::domain::entities::user::{User, UserRole};
+use crate::domain::entities::user::{User, UserFlags, UserRole};
 use crate::domain::repositories::user_repository::{
     StorageStats, UserRepository, UserRepositoryError, UserRepositoryResult,
 };
@@ -49,6 +49,40 @@ impl UserPgRepository {
             }
             _ => UserRepositoryError::DatabaseError(format!("Database error: {}", err)),
         }
+    }
+
+    /// Fetch only the authorization-relevant flags of a user. Not part of
+    /// the `UserRepository` trait — called directly from
+    /// `AuthApplicationService::get_user_flags`.
+    ///
+    /// Deliberately selects three tiny columns instead of the full row:
+    /// the full-row SELECT includes `image` (a data URI of up to 512 KiB),
+    /// which per-request middleware guards were paying on every WebDAV /
+    /// CalDAV / CardDAV request just to read `is_external` or `role`.
+    pub async fn get_user_flags(&self, id: Uuid) -> UserRepositoryResult<UserFlags> {
+        let row = sqlx::query(
+            r#"
+            SELECT role::text as role_text, is_external, active
+            FROM auth.users
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .fetch_one(&*self.pool)
+        .await
+        .map_err(Self::map_sqlx_error)?;
+
+        let role_str: Option<String> = row.try_get("role_text").unwrap_or(None);
+        let role = match role_str.as_deref() {
+            Some("admin") => UserRole::Admin,
+            _ => UserRole::User,
+        };
+
+        Ok(UserFlags {
+            role,
+            is_external: row.get("is_external"),
+            active: row.get("active"),
+        })
     }
 
     /// Updates a user's profile image (URL or data URI). Not part of the

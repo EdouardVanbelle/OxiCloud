@@ -87,6 +87,14 @@ pub trait CalendarStoragePort: Send + Sync + 'static {
     ) -> Result<CalendarEventDto, DomainError>;
     async fn delete_event(&self, event_id: &str) -> Result<(), DomainError>;
     async fn get_event(&self, event_id: &str) -> Result<CalendarEventDto, DomainError>;
+    /// Indexed single-row lookup by iCalendar UID — the CalDAV
+    /// object-resource paths must use this instead of listing the whole
+    /// calendar (every row + its `ical_data`) and filtering client-side.
+    async fn find_event_by_ical_uid(
+        &self,
+        calendar_id: &str,
+        ical_uid: &str,
+    ) -> Result<Option<CalendarEventDto>, DomainError>;
     async fn list_events_by_calendar(
         &self,
         calendar_id: &str,
@@ -180,6 +188,15 @@ pub trait CalendarUseCase: Send + Sync + 'static {
         event_id: &str,
         user_id: Uuid,
     ) -> Result<CalendarEventDto, DomainError>;
+    /// Resolve one event by its iCalendar UID (the identifier CalDAV
+    /// object resources are addressed by). `Ok(None)` when no event with
+    /// that UID exists in the calendar.
+    async fn get_event_by_ical_uid(
+        &self,
+        calendar_id: &str,
+        ical_uid: &str,
+        user_id: Uuid,
+    ) -> Result<Option<CalendarEventDto>, DomainError>;
     async fn list_events(
         &self,
         calendar_id: &str,

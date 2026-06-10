@@ -14,7 +14,7 @@ use crate::common::di::AppState;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::{AuthUser, CurrentUser};
 use crate::interfaces::nextcloud::webdav_handler::{
-    format_oc_id, resolve_file_id, resolve_folder_id, write_text_element,
+    batch_resolve_ids, format_oc_id, write_text_element,
 };
 
 const HEADER_DAV: HeaderName = HeaderName::from_static("dav");
@@ -198,6 +198,7 @@ fn strip_home_prefix<'a>(original_path: &'a str, username: &str) -> &'a str {
 
 use crate::application::dtos::trash_dto::TrashedItemDto;
 use crate::application::services::nextcloud_file_id_service::NextcloudFileIdService;
+use std::collections::HashMap;
 
 /// Generate a complete Nextcloud-compatible multistatus XML response for the trashbin.
 async fn write_trashbin_multistatus<W: std::io::Write>(
@@ -219,9 +220,25 @@ async fn write_trashbin_multistatus<W: std::io::Write>(
     // Root container entry for the trash collection itself.
     write_trash_root_response(&mut xml, username)?;
 
+    // Pre-resolve every oc:fileid in two batch queries by object type (was one
+    // INSERT round-trip per item). File and folder UUIDs are disjoint, so the
+    // two maps merge cleanly into one keyed by original_id.
+    let mut file_uuids: Vec<String> = Vec::new();
+    let mut folder_uuids: Vec<String> = Vec::new();
+    for item in items {
+        if item.item_type == "folder" {
+            folder_uuids.push(item.original_id.clone());
+        } else {
+            file_uuids.push(item.original_id.clone());
+        }
+    }
+    let (mut id_map, folder_id_map) =
+        batch_resolve_ids(file_id_svc, &file_uuids, &folder_uuids).await;
+    id_map.extend(folder_id_map);
+
     // Individual trashed items.
     for item in items {
-        write_trash_item_response(&mut xml, item, username, file_id_svc).await?;
+        write_trash_item_response(&mut xml, item, username, file_id_svc, &id_map)?;
     }
 
     xml.write_event(Event::End(BytesEnd::new("d:multistatus")))
@@ -267,11 +284,12 @@ fn write_trash_root_response<W: std::io::Write>(
 }
 
 /// Write a single trashed item as a `<d:response>` element.
-async fn write_trash_item_response<W: std::io::Write>(
+fn write_trash_item_response<W: std::io::Write>(
     xml: &mut Writer<W>,
     item: &TrashedItemDto,
     username: &str,
     file_id_svc: Option<&Arc<NextcloudFileIdService>>,
+    id_map: &HashMap<String, i64>,
 ) -> Result<(), String> {
     xml.write_event(Event::Start(BytesStart::new("d:response")))
         .map_err(|e| e.to_string())?;
@@ -318,12 +336,8 @@ async fn write_trash_item_response<W: std::io::Write>(
     // d:getcontentlength
     write_text_element(xml, "d:getcontentlength", "0")?;
 
-    // oc:fileid and oc:id — resolve numeric ID via file_id service
-    let file_id = if item.item_type == "folder" {
-        resolve_folder_id(file_id_svc, &item.original_id).await
-    } else {
-        resolve_file_id(file_id_svc, &item.original_id).await
-    };
+    // oc:fileid and oc:id — resolved up front in a batch query.
+    let file_id = id_map.get(&item.original_id).copied();
     if let Some(id) = file_id {
         write_text_element(xml, "oc:fileid", &id.to_string())?;
         let oc_id = format_oc_id(id, file_id_svc);

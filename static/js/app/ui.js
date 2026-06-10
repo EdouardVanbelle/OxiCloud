@@ -14,6 +14,7 @@ import { fileOps } from '../features/files/fileOperations.js';
 import { inlineViewer } from '../features/files/inlineViewer.js';
 import { wopiEditor } from '../features/files/wopiEditor.js';
 import { recent } from '../features/library/recent.js';
+import { buildBatchDownloadUrl } from '../utils/download.js';
 import { positionMenu } from '../utils/menuPosition.js';
 import { loadFiles } from './filesView.js';
 import { updateHistory } from './main.js';
@@ -774,7 +775,7 @@ const ui = {
                     if (item?.type === 'file') fileIds.push(item.id);
                     else if (item) folderIds.push(item.id);
                 });
-                downloadUrl = `${window.location.origin}/api/batch/download?file_ids=${fileIds.join(',')}&folder_ids=${folderIds.join(',')}`;
+                downloadUrl = `${window.location.origin}${buildBatchDownloadUrl(fileIds, folderIds)}`;
             }
 
             e.dataTransfer.setData('DownloadURL', `application/octet-stream:${nameEncoded}:${downloadUrl}`);
@@ -1099,6 +1100,69 @@ function initRubberBandSelection() {
     let active = false;
     let startX = 0,
         startY = 0;
+    let curX = 0,
+        curY = 0;
+    let rafId = 0;
+
+    /**
+     * Card geometry snapshot taken once per drag (and rebuilt on scroll).
+     * Comparing the lasso against these cached rects means the per-frame
+     * pass performs zero DOM reads — no forced reflow per card.
+     * @type {Array<{el: HTMLElement, left: number, top: number, right: number,
+     *               bottom: number, info: ReturnType<typeof batchToolbar._extractInfo>,
+     *               selected: boolean}> | null}
+     */
+    let cardCache = null;
+
+    const buildCardCache = () => {
+        cardCache = [];
+        document.querySelectorAll('#files-list .file-item').forEach((card) => {
+            const el = /** @type {HTMLElement} */ (card);
+            const r = el.getBoundingClientRect();
+            cardCache.push({
+                el,
+                left: r.left,
+                top: r.top,
+                right: r.right,
+                bottom: r.bottom,
+                info: batchToolbar ? batchToolbar._extractInfo(/** @type {HTMLDivElement} */ (el)) : null,
+                selected: el.classList.contains('selected')
+            });
+        });
+    };
+
+    // Scrolling mid-drag shifts every viewport rect — drop the snapshot so
+    // the next frame rebuilds it.
+    const invalidateCardCache = () => {
+        cardCache = null;
+    };
+
+    /** One classification pass per animation frame (cached rects only). */
+    const classifyCards = () => {
+        rafId = 0;
+        if (!cardCache) buildCardCache();
+
+        const left = Math.min(startX, curX);
+        const top = Math.min(startY, curY);
+        const right = Math.max(startX, curX);
+        const bottom = Math.max(startY, curY);
+
+        for (const entry of cardCache) {
+            const intersects = entry.left < right && entry.right > left && entry.top < bottom && entry.bottom > top;
+            if (intersects === entry.selected) continue;
+            entry.selected = intersects;
+            entry.el.classList.toggle('selected', intersects);
+
+            // Sync with batchToolbar module (only on state change)
+            if (batchToolbar && entry.info) {
+                if (intersects) {
+                    batchToolbar.select(entry.info.id, entry.info.name, entry.info.type, entry.info.parentId);
+                } else {
+                    batchToolbar.deselect(entry.info.id);
+                }
+            }
+        }
+    };
 
     // We listen on the whole files-container (covers grid + empty space)
     const container = document.querySelector('.files-container') || document.getElementById('files-list');
@@ -1123,6 +1187,10 @@ function initRubberBandSelection() {
         active = true;
         startX = e.clientX;
         startY = e.clientY;
+        curX = startX;
+        curY = startY;
+        cardCache = null; // built lazily on the first classification frame
+        document.addEventListener('scroll', invalidateCardCache, { capture: true, passive: true });
 
         selRect.style.left = `${startX}px`;
         selRect.style.top = `${startY}px`;
@@ -1136,8 +1204,8 @@ function initRubberBandSelection() {
     document.addEventListener('mousemove', (e) => {
         if (!active) return;
 
-        const curX = e.clientX;
-        const curY = e.clientY;
+        curX = e.clientX;
+        curY = e.clientY;
 
         const left = Math.min(startX, curX);
         const top = Math.min(startY, curY);
@@ -1149,41 +1217,27 @@ function initRubberBandSelection() {
             selRect.style.display = 'block';
         }
 
+        // Style writes only — no layout reads here. The card highlighting
+        // runs at most once per frame against the cached geometry.
         selRect.style.left = `${left}px`;
         selRect.style.top = `${top}px`;
         selRect.style.width = `${width}px`;
         selRect.style.height = `${height}px`;
 
-        // Highlight cards that intersect with the rectangle
-        const rectBounds = { left, top, right: left + width, bottom: top + height };
-
-        document.querySelectorAll('#files-list .file-item').forEach((card) => {
-            const cardRect = card.getBoundingClientRect();
-            const intersects =
-                cardRect.left < rectBounds.right && cardRect.right > rectBounds.left && cardRect.top < rectBounds.bottom && cardRect.bottom > rectBounds.top;
-
-            if (intersects) {
-                card.classList.add('selected');
-
-                // Sync with batchToolbar module
-                if (batchToolbar) {
-                    const info = batchToolbar._extractInfo(/** @type {HTMLDivElement} */ (card));
-                    if (info) batchToolbar.select(info.id, info.name, info.type, info.parentId);
-                }
-            } else {
-                card.classList.remove('selected');
-                // Deselect from batchToolbar module
-                if (batchToolbar) {
-                    const info = batchToolbar._extractInfo(/** @type {HTMLDivElement} */ (card));
-                    if (info) batchToolbar.deselect(info.id);
-                }
-            }
-        });
+        if (!rafId) rafId = requestAnimationFrame(classifyCards);
     });
 
     document.addEventListener('mouseup', () => {
         if (!active) return;
         active = false;
+        document.removeEventListener('scroll', invalidateCardCache, { capture: true });
+        // Apply the still-pending classification so the final lasso
+        // position is what determines the selection.
+        if (rafId) {
+            cancelAnimationFrame(rafId);
+            classifyCards();
+        }
+        cardCache = null;
         const hadSelection = selRect.style.display === 'block';
         selRect.style.display = 'none';
         // Update the batch bar after rubber band selection completes

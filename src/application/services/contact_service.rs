@@ -780,6 +780,22 @@ impl ContactUseCase for ContactService {
         Ok(ContactDto::from(contact))
     }
 
+    async fn get_contact_by_uid(
+        &self,
+        address_book_id: &str,
+        uid: &str,
+        user_id: Uuid,
+    ) -> Result<Option<ContactDto>, DomainError> {
+        let id = Uuid::parse_str(address_book_id)
+            .map_err(|_| DomainError::validation_error("Invalid address book ID format"))?;
+
+        // Check if user has access to the address book
+        self.check_address_book_access(&id, &user_id).await?;
+
+        let contact = self.contact_repository.get_contact_by_uid(&id, uid).await?;
+        Ok(contact.map(ContactDto::from))
+    }
+
     async fn list_contacts(
         &self,
         address_book_id: &str,

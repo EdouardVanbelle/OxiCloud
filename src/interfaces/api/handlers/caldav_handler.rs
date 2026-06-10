@@ -608,12 +608,13 @@ async fn handle_put(
 
     let ical_uid = extract_uid_from_ical(&ical_data);
 
+    // Indexed single-row lookup — listing the whole calendar (every row
+    // with its ical_data) to find one UID made imports O(N²).
     let existing = if let Some(ref uid) = ical_uid {
-        let events = calendar_service
-            .list_events(calendar_id, None, None, user.id)
+        calendar_service
+            .get_event_by_ical_uid(calendar_id, uid, user.id)
             .await
-            .unwrap_or_default();
-        events.into_iter().find(|e| e.ical_uid == *uid)
+            .unwrap_or_default()
     } else {
         None
     };
@@ -704,21 +705,17 @@ async fn handle_get(
             .body(Body::from(ical))
             .unwrap())
     } else {
-        // GET on individual event
+        // GET on individual event — indexed lookup by iCalendar UID.
         let event_file = parts[1];
         let ical_uid = event_file.trim_end_matches(".ics");
 
-        let events = calendar_service
-            .list_events(calendar_id, None, None, user.id)
+        let event = calendar_service
+            .get_event_by_ical_uid(calendar_id, ical_uid, user.id)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to list events: {}", e)))?;
-
-        let event = events
-            .iter()
-            .find(|e| e.ical_uid == ical_uid)
+            .map_err(|e| AppError::internal_error(format!("Failed to look up event: {}", e)))?
             .ok_or_else(|| AppError::not_found(format!("Event not found: {}", ical_uid)))?;
 
-        let ical = generate_event_ical(event);
+        let ical = generate_event_ical(&event);
 
         Ok(Response::builder()
             .status(StatusCode::OK)
@@ -813,14 +810,11 @@ async fn handle_delete(
         let event_file = parts[1];
         let ical_uid = event_file.trim_end_matches(".ics");
 
-        let events = calendar_service
-            .list_events(calendar_id, None, None, user.id)
+        // Indexed lookup by iCalendar UID instead of listing the calendar.
+        let event = calendar_service
+            .get_event_by_ical_uid(calendar_id, ical_uid, user.id)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to list events: {}", e)))?;
-
-        let event = events
-            .iter()
-            .find(|e| e.ical_uid == ical_uid)
+            .map_err(|e| AppError::internal_error(format!("Failed to look up event: {}", e)))?
             .ok_or_else(|| AppError::not_found(format!("Event not found: {}", ical_uid)))?;
 
         calendar_service

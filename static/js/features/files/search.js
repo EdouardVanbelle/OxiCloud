@@ -7,7 +7,7 @@
  * displays the enriched results returned by the server.
  */
 
-import { addItem as filesViewAddItem, loadFiles } from '../../app/filesView.js';
+import { loadFiles, renderItems } from '../../app/filesView.js';
 import { app } from '../../app/state.js';
 import { ui } from '../../app/ui.js';
 import { getAuthHeaders } from './fileOperations.js';
@@ -198,15 +198,10 @@ const search = {
             return;
         }
 
-        // Render folders (server-provided enriched data)
-        results.folders.forEach((folder) => {
-            filesViewAddItem(folder);
-        });
-
-        // Render files (server-provided enriched data)
-        results.files.forEach((file) => {
-            filesViewAddItem(file);
-        });
+        // Render the whole result set (server-provided enriched data) in one
+        // batched pass — per-item inserts would trigger a DOM scan, a smooth
+        // scroll and a highlight pulse for each of up to 100 rows.
+        renderItems([...results.folders, ...results.files]);
     },
 
     /**

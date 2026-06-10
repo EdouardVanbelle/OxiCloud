@@ -30,6 +30,7 @@ use crate::common::di::AppState;
 use crate::infrastructure::services::path_resolver_service::ResolvedResource;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::{AuthUser, CurrentUser};
+use crate::interfaces::range_requests::{not_modified_response, range_response};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use std::sync::Arc;
 
@@ -127,7 +128,9 @@ const MAX_MKCOL_BODY: usize = 4096;
 
 /// Batch size for streaming PROPFIND — files and folders are fetched in pages
 /// of this size to keep memory constant regardless of folder contents.
-const PROPFIND_BATCH_SIZE: i64 = 500;
+/// `pub(crate)` so the NextCloud PROPFIND handler streams with the same
+/// page size.
+pub(crate) const PROPFIND_BATCH_SIZE: i64 = 500;
 
 // ────────────────────────────────────────────────────────────────────────
 // Security helpers (Sol.1 — handler-level user extraction & ownership guard)
@@ -767,6 +770,21 @@ async fn handle_get(
         f
     };
 
+    let etag = format!("\"{}\"", file.etag);
+
+    // Conditional GET — clients revalidating a cached copy get a 304
+    // instead of the full body.
+    if let Some(resp) = not_modified_response(req.headers(), &etag) {
+        return Ok(resp);
+    }
+
+    // Range Requests — mount-style clients (rclone, davfs2, Finder) read
+    // by ranges; serve 206/416 instead of re-sending the whole file on
+    // every seek or resume.
+    if let Some(resp) = range_response(req.headers(), &file, &etag, file_retrieval_service).await {
+        return Ok(resp);
+    }
+
     // Stream file content — constant ~64 KB memory regardless of file size
     let stream = file_retrieval_service
         .get_file_stream(&file.id)
@@ -778,7 +796,8 @@ async fn handle_get(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, &*file.mime_type)
         .header(header::CONTENT_LENGTH, file.size)
-        .header(header::ETAG, format!("\"{}\"", file.etag))
+        .header(header::ETAG, etag)
+        .header(header::ACCEPT_RANGES, "bytes")
         .header(
             header::LAST_MODIFIED,
             chrono::DateTime::<Utc>::from_timestamp(file.created_at as i64, 0)
