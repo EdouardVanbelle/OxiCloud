@@ -100,13 +100,16 @@ front-check-i18n:
 
 # end-to-end Playwright tests
 front-test:
+    cargo build
     cd tests/e2e && npm test
 
 # update images snapshots
 front-test-update-snapshot:
+    cargo build
     cd tests/e2e && npm test -- --update-snapshots=all
 
 # Hurl API functional tests (starts postgres + server, tears down after)
 api-test:
+    cargo build
     bash tests/api/run.sh
     bash tests/webdav/run.sh
