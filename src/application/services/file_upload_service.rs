@@ -182,6 +182,69 @@ impl FileUploadUseCase for FileUploadService {
         Ok(dto)
     }
 
+    /// Dedup-create / upload-precheck flow. See trait docs for the
+    /// caller-owns-hash anti-enumeration scope reasoning.
+    async fn dedup_create_file_with_perms(
+        &self,
+        name: String,
+        folder_id: Option<String>,
+        content_type: String,
+        size: u64,
+        blob_hash: String,
+        caller_id: uuid::Uuid,
+    ) -> Result<FileDto, DomainError> {
+        // Anti-enumeration scope: the caller can only short-circuit
+        // a body upload when they already own a file with this hash.
+        // Cross-user matches are invisible — hash probing cannot leak
+        // other tenants' content.
+        let owns = self
+            .file_write
+            .caller_owns_blob(caller_id, &blob_hash)
+            .await?;
+        if !owns {
+            tracing::info!(
+                target: "audit",
+                event = "dedup_create.denied",
+                reason = "blob_not_in_caller_scope",
+                caller_id = %caller_id,
+                hash_prefix = &blob_hash[..12.min(blob_hash.len())],
+                "🚪 dedup-create denied: caller doesn't own a file with this hash"
+            );
+            return Err(DomainError::not_found(
+                "Blob",
+                "no file with this hash owned by the caller",
+            ));
+        }
+
+        // Repo handles refcount bump + INSERT + rollback-on-failure.
+        let file = self
+            .file_write
+            .create_file_referencing_existing_blob(
+                name,
+                folder_id,
+                caller_id,
+                content_type,
+                size,
+                blob_hash.clone(),
+            )
+            .await?;
+        let dto = FileDto::from(file);
+
+        tracing::info!(
+            "🎯 DEDUP-CREATE HIT: {} (ID: {}, hash: {}) — body upload skipped",
+            dto.name,
+            dto.id,
+            &blob_hash[..12.min(blob_hash.len())]
+        );
+
+        self.maybe_update_storage_usage(&dto);
+        if let Some(hook) = &self.file_lifecycle_hook {
+            // `is_new_blob = false` — this is by definition a dedup hit.
+            hook.on_file_created(&dto.id, &dto.etag, &dto.mime_type, false);
+        }
+        Ok(dto)
+    }
+
     /// Upload from a file already on disk (chunked uploads).
     async fn upload_file_from_path(
         &self,

@@ -634,12 +634,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // element.style.display = 'none'). This is a common pattern
             // for UI state management and cannot be easily migrated to
             // external CSS classes without significant refactoring.
+            //
+            // 'wasm-unsafe-eval' on script-src permits `WebAssembly.compile`
+            // / `WebAssembly.instantiate` calls — required by the
+            // hash-wasm bundle (`static/js/vendors/hash-wasm-blake3.js`)
+            // that the upload precheck uses to compute client-side
+            // BLAKE3. This is the WASM-specific permission, NOT the
+            // broader 'unsafe-eval': it does NOT permit `eval()`,
+            // `new Function()`, or `setTimeout(string, ...)`. CSP has
+            // no per-WASM-blob hash trust mechanism today (no
+            // `'wasm-sha256-...'` directive); the next layer of
+            // hardening is Subresource Integrity on the vendored JS
+            // file itself, which expresses "trust this file's bytes".
+            //
             // frame-src: '*' only matches network schemes, so 'blob:' must be
             // listed explicitly for inline PDF/document viewers.
             // media-src: needed for blob: video/audio playback.
             HeaderValue::from_static(
                 "default-src 'self'; \
-                 script-src 'self'; \
+                 script-src 'self' 'wasm-unsafe-eval'; \
                  worker-src 'self'; \
                  style-src 'self' 'unsafe-inline'; \
                  img-src 'self' data: blob: https:; \

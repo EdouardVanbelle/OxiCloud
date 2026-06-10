@@ -161,6 +161,26 @@ impl FileWritePort for StubFileWritePort {
         Ok(File::default())
     }
 
+    async fn caller_owns_blob(
+        &self,
+        _owner_id: uuid::Uuid,
+        _blob_hash: &str,
+    ) -> Result<bool, DomainError> {
+        Ok(false)
+    }
+
+    async fn create_file_referencing_existing_blob(
+        &self,
+        _name: String,
+        _folder_id: Option<String>,
+        _owner_id: uuid::Uuid,
+        _content_type: String,
+        _size: u64,
+        _blob_hash: String,
+    ) -> Result<File, DomainError> {
+        Ok(File::default())
+    }
+
     async fn move_file(
         &self,
         _file_id: &str,
@@ -492,6 +512,18 @@ impl FileUploadUseCase for StubFileUploadUseCase {
         _content_type: String,
         _file_path: &Path,
         _pre_computed_hash: Option<String>,
+    ) -> Result<FileDto, DomainError> {
+        Ok(FileDto::default())
+    }
+
+    async fn dedup_create_file_with_perms(
+        &self,
+        _name: String,
+        _folder_id: Option<String>,
+        _content_type: String,
+        _size: u64,
+        _blob_hash: String,
+        _caller_id: uuid::Uuid,
     ) -> Result<FileDto, DomainError> {
         Ok(FileDto::default())
     }

@@ -268,6 +268,43 @@ pub trait FileWritePort: Send + Sync + 'static {
         pre_computed_hash: Option<String>,
     ) -> Result<File, DomainError>;
 
+    /// Returns `true` when `owner_id` has at least one row in
+    /// `storage.files` (including trashed) referencing `blob_hash`.
+    ///
+    /// Used by the dedup-create / upload-precheck flow to enforce
+    /// caller-scoped anti-enumeration: short-circuiting a body upload
+    /// because the server "already has" content is only safe when the
+    /// caller already owns a file with that hash. Without this scope,
+    /// hash probing could leak the existence of other users' content.
+    async fn caller_owns_blob(
+        &self,
+        owner_id: uuid::Uuid,
+        blob_hash: &str,
+    ) -> Result<bool, DomainError>;
+
+    /// Creates a new `storage.files` row that references an
+    /// already-existing blob, without writing any body bytes. Used by
+    /// the dedup-create / upload-precheck flow.
+    ///
+    /// Pre-conditions enforced by the CALLER (the service layer):
+    /// - Caller has Create permission on `folder_id`.
+    /// - Caller already owns at least one file with `blob_hash`
+    ///   (verified via [`caller_owns_blob`]).
+    /// - Blob ref-count has been bumped via the dedup service.
+    ///
+    /// On INSERT failure (e.g. unique-name violation) the caller MUST
+    /// roll back the ref-count bump. Returns `DomainError::AlreadyExists`
+    /// for the name-conflict case so the handler can map to 409.
+    async fn create_file_referencing_existing_blob(
+        &self,
+        name: String,
+        folder_id: Option<String>,
+        owner_id: uuid::Uuid,
+        content_type: String,
+        size: u64,
+        blob_hash: String,
+    ) -> Result<File, DomainError>;
+
     /// Moves a file to another folder.
     async fn move_file(
         &self,

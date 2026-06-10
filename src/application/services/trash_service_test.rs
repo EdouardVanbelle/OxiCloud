@@ -566,6 +566,26 @@ impl FileWritePort for MockFileRepository {
         unimplemented!()
     }
 
+    async fn caller_owns_blob(
+        &self,
+        _owner_id: uuid::Uuid,
+        _blob_hash: &str,
+    ) -> std::result::Result<bool, DomainError> {
+        unimplemented!()
+    }
+
+    async fn create_file_referencing_existing_blob(
+        &self,
+        _name: String,
+        _folder_id: Option<String>,
+        _owner_id: uuid::Uuid,
+        _content_type: String,
+        _size: u64,
+        _blob_hash: String,
+    ) -> std::result::Result<File, DomainError> {
+        unimplemented!()
+    }
+
     async fn move_file(
         &self,
         _file_id: &str,

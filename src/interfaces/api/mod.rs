@@ -58,7 +58,7 @@ use crate::interfaces::api::handlers::contacts_handler::{
 use crate::interfaces::api::handlers::dedup_handler::{
     DedupUploadResponse, HashCheckResponse, StatsResponse,
 };
-use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
+use crate::interfaces::api::handlers::file_handler::{DedupCreateRequest, MoveFilePayload};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -80,6 +80,7 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
         // File handlers (free functions — see file_handler.rs for why)
         handlers::file_handler::list_files_query,
         handlers::file_handler::upload_file_with_thumbnails,
+        handlers::file_handler::dedup_create_file,
         handlers::file_handler::download_file,
         handlers::file_handler::get_thumbnail,
         handlers::file_handler::upload_thumbnail,
@@ -262,6 +263,7 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
             // File schemas
             FileDto,
             MoveFilePayload,
+            DedupCreateRequest,
             PaginationDto,
             PaginationRequestDto,
             // User / Auth schemas

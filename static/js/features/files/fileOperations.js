@@ -13,11 +13,27 @@ import { notifications } from '../../core/notifications.js';
 import { invalidateFolderMeta } from '../../model/filesModel.js';
 import { triggerBrowserDownload } from '../../utils/download.js';
 
+const SMALL_FILE_SIZE = 5 * 1024 * 1024; // 5 MB — generous for the hash-precheck path
+
 /**
  * @typedef {Object} BatchResult
- * @property {number} success number of files|folders sucessfully updated
+ * @property {number} success number of files|folders successfully updated
  * @property {number} errors  number of files|folders in error
- * /
+ */
+
+// Return shape of `_uploadFileXHR` and several other upload helpers.
+// Declared at module scope (rather than inside the `fileOps` literal)
+// so TypeScript's `checkJs` pass doesn't truncate the inferred literal
+// type at an embedded type tag.
+/**
+ * @typedef {Object} UploadAnswer
+ * @property {boolean} ok
+ * @property {any} [data]
+ * @property {string} [errorMsg]
+ * @property {boolean} [isQuotaError]
+ * @property {boolean} [isTimeout]
+ * @property {boolean} [isConflict] dedup-create returned 409 — body upload would also clash, do not retry
+ */
 
 /**
  * Get authorization headers for API requests.
@@ -46,6 +62,119 @@ const fileOps = {
      */
     _initUploadToast(totalFiles, folderName) {
         this._currentBatchId = notifications.addUploadBatch(totalFiles, folderName);
+    },
+
+    /** @type {any} */
+    _hashLib: null,
+
+    /** @type {String|null} */
+    _hashLibUnavailable: null,
+
+    async _loadHashLib() {
+        if (this._hashLib) return this._hashLib;
+        if (this._hashLibUnavailable) return null;
+        try {
+            const lib = '/js/vendors/hash-wasm.mjs';
+            this._hashLib = await import(lib);
+            return this._hashLib;
+        } catch (err) {
+            this._hashLibUnavailable = String(err);
+            console.warn(
+                'Upload BLAKE3 precheck disabled — hash-wasm failed to load. ' +
+                    'Uploads will proceed without a Content-Digest header; ' +
+                    'server-side dedup still applies.',
+                err
+            );
+            return null;
+        }
+    },
+
+    /**
+     * Compute BLAKE3 hex of a blob, or `null` if hashing is unavailable
+     * or fails. Caller must tolerate `null` and upload without a hash.
+     *
+     * @param {Blob} blob
+     * @returns {Promise<string | null>}
+     */
+    async _blake3HexOrNull(blob) {
+        const lib = await this._loadHashLib();
+        if (!lib) return null;
+        try {
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            return await lib.blake3(bytes);
+        } catch (err) {
+            // Per-file failures (e.g. memory pressure during compile of
+            // a chunk this size) — leave the cache alone, just skip
+            // the precheck for THIS file. Other files might succeed.
+            console.warn(`BLAKE3 precheck failed for one file:`, err);
+            return null;
+        }
+    },
+
+    /**
+     * Try the upload precheck. POSTs to `/api/files/dedup-create` with
+     * the BLAKE3 hex digest as `content_hash` — symmetric with what
+     * `FileDto.content_hash` returns on a normal upload. On a hit the
+     * server short-circuits the body upload entirely and returns the
+     * new file's FileItem; the client increments its success counter
+     * and skips the multipart upload.
+     *
+     * Server-enforced caller-owns-hash scope: the precheck only hits
+     * when the caller already owns at least one file with the same
+     * BLAKE3. Cross-user matches are invisible — see
+     * `FileUploadUseCase::dedup_create_file_with_perms` on the server.
+     *
+     * Three possible outcomes:
+     *  - FileItem (hit): server already had the content for this caller
+     *    and the file row was created. Skip the body upload.
+     *  - `'conflict'` (409): a file with this name already exists in
+     *    the target folder. The body upload would also 409, so the
+     *    caller must NOT retry — surface a failure instead.
+     *  - `null` (miss / error): 404, network failure, or any other
+     *    non-201/non-409 response. Caller falls back to multipart.
+     *
+     * Errors other than 404/409 emit one console.warn so a precheck
+     * miss doesn't surface to the user.
+     *
+     * @param {File} file
+     * @param {string | null} folderId
+     * @param {string} hashHex BLAKE3 hex (64 chars)
+     * @returns {Promise<import('../../core/types.js').FileItem | 'conflict' | null>}
+     */
+    async _tryDedupCreate(file, folderId, hashHex) {
+        try {
+            const resp = await fetch('/api/files/dedup-create', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeaders()
+                },
+                body: JSON.stringify({
+                    filename: file.name,
+                    folder_id: folderId,
+                    content_type: file.type || 'application/octet-stream',
+                    size: file.size,
+                    content_hash: hashHex
+                })
+            });
+            if (resp.status === 201) {
+                return /** @type {import('../../core/types.js').FileItem} */ (await resp.json());
+            }
+            if (resp.status === 409) {
+                // Same (folder_id, name) already exists. The multipart
+                // upload would also 409 — short-circuit so the caller
+                // doesn't waste bytes on the wire.
+                return 'conflict';
+            }
+            // 404 is the normal "first-time upload" path; stay quiet.
+            if (resp.status !== 404) {
+                console.warn(`dedup-create returned ${resp.status} for ${file.name}`);
+            }
+            return null;
+        } catch (err) {
+            console.warn(`dedup-create network failure for ${file.name}:`, err);
+            return null;
+        }
     },
 
     /**
@@ -80,14 +209,7 @@ const fileOps = {
     },
 
     // FIXME: prefer exceptions for errors
-    /**
-     * @typedef {Object} UploadAnswer
-     * @property {boolean} ok
-     * @property {any} [data]
-     * @property {string} [errorMsg]
-     * @property {boolean} [isQuotaError]
-     * @property {boolean} [isTimeout]
-     */
+    // (UploadAnswer typedef declared at module top.)
 
     /**
      * Upload a single file via XMLHttpRequest with progress events.
@@ -267,9 +389,8 @@ const fileOps = {
      * Returns { ok, data?, errorMsg?, isQuotaError?, isTimeout? }.
      */
     /**
-     *
-     * @param {*} formData
-     * @param {*} timeoutMs
+     * @param {FormData} formData
+     * @param {number} [timeoutMs=60000]
      * @returns {Promise<UploadAnswer>}
      */
     async _uploadFileFetch(formData, timeoutMs = 60000) {
@@ -404,6 +525,78 @@ const fileOps = {
                 if (quotaStop) return;
                 const file = readableFiles[idx];
 
+                /** @type {string|null} */
+                let blake3Hash = null;
+                if (file.size < SMALL_FILE_SIZE) {
+                    blake3Hash = await this._blake3HexOrNull(file);
+                }
+                // Files ≥ SMALL_FILE_SIZE skip the client-side hash by
+                // design. Pre-hashing a large file means reading every
+                // byte locally before the upload can begin — a ~10 s
+                // delay on a 2 GB file before any network activity.
+                // That cost is paid on EVERY upload, including the
+                // ones that wouldn't have deduplicated anyway. The
+                // server still computes BLAKE3 during the streaming
+                // write and the dedup layer still catches duplicate
+                // content; the only thing we'd save is the body
+                // upload, which is a worthwhile trade only when the
+                // dedup hit rate is high.
+
+                // ── Dedup-create precheck (BLAKE3 content_hash) ──────
+                // When BLAKE3 is available (small files only), ask
+                // the server "do you already have this content for
+                // me?" before sending bytes. On a hit the server
+                // creates the file row referencing the existing blob
+                // and returns the FileItem with no body uploaded.
+                // On a miss (404) or any failure we fall through to
+                // the normal upload — see `_tryDedupCreate` for the
+                // silent-fallback model.
+                if (blake3Hash) {
+                    const precheckHit = await this._tryDedupCreate(file, targetFolderId, blake3Hash);
+                    if (precheckHit === 'conflict') {
+                        // (folder_id, name) clash — the body upload
+                        // would also 409, so don't bother sending bytes.
+                        uploadedCount++;
+                        if (progressBar) {
+                            progressBar.style.width = `${(uploadedCount / totalFiles) * 100}%`;
+                        }
+                        if (batchId) {
+                            try {
+                                notifications.fileCompleted(batchId, false);
+                            } catch (e) {
+                                console.warn('Batch progress update failed:', e);
+                            }
+                        }
+                        if (notifications) {
+                            notifications.addNotification({
+                                icon: 'fa-exclamation-triangle',
+                                iconClass: 'error',
+                                title: file.name,
+                                text: i18n.t?.('file_name_already_exists') || 'A file with this name already exists'
+                            });
+                        }
+                        console.warn(`⛔ dedup-create CONFLICT for ${file.name} — name clash, upload skipped`);
+                        return; // next file
+                    }
+                    if (precheckHit) {
+                        uploadedCount++;
+                        successCount++;
+                        if (progressBar) {
+                            progressBar.style.width = `${(uploadedCount / totalFiles) * 100}%`;
+                        }
+                        if (batchId) {
+                            try {
+                                notifications.fileCompleted(batchId, true);
+                            } catch (e) {
+                                console.warn('Batch progress update failed:', e);
+                            }
+                        }
+                        console.log(`🎯 dedup-create HIT for ${file.name} — body upload skipped`, precheckHit);
+                        return; // Blob already exists, file created + no quota change
+                    }
+                }
+
+                // ── Normal multipart upload (precheck miss path) ─────
                 const formData = new FormData();
                 if (targetFolderId) formData.append('folder_id', targetFolderId);
                 formData.append('file', file);
@@ -692,17 +885,63 @@ const fileOps = {
                         }
                     }
 
-                    const formData = new FormData();
-                    formData.append('folder_id', targetFolderId);
-                    formData.append('file', uploadFile, file.name);
+                    /** @type {string|null} */
+                    let blake3Hash = null;
+                    if (file.size < SMALL_FILE_SIZE) {
+                        blake3Hash = await this._blake3HexOrNull(file);
+                    }
+                    // Large-file path: skip the client hash by design.
+                    // See the single-file uploader for the rationale —
+                    // pre-hashing every large file would add seconds-
+                    // to-tens-of-seconds of read latency to every
+                    // upload, including the ones that would never
+                    // dedup. Server-side dedup catches duplicates on
+                    // the body-upload path regardless.
 
-                    const thisTimeout =
-                        file.size === 0
-                            ? TIMEOUT_MS_ZERO
-                            : Math.max(TIMEOUT_MIN_MS, TIMEOUT_BASE_MS + Math.ceil(file.size / (1024 * 1024)) * TIMEOUT_PER_MB_MS);
-                    console.log(`[UPLOAD START] #${idx} ${rel} (${file.size} bytes, timeout=${thisTimeout}ms)`);
+                    // ── Dedup-create precheck (folder-upload variant) ──
+                    // Same model as the single-file path: on a hit the
+                    // server creates the FileItem referencing the
+                    // existing blob and we skip the multipart upload
+                    // entirely. On miss or any failure → fall through.
+                    //
+                    // The precheck request needs the original `file`
+                    // (which carries `.name` — `uploadFile` is a Blob
+                    // slice/wrapper without a name).
+                    if (blake3Hash) {
+                        const precheckHit = await this._tryDedupCreate(file, targetFolderId, blake3Hash);
+                        if (precheckHit === 'conflict') {
+                            // Name clash — body upload would also 409.
+                            // Mark as terminal failure so the loop below
+                            // skips the multipart attempt.
+                            result = {
+                                ok: false,
+                                isConflict: true,
+                                errorMsg: i18n.t?.('file_name_already_exists') || 'A file with this name already exists'
+                            };
+                            console.warn(`[UPLOAD CONFLICT] #${idx} ${rel} — dedup-create 409, upload skipped`);
+                        } else if (precheckHit) {
+                            result = { ok: true, data: precheckHit };
+                            console.log(`[UPLOAD HIT]   #${idx} ${rel} — dedup-create, no body`);
+                            // Fall through to the post-upload accounting
+                            // (uploadedCount++, fileCompleted, progressBar)
+                            // by skipping the upload + setting result above.
+                            // Continue out of the inner try by ending it normally.
+                        }
+                    }
 
-                    result = await this._uploadFileFetch(formData, thisTimeout);
+                    if (!result.ok && !result.isConflict) {
+                        const formData = new FormData();
+                        formData.append('folder_id', targetFolderId);
+                        formData.append('file', uploadFile, file.name);
+
+                        const thisTimeout =
+                            file.size === 0
+                                ? TIMEOUT_MS_ZERO
+                                : Math.max(TIMEOUT_MIN_MS, TIMEOUT_BASE_MS + Math.ceil(file.size / (1024 * 1024)) * TIMEOUT_PER_MB_MS);
+                        console.log(`[UPLOAD START] #${idx} ${rel} (${file.size} bytes, timeout=${thisTimeout}ms)`);
+
+                        result = await this._uploadFileFetch(formData, thisTimeout);
+                    }
 
                     console.log(`[UPLOAD END]   #${idx} ${rel} ok=${result.ok}${result.errorMsg ? ` err=${result.errorMsg}` : ''}`);
                 } catch (e) {

@@ -317,6 +317,114 @@ impl FileWritePort for FileBlobWriteRepository {
         .map(|(file, _)| file)
     }
 
+    async fn caller_owns_blob(
+        &self,
+        owner_id: uuid::Uuid,
+        blob_hash: &str,
+    ) -> Result<bool, DomainError> {
+        // Trashed rows count: a file the user previously had (and can
+        // potentially restore) is content they "own" for the purpose
+        // of dedup-precheck. Cross-user matches are NEVER reported —
+        // that's the whole point of this scoped check.
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (\
+                 SELECT 1 FROM storage.files \
+                 WHERE blob_hash = $1 AND user_id = $2\
+             )",
+        )
+        .bind(blob_hash)
+        .bind(owner_id)
+        .fetch_one(self.pool.as_ref())
+        .await
+        .map_err(|e| DomainError::internal_error("FileBlobWrite", format!("caller_owns_blob: {e}")))
+    }
+
+    async fn create_file_referencing_existing_blob(
+        &self,
+        name: String,
+        folder_id: Option<String>,
+        owner_id: uuid::Uuid,
+        content_type: String,
+        size: u64,
+        blob_hash: String,
+    ) -> Result<File, DomainError> {
+        // Refcount bump + INSERT + rollback-on-failure all happen
+        // here so the service layer doesn't need a DedupService
+        // handle. Mirrors `save_file_from_temp_with_dedup`'s
+        // bump-then-insert-then-rollback pattern; the caller has
+        // already enforced `caller_owns_blob` and the folder Create
+        // permission.
+
+        // 1. Bump refcount. If the blob doesn't exist (race with GC
+        // between the caller's ownership check and now), this errors
+        // and we propagate before doing anything else.
+        self.dedup.add_reference(&blob_hash).await?;
+
+        // 2. INSERT the new metadata row.
+        let row = match sqlx::query_as::<_, (String, i64, i64)>(
+            "INSERT INTO storage.files \
+                 (name, folder_id, user_id, blob_hash, size, mime_type, category_order) \
+             VALUES ($1, $2::uuid, $3, $4, $5, $6, $7) \
+             RETURNING id::text, \
+                       EXTRACT(EPOCH FROM created_at)::bigint, \
+                       EXTRACT(EPOCH FROM updated_at)::bigint",
+        )
+        .bind(&name)
+        .bind(&folder_id)
+        .bind(owner_id)
+        .bind(&blob_hash)
+        .bind(size as i64)
+        .bind(&content_type)
+        .bind(category_order_for(&name, &content_type))
+        .fetch_one(self.pool.as_ref())
+        .await
+        {
+            Ok(row) => row,
+            Err(e) => {
+                // 3. Rollback the refcount bump. Best-effort: if the
+                // rollback also fails we log loudly — the dedup GC
+                // will eventually pick up the over-counted blob but
+                // until then a `ref_count` of 1 keeps a blob no one
+                // references from being deleted.
+                if let Err(rollback_err) = self.dedup.remove_reference(&blob_hash).await {
+                    tracing::error!(
+                        "Blob ref-count over-counted after failed dedup-create INSERT \
+                         — hash: {}, INSERT err: {}, rollback err: {}",
+                        &blob_hash[..12.min(blob_hash.len())],
+                        e,
+                        rollback_err
+                    );
+                }
+                if let sqlx::Error::Database(ref db_err) = e
+                    && db_err.code().as_deref() == Some("23505")
+                {
+                    return Err(DomainError::already_exists(
+                        "File",
+                        format!("'{name}' already exists in this folder"),
+                    ));
+                }
+                return Err(DomainError::internal_error(
+                    "FileBlobWrite",
+                    format!("dedup-create INSERT: {e}"),
+                ));
+            }
+        };
+
+        let folder_path = self.lookup_folder_path(folder_id.as_deref()).await?;
+        Self::row_to_file(
+            row.0,
+            name,
+            folder_id,
+            folder_path,
+            size as i64,
+            content_type,
+            row.1,
+            row.2,
+            Some(owner_id),
+            blob_hash,
+        )
+    }
+
     async fn move_file(
         &self,
         file_id: &str,

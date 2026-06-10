@@ -181,6 +181,26 @@ impl FileWritePort for MockFileWritePort {
         unimplemented!()
     }
 
+    async fn caller_owns_blob(
+        &self,
+        _owner_id: uuid::Uuid,
+        _blob_hash: &str,
+    ) -> Result<bool, DomainError> {
+        unimplemented!()
+    }
+
+    async fn create_file_referencing_existing_blob(
+        &self,
+        _name: String,
+        _folder_id: Option<String>,
+        _owner_id: uuid::Uuid,
+        _content_type: String,
+        _size: u64,
+        _blob_hash: String,
+    ) -> Result<File, DomainError> {
+        unimplemented!()
+    }
+
     async fn move_file(
         &self,
         file_id: &str,

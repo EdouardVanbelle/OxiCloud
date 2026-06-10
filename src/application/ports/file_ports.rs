@@ -55,6 +55,31 @@ pub trait FileUploadUseCase: Send + Sync + 'static {
         pre_computed_hash: Option<String>,
     ) -> Result<FileDto, DomainError>;
 
+    /// Dedup-create / upload-precheck flow.
+    ///
+    /// Creates a new file metadata row pointing at an existing blob,
+    /// without uploading any body bytes. Used by the client-side
+    /// hash-precheck (RFC 9530 `Content-Digest`) — the client computes
+    /// BLAKE3 locally and asks the server "do you already have this
+    /// content for me?" before deciding whether to transfer the body.
+    ///
+    /// **Strict caller-owns-hash anti-enumeration scope.** Returns
+    /// `NotFound` when the caller doesn't already own at least one
+    /// file with `blob_hash`. Cross-user matches are invisible —
+    /// hash probing cannot leak other tenants' content. Returns
+    /// `AlreadyExists` on a name conflict in the target folder.
+    /// Permission check (Create on `folder_id`) mirrors
+    /// [`upload_file_streaming`].
+    async fn dedup_create_file_with_perms(
+        &self,
+        name: String,
+        folder_id: Option<String>,
+        content_type: String,
+        size: u64,
+        blob_hash: String,
+        caller_id: uuid::Uuid,
+    ) -> Result<FileDto, DomainError>;
+
     /// Creates a new file at the specified path (for WebDAV)
     async fn create_file(
         &self,

@@ -535,6 +535,16 @@ impl ChunkedUploadHandler {
 // routes.rs calls these free functions directly.
 // TODO: collapse back into the impl block after a utoipa upgrade resolves the issue.
 
+/// Open a chunked upload session.
+///
+/// **Recommendation for clients that can compute BLAKE3 locally:**
+/// before opening a session here, try `POST /api/files/dedup-create`
+/// with the file's `content_hash`. If the caller already owns a file
+/// with that hash the server creates the FileDto directly (201) and
+/// no chunked upload is needed. Only on a 404 from dedup-create
+/// should the client fall back to opening a chunked upload session
+/// here. This avoids spending bandwidth and disk on bytes the server
+/// already has.
 #[utoipa::path(
     post,
     path = "/api/uploads",

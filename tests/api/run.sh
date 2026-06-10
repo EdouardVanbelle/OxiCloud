@@ -117,7 +117,8 @@ hurl --variables-file "$API_DIR/test.env" --file-root "$REPO_ROOT/tests" --test 
   "$API_DIR/subject_groups.hurl" \
   "$API_DIR/grants_nested_groups.hurl" \
   "$API_DIR/external_users.hurl" \
-  "$API_DIR/chunked_upload_cap.hurl"
+  "$API_DIR/chunked_upload_cap.hurl" \
+  "$API_DIR/dedup_create.hurl"
 
 #bash "$API_DIR/dedup_bulk_upload.sh"
 

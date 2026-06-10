@@ -30,6 +30,37 @@ use std::sync::Arc;
 /// Global application state for dependency injection
 type GlobalState = Arc<AppState>;
 
+/// Request body for `POST /api/files/dedup-create` — the upload
+/// precheck. See [`FileUploadUseCase::dedup_create_file_with_perms`]
+/// for the caller-scoped anti-enumeration semantics.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct DedupCreateRequest {
+    pub filename: String,
+    pub folder_id: Option<String>,
+    pub content_type: String,
+    pub size: u64,
+    /// BLAKE3 hex digest of the file body — 64 lowercase hex chars.
+    /// Symmetric with `FileDto.content_hash`: clients echo back the
+    /// hash the server returned on a previous upload to short-circuit
+    /// the body re-upload.
+    pub content_hash: String,
+}
+
+/// Validate that `s` is a 64-char lowercase hex string (i.e. a
+/// well-formed BLAKE3 digest). Returns `None` on any malformation.
+fn validate_blake3_hex(s: &str) -> Option<&str> {
+    if s.len() != 64 {
+        return None;
+    }
+    if !s
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return None;
+    }
+    Some(s)
+}
+
 /**
  * API handler for file-related operations.
  *
@@ -786,6 +817,96 @@ impl FileHandler {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    //  DEDUP-CREATE — upload bypass via client-supplied Content-Digest
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// `POST /api/files/dedup-create` — short-circuits a body upload
+    /// when the caller already owns a file with the same BLAKE3.
+    /// See [`FileUploadUseCase::dedup_create_file_with_perms`] for the
+    /// caller-scoped anti-enumeration model.
+    ///
+    /// HTTP shape:
+    /// ```json
+    /// {
+    ///   "filename": "photo.jpg",
+    ///   "folder_id": "uuid|null",
+    ///   "content_type": "image/jpeg",
+    ///   "size": 1048576,
+    ///   "content_hash": "<64-char lowercase BLAKE3 hex>"
+    /// }
+    /// ```
+    /// `content_hash` is symmetric with `FileDto.content_hash`: clients
+    /// echo back the hash they received on a previous upload.
+    /// Returns `201 + FileDto` on a hit, `404` otherwise. Clients are
+    /// expected to fall back to the multipart upload endpoint on 404.
+    pub(super) async fn dedup_create_file_impl(
+        State(state): State<GlobalState>,
+        auth_user: AuthUser,
+        Json(req): Json<DedupCreateRequest>,
+    ) -> impl IntoResponse {
+        // ── Input validation ────────────────────────────────────────
+        if req.filename.is_empty() {
+            return AppError::bad_request("filename is required").into_response();
+        }
+        if req.size == 0 {
+            return AppError::bad_request("size must be > 0").into_response();
+        }
+        if validate_blake3_hex(&req.content_hash).is_none() {
+            return AppError::bad_request(
+                "content_hash must be a 64-char lowercase BLAKE3 hex digest",
+            )
+            .into_response();
+        }
+        let blob_hash_hex = req.content_hash.clone();
+
+        // ── Folder Create permission pre-check ──────────────────────
+        // Mirrors `upload_file_inner` — fail fast before the service
+        // call. The service-layer authz (caller_owns_blob) is the
+        // load-bearing check; this one is a UX optimisation.
+        if let Some(ref fid) = req.folder_id
+            && let Err(err) = state
+                .applications
+                .folder_service_concrete
+                .require_permission(auth_user.id, Permission::Create, fid)
+                .await
+        {
+            return Self::domain_error_response(err);
+        }
+
+        // ── Delegate to the use case ────────────────────────────────
+        let upload_service = &state.applications.file_upload_service;
+        match upload_service
+            .dedup_create_file_with_perms(
+                req.filename,
+                req.folder_id,
+                req.content_type,
+                req.size,
+                blob_hash_hex,
+                auth_user.id,
+            )
+            .await
+        {
+            Ok(file_dto) => (StatusCode::CREATED, Json(file_dto)).into_response(),
+            Err(err) => {
+                // The service returns `NotFound` for the
+                // caller-doesn't-own-hash case — reshape the response
+                // so the client knows to fall back to multipart upload.
+                if matches!(err.kind, crate::domain::errors::ErrorKind::NotFound) {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({
+                            "error": "blob_not_owned_by_caller",
+                            "upload_path": "/api/files/upload"
+                        })),
+                    )
+                        .into_response();
+                }
+                Self::domain_error_response(err)
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     //  METADATA
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -1089,6 +1210,15 @@ pub async fn list_files_query(
     FileHandler::list_files_query_impl(state, auth_user, headers, query).await
 }
 
+/// Upload a file via multipart/form-data (with thumbnails).
+///
+/// **Recommendation for clients that can compute BLAKE3 locally:**
+/// before posting the body, try `POST /api/files/dedup-create` with
+/// the file's `content_hash`. If the caller already owns a file with
+/// that hash the server creates the FileDto directly (201) and no
+/// body upload is needed. Only on a 404 from dedup-create should the
+/// client fall back to the multipart upload here. This avoids
+/// spending bandwidth and disk on bytes the server already has.
 #[utoipa::path(
     post,
     path = "/api/files/upload",
@@ -1107,6 +1237,39 @@ pub async fn upload_file_with_thumbnails(
     multipart: Multipart,
 ) -> impl IntoResponse {
     FileHandler::upload_file_with_thumbnails_impl(state, auth_user, multipart).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/files/dedup-create",
+    request_body(
+        content = DedupCreateRequest,
+        content_type = "application/json",
+        description = "Upload precheck. Client computes BLAKE3 of the file body locally and \
+            asks the server to short-circuit the body upload when the caller already owns a \
+            file with the same hash. `content_hash` is a 64-char lowercase BLAKE3 hex digest, \
+            symmetric with `FileDto.content_hash`. \
+            \n\n\
+            **Strict caller-owns-hash scope:** the server returns 201 only when the *caller* \
+            already owns at least one file with that hash. Cross-user matches are invisible — \
+            this endpoint cannot be used to probe whether other users have specific content. \
+            On 404, the client must fall back to a normal multipart upload at `/api/files/upload`."
+    ),
+    responses(
+        (status = 201, description = "Dedup-create hit — file row created without body upload", body = FileDto),
+        (status = 400, description = "Invalid request (empty filename, malformed content_hash)"),
+        (status = 404, description = "Caller doesn't own a file with this hash; fall back to /api/files/upload"),
+        (status = 409, description = "A file with this name already exists in the target folder"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "files"
+)]
+pub async fn dedup_create_file(
+    state: State<GlobalState>,
+    auth_user: AuthUser,
+    body: Json<DedupCreateRequest>,
+) -> impl IntoResponse {
+    FileHandler::dedup_create_file_impl(state, auth_user, body).await
 }
 
 #[utoipa::path(
