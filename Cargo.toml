@@ -92,6 +92,10 @@ path = "src/bin/generate-openapi.rs"
 name = "migrate-nfc-filenames"
 path = "src/bin/migrate-nfc-filenames.rs"
 
+[[bin]]
+name = "load-seed"
+path = "src/bin/load-seed.rs"
+
 [build-dependencies]
 oxc_allocator = "0.125.0"
 oxc_parser = "0.125.0"

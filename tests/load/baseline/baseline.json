@@ -1,0 +1,16 @@
+{
+  "_comment": "Placeholder values. First run on stable hardware seeds real numbers; commit them via 'just load-baseline'. Each entry: p50/p95/p99 (ms) + tolerance_pct (regression threshold). Keys must match the `op` tag the matching scenario emits — adding a scenario means adding entries here in the same PR.",
+  "smoke.login":              { "p50": 50.0, "p95": 200.0, "p99": 400.0, "tolerance_pct": 15 },
+  "smoke.create_folder":      { "p50": 20.0, "p95": 80.0,  "p99": 150.0, "tolerance_pct": 15 },
+  "smoke.upload_tiny":        { "p50": 30.0, "p95": 120.0, "p99": 250.0, "tolerance_pct": 15 },
+  "smoke.list_root":          { "p50": 15.0, "p95": 60.0,  "p99": 120.0, "tolerance_pct": 15 },
+  "smoke.delete_folder":      { "p50": 20.0, "p95": 80.0,  "p99": 150.0, "tolerance_pct": 15 },
+  "folder_cascade.list_depth1":     { "p50": 12.0, "p95": 45.0, "p99": 80.0,  "tolerance_pct": 10 },
+  "folder_cascade.list_depth4":     { "p50": 15.0, "p95": 60.0, "p99": 110.0, "tolerance_pct": 10 },
+  "folder_cascade.list_depth_deep": { "p50": 20.0, "p95": 80.0, "p99": 150.0, "tolerance_pct": 10 },
+  "share_cascade_rebac.list_grants":               { "p50": 15.0, "p95": 50.0, "p99": 100.0, "tolerance_pct": 10 },
+  "share_cascade_rebac.fetch_as_grantee_depth1":   { "p50": 18.0, "p95": 55.0, "p99": 100.0, "tolerance_pct": 10 },
+  "share_cascade_rebac.fetch_as_grantee_depth_deep": { "p50": 25.0, "p95": 80.0, "p99": 150.0, "tolerance_pct": 10 },
+  "subject_group_nested.fetch_as_member_depth1":     { "p50": 20.0, "p95": 65.0,  "p99": 120.0, "tolerance_pct": 10 },
+  "subject_group_nested.fetch_as_member_depth_deep": { "p50": 30.0, "p95": 100.0, "p99": 200.0, "tolerance_pct": 10 }
+}

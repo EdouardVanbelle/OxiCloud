@@ -1,0 +1,84 @@
+name: Load Nightly
+
+# Nightly regression gate. Runs every k6 scenario, diffs against
+# baseline.json, opens an issue if any metric regresses.
+#
+# IMPORTANT: shared GitHub-hosted runners produce noisy timings —
+# regression signal is unreliable until this workflow is moved to a
+# pinned self-hosted runner with consistent hardware. The cron run is
+# informational until then; treat opened issues as "investigate" not
+# "broken main."
+
+on:
+  schedule:
+    # 03:00 UTC daily — outside US/EU working hours, low contention.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  load:
+    name: k6 load suite + baseline diff
+    # TODO: move to a self-hosted runner pinned to consistent hardware before
+    # treating regressions here as merge-blocking. ubuntu-latest is too noisy
+    # for trustworthy p95/p99 deltas.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: load
+
+      - name: Install k6
+        uses: grafana/setup-k6-action@v1
+
+      - name: Build OxiCloud + load-seed (release)
+        run: |
+          cargo build --release --bin oxicloud
+          cargo build --release --bin load-seed
+
+      - name: Run full load suite
+        id: load
+        run: bash tests/load/run.sh
+        env:
+          BUILD_TARGET: release
+        continue-on-error: true
+
+      - name: Upload raw k6 summaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-results-${{ github.run_id }}
+          path: tests/load/results/*.json
+          retention-days: 30
+
+      - name: Prepare regression report
+        if: steps.load.outcome == 'failure'
+        run: |
+          {
+            echo "## Load nightly regression"
+            echo ""
+            echo "Run: \`${{ github.run_id }}\`  ·  Commit: \`${{ github.sha }}\`"
+            echo ""
+            echo "Compare exited non-zero — see uploaded artifact \`load-results-${{ github.run_id }}\` for raw summaries."
+            echo ""
+            echo "Caveat: this workflow currently runs on shared GitHub runners."
+            echo "Treat results as a directional signal until moved to a pinned"
+            echo "self-hosted runner."
+          } > regression-issue.md
+
+      - name: Open issue on regression
+        if: steps.load.outcome == 'failure'
+        uses: peter-evans/create-issue-from-file@v5
+        with:
+          title: "Load nightly: regression on ${{ github.sha }}"
+          content-filepath: regression-issue.md
+          labels: |
+            load-test
+            regression

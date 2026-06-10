@@ -100,3 +100,7 @@ tests/e2e/playwright/.auth/
 
 # Test fixtures generated on-the-fly by tests/api/run.sh
 tests/fixtures/chunk-over-cap-*.bin
+
+# K6 load-test raw run outputs and per-run storage (baseline is committed)
+tests/load/results/*.json
+tests/load/storage/
