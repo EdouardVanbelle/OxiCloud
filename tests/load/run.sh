@@ -74,8 +74,11 @@ rm -rf "$OXICLOUD_STORAGE_PATH"
 mkdir -p "$OXICLOUD_STORAGE_PATH"
 
 BUILD_TARGET="${BUILD_TARGET:-release}"
-OXICLOUD_BIN="$REPO_ROOT/target/$BUILD_TARGET/oxicloud"
-SEED_BIN="$REPO_ROOT/target/$BUILD_TARGET/load-seed"
+# Respect CARGO_TARGET_DIR for self-hosted runners that bind-mount target/
+# outside the workspace (avoids actions/checkout EBUSY on the mount point).
+TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+OXICLOUD_BIN="$TARGET_DIR/$BUILD_TARGET/oxicloud"
+SEED_BIN="$TARGET_DIR/$BUILD_TARGET/load-seed"
 
 # Build both bins up front so the server-start step doesn't race the seeder
 # build. load-seed needs --features test_utils because the bin is gated in
