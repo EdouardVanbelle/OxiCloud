@@ -129,6 +129,7 @@ log "Running Hurl tests..."
 hurl --variables-file "$API_DIR/test.env" --file-root "$REPO_ROOT/tests" --test --jobs 1 \
   "$API_DIR/setup.hurl" \
   "$API_DIR/auth_login.hurl" \
+  "$API_DIR/auth_session_lifecycle.hurl" \
   "$API_DIR/registration.hurl" \
   "$API_DIR/nc_status_capabilities.hurl" \
   "$API_DIR/nc_login_flow_v2.hurl" \
@@ -142,13 +143,17 @@ hurl --variables-file "$API_DIR/test.env" --file-root "$REPO_ROOT/tests" --test 
   "$API_DIR/batch_folder_copy.hurl" \
   "$API_DIR/dedup_blob_cleanup.hurl" \
   "$API_DIR/contacts.hurl" \
+  "$API_DIR/public_shares.hurl" \
   "$API_DIR/permissions.hurl" \
   "$API_DIR/grants.hurl" \
   "$API_DIR/subject_groups.hurl" \
+  "$API_DIR/groups_effective_members.hurl" \
   "$API_DIR/grants_nested_groups.hurl" \
   "$API_DIR/external_users.hurl" \
+  "$API_DIR/search_basic.hurl" \
   "$API_DIR/nc_second_user_setup.hurl" \
   "$API_DIR/nc_admin_views_other_user.hurl" \
+  "$API_DIR/admin_user_ops.hurl" \
   "$API_DIR/chunked_upload_cap.hurl" \
   "$API_DIR/nc_auth_failures.hurl"
 
