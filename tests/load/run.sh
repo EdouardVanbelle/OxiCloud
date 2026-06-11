@@ -78,13 +78,16 @@ OXICLOUD_BIN="$REPO_ROOT/target/$BUILD_TARGET/oxicloud"
 SEED_BIN="$REPO_ROOT/target/$BUILD_TARGET/load-seed"
 
 # Build both bins up front so the server-start step doesn't race the seeder
-# build.
+# build. load-seed needs --features test_utils because the bin is gated in
+# Cargo.toml (see required-features there).
 if [[ ! -x "$OXICLOUD_BIN" || ! -x "$SEED_BIN" ]]; then
   log "Building OxiCloud + load-seed ($BUILD_TARGET)..."
   if [[ "$BUILD_TARGET" == "release" ]]; then
-    cargo build --release --bin oxicloud --bin load-seed
+    cargo build --release --bin oxicloud
+    cargo build --release --features test_utils --bin load-seed
   else
-    cargo build --bin oxicloud --bin load-seed
+    cargo build --bin oxicloud
+    cargo build --features test_utils --bin load-seed
   fi
 fi
 

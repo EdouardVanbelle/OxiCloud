@@ -95,6 +95,10 @@ path = "src/bin/migrate-nfc-filenames.rs"
 [[bin]]
 name = "load-seed"
 path = "src/bin/load-seed.rs"
+# Test-only fixture seeder. Gated behind `test_utils` so `cargo build --release`
+# (and the prod Dockerfile) skip it. tests/load/run.sh builds it explicitly with
+# --features test_utils.
+required-features = ["test_utils"]
 
 [build-dependencies]
 oxc_allocator = "0.125.0"

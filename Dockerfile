@@ -18,6 +18,7 @@ RUN mkdir -p src/bin && \
     echo 'fn main() { println!("Dummy build for caching dependencies"); }' > src/main.rs && \
     echo 'fn main() {}' > src/bin/generate-openapi.rs && \
     echo 'fn main() {}' > src/bin/migrate-nfc-filenames.rs && \
+    echo 'fn main() {}' > src/bin/load-seed.rs && \
     cargo build --release && \
     rm -rf src static-dist target/release/deps/oxicloud* target/release/build/oxicloud-*
 
