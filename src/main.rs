@@ -120,8 +120,63 @@ fn make_socket(addr: &SocketAddr, reuse_port: bool) -> std::io::Result<Socket> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Load .env file if present (for local development)
-    dotenvy::dotenv().ok();
+    // Minimal CLI:
+    //   --version            Print version + branch + commit hash and exit.
+    //   --config <path>      Load env from this file. When given, the default
+    //                        `./.env` probe is INTENTIONALLY skipped — tests
+    //                        use this to isolate from a developer's repo-root
+    //                        `.env`, and operators get a reproducible "this
+    //                        file and nothing else" boot.
+    let mut args = std::env::args().skip(1);
+    let mut config_path: Option<String> = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--version" | "-V" => {
+                println!(
+                    "OxiCloud v{} (branch={} commit={})",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("GIT_BRANCH"),
+                    env!("GIT_HASH"),
+                );
+                return Ok(());
+            }
+            "--config" => {
+                let Some(p) = args.next() else {
+                    eprintln!("--config requires a path argument");
+                    std::process::exit(2);
+                };
+                config_path = Some(p);
+            }
+            "--help" | "-h" => {
+                println!(
+                    "OxiCloud v{}\n\nUSAGE:\n  oxicloud [--config <path>]\n  oxicloud --version\n  oxicloud --help\n",
+                    env!("CARGO_PKG_VERSION"),
+                );
+                return Ok(());
+            }
+            other => {
+                eprintln!("Unknown argument: {other}");
+                eprintln!("Try `oxicloud --help`.");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    match config_path {
+        Some(ref path) => {
+            // Explicit file → hard error on a missing/unreadable path.
+            // Silent fallback would defeat the purpose of pinning the
+            // config source.
+            if let Err(e) = dotenvy::from_filename(path) {
+                eprintln!("failed to load --config {path}: {e}");
+                std::process::exit(2);
+            }
+        }
+        None => {
+            // Default dev-convenience probe at CWD/.env.
+            dotenvy::dotenv().ok();
+        }
+    }
 
     // Initialize tracing
     tracing_subscriber::registry()

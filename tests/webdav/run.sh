@@ -74,13 +74,18 @@ wipe_storage "$OXICLOUD_STORAGE_PATH"
 BUILD_TARGET="${BUILD_TARGET:-debug}"
 OXICLOUD_BIN="$REPO_ROOT/target/$BUILD_TARGET/oxicloud"
 
+# `--config` pins the env file the binary reads AND suppresses the default
+# `.env` probe in main.rs, so a developer's repo-root `.env` can never leak
+# into a test run. Bash also sourced the same file above, so anything the
+# test harness itself reads via $OXICLOUD_* stays available; dotenvy won't
+# override those already-exported values.
 if [[ -x "$OXICLOUD_BIN" ]]; then
   log "Starting pre-built OxiCloud server ($BUILD_TARGET) on port $SERVER_PORT..."
-  "$OXICLOUD_BIN" &
+  "$OXICLOUD_BIN" --config "$COMMON/server.env" &
 else
   log "Building and starting OxiCloud server on port $SERVER_PORT..."
   cd "$REPO_ROOT"
-  cargo run &
+  cargo run -- --config "$COMMON/server.env" &
 fi
 SERVER_PID=$!
 log "Waiting for server at $base_url..."

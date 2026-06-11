@@ -94,7 +94,12 @@ if [[ ! -x "$OXICLOUD_BIN" ]]; then
 fi
 
 log "Starting OxiCloud server ($BUILD_TARGET) on port $SERVER_PORT..."
-"$OXICLOUD_BIN" &
+# `--config` pins the env file the binary reads AND suppresses the default
+# `.env` probe in main.rs, so a developer's repo-root `.env` can never leak
+# into a test run. Bash also sourced the same file above, so anything the
+# test harness itself reads via $OXICLOUD_* stays available; dotenvy won't
+# override those already-exported values.
+"$OXICLOUD_BIN" --config "$COMMON/server.env" &
 SERVER_PID=$!
 log "Waiting for server at $base_url..."
 wait_for_http "$base_url/ready" 120
