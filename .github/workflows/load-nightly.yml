@@ -27,10 +27,10 @@ jobs:
     # for that path (event != schedule). Additional fork repositories are
     # opted-in explicitly below.
     if: github.event_name != 'schedule' || github.repository == 'AtalayaLabs/OxiCloud' || github.repository == 'EdouardVanbelle/OxiCloud'
-    # TODO: move to a self-hosted runner pinned to consistent hardware before
+    # tunning on Ed's nuc to ensure stable environment
     # treating regressions here as merge-blocking. ubuntu-latest is too noisy
     # for trustworthy p95/p99 deltas.
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, nuc-loadtest]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
