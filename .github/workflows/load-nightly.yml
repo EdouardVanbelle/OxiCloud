@@ -21,6 +21,12 @@ env:
 jobs:
   load:
     name: k6 load suite + baseline diff
+    # Skip the scheduled run on forks — nightly is only meaningful against the
+    # canonical baseline.json on the upstream repo. Forks can still hit it
+    # manually via `workflow_dispatch` if they want, and the guard is bypassed
+    # for that path (event != schedule). Additional fork repositories are
+    # opted-in explicitly below.
+    if: github.event_name != 'schedule' || github.repository == 'AtalayaLabs/OxiCloud' || github.repository == 'EdouardVanbelle/OxiCloud'
     # TODO: move to a self-hosted runner pinned to consistent hardware before
     # treating regressions here as merge-blocking. ubuntu-latest is too noisy
     # for trustworthy p95/p99 deltas.
