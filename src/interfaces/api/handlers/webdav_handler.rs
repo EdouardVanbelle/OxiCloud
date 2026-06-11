@@ -898,10 +898,11 @@ async fn handle_head(
 /**
  * Handles PUT requests to create or update files.
  *
- * **Streaming implementation**: the request body is spooled to a temp file
- * with incremental BLAKE3 hashing. Peak RAM usage is ~256 KB regardless
- * of file size. The temp file is then atomically moved into blob storage
- * via `update_file_streaming`.
+ * **Streaming implementation**: the request body is streamed straight into
+ * the CDC chunk store (FastCDC + BLAKE3 while the bytes arrive — no spool
+ * file, no re-read; peak RAM is bounded regardless of file size), then the
+ * file row is atomically swapped onto the ingested blob via
+ * `update_file_streaming`.
  *
  * @param state The application state containing service dependencies
  * @param path The requested resource path
@@ -913,7 +914,7 @@ async fn handle_put(
     req: Request<Body>,
     path: String,
 ) -> Result<Response<Body>, AppError> {
-    use crate::interfaces::upload_spool::spool_body_to_temp;
+    use crate::interfaces::upload_ingest;
 
     let user = extract_user(&req)?;
 
@@ -972,32 +973,31 @@ async fn handle_put(
         .unwrap_or("application/octet-stream")
         .to_string();
 
-    // ── Streaming spool: body → temp file + incremental hash ──
-    // Shared with the NextCloud-compat PUT handler; peak heap ~one frame
-    // regardless of file size.  Honors `upload_temp_dir` to keep the spool
-    // off tmpfs/RAM.
-    let spooled = spool_body_to_temp(
+    // ── Streaming ingest: body → CDC chunk store ──────────────
+    // Shared with the NextCloud-compat PUT handler; chunking + hashing +
+    // dedup checks run while the body arrives — no spool file, no re-read.
+    let filename = crate::common::mime_detect::filename_from_path(&path).to_string();
+    let ingested = upload_ingest::ingest_body_to_cas(
         req.into_body(),
+        &state.core.dedup_service,
+        &filename,
+        &content_type,
         max_upload,
-        state.core.config.storage.upload_temp_dir.clone(),
     )
     .await?;
-    let temp_path = spooled.temp.path().to_path_buf();
-    let total_bytes = spooled.size as usize;
-    let hash = spooled.hash;
 
     // ── Quota enforcement ────────────────────────────────────
     if let Some(storage_svc) = state.storage_usage_service.as_ref()
         && let Err(err) = storage_svc
-            .check_storage_quota(user.id, total_bytes as u64)
+            .check_storage_quota(user.id, ingested.size)
             .await
     {
-        let _ = tokio::fs::remove_file(&temp_path).await;
+        upload_ingest::discard_ingested(&state.core.dedup_service, &ingested).await;
         tracing::warn!(
             "⛔ WEBDAV PUT REJECTED (quota): user={}, file={}, size={}",
             user.id,
             path,
-            total_bytes
+            ingested.size
         );
         return Err(AppError::new(
             StatusCode::INSUFFICIENT_STORAGE,
@@ -1006,20 +1006,11 @@ async fn handle_put(
         ));
     }
 
-    // ── Atomic store: temp file → dedup blob + DB metadata update ──
+    // ── Atomic store: swap the file row onto the ingested blob ──
+    let content_type = ingested.content_type.clone();
     let result = file_upload_service
-        .update_file_streaming(
-            &path,
-            &temp_path,
-            total_bytes as u64,
-            &content_type,
-            Some(hash),
-            None,
-        )
+        .update_file_streaming(&path, ingested.stored(), &content_type, None)
         .await;
-
-    // Clean up temp file (may already be moved by dedup, ignore error)
-    let _ = tokio::fs::remove_file(&temp_path).await;
 
     match result {
         Ok(_file_dto) => Ok(Response::builder()

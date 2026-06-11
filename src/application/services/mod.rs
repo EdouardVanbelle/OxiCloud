@@ -5,6 +5,7 @@ pub mod batch_operations;
 pub mod blob_lifecycle_service;
 pub mod calendar_service;
 pub mod contact_service;
+pub mod delta_upload_service;
 pub mod device_auth_service;
 pub mod external_identity_service;
 pub mod favorites_service;

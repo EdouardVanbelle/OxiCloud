@@ -24,6 +24,7 @@ use crate::application::dtos::search_dto::{
 };
 use crate::application::ports::file_ports::{
     FileManagementUseCase, FileRetrievalUseCase, FileUploadUseCase, OptimizedFileContent,
+    StoredBlob,
 };
 use crate::application::ports::folder_ports::FolderUseCase;
 
@@ -149,14 +150,13 @@ impl FileReadPort for StubFileReadPort {
 pub struct StubFileWritePort;
 
 impl FileWritePort for StubFileWritePort {
-    async fn save_file_from_temp(
+    async fn save_file_with_blob(
         &self,
         _name: String,
         _folder_id: Option<String>,
         _content_type: String,
-        _temp_path: &Path,
+        _blob_hash: &str,
         _size: u64,
-        _pre_computed_hash: Option<String>,
     ) -> Result<File, DomainError> {
         Ok(File::default())
     }
@@ -185,13 +185,11 @@ impl FileWritePort for StubFileWritePort {
         Ok(())
     }
 
-    async fn update_file_content_from_temp(
+    async fn update_file_content_with_blob(
         &self,
         _file_id: &str,
-        _temp_path: &Path,
+        _blob_hash: &str,
         _size: u64,
-        _content_type: Option<String>,
-        _pre_computed_hash: Option<String>,
         _modified_at: Option<i64>,
     ) -> Result<(String, i64), DomainError> {
         Ok((String::new(), 0))
@@ -478,40 +476,7 @@ impl FileUploadUseCase for StubFileUploadUseCase {
         _name: String,
         _folder_id: Option<String>,
         _content_type: String,
-        _temp_path: &Path,
-        _size: u64,
-        _pre_computed_hash: Option<String>,
-    ) -> Result<FileDto, DomainError> {
-        Ok(FileDto::default())
-    }
-
-    async fn upload_file_from_path(
-        &self,
-        _name: String,
-        _folder_id: Option<String>,
-        _content_type: String,
-        _file_path: &Path,
-        _pre_computed_hash: Option<String>,
-    ) -> Result<FileDto, DomainError> {
-        Ok(FileDto::default())
-    }
-
-    async fn create_file(
-        &self,
-        _parent_path: &str,
-        _filename: &str,
-        _content: &[u8],
-        _content_type: &str,
-    ) -> Result<FileDto, DomainError> {
-        Ok(FileDto::default())
-    }
-
-    async fn update_file(
-        &self,
-        _path: &str,
-        _content: &[u8],
-        _content_type: &str,
-        _modified_at: Option<i64>,
+        _blob: StoredBlob,
     ) -> Result<FileDto, DomainError> {
         Ok(FileDto::default())
     }
@@ -519,10 +484,8 @@ impl FileUploadUseCase for StubFileUploadUseCase {
     async fn update_file_streaming(
         &self,
         _path: &str,
-        _temp_path: &Path,
-        _size: u64,
+        _blob: StoredBlob,
         _content_type: &str,
-        _pre_computed_hash: Option<String>,
         _modified_at: Option<i64>,
     ) -> Result<FileDto, DomainError> {
         Ok(FileDto::default())
@@ -756,25 +719,11 @@ impl SearchUseCase for StubSearchUseCase {
 // DedupPort
 // ---------------------------------------------------------------------------
 
-use crate::application::ports::dedup_ports::{
-    BlobMetadataDto, DedupPort, DedupResultDto, DedupStatsDto,
-};
+use crate::application::ports::dedup_ports::{BlobMetadataDto, DedupPort, DedupStatsDto};
 
 pub struct StubDedupPort;
 
 impl DedupPort for StubDedupPort {
-    async fn store_from_file(
-        &self,
-        _source_path: &Path,
-        _content_type: Option<String>,
-        _pre_computed_hash: Option<String>,
-    ) -> Result<DedupResultDto, DomainError> {
-        Err(DomainError::internal_error(
-            "DedupService",
-            "DedupService not initialized",
-        ))
-    }
-
     async fn blob_exists(&self, _hash: &str) -> bool {
         false
     }

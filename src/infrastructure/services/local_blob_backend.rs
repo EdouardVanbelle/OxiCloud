@@ -244,12 +244,13 @@ impl BlobStorageBackend for LocalBlobBackend {
             // Atomic rename (same filesystem).  Falls back to copy+delete for
             // cross-device moves (EXDEV errno 18).
             //
-            // Durability boundary: the caller is responsible for
-            // having sync_all'd the source file before invoking this
-            // function — both `interfaces::upload_spool::spool_body_to_temp`
-            // and `chunked_upload_service::complete_upload_inner`
-            // (the two production producers of `source_path`) now do
-            // so. We fsync the parent of `blob_path` AFTER the rename
+            // Durability boundary: the caller is responsible for having
+            // sync_all'd the source file before invoking this function.
+            // (The streaming upload path writes chunks via
+            // `put_blob_from_bytes_unsynced` + a batched `sync_blobs`
+            // sweep instead; this move-based entry point remains for
+            // whole-file producers such as migration tooling and tests.)
+            // We fsync the parent of `blob_path` AFTER the rename
             // so the dirent change itself becomes durable; without
             // that, a power loss can resurrect the old (unrenamed)
             // name even when the file contents survive.

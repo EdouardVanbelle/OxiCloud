@@ -6,7 +6,7 @@
 use bytes::Bytes;
 use futures::Stream;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -169,14 +169,13 @@ impl MockFileWritePort {
 }
 
 impl FileWritePort for MockFileWritePort {
-    async fn save_file_from_temp(
+    async fn save_file_with_blob(
         &self,
         _name: String,
         _folder_id: Option<String>,
         _content_type: String,
-        _temp_path: &Path,
+        _blob_hash: &str,
         _size: u64,
-        _pre_computed_hash: Option<String>,
     ) -> Result<File, DomainError> {
         unimplemented!()
     }
@@ -205,13 +204,11 @@ impl FileWritePort for MockFileWritePort {
         Ok(())
     }
 
-    async fn update_file_content_from_temp(
+    async fn update_file_content_with_blob(
         &self,
         _file_id: &str,
-        _temp_path: &Path,
+        _blob_hash: &str,
         _size: u64,
-        _content_type: Option<String>,
-        _pre_computed_hash: Option<String>,
         _modified_at: Option<i64>,
     ) -> Result<(String, i64), DomainError> {
         Ok((String::new(), 0))

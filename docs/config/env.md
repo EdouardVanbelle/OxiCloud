@@ -14,8 +14,7 @@ Most runtime variables use the `OXICLOUD_` prefix. A few build-time or allocator
 | `OXICLOUD_MAX_UPLOAD_SIZE` | `10737418240` | Whole-file size ceiling, in bytes (10 GB on 64-bit, 1 GB on 32-bit). Applies to BOTH direct PUTs (per-request body) and chunked uploads (declared `total_size`, checked upfront at session creation). |
 | `OXICLOUD_DIRECT_PUT_MAX_BYTES` | `1073741824` | Per-request cap for non-chunked PUT bodies, in bytes (1 GiB). Set below `OXICLOUD_MAX_UPLOAD_SIZE` so larger files are pushed onto the chunked protocol (resumable on failure). See [Storage Fine Tuning](./storage-fine-tuning.md). |
 | `OXICLOUD_CHUNK_MAX_BYTES` | `104857600` | Maximum size of a single chunked-upload PUT in bytes (100 MB). Per-chunk cap, independent of `OXICLOUD_MAX_UPLOAD_SIZE` (whole-file cap). See [Storage Fine Tuning](./storage-fine-tuning.md). |
-| `OXICLOUD_UPLOAD_TMPDIR` | (OS temp dir) | Spool directory for non-chunked PUT bodies (`/api/files/upload`, WebDAV PUT). Point at a real-disk path on the same FS as `.blobs/` to avoid tmpfs OOMKill and make blob promotion an atomic rename. See [Storage Fine Tuning](./storage-fine-tuning.md). |
-| `OXICLOUD_CHUNK_DIR` | `{STORAGE_PATH}/.uploads` | Root directory for chunked-upload sessions (REST + NextCloud). Same-FS / NVMe placement guidance: see [Storage Fine Tuning](./storage-fine-tuning.md). |
+| `OXICLOUD_CHUNK_DIR` | `{STORAGE_PATH}/.uploads` | Root directory for chunked-upload sessions (REST + NextCloud). Direct (non-chunked) uploads stream straight into the blob store and need no spool directory. Placement guidance: see [Storage Fine Tuning](./storage-fine-tuning.md). |
 | `OXICLOUD_REUSE_PORT` | `false` | Enable `SO_REUSEPORT` so multiple processes can share the same port. **Disabled by default** — a second accidental instance will fail with "address already in use". Enable only for deliberate multi-worker setups (process supervisor, rolling restart). Not supported on Windows. |
 
 ## Database

@@ -7,10 +7,12 @@ use std::sync::Arc;
 
 use crate::application::ports::file_ports::{FileRetrievalUseCase, FileUploadUseCase};
 use crate::common::di::AppState;
-use crate::common::mime_detect::{filename_from_path, refine_content_type_from_file};
+use crate::common::mime_detect::filename_from_path;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::{AuthUser, CurrentUser};
-use crate::interfaces::upload_spool::stream_body_to_path;
+use crate::interfaces::upload_ingest::{
+    discard_ingested, ingest_stream_to_cas, stream_body_to_path, stream_from_files,
+};
 
 /// Dispatch Nextcloud chunked upload WebDAV requests.
 ///
@@ -239,18 +241,17 @@ async fn handle_assemble(
     let dest_subpath = extract_files_subpath(&destination, &user.username)
         .ok_or_else(|| AppError::bad_request("Invalid Destination URL"))?;
 
-    // Assemble chunks into a temp file with hash-on-write (BLAKE3 computed
-    // during the same read/write loop that copies chunks into the
-    // assembled file). The hash is passed downstream as `pre_computed_hash`
-    // so the dedup layer never re-reads the assembled file just to compute
-    // it — saves one full file-sized read pass per upload.
-    let (temp_path, size, blake3_hash) = nc
+    // Stream the chunk parts, in order, straight into the CDC chunk store —
+    // no assembled temp file is ever written. Chunking (FastCDC), BLAKE3
+    // hashing, dedup checks and MIME sniffing (magic bytes off the first
+    // part) all happen in that single read pass. The parts stay on disk
+    // until the session cleanup below, so a failed completion is retryable.
+    let chunk_paths = nc
         .chunked_uploads
-        .assemble(&user.username, upload_id)
+        .ordered_chunk_paths(&user.username, upload_id)
         .await
-        .map_err(|e| AppError::internal_error(format!("Failed to assemble chunks: {}", e)))?;
+        .map_err(|e| AppError::internal_error(format!("Failed to list chunks: {}", e)))?;
 
-    // Write assembled file to storage via the upload service.
     let upload_service = &state.applications.file_upload_service;
     let file_service = &state.applications.file_retrieval_service;
     let folder_service = &state.applications.folder_service;
@@ -261,35 +262,31 @@ async fn handle_assemble(
         dest_subpath.trim_matches('/')
     );
 
-    // Detect content type via magic bytes + extension fallback.
-    let filename = filename_from_path(&dest_subpath);
-    let content_type =
-        refine_content_type_from_file(&temp_path, filename, "application/octet-stream").await;
+    let filename = filename_from_path(&dest_subpath).to_string();
+    let ingested = ingest_stream_to_cas(
+        stream_from_files(chunk_paths),
+        &state.core.dedup_service,
+        &filename,
+        "application/octet-stream",
+        usize::MAX,
+        None,
+    )
+    .await?;
+    let content_type = ingested.content_type.clone();
 
     // Check if file exists (update vs create).
     let existing = file_service.get_file_by_path(&internal_path).await;
 
     let etag: Option<String> = if existing.is_ok() {
         let dto = upload_service
-            .update_file_streaming(
-                &internal_path,
-                &temp_path,
-                size,
-                &content_type,
-                Some(blake3_hash.clone()),
-                oc_mtime,
-            )
+            .update_file_streaming(&internal_path, ingested.stored(), &content_type, oc_mtime)
             .await
             .map_err(|e| AppError::internal_error(format!("Failed to update file: {}", e)))?;
 
         Some(dto.etag)
     } else {
-        // New-file branch: resolve the parent folder by path and pass the
-        // assembled file's path directly to `upload_file_from_path` so the
-        // bytes never get read back into RAM. Previously this branch did
-        // `tokio::fs::read(&temp_path)` — an extra full file-sized read
-        // pass AND a peak-RAM allocation equal to the upload size, which
-        // defeated the streaming model on large NC uploads.
+        // New-file branch: resolve the parent folder by path and register
+        // the file row against the already-ingested blob.
         let (parent_sub, filename) = match dest_subpath.rsplit_once('/') {
             Some((p, n)) => (p, n),
             None => ("", dest_subpath.as_str()),
@@ -302,27 +299,29 @@ async fn handle_assemble(
         let parent_internal = parent_internal.trim_end_matches('/');
 
         use crate::application::ports::folder_ports::FolderUseCase;
-        let parent_folder = folder_service
-            .get_folder_by_path(parent_internal)
-            .await
-            .map_err(|e| AppError::internal_error(format!("Parent folder lookup failed: {}", e)))?;
+        let parent_folder = match folder_service.get_folder_by_path(parent_internal).await {
+            Ok(folder) => folder,
+            Err(e) => {
+                discard_ingested(&state.core.dedup_service, &ingested).await;
+                return Err(AppError::internal_error(format!(
+                    "Parent folder lookup failed: {}",
+                    e
+                )));
+            }
+        };
 
         let dto = upload_service
-            .upload_file_from_path(
+            .upload_file_streaming(
                 filename.to_string(),
                 Some(parent_folder.id),
                 content_type.to_string(),
-                &temp_path,
-                Some(blake3_hash),
+                ingested.stored(),
             )
             .await
             .map_err(|e| AppError::internal_error(format!("Failed to create file: {}", e)))?;
 
         Some(dto.etag)
     };
-
-    // Clean up temp file (session cleanup below removes the directory anyway).
-    let _ = tokio::fs::remove_file(&temp_path).await;
 
     // Cleanup session.
     let _ = nc.chunked_uploads.cleanup(&user.username, upload_id).await;

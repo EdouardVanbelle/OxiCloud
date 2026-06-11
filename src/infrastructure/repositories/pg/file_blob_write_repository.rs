@@ -220,26 +220,30 @@ impl FileBlobWriteRepository {
         Ok((new_hash.to_string(), updated_at))
     }
 
-    /// Like [`FileWritePort::save_file_from_temp`] but also returns whether the
-    /// blob was genuinely new (`true`) or a dedup hit (`false`).
-    /// Used by [`FileUploadService`] to pass `is_new_blob` to lifecycle hooks.
-    pub async fn save_file_from_temp_with_dedup(
+    /// Register a file row pointing at a blob already stored in the chunk
+    /// store (the upload-ingest layer streamed the content in). Consumes the
+    /// caller's blob reference: any failure releases it before returning.
+    async fn save_file_with_blob_impl(
         &self,
         name: String,
         folder_id: Option<String>,
         content_type: String,
-        temp_path: &std::path::Path,
+        blob_hash: &str,
         size: u64,
-        pre_computed_hash: Option<String>,
-    ) -> Result<(File, bool), DomainError> {
-        let user_id = self.resolve_user_id(folder_id.as_deref()).await?;
-
-        let dedup_result = self
-            .dedup
-            .store_from_file(temp_path, Some(content_type.clone()), pre_computed_hash)
-            .await?;
-        let is_new_blob = !dedup_result.was_deduplicated();
-        let blob_hash = dedup_result.hash().to_string();
+    ) -> Result<File, DomainError> {
+        let user_id = match self.resolve_user_id(folder_id.as_deref()).await {
+            Ok(user_id) => user_id,
+            Err(e) => {
+                if let Err(rollback_err) = self.dedup.remove_reference(blob_hash).await {
+                    tracing::error!(
+                        "Blob orphaned after owner resolution failure — hash: {}, err: {}",
+                        &blob_hash[..12],
+                        rollback_err
+                    );
+                }
+                return Err(e);
+            }
+        };
 
         // Deadlock victims (40P01) retry before the compensation below runs —
         // a successful retry must keep the blob reference alive. The final
@@ -259,7 +263,7 @@ impl FileBlobWriteRepository {
             .bind(&name)
             .bind(&folder_id)
             .bind(user_id)
-            .bind(&blob_hash)
+            .bind(blob_hash)
             .bind(size as i64)
             .bind(&content_type)
             .bind(category_order_for(&name, &content_type))
@@ -269,7 +273,7 @@ impl FileBlobWriteRepository {
         {
             Ok(row) => row,
             Err(e) => {
-                if let Err(rollback_err) = self.dedup.remove_reference(&blob_hash).await {
+                if let Err(rollback_err) = self.dedup.remove_reference(blob_hash).await {
                     tracing::error!(
                         "Blob orphaned after failed INSERT — hash: {}, err: {}",
                         &blob_hash[..12],
@@ -309,32 +313,23 @@ impl FileBlobWriteRepository {
             row.1,
             row.2,
             Some(user_id),
-            blob_hash,
+            blob_hash.to_string(),
         )?;
-        Ok((file, is_new_blob))
+        Ok(file)
     }
 }
 
 impl FileWritePort for FileBlobWriteRepository {
-    async fn save_file_from_temp(
+    async fn save_file_with_blob(
         &self,
         name: String,
         folder_id: Option<String>,
         content_type: String,
-        temp_path: &std::path::Path,
+        blob_hash: &str,
         size: u64,
-        pre_computed_hash: Option<String>,
     ) -> Result<File, DomainError> {
-        self.save_file_from_temp_with_dedup(
-            name,
-            folder_id,
-            content_type,
-            temp_path,
-            size,
-            pre_computed_hash,
-        )
-        .await
-        .map(|(file, _)| file)
+        self.save_file_with_blob_impl(name, folder_id, content_type, blob_hash, size)
+            .await
     }
 
     async fn move_file(
@@ -532,24 +527,18 @@ impl FileWritePort for FileBlobWriteRepository {
         Ok(())
     }
 
-    async fn update_file_content_from_temp(
+    async fn update_file_content_with_blob(
         &self,
         file_id: &str,
-        temp_path: &std::path::Path,
+        blob_hash: &str,
         size: u64,
-        content_type: Option<String>,
-        pre_computed_hash: Option<String>,
         modified_at: Option<i64>,
     ) -> Result<(String, i64), DomainError> {
-        // Streaming: pass pre-computed hash so dedup skips re-reading the file.
-        let dedup_result = self
-            .dedup
-            .store_from_file(temp_path, content_type, pre_computed_hash)
-            .await?;
-        let new_hash = dedup_result.hash().to_string();
-
+        // The content was already ingested into the chunk store by the
+        // upload-ingest layer; swap_blob_hash consumes its reference and
+        // releases it on failure.
         let swapped = self
-            .swap_blob_hash(file_id, &new_hash, size as i64, modified_at)
+            .swap_blob_hash(file_id, blob_hash, size as i64, modified_at)
             .await?;
         // The file now maps to a different blob — drop the read-side cache
         // entry so streaming downloads cannot serve the previous content

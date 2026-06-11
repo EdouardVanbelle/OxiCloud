@@ -80,18 +80,6 @@ pub struct DedupStatsDto {
 /// duplicate storage automatically. Multiple file references can
 /// point to the same physical blob.
 pub trait DedupPort: Send + Sync + 'static {
-    /// Store content with deduplication (streaming from file).
-    ///
-    /// If `pre_computed_hash` is provided (e.g. hash-on-write from the handler),
-    /// the file will NOT be re-read to calculate the hash — saving one full
-    /// sequential read of the file.
-    async fn store_from_file(
-        &self,
-        source_path: &Path,
-        content_type: Option<String>,
-        pre_computed_hash: Option<String>,
-    ) -> Result<DedupResultDto, DomainError>;
-
     /// Check if a blob with the given hash exists.
     async fn blob_exists(&self, hash: &str) -> bool;
 

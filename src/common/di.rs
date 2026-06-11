@@ -441,6 +441,7 @@ impl AppServiceFactory {
         repos: &RepositoryServices,
         trash_service: Option<Arc<TrashService>>,
         authz: &Arc<PgAclEngine>,
+        storage_usage: &Arc<StorageUsageService>,
         content_index: Option<Arc<TantivyContentIndex>>,
     ) -> ApplicationServices {
         // Main services
@@ -456,7 +457,25 @@ impl AppServiceFactory {
             )
             .with_content_cache(core.file_content_cache.clone())
             .with_file_lifecycle_hook(core.file_lifecycle.clone())
-            .with_upload_temp_dir(self.config.storage.upload_temp_dir.clone()),
+            .with_instant_upload(
+                authz.clone(),
+                core.dedup_service.clone(),
+                storage_usage.clone(),
+            ),
+        );
+
+        // Delta-upload protocol — chunk negotiation over the same dedup
+        // store. Bounded by the same whole-file ceiling as byte uploads.
+        let delta_upload_service = Arc::new(
+            crate::application::services::delta_upload_service::DeltaUploadService::new(
+                core.dedup_service.clone(),
+                file_upload_service.clone(),
+                repos.file_read_repository.clone(),
+                storage_usage.clone(),
+                authz.clone(),
+                self.config.storage.max_upload_size as u64,
+                self.config.storage.chunk_max_bytes as u64,
+            ),
         );
 
         let file_retrieval_service = Arc::new(FileRetrievalService::new_with_cache(
@@ -508,6 +527,7 @@ impl AppServiceFactory {
             // Traits for abstraction
             folder_service,
             file_upload_service,
+            delta_upload_service,
             file_retrieval_service,
             file_management_service,
             file_use_case_factory,
@@ -566,9 +586,12 @@ impl AppServiceFactory {
             .with_file_deleted_hook(core.file_lifecycle.clone()),
         );
 
-        // Initialize cleanup service (bulk-deletes expired items in 2 SQL queries)
+        // Initialize cleanup service (bulk-deletes expired items in 2 SQL
+        // queries, then GCs zero-reference blobs — including chunks orphaned
+        // by aborted streaming uploads).
         let cleanup_service = TrashCleanupService::new(
             trash_repo.clone(),
+            core.dedup_service.clone(),
             24, // Run cleanup every 24 hours
         );
 
@@ -799,7 +822,12 @@ impl AppServiceFactory {
             .create_trash_service(&repos, &core, &authorization)
             .await;
 
-        // 3c. Content index (embedded Tantivy) — opened before application
+        // 3c. Storage usage / quota service (needed by the instant-upload
+        // path inside the application services, and re-exposed on AppState
+        // for the handler-side quota checks of the byte-upload paths).
+        let storage_usage = self.create_storage_usage_service(&repos, &pool, &maintenance_pool);
+
+        // 3d. Content index (embedded Tantivy) — opened before application
         // services so SearchService can hold the query port; the feeding
         // worker starts further down with the maintenance pool.
         let content_index = self.create_content_index();
@@ -810,6 +838,7 @@ impl AppServiceFactory {
             &repos,
             trash_service.clone(),
             &authorization,
+            &storage_usage,
             content_index.as_ref().map(|(idx, _)| idx.clone()),
         );
 
@@ -851,8 +880,7 @@ impl AppServiceFactory {
             recent_service = Some(recent.clone());
             apps.recent_service = Some(recent);
 
-            storage_usage_service =
-                Some(self.create_storage_usage_service(&repos, &pool, &maintenance_pool));
+            storage_usage_service = Some(storage_usage.clone());
 
             self.start_tree_etag_flush_job(&maintenance_pool);
 
@@ -1102,6 +1130,13 @@ impl AppServiceFactory {
             // Arc.
             user_profile_rate_limiter: Arc::new(
                 crate::interfaces::middleware::rate_limit::RateLimiter::new(60, 60, 50_000),
+            ),
+            // Delta upload: 240 requests / minute / caller. Generous for a
+            // real client (chunk PUTs carry up to 100 MB each) while
+            // stopping pin/negotiate floods; 50 000 tracked callers bound
+            // the memory like the other limiters.
+            delta_upload_rate_limiter: Arc::new(
+                crate::interfaces::middleware::rate_limit::RateLimiter::new(240, 60, 50_000),
             ),
             // PR 12 — per-sharer email-invite ceiling: caller_id-keyed.
             // Defends against a compromised account spamming external
@@ -1440,6 +1475,8 @@ pub struct ApplicationServices {
     // Traits for abstraction
     pub folder_service: Arc<FolderService>,
     pub file_upload_service: Arc<FileUploadService>,
+    pub delta_upload_service:
+        Arc<crate::application::services::delta_upload_service::DeltaUploadService>,
     pub file_retrieval_service: Arc<FileRetrievalService>,
     pub file_management_service: Arc<FileManagementService>,
     pub file_use_case_factory: Arc<dyn FileUseCaseFactory>,
@@ -1559,6 +1596,9 @@ pub struct AppState {
     /// authenticated caller covers any legitimate UI rendering while
     /// throttling enumeration.
     pub user_profile_rate_limiter: Arc<crate::interfaces::middleware::rate_limit::RateLimiter>,
+    /// Per-caller flood guard for the delta-upload endpoints
+    /// (negotiate / chunks / commit share one budget).
+    pub delta_upload_rate_limiter: Arc<crate::interfaces::middleware::rate_limit::RateLimiter>,
     /// Per-sharer ceiling on `POST /api/grants` invitations whose
     /// subject is `{ type: "email" }`. 50 per hour keyed on
     /// `caller_id`. Anonymous attackers can't reach this code path

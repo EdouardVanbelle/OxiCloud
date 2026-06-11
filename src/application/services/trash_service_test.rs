@@ -554,14 +554,13 @@ impl FileReadPort for MockFileRepository {
 }
 
 impl FileWritePort for MockFileRepository {
-    async fn save_file_from_temp(
+    async fn save_file_with_blob(
         &self,
         _name: String,
         _folder_id: Option<String>,
         _content_type: String,
-        _temp_path: &std::path::Path,
+        _blob_hash: &str,
         _size: u64,
-        _pre_computed_hash: Option<String>,
     ) -> std::result::Result<File, DomainError> {
         unimplemented!()
     }
@@ -586,13 +585,11 @@ impl FileWritePort for MockFileRepository {
         Ok(())
     }
 
-    async fn update_file_content_from_temp(
+    async fn update_file_content_with_blob(
         &self,
         _file_id: &str,
-        _temp_path: &std::path::Path,
+        _blob_hash: &str,
         _size: u64,
-        _content_type: Option<String>,
-        _pre_computed_hash: Option<String>,
         _modified_at: Option<i64>,
     ) -> std::result::Result<(String, i64), DomainError> {
         Ok((String::new(), 0))

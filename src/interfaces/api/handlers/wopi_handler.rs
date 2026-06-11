@@ -165,10 +165,6 @@ async fn put_file(
     State(state): State<WopiState>,
     req: Request<Body>,
 ) -> Response {
-    use http_body_util::BodyStream;
-    use tokio::io::AsyncWriteExt;
-    use tokio_stream::StreamExt;
-
     let claims = match state
         .token_service
         .validate_token(&token_query.access_token)
@@ -218,74 +214,31 @@ async fn put_file(
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
     };
 
-    // ── Streaming spool: body → temp file + incremental BLAKE3 ──
-    let temp_file = match tempfile::NamedTempFile::new() {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::error!("WOPI PutFile: failed to create temp file: {}", e);
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-    let temp_path = temp_file.path().to_path_buf();
-
-    let mut file_out = match tokio::fs::File::create(&temp_path).await {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::error!("WOPI PutFile: failed to open temp file: {}", e);
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-
+    // ── Streaming ingest: body → CDC chunk store (no temp file) ──
     let content_type = file.mime_type.clone();
-    let mut hasher = blake3::Hasher::new();
-    let mut total_bytes: u64 = 0;
-    let mut stream = BodyStream::new(req.into_body());
-
-    while let Some(frame_result) = stream.next().await {
-        let frame = match frame_result {
-            Ok(f) => f,
-            Err(e) => {
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                tracing::error!("WOPI PutFile: body read error: {}", e);
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        };
-        if let Some(chunk) = frame.data_ref() {
-            total_bytes += chunk.len() as u64;
-            hasher.update(chunk);
-            if let Err(e) = file_out.write_all(chunk).await {
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                tracing::error!("WOPI PutFile: temp write error: {}", e);
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
+    let ingested = match crate::interfaces::upload_ingest::ingest_body_to_cas(
+        req.into_body(),
+        &state.app_state.core.dedup_service,
+        &file.name,
+        &content_type,
+        usize::MAX,
+    )
+    .await
+    {
+        Ok(ingested) => ingested,
+        Err(e) => {
+            tracing::error!("WOPI PutFile: ingest failed: {}", e.message);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
-    }
-    if let Err(e) = file_out.flush().await {
-        let _ = tokio::fs::remove_file(&temp_path).await;
-        tracing::error!("WOPI PutFile: flush error: {}", e);
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-    drop(file_out);
+    };
 
-    let hash = hasher.finalize().to_hex().to_string();
-
-    // ── Atomic store: temp file → dedup blob + DB metadata update ──
+    // ── Atomic store: swap the file row onto the ingested blob ──
     let result = state
         .app_state
         .applications
         .file_upload_service
-        .update_file_streaming(
-            &file.path,
-            &temp_path,
-            total_bytes,
-            &content_type,
-            Some(hash),
-            None,
-        )
+        .update_file_streaming(&file.path, ingested.stored(), &content_type, None)
         .await;
-
-    // Clean up temp file (may already be moved by dedup, ignore error)
-    let _ = tokio::fs::remove_file(&temp_path).await;
 
     match result {
         Ok(_file_dto) => StatusCode::OK.into_response(),

@@ -520,3 +520,77 @@
  * @typedef {{kind: 'user', id: string} | {kind: 'group', id: string}} GroupMemberItem
  */
 
+// ------------------- Instant upload (dedup)
+
+/**
+ * Response from `GET /api/dedup/check/{hash}` — user-scoped: `exists` only
+ * reflects content the CALLER already owns, never global existence.
+ * Mirrors `HashCheckResponse` on the server (`dedup_handler.rs`).
+ * @typedef {Object} HashCheckAnswer
+ * @property {boolean} exists
+ * @property {string} hash BLAKE3 echoed back (64 hex chars)
+ * @property {number} [existing_size] size in bytes, present when `exists`
+ */
+
+/**
+ * Request body for `POST /api/files/by-hash` (instant upload — registers a
+ * file from an already-owned blob, zero content bytes on the wire).
+ * Mirrors `CreateFileByHashRequest` on the server (`file_handler.rs`).
+ * The 201 response body is a {@link FileItem}.
+ * @typedef {Object} CreateFileByHash
+ * @property {string} name file name to create (basename only)
+ * @property {string} folder_id target folder (caller needs Create on it)
+ * @property {string} hash BLAKE3 of the owned content (64 hex chars)
+ */
+
+// ------------------- Delta sync (chunk negotiation)
+
+/**
+ * One chunk reference on the delta wire: terse on purpose (a 10 GB file
+ * is ~40 000 of these). Mirrors `ChunkRef` on the server
+ * (`delta_upload_service.rs`).
+ * @typedef {Object} DeltaChunkRef
+ * @property {string} h BLAKE3 of the chunk (64 hex chars)
+ * @property {number} s chunk size in bytes (1 ..= 1 MiB)
+ */
+
+/**
+ * Response of `POST /api/files/delta/negotiate` — the distinct chunk
+ * hashes the caller must upload (user-scoped, advisory).
+ * @typedef {Object} DeltaNegotiateAnswer
+ * @property {string[]} missing
+ */
+
+/**
+ * Request body of `POST /api/files/delta/commit`. Exactly one of
+ * (`name` + `folder_id`) or `file_id` selects create vs update mode.
+ * 201/200 responses carry a {@link FileItem}; 409 carries
+ * `{still_missing: string[]}` (upload those chunks and retry).
+ * @typedef {Object} DeltaCommitRequest
+ * @property {string} file_hash BLAKE3 of the whole file (verified server-side)
+ * @property {DeltaChunkRef[]} chunks full sequence, in file order
+ * @property {string} [name] create mode: file name
+ * @property {string} [folder_id] create mode: target folder
+ * @property {string} [file_id] update mode: file whose content is replaced
+ */
+
+/**
+ * Response of `GET /api/files/{id}/manifest` — the recipe to rebuild a
+ * file from chunks (delta download, step 1). Immutable per `file_hash`;
+ * the endpoint serves it with `ETag: file_hash` so polling sync clients
+ * revalidate with a 304 for free.
+ * @typedef {Object} DeltaManifestAnswer
+ * @property {string} file_hash BLAKE3 of the whole file
+ * @property {number} total_size bytes
+ * @property {DeltaChunkRef[]} chunks full sequence, in file order
+ */
+
+/**
+ * Request body of `POST /api/files/delta/download` (delta download,
+ * step 2). Responds with `[u32 BE length][bytes]` frames in request
+ * order, or 404 `{not_available: string[]}` for chunks outside the
+ * caller's files.
+ * @typedef {Object} DeltaDownloadRequest
+ * @property {string[]} hashes distinct chunk hashes to fetch
+ */
+

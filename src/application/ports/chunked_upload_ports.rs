@@ -98,6 +98,21 @@ pub struct UploadStatusResponseDto {
     pub is_complete: bool,
 }
 
+/// A completed upload session, ready to be streamed into the blob store.
+///
+/// `chunk_paths` lists every chunk file in assembly order — the caller
+/// concatenates them as one byte stream (CDC chunking + hashing happen in
+/// that single pass). The files stay on disk until `finalize_upload`, so a
+/// failed completion (e.g. checksum mismatch) remains retryable.
+#[derive(Debug, Clone)]
+pub struct CompletedUploadParts {
+    pub chunk_paths: Vec<PathBuf>,
+    pub filename: String,
+    pub folder_id: Option<String>,
+    pub content_type: String,
+    pub total_size: u64,
+}
+
 /// Port for chunked/resumable upload operations.
 ///
 /// Implementations manage upload sessions, chunk storage, reassembly,
@@ -137,16 +152,15 @@ pub trait ChunkedUploadPort: Send + Sync + 'static {
         user_id: Uuid,
     ) -> Result<UploadStatusResponseDto, DomainError>;
 
-    /// Assemble all chunks into the final file.
+    /// Validate completion and hand back the ordered chunk parts.
     ///
-    /// Returns `(assembled_file_path, filename, folder_id, content_type, total_size, blake3_hash)`.
-    /// The hash is computed during assembly (hash-on-write), eliminating a
-    /// second sequential read of the assembled file.
+    /// No assembled file is written — the caller streams the parts straight
+    /// into the content-addressable store.
     async fn complete_upload(
         &self,
         upload_id: &str,
         user_id: Uuid,
-    ) -> Result<(PathBuf, String, Option<String>, String, u64, String), DomainError>;
+    ) -> Result<CompletedUploadParts, DomainError>;
 
     /// Finalize upload: clean up the session and temporary files.
     async fn finalize_upload(&self, upload_id: &str, user_id: Uuid) -> Result<(), DomainError>;

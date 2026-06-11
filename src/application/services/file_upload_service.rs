@@ -1,16 +1,19 @@
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::application::dtos::file_dto::FileDto;
+use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::file_lifecycle::FileLifecycleHook;
-use crate::application::ports::file_ports::FileUploadUseCase;
-use crate::application::ports::storage_ports::{FileReadPort, FileWritePort};
+use crate::application::ports::file_ports::{FileUploadUseCase, StoredBlob};
+use crate::application::ports::storage_ports::{FileReadPort, FileWritePort, StorageUsagePort};
 use crate::application::services::storage_usage_service::StorageUsageService;
 use crate::common::errors::DomainError;
+use crate::domain::services::authorization::{Permission, Resource, Subject};
 use crate::infrastructure::repositories::pg::FileBlobReadRepository;
 use crate::infrastructure::repositories::pg::FileBlobWriteRepository;
 use crate::infrastructure::services::dedup_service::DedupService;
 use crate::infrastructure::services::file_content_cache::FileContentCache;
+use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
 use tracing::{debug, info, warn};
 
 /// Helper function to extract username from folder path string.
@@ -34,20 +37,16 @@ fn extract_username_from_path(path: &str) -> Option<String> {
 
 /// Service for file upload operations.
 ///
-/// **Every upload path converges on streaming-to-disk** — there is no
-/// `Vec<u8>` buffer path.
-///
-/// - **Normal uploads**: handler spools multipart to temp file → `upload_file_streaming`
-/// - **Chunked uploads**: chunks already on disk → `upload_file_from_path`
-/// - **WebDAV PUT (large)**: handler streams body to temp file → `update_file_streaming`
-/// - **WebDAV PUT (small / compat)**: `create_file` / `update_file` spool `&[u8]`
-///   to a temp file internally, then call the streaming path.
-///
-/// Peak RAM usage during any upload: ~256 KB (streaming hash) regardless of file size.
+/// Content never passes through this service: the interface layer streams
+/// the request body straight into the CDC chunk store (no spool file, no
+/// full-body buffering) and hands over a [`StoredBlob`] reference. This
+/// service registers the metadata row, keeps caches coherent and fires
+/// lifecycle hooks. Blob-reference ownership is consumed by the write
+/// port, which releases it on failure — callers never compensate.
 pub struct FileUploadService {
-    /// Write port — handles save, streaming, deferred registration
+    /// Write port — registers file rows against ingested blobs.
     file_write: Arc<FileBlobWriteRepository>,
-    /// Read port — needed for WebDAV create_file / update_file
+    /// Read port — needed for WebDAV/WOPI update-by-path.
     file_read: Option<Arc<FileBlobReadRepository>>,
     /// Optional storage usage tracking
     storage_usage_service: Option<Arc<StorageUsageService>>,
@@ -55,9 +54,18 @@ pub struct FileUploadService {
     content_cache: Option<Arc<FileContentCache>>,
     /// Single lifecycle dispatcher — fires on_file_created / on_file_updated.
     file_lifecycle_hook: Option<Arc<dyn FileLifecycleHook>>,
-    /// Directory for spool temp files (`&[u8]` upload variants). When `Some`,
-    /// keeps spools off tmpfs/RAM so they don't count against the cgroup limit.
-    upload_temp_dir: Option<PathBuf>,
+    /// Dependencies of the instant-upload path
+    /// (`create_file_from_owned_blob_with_perms`); `None` in minimal test
+    /// wiring.
+    instant_upload: Option<InstantUploadDeps>,
+}
+
+/// Everything the instant-upload path needs beyond the upload service's own
+/// ports: permission checks, the dedup index, and quota enforcement.
+struct InstantUploadDeps {
+    authz: Arc<PgAclEngine>,
+    dedup: Arc<DedupService>,
+    quota: Arc<StorageUsageService>,
 }
 
 impl FileUploadService {
@@ -69,7 +77,7 @@ impl FileUploadService {
             storage_usage_service: None,
             content_cache: None,
             file_lifecycle_hook: None,
-            upload_temp_dir: None,
+            instant_upload: None,
         }
     }
 
@@ -84,13 +92,23 @@ impl FileUploadService {
             storage_usage_service: None,
             content_cache: None,
             file_lifecycle_hook: None,
-            upload_temp_dir: None,
+            instant_upload: None,
         }
     }
 
-    /// Configures the spool directory for the `&[u8]` upload variants.
-    pub fn with_upload_temp_dir(mut self, dir: Option<PathBuf>) -> Self {
-        self.upload_temp_dir = dir;
+    /// Wires the authorization engine, dedup index and quota service that
+    /// power the instant-upload path.
+    pub fn with_instant_upload(
+        mut self,
+        authz: Arc<PgAclEngine>,
+        dedup: Arc<DedupService>,
+        quota: Arc<StorageUsageService>,
+    ) -> Self {
+        self.instant_upload = Some(InstantUploadDeps {
+            authz,
+            dedup,
+            quota,
+        });
         self
     }
 
@@ -115,12 +133,177 @@ impl FileUploadService {
         self
     }
 
-    // ── private helpers ──────────────────────────────────────────
+    // ── Instant upload (zero content bytes) ──────────────────────
 
-    /// Create a spool temp file, honoring the configured upload temp dir.
-    fn new_temp(&self) -> std::io::Result<tempfile::NamedTempFile> {
-        crate::common::temp::new_spool_temp_file(self.upload_temp_dir.as_deref())
+    /// Register a new file row pointing at a blob the caller **already
+    /// owns** — the instant-upload path: the client proved it has the
+    /// content by hash, so no bytes travel and no chunk is written. Pure
+    /// metadata: one ref_count bump + one row INSERT.
+    ///
+    /// Security model (mirrors `GET /api/dedup/check/{hash}`):
+    /// - The caller must have `Create` permission on the target folder.
+    /// - The hash is only claimable when the caller owns at least one
+    ///   non-trashed file referencing it — never a global content oracle.
+    ///   A non-owned hash returns `NotFound` (anti-enumeration: same shape
+    ///   as "no such blob") and emits an `instant_upload.rejected` audit
+    ///   event with the real reason.
+    /// - Quota is enforced on the logical size, exactly like a byte upload.
+    pub async fn create_file_from_owned_blob_with_perms(
+        &self,
+        caller_id: Uuid,
+        name: String,
+        folder_id: String,
+        hash: &str,
+    ) -> Result<FileDto, DomainError> {
+        let Some(InstantUploadDeps {
+            authz,
+            dedup,
+            quota,
+        }) = &self.instant_upload
+        else {
+            return Err(DomainError::internal_error(
+                "FileUpload",
+                "instant upload is not wired (authz/dedup/quota missing)",
+            ));
+        };
+
+        // ── AuthZ: Create on the target folder ───────────────────
+        let folder_uuid = Uuid::parse_str(&folder_id)
+            .map_err(|_| DomainError::not_found("Folder", folder_id.clone()))?;
+        authz
+            .require(
+                Subject::User(caller_id),
+                Permission::Create,
+                Resource::Folder(folder_uuid),
+            )
+            .await?;
+
+        // ── Ownership: only blobs the caller can already read ────
+        if !dedup
+            .user_owns_blob_reference(hash, &caller_id.to_string())
+            .await
+        {
+            tracing::info!(
+                target: "audit",
+                event = "instant_upload.rejected",
+                reason = "hash_not_owned",
+                caller_id = %caller_id,
+                blob_hash = %hash,
+                "👮🏻‍♂️ Instant upload rejected: caller owns no file referencing the claimed hash",
+            );
+            return Err(DomainError::not_found("Blob", hash));
+        }
+
+        let Some(metadata) = dedup.get_blob_metadata(hash).await else {
+            // Lost a race with the last-reference delete — same shape as
+            // "never existed".
+            return Err(DomainError::not_found("Blob", hash));
+        };
+
+        // ── Quota on the logical size, before taking any reference ──
+        quota.check_storage_quota(caller_id, metadata.size).await?;
+
+        // The manifest knows the original content type; fall back to the
+        // new name's extension when the stored one is generic.
+        let claimed = metadata.content_type.as_deref().unwrap_or("");
+        let content_type =
+            match crate::common::mime_detect::refine_content_type(&[], &name, claimed) {
+                ct if ct.is_empty() => "application/octet-stream".to_string(),
+                ct => ct,
+            };
+
+        // Take the reference the row registration will consume (it releases
+        // it again on any failure). A concurrent GC between the ownership
+        // check and this bump surfaces as NotFound — the client falls back
+        // to a normal byte upload.
+        dedup.add_reference(hash).await?;
+
+        let dto = self
+            .upload_file_streaming(
+                name,
+                Some(folder_id),
+                content_type,
+                StoredBlob {
+                    hash: hash.to_string(),
+                    size: metadata.size,
+                    is_new_blob: false,
+                },
+            )
+            .await?;
+
+        info!(
+            "⚡ INSTANT UPLOAD: {} ({} bytes, 0 transferred, ID: {})",
+            dto.name, metadata.size, dto.id
+        );
+        Ok(dto)
     }
+
+    /// Swap an existing file's content to an already-ingested blob — the
+    /// update mode of the delta-upload commit. The caller needs `Write`
+    /// permission on the file; the blob reference is consumed (released on
+    /// failure by the write port, like every other registration path).
+    pub async fn update_file_content_by_id_with_perms(
+        &self,
+        caller_id: Uuid,
+        file_id: &str,
+        blob: StoredBlob,
+    ) -> Result<FileDto, DomainError> {
+        let Some(InstantUploadDeps { authz, .. }) = &self.instant_upload else {
+            return Err(DomainError::internal_error(
+                "FileUpload",
+                "instant upload is not wired (authz/dedup/quota missing)",
+            ));
+        };
+        let Some(file_read) = &self.file_read else {
+            return Err(DomainError::internal_error(
+                "FileUpload",
+                "read port is not wired",
+            ));
+        };
+
+        let file_uuid = Uuid::parse_str(file_id)
+            .map_err(|_| DomainError::not_found("File", file_id.to_string()))?;
+        authz
+            .require(
+                Subject::User(caller_id),
+                Permission::Update,
+                Resource::File(file_uuid),
+            )
+            .await?;
+
+        let file = file_read.get_file(file_id).await?;
+        let (new_hash, updated_at) = self
+            .file_write
+            .update_file_content_with_blob(file_id, &blob.hash, blob.size, None)
+            .await?;
+        // The file maps to a different blob now — stale cached content must
+        // never be served for the rest of its TTI window.
+        if let Some(cc) = &self.content_cache {
+            cc.invalidate(file_id).await;
+        }
+
+        let parts = file.into_parts();
+        let updated = crate::domain::entities::file::File::with_timestamps_and_blob_hash(
+            parts.id,
+            parts.name,
+            parts.storage_path,
+            blob.size,
+            parts.mime_type,
+            parts.folder_id,
+            parts.created_at,
+            updated_at as u64,
+            parts.owner_id,
+            new_hash,
+        )
+        .map_err(|e| DomainError::internal_error("FileUpload", format!("rebuild entity: {e}")))?;
+        let dto = FileDto::from(updated);
+        if let Some(hook) = &self.file_lifecycle_hook {
+            hook.on_file_updated(file_id, &dto.content_hash, &dto.mime_type);
+        }
+        Ok(dto)
+    }
+
+    // ── private helpers ──────────────────────────────────────────
 
     /// Optionally update storage usage after a successful upload.
     fn maybe_update_storage_usage(&self, file: &FileDto) {
@@ -146,172 +329,37 @@ impl FileUploadService {
 }
 
 impl FileUploadUseCase for FileUploadService {
-    /// Streaming upload from a temp file on disk.
-    ///
-    /// Peak RAM: ~256 KB (hash calculation) regardless of file size.
-    /// The temp file is consumed (moved/deleted) by the blob store.
+    /// Register a new file row pointing at an already-ingested blob.
     async fn upload_file_streaming(
         &self,
         name: String,
         folder_id: Option<String>,
         content_type: String,
-        temp_path: &Path,
-        size: u64,
-        pre_computed_hash: Option<String>,
+        blob: StoredBlob,
     ) -> Result<FileDto, DomainError> {
-        let (file, is_new_blob) = self
+        let file = self
             .file_write
-            .save_file_from_temp_with_dedup(
-                name.clone(),
-                folder_id,
-                content_type,
-                temp_path,
-                size,
-                pre_computed_hash,
-            )
+            .save_file_with_blob(name.clone(), folder_id, content_type, &blob.hash, blob.size)
             .await?;
         let dto = FileDto::from(file);
         info!(
             "📡 STREAMING UPLOAD: {} ({} bytes, ID: {})",
-            name, size, dto.id
+            name, blob.size, dto.id
         );
         self.maybe_update_storage_usage(&dto);
         if let Some(hook) = &self.file_lifecycle_hook {
-            hook.on_file_created(&dto.id, &dto.content_hash, &dto.mime_type, is_new_blob);
+            hook.on_file_created(&dto.id, &dto.content_hash, &dto.mime_type, blob.is_new_blob);
         }
         Ok(dto)
     }
 
-    /// Upload from a file already on disk (chunked uploads).
-    async fn upload_file_from_path(
-        &self,
-        name: String,
-        folder_id: Option<String>,
-        content_type: String,
-        file_path: &Path,
-        pre_computed_hash: Option<String>,
-    ) -> Result<FileDto, DomainError> {
-        let size = tokio::fs::metadata(file_path)
-            .await
-            .map_err(|e| {
-                DomainError::internal_error(
-                    "FileUpload",
-                    format!("Failed to read file metadata: {}", e),
-                )
-            })?
-            .len();
-
-        self.upload_file_streaming(
-            name,
-            folder_id,
-            content_type,
-            file_path,
-            size,
-            pre_computed_hash,
-        )
-        .await
-    }
-
-    /// Creates a file at a specific path (for WebDAV PUT on new resource).
-    ///
-    /// Spools the in-memory `&[u8]` to a temp file with hash-on-write,
-    /// then delegates to the streaming path.  Peak RAM: the caller's
-    /// buffer + ~256 KB for the hasher.
-    async fn create_file(
-        &self,
-        parent_path: &str,
-        filename: &str,
-        content: &[u8],
-        content_type: &str,
-    ) -> Result<FileDto, DomainError> {
-        // Look up the folder ID by folder path
-        let parent_id = if !parent_path.is_empty() {
-            if let Some(file_read) = &self.file_read {
-                file_read.get_folder_id_by_path(parent_path).await.ok()
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // Spool to temp file + hash
-        let temp = self
-            .new_temp()
-            .map_err(|e| DomainError::internal_error("FileUpload", format!("temp file: {e}")))?;
-        tokio::fs::write(temp.path(), content)
-            .await
-            .map_err(|e| DomainError::internal_error("FileUpload", format!("write temp: {e}")))?;
-        let hash = DedupService::hash_file(temp.path())
-            .await
-            .map_err(|e| DomainError::internal_error("FileUpload", format!("hash: {e}")))?;
-
-        let (file, is_new_blob) = self
-            .file_write
-            .save_file_from_temp_with_dedup(
-                filename.to_string(),
-                parent_id,
-                content_type.to_string(),
-                temp.path(),
-                content.len() as u64,
-                Some(hash),
-            )
-            .await?;
-        let dto = FileDto::from(file);
-        self.maybe_update_storage_usage(&dto);
-        if let Some(hook) = &self.file_lifecycle_hook {
-            hook.on_file_created(&dto.id, &dto.content_hash, &dto.mime_type, is_new_blob);
-        }
-        Ok(dto)
-    }
-
-    /// Updates an existing file's content, or creates it if not found (for WebDAV PUT).
-    ///
-    /// Spools the in-memory `&[u8]` to a temp file with hash-on-write,
-    /// then delegates to the streaming update/create path.
-    async fn update_file(
-        &self,
-        path: &str,
-        content: &[u8],
-        content_type: &str,
-        modified_at: Option<i64>,
-    ) -> Result<FileDto, DomainError> {
-        // Spool to temp file + hash
-        let temp = self
-            .new_temp()
-            .map_err(|e| DomainError::internal_error("FileUpload", format!("temp file: {e}")))?;
-        tokio::fs::write(temp.path(), content)
-            .await
-            .map_err(|e| DomainError::internal_error("FileUpload", format!("write temp: {e}")))?;
-        let hash = DedupService::hash_file(temp.path())
-            .await
-            .map_err(|e| DomainError::internal_error("FileUpload", format!("hash: {e}")))?;
-
-        self.update_file_streaming(
-            path,
-            temp.path(),
-            content.len() as u64,
-            content_type,
-            Some(hash),
-            modified_at,
-        )
-        .await
-    }
-
-    /// Streaming update — replaces file content from a temp file on disk.
-    ///
-    /// Uses `update_file_content_from_temp` which passes the pre-computed hash
-    /// to dedup, avoiding a second full read of the file.
-    /// For new files (not found at `path`), falls back to `upload_file_streaming`.
-    ///
-    /// Peak RAM: ~256 KB regardless of file size.
+    /// Swap the content of the file at `path` to an already-ingested blob,
+    /// creating the file when it doesn't exist (WebDAV/NextCloud/WOPI PUT).
     async fn update_file_streaming(
         &self,
         path: &str,
-        temp_path: &Path,
-        size: u64,
+        blob: StoredBlob,
         content_type: &str,
-        pre_computed_hash: Option<String>,
         modified_at: Option<i64>,
     ) -> Result<FileDto, DomainError> {
         // Try to find the existing file first
@@ -321,14 +369,7 @@ impl FileUploadUseCase for FileUploadService {
             let file_id = file.id().to_string();
             let (new_hash, updated_at) = self
                 .file_write
-                .update_file_content_from_temp(
-                    &file_id,
-                    temp_path,
-                    size,
-                    Some(content_type.to_string()),
-                    pre_computed_hash,
-                    modified_at,
-                )
+                .update_file_content_with_blob(&file_id, &blob.hash, blob.size, modified_at)
                 .await?;
             // Invalidate content cache — file content has changed.
             if let Some(cc) = &self.content_cache {
@@ -343,7 +384,7 @@ impl FileUploadUseCase for FileUploadService {
                 parts.id,
                 parts.name,
                 parts.storage_path,
-                size,
+                blob.size,
                 parts.mime_type,
                 parts.folder_id,
                 parts.created_at,
@@ -381,15 +422,15 @@ impl FileUploadUseCase for FileUploadService {
             None
         };
 
-        let (created, is_new_blob) = self
+        let is_new_blob = blob.is_new_blob;
+        let created = self
             .file_write
-            .save_file_from_temp_with_dedup(
+            .save_file_with_blob(
                 filename.to_string(),
                 parent_id,
                 content_type.to_string(),
-                temp_path,
-                size,
-                pre_computed_hash,
+                &blob.hash,
+                blob.size,
             )
             .await?;
         let dto = FileDto::from(created);

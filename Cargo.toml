@@ -68,8 +68,7 @@ azure_storage = { version = "0.21", default-features = false, features = ["enabl
 azure_storage_blobs = { version = "0.21", default-features = false, features = ["enable_reqwest_rustls", "hmac_rust"] }
 aes-gcm = "0.10.3"
 lru = "0.16.4"
-fastcdc = "4.0.0"
-memmap2 = "0.9.10"
+fastcdc = { version = "4.0.0", features = ["tokio"] }
 lettre = { version = "0.11.18", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "rustls-native-certs", "builder"] }
 idna = "1.1"
 smol_str = { version = "0.3.2", features = ["serde"] }

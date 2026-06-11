@@ -100,3 +100,4 @@ tests/e2e/playwright/.auth/
 
 # Test fixtures generated on-the-fly by tests/api/run.sh
 tests/fixtures/chunk-over-cap-*.bin
+wasm/oxicloud-hash/target/

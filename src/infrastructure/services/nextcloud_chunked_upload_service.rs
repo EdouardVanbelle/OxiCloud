@@ -73,7 +73,7 @@ impl NextcloudChunkedUploadService {
 
     /// Store a chunk in the session directory. Buffers `data` in memory —
     /// use [`safe_chunk_path`](Self::safe_chunk_path) + the
-    /// `interfaces/upload_spool::stream_body_to_path` helper to stream the
+    /// `interfaces/upload_ingest::stream_body_to_path` helper to stream the
     /// HTTP body directly to disk and avoid materialising the whole chunk
     /// in RAM.
     pub async fn store_chunk(
@@ -93,24 +93,14 @@ impl NextcloudChunkedUploadService {
         Ok(())
     }
 
-    /// Assemble all chunks in numeric order into a temp file, computing
-    /// the BLAKE3 of the concatenated stream **during** the same read/
-    /// write pass (hash-on-write).
+    /// List the session's chunk files in assembly (numeric) order.
     ///
-    /// Returns `(temp_path, total_size, blake3_hex)`. The caller passes
-    /// the hash to the upload service as `pre_computed_hash` so the
-    /// downstream dedup layer never has to re-read the assembled file
-    /// to compute it — saving one full file-sized read pass per upload.
-    ///
-    /// The read/hash/write loop runs inside `spawn_blocking` because
-    /// BLAKE3 is CPU-bound and would otherwise starve the Tokio worker
-    /// running other connections; synchronous I/O is used inside the
-    /// blocking thread because the workload is sequential and the
-    /// async reactor overhead would only slow it down. For files larger
-    /// than ~10 MB BLAKE3's Rayon mode parallelises across cores —
-    /// mirrors what `ChunkedUploadService::complete_upload_inner` does
-    /// for the REST chunked path.
-    pub async fn assemble(&self, user: &str, upload_id: &str) -> Result<(PathBuf, u64, String)> {
+    /// The caller streams these directly into the CDC chunk store
+    /// (`interfaces::upload_ingest::stream_from_files`) — chunking, BLAKE3
+    /// hashing and dedup checks happen in that single read pass, so no
+    /// assembled temp file is ever written. The chunk parts stay on disk
+    /// until [`cleanup`](Self::cleanup), keeping completion retryable.
+    pub async fn ordered_chunk_paths(&self, user: &str, upload_id: &str) -> Result<Vec<PathBuf>> {
         let session_dir = self.safe_session_dir(user, upload_id)?;
         let mut entries: Vec<String> = Vec::new();
 
@@ -124,8 +114,11 @@ impl NextcloudChunkedUploadService {
             .map_err(|e| DomainError::internal_error("ChunkedUpload", e.to_string()))?
         {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name == ".file" {
-                continue; // Skip the assembly marker.
+            // `.file` is the NC-protocol assembly marker; `.assembled` is
+            // the staging file older releases wrote — sessions in flight
+            // across an upgrade may still contain one.
+            if name == ".file" || name == ".assembled" {
+                continue;
             }
             entries.push(name);
         }
@@ -133,74 +126,7 @@ impl NextcloudChunkedUploadService {
         // Sort chunks numerically (Nextcloud sends them as "00001", "00002", ...).
         entries.sort();
 
-        let temp_path = session_dir.join(".assembled");
-        let chunk_paths: Vec<PathBuf> = entries.iter().map(|n| session_dir.join(n)).collect();
-        let assembled_for_blocking = temp_path.clone();
-
-        // Read/hash/write loop runs synchronously on the blocking pool.
-        // BLAKE3 is computed in the same pass that copies bytes from chunk
-        // files into the assembled file — no second read after the fact.
-        let (total_size, hash) =
-            tokio::task::spawn_blocking(move || -> std::io::Result<(u64, String)> {
-                use std::io::{BufWriter as StdBufWriter, Read, Write};
-
-                let raw_output = std::fs::OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .truncate(true)
-                    .open(&assembled_for_blocking)?;
-
-                // 512 KB write buffer — 8× fewer syscalls than 64 KB.
-                let mut output = StdBufWriter::with_capacity(524_288, raw_output);
-                let mut hasher = blake3::Hasher::new();
-                let mut buf = vec![0u8; 524_288];
-                let mut total: u64 = 0;
-
-                // Files >10 MB benefit from BLAKE3's multi-threaded mode.
-                // The threshold matches the REST chunked path's heuristic.
-                const RAYON_THRESHOLD_PER_FRAME: usize = 128 * 1024;
-
-                for chunk_path in &chunk_paths {
-                    let mut chunk_file = std::fs::File::open(chunk_path)?;
-                    loop {
-                        let n = chunk_file.read(&mut buf)?;
-                        if n == 0 {
-                            break;
-                        }
-                        if n >= RAYON_THRESHOLD_PER_FRAME {
-                            hasher.update_rayon(&buf[..n]);
-                        } else {
-                            hasher.update(&buf[..n]);
-                        }
-                        output.write_all(&buf[..n])?;
-                        total += n as u64;
-                    }
-                }
-
-                output.flush()?;
-                // ── Durability boundary ─────────────────────────────────
-                // sync_all is the actual fsync; without it, a power loss
-                // before the kernel writeback timer (~5 s) loses
-                // acknowledged data. Pull the inner File out of the
-                // BufWriter so we can sync the underlying handle —
-                // dropping the BufWriter wouldn't trigger fsync. macOS
-                // caveat: fsync there flushes to the disk controller
-                // only; true durability needs F_FULLFSYNC, not exposed
-                // by std.
-                let raw_output = output
-                    .into_inner()
-                    .map_err(|e| std::io::Error::other(format!("into_inner: {e}")))?;
-                raw_output.sync_all()?;
-
-                Ok((total, hasher.finalize().to_hex().to_string()))
-            })
-            .await
-            .map_err(|e| {
-                DomainError::internal_error("ChunkedUpload", format!("assemble task: {e}"))
-            })?
-            .map_err(|e| DomainError::internal_error("ChunkedUpload", e.to_string()))?;
-
-        Ok((temp_path, total_size, hash))
+        Ok(entries.iter().map(|n| session_dir.join(n)).collect())
     }
 
     /// Delete the upload session directory.
@@ -260,9 +186,10 @@ impl NextcloudChunkedUploadService {
             let name = entry.file_name().to_string_lossy().to_string();
             // Filter internal markers — `.file` is the NC-protocol
             // assembly trigger target (it never reaches the disk
-            // because MOVE redirects it), `.assembled` is our own
-            // staging file from `assemble()`. Surfacing either to
-            // the client would confuse its chunk-count check.
+            // because MOVE redirects it), `.assembled` is the staging
+            // file pre-streaming releases wrote (kept for sessions in
+            // flight across an upgrade). Surfacing either to the
+            // client would confuse its chunk-count check.
             if name == ".file" || name == ".assembled" {
                 continue;
             }
@@ -331,8 +258,18 @@ mod tests {
         assert!(!svc.session_exists("alice", "upload-999").await);
     }
 
+    /// Concatenate the session's chunk files in assembly order — mirrors
+    /// what `upload_ingest::stream_from_files` feeds the CDC store.
+    async fn concat_chunks(svc: &NextcloudChunkedUploadService, user: &str, id: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        for path in svc.ordered_chunk_paths(user, id).await.unwrap() {
+            out.extend_from_slice(&fs::read(&path).await.unwrap());
+        }
+        out
+    }
+
     #[tokio::test]
-    async fn test_store_and_assemble_chunks() {
+    async fn test_store_and_order_chunks() {
         let (svc, _dir) = test_service();
         svc.create_session("alice", "upload-002").await.unwrap();
 
@@ -343,20 +280,14 @@ mod tests {
             .await
             .unwrap();
 
-        let (temp_path, size, hash) = svc.assemble("alice", "upload-002").await.unwrap();
-        let assembled = fs::read(&temp_path).await.unwrap();
-        assert_eq!(assembled, b"Hello, World!");
-        assert_eq!(size, 13);
-        // BLAKE3("Hello, World!") — proves hash-on-write happens during
-        // the assemble pass, not via a re-read.
         assert_eq!(
-            hash,
-            "288a86a79f20a3d6dccdca7713beaed178798296bdfa7913fa2a62d9727bf8f8"
+            concat_chunks(&svc, "alice", "upload-002").await,
+            b"Hello, World!"
         );
     }
 
     #[tokio::test]
-    async fn test_assemble_chunks_in_sorted_order() {
+    async fn test_chunk_paths_sorted_regardless_of_upload_order() {
         let (svc, _dir) = test_service();
         svc.create_session("alice", "upload-003").await.unwrap();
 
@@ -371,16 +302,29 @@ mod tests {
             .await
             .unwrap();
 
-        let (temp_path, size, hash) = svc.assemble("alice", "upload-003").await.unwrap();
-        let assembled = fs::read(&temp_path).await.unwrap();
-        assert_eq!(assembled, b"ABC");
-        assert_eq!(size, 3);
-        // BLAKE3("ABC") — confirms sort happened (chunks were stored in
-        // order 3,1,2 but the hash matches "ABC", not "CAB" or "BAC").
-        assert_eq!(
-            hash,
-            "d1717274597cf0289694f75d96d444b992a096f1afd8e7bbfa6ebb1d360fedfc"
-        );
+        // Chunks were stored in order 3,1,2 but must concatenate as "ABC".
+        assert_eq!(concat_chunks(&svc, "alice", "upload-003").await, b"ABC");
+    }
+
+    #[tokio::test]
+    async fn test_internal_markers_excluded_from_chunk_paths() {
+        let (svc, _dir) = test_service();
+        svc.create_session("alice", "upload-005").await.unwrap();
+
+        svc.store_chunk("alice", "upload-005", "00001", b"data")
+            .await
+            .unwrap();
+        // Stale staging file from a pre-streaming release.
+        svc.store_chunk("alice", "upload-005", ".assembled", b"old")
+            .await
+            .unwrap();
+
+        let paths = svc
+            .ordered_chunk_paths("alice", "upload-005")
+            .await
+            .unwrap();
+        assert_eq!(paths.len(), 1, "markers must be filtered out");
+        assert!(paths[0].ends_with("00001"));
     }
 
     #[tokio::test]

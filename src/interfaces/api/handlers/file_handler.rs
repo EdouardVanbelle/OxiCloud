@@ -21,6 +21,7 @@ use crate::common::di::AppState;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::AuthUser;
 use crate::interfaces::range_requests::not_modified_response;
+use crate::interfaces::upload_ingest;
 use crate::{application::dtos::file_dto::FileDto, domain::services::authorization::Permission};
 use std::sync::Arc;
 
@@ -51,11 +52,12 @@ impl FileHandler {
     //  UPLOAD
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// Streaming file upload — constant ~64 KB RAM regardless of file size.
+    /// Streaming file upload — bounded RAM regardless of file size.
     ///
-    /// **Hash-on-Write**: BLAKE3 is computed while spooling the multipart
-    /// body to the temp file. This eliminates the second sequential read
-    /// that dedup_service would otherwise need, cutting total I/O in half.
+    /// The multipart body is streamed straight into the CDC chunk store:
+    /// chunking, hashing and dedup checks happen while the bytes arrive.
+    /// No spool file, no re-read — chunks the store already has are never
+    /// written to disk at all.
     pub async fn upload_file(
         State(state): State<GlobalState>,
         auth_user: AuthUser,
@@ -67,11 +69,62 @@ impl FileHandler {
         }
     }
 
+    /// Instant upload: create a file from a blob the caller already owns.
+    ///
+    /// Zero content bytes travel — the client proved possession of the
+    /// content by hash (it computed BLAKE3 locally and confirmed via
+    /// `GET /api/dedup/check/{hash}`), so the server only bumps the blob's
+    /// reference count and registers the metadata row.
+    ///
+    /// All authorization (folder Create permission, hash ownership with
+    /// anti-enumeration, quota) lives in the application service.
+    pub(super) async fn create_file_by_hash_impl(
+        State(state): State<GlobalState>,
+        auth_user: AuthUser,
+        Json(request): Json<CreateFileByHashRequest>,
+    ) -> impl IntoResponse {
+        // Hash shape check — same contract as /api/dedup/check/{hash}.
+        if request.hash.len() != 64 || !request.hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return AppError::bad_request(
+                "Invalid hash format. Expected BLAKE3 (64 hex characters)",
+            )
+            .into_response();
+        }
+        // Basename only — same path-traversal guard as the multipart upload.
+        let filename = request
+            .name
+            .rsplit('/')
+            .next()
+            .unwrap_or(&request.name)
+            .rsplit('\\')
+            .next()
+            .unwrap_or(&request.name)
+            .to_string();
+        if filename.is_empty() {
+            return AppError::bad_request("File name must not be empty").into_response();
+        }
+
+        match state
+            .applications
+            .file_upload_service
+            .create_file_from_owned_blob_with_perms(
+                auth_user.id,
+                filename,
+                request.folder_id,
+                &request.hash,
+            )
+            .await
+        {
+            Ok(file) => Self::created_json_response(&file).into_response(),
+            Err(err) => Self::domain_error_response(err).into_response(),
+        }
+    }
+
     /// Core upload logic shared by [`Self::upload_file`] and
     /// [`Self::upload_file_with_thumbnails`].
     ///
     /// Returns `(FileDto, blob_hash)` on success.  The blob hash is the
-    /// BLAKE3 digest computed during the hash-on-write spool and is
+    /// BLAKE3 digest computed during the streaming ingest and is
     /// propagated without an extra database round-trip so that callers
     /// (e.g. thumbnail generation) can resolve the physical blob path
     /// immediately.
@@ -158,120 +211,55 @@ impl FileHandler {
                     }
                 }
 
-                // ── Spool multipart field to temp file + hash-on-write ──
-                // .dedup_temp is created once by DedupService::initialize() at startup
-                let temp_dir = state.core.path_service.get_root_path().join(".dedup_temp");
-                let temp_path = temp_dir.join(format!("upload-{}", uuid::Uuid::new_v4()));
-
-                let mut total_size: u64 = 0;
-                let mut hasher = blake3::Hasher::new();
-                let spool_result: Result<(), String> = async {
-                    let file = tokio::fs::File::create(&temp_path)
-                        .await
-                        .map_err(|e| format!("Failed to create temp file: {}", e))?;
-
-                    // Pre-allocate if Content-Length is known (reduces fragmentation)
-                    let hint = field
-                        .headers()
-                        .get(axum::http::header::CONTENT_LENGTH)
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok());
-                    if let Some(len) = hint {
-                        let _ = file.set_len(len).await; // best-effort
-                    }
-
-                    // 512 KB buffer — 8× fewer write syscalls than 64 KB
-                    let mut writer = tokio::io::BufWriter::with_capacity(524_288, file);
-                    let mut field = field;
-                    // IMPORTANT: use explicit match instead of `while let Ok(Some(..))`.
-                    // The old pattern silently swallowed Err (client disconnect)
-                    // and accepted partially received data as a complete upload.
-                    loop {
-                        match field.chunk().await {
-                            Ok(Some(chunk)) => {
-                                total_size += chunk.len() as u64;
-                                hasher.update(&chunk);
-                                tokio::io::AsyncWriteExt::write_all(&mut writer, &chunk)
-                                    .await
-                                    .map_err(|e| format!("Failed to write chunk: {}", e))?;
-                            }
-                            Ok(None) => break, // End of field — upload complete
-                            Err(e) => {
-                                return Err(format!(
-                                    "Connection lost during upload (received {} bytes): {}",
-                                    total_size, e
-                                ));
-                            }
-                        }
-                    }
-                    tokio::io::AsyncWriteExt::flush(&mut writer)
-                        .await
-                        .map_err(|e| format!("Failed to flush temp file: {}", e))?;
-                    Ok(())
-                }
-                .await;
-
-                if let Err(e) = spool_result {
-                    let _ = tokio::fs::remove_file(&temp_path).await;
-                    tracing::error!("❌ UPLOAD SPOOL FAILED: {} - {}", filename, e);
-                    return Err(Self::domain_error_response(
-                        crate::common::errors::DomainError::internal_error("FileUpload", e),
-                    ));
-                }
-
-                // Empty file — use streaming path with the (empty) temp file
-                if total_size == 0 {
-                    let hash = hasher.finalize().to_hex().to_string();
-                    let dto = upload_service
-                        .upload_file_streaming(
-                            filename,
-                            folder_id,
-                            content_type,
-                            &temp_path,
-                            0,
-                            Some(hash.clone()),
-                        )
-                        .await
-                        .map_err(Self::domain_error_response)?;
-                    return Ok((dto, hash));
-                }
-
-                // Finalize hash
-                let hash = hasher.finalize().to_hex().to_string();
-
-                // ── MIME detection (magic bytes + extension fallback) ─
-                let content_type = crate::common::mime_detect::refine_content_type_from_file(
-                    &temp_path,
+                // ── Stream the field into the CDC chunk store ────────
+                // Chunking (FastCDC) + hashing (BLAKE3) + dedup checks +
+                // MIME sniffing all happen while the bytes arrive; chunks
+                // the store already has never touch the disk. Size is
+                // capped globally by DefaultBodyLimit.
+                let dedup = &state.core.dedup_service;
+                let source = upload_ingest::multipart_field_stream(field);
+                let ingested = match upload_ingest::ingest_stream_to_cas(
+                    source,
+                    dedup,
                     &filename,
                     &content_type,
+                    usize::MAX,
+                    None,
                 )
-                .await;
+                .await
+                {
+                    Ok(ingested) => ingested,
+                    Err(e) => {
+                        tracing::error!("❌ UPLOAD INGEST FAILED: {} - {}", filename, e.message);
+                        return Err(e.into_response());
+                    }
+                };
 
-                // ── Quota enforcement ────────────────────────────────
+                // ── Quota enforcement (exact size now known) ─────────
                 if let Some(storage_svc) = state.storage_usage_service.as_ref()
                     && let Err(err) = storage_svc
-                        .check_storage_quota(auth_user.id, total_size)
+                        .check_storage_quota(auth_user.id, ingested.size)
                         .await
                 {
-                    let _ = tokio::fs::remove_file(&temp_path).await;
+                    upload_ingest::discard_ingested(dedup, &ingested).await;
                     tracing::warn!(
                         "⛔ UPLOAD REJECTED (quota): user={}, file={}, size={}",
                         auth_user.username,
                         filename,
-                        total_size
+                        ingested.size
                     );
                     return Err(Self::quota_error_response(err));
                 }
 
-                // ── Streaming upload (temp file → blob store, hash pre-computed) ─
+                // ── Register the file row against the ingested blob ──
+                let hash = ingested.hash.clone();
+                let size = ingested.size;
                 match upload_service
                     .upload_file_streaming(
                         filename.clone(),
                         folder_id,
-                        content_type,
-                        &temp_path,
-                        total_size,
-                        Some(hash.clone()),
+                        ingested.content_type.clone(),
+                        ingested.stored(),
                     )
                     .await
                 {
@@ -279,13 +267,12 @@ impl FileHandler {
                         tracing::info!(
                             "✅ STREAMING UPLOAD: {} ({} bytes, ID: {})",
                             filename,
-                            total_size,
+                            size,
                             file.id
                         );
                         return Ok((file, hash));
                     }
                     Err(err) => {
-                        let _ = tokio::fs::remove_file(&temp_path).await;
                         tracing::error!("❌ UPLOAD FAILED: {} - {}", filename, err);
                         return Err(Self::domain_error_response(err));
                     }
@@ -1101,6 +1088,39 @@ pub async fn upload_file_with_thumbnails(
     multipart: Multipart,
 ) -> impl IntoResponse {
     FileHandler::upload_file_with_thumbnails_impl(state, auth_user, multipart).await
+}
+
+/// Request body for the instant-upload endpoint.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateFileByHashRequest {
+    /// File name to create (path components are stripped).
+    pub name: String,
+    /// Target folder ID (the caller needs Create permission on it).
+    pub folder_id: String,
+    /// BLAKE3 hash (64 hex chars) of content the caller already owns.
+    pub hash: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/files/by-hash",
+    request_body = CreateFileByHashRequest,
+    responses(
+        (status = 201, description = "File created from an already-owned blob — zero bytes transferred", body = FileDto),
+        (status = 400, description = "Invalid hash format or empty name"),
+        (status = 404, description = "No owned blob with this hash (anti-enumeration: same shape as unknown hash)"),
+        (status = 409, description = "A file with this name already exists in the folder"),
+        (status = 507, description = "Storage quota exceeded"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "files"
+)]
+pub async fn create_file_by_hash(
+    state: State<GlobalState>,
+    auth_user: AuthUser,
+    request: Json<CreateFileByHashRequest>,
+) -> impl IntoResponse {
+    FileHandler::create_file_by_hash_impl(state, auth_user, request).await
 }
 
 #[utoipa::path(

@@ -8,21 +8,25 @@
 //!
 //! Performance: < 1µs for the `infer` check (reads only header bytes, no allocation).
 
-use std::path::Path;
-use tokio::io::AsyncReadExt;
-
-/// Maximum bytes to read for magic-byte detection.
-const MAGIC_BYTES_LEN: usize = 8192;
+/// Maximum bytes needed for magic-byte detection. Upload ingestion peeks
+/// this many bytes off the stream before forwarding them unchanged.
+pub const MAGIC_BYTES_LEN: usize = 8192;
 
 /// Extract the filename component from a `/`-separated path.
 pub fn filename_from_path(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// Whether a claimed Content-Type is too generic to trust — these trigger
+/// magic-byte detection on the upload path.
+pub fn is_generic_mime(claimed: &str) -> bool {
+    claimed.is_empty() || claimed == "application/octet-stream" || claimed == "binary/octet-stream"
+}
+
 /// Refine a claimed MIME type using magic bytes and filename extension.
 ///
 /// This is a synchronous function — the caller should already have the first
-/// bytes of the file available (or call the async wrapper below).
+/// bytes of the content available (upload ingestion peeks them in-flight).
 ///
 /// # Arguments
 /// * `buf` — first bytes of the file (at least 8192 for best results)
@@ -30,10 +34,7 @@ pub fn filename_from_path(path: &str) -> &str {
 /// * `claimed` — the Content-Type sent by the client
 pub fn refine_content_type(buf: &[u8], filename: &str, claimed: &str) -> String {
     // If the client sent a specific type (not generic), trust it
-    if !claimed.is_empty()
-        && claimed != "application/octet-stream"
-        && claimed != "binary/octet-stream"
-    {
+    if !is_generic_mime(claimed) {
         return claimed.to_string();
     }
 
@@ -52,49 +53,9 @@ pub fn refine_content_type(buf: &[u8], filename: &str, claimed: &str) -> String 
     claimed.to_string()
 }
 
-/// Async helper: reads the first bytes of a file on disk and refines the MIME type.
-///
-/// Designed for the upload path where the file has been spooled to a temp path.
-pub async fn refine_content_type_from_file(
-    temp_path: &Path,
-    filename: &str,
-    claimed: &str,
-) -> String {
-    // Fast path: if the client gave us a specific type, trust it
-    if !claimed.is_empty()
-        && claimed != "application/octet-stream"
-        && claimed != "binary/octet-stream"
-    {
-        return claimed.to_string();
-    }
-
-    // Read only the first bytes needed for magic detection (not the whole file).
-    match tokio::fs::File::open(temp_path).await {
-        Ok(mut file) => {
-            let mut buf = vec![0u8; MAGIC_BYTES_LEN];
-            let n = file.read(&mut buf).await.unwrap_or(0);
-            refine_content_type(&buf[..n], filename, claimed)
-        }
-        Err(e) => {
-            tracing::warn!(
-                "MIME detection: failed to read {} for magic bytes: {}",
-                temp_path.display(),
-                e
-            );
-            // Fall back to extension
-            let guess = mime_guess::from_path(filename);
-            if let Some(mime) = guess.first() {
-                return mime.to_string();
-            }
-            claimed.to_string()
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     // ── refine_content_type (sync) ──────────────────────────────
 
@@ -145,47 +106,15 @@ mod tests {
         assert_eq!(result, "image/png");
     }
 
-    // ── refine_content_type_from_file (async) ───────────────────
+    // ── is_generic_mime ─────────────────────────────────────────
 
-    #[tokio::test]
-    async fn from_file_detects_png() {
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR";
-        tmp.write_all(png).unwrap();
-        tmp.flush().unwrap();
-
-        let result =
-            refine_content_type_from_file(tmp.path(), "photo", "application/octet-stream").await;
-        assert_eq!(result, "image/png");
-    }
-
-    #[tokio::test]
-    async fn from_file_falls_back_to_extension() {
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        tmp.write_all(b"not magic").unwrap();
-        tmp.flush().unwrap();
-
-        let result =
-            refine_content_type_from_file(tmp.path(), "doc.css", "application/octet-stream").await;
-        assert_eq!(result, "text/css");
-    }
-
-    #[tokio::test]
-    async fn from_file_trusts_specific_claimed() {
-        let result =
-            refine_content_type_from_file(Path::new("/nonexistent"), "file", "image/webp").await;
-        assert_eq!(result, "image/webp");
-    }
-
-    #[tokio::test]
-    async fn from_file_missing_file_falls_back_to_extension() {
-        let result = refine_content_type_from_file(
-            Path::new("/nonexistent/file"),
-            "photo.jpg",
-            "application/octet-stream",
-        )
-        .await;
-        assert_eq!(result, "image/jpeg");
+    #[test]
+    fn generic_mime_detection() {
+        assert!(is_generic_mime(""));
+        assert!(is_generic_mime("application/octet-stream"));
+        assert!(is_generic_mime("binary/octet-stream"));
+        assert!(!is_generic_mime("image/png"));
+        assert!(!is_generic_mime("text/plain"));
     }
 
     // ── filename_from_path ──────────────────────────────────────

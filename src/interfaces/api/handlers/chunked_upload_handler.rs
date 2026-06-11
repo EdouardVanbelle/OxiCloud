@@ -4,7 +4,7 @@
 //! - POST   /api/uploads          → Create upload session
 //! - PATCH  /api/uploads/:id      → Upload a chunk
 //! - HEAD   /api/uploads/:id      → Get upload status
-//! - POST   /api/uploads/:id/complete → Assemble and finalize
+//! - POST   /api/uploads/:id/complete → Stream parts into the blob store
 //! - DELETE /api/uploads/:id      → Cancel upload
 
 use axum::{
@@ -27,7 +27,7 @@ use crate::common::di::AppState;
 use crate::domain::services::authorization::Permission;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::AuthUser;
-use crate::interfaces::upload_spool::stream_body_to_path;
+use crate::interfaces::upload_ingest::{self, stream_body_to_path};
 
 /// Request body for creating an upload session
 #[derive(Debug, Deserialize, ToSchema)]
@@ -64,35 +64,32 @@ pub struct CompleteUploadResponse {
 /// Optional body for `POST /api/uploads/{id}/complete`.
 ///
 /// When the client supplies `checksum`, the server compares it against
-/// the assembled file's hash BEFORE promoting the blob to storage —
-/// failure aborts the upload atomically (no orphaned blob, no DB row).
-/// This is the end-to-end integrity check: per-chunk MD5 proves each
-/// chunk arrived intact, but only the final hash catches assembly /
-/// promotion bugs and mis-ordered chunks.
+/// the streamed content's hash BEFORE the file row is created — failure
+/// releases the blob reference and returns 400, with the chunk parts
+/// kept on disk for a retry. This is the end-to-end integrity check:
+/// per-chunk MD5 proves each chunk arrived intact, but only the final
+/// hash catches mis-ordered or corrupted assemblies.
 ///
-/// **`blake3` is highly recommended** — it's the algorithm the server
-/// already runs over the assembled file during hash-on-write
-/// assembly, so verification is a string comparison with zero extra
-/// I/O and zero extra CPU. It's also the same algorithm the server
-/// uses for blob-storage addressing, so the value the client sends
-/// equals the `content_hash` they'd later read back from
-/// `GET /api/files/{id}`. `md5` and `sha256` are accepted for
-/// compatibility with legacy client tooling but each triggers a
-/// second hash pass over the assembled file (~30–100 ms depending
-/// on size).
+/// **`blake3` is highly recommended** — it's the content-addressing
+/// algorithm of the blob store itself, so verification is a string
+/// comparison against the hash the store already computed, and the
+/// value the client sends equals the `content_hash` they'd later read
+/// back from `GET /api/files/{id}`. `md5` and `sha256` are accepted
+/// for legacy client tooling; they are computed by an in-flight tee
+/// during the same streaming pass — no extra disk read either way.
 ///
 /// `Default` keeps the existing wire shape: clients that POST with no
 /// body get today's behavior (no verification, server just returns
 /// what it computed).
 #[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct CompleteUploadRequest {
-    /// Lowercase hex digest the client expects the assembled file to
+    /// Lowercase hex digest the client expects the streamed content to
     /// hash to. Compared case-insensitively. Omit to skip verification.
     pub checksum: Option<String>,
     /// Algorithm name. `blake3` is the recommended choice (default —
-    /// matches the server's hash-on-write algorithm, zero extra cost).
-    /// `md5`, `sha256` / `sha-256` are accepted but trigger an extra
-    /// hash pass. Unknown values return 400.
+    /// matches the blob store's content-addressing algorithm). `md5`,
+    /// `sha256` / `sha-256` are accepted and computed in-flight.
+    /// Unknown values return 400.
     pub checksumalg: Option<String>,
 }
 
@@ -307,70 +304,15 @@ impl ChunkedUploadHandler {
         }
     }
 
-    /// Compute the requested checksum of the assembled file.
-    ///
-    /// For `Blake3` the server already has the hash from hash-on-write
-    /// assembly — we just return it (zero I/O, zero CPU). For `Md5` and
-    /// `Sha256` we re-read the assembled file on the blocking pool and
-    /// hash it; the cost (~30–100 ms for typical files) is the trade-off
-    /// for accepting non-default algorithms.
-    async fn compute_assembled_hash(
-        assembled_path: &std::path::Path,
-        alg: ChecksumAlg,
-        blake3_already_computed: &str,
-    ) -> Result<String, std::io::Error> {
-        match alg {
-            ChecksumAlg::Blake3 => Ok(blake3_already_computed.to_string()),
-            ChecksumAlg::Md5 | ChecksumAlg::Sha256 => {
-                let path = assembled_path.to_path_buf();
-                tokio::task::spawn_blocking(move || -> Result<String, std::io::Error> {
-                    use std::io::Read;
-                    let mut file = std::fs::File::open(&path)?;
-                    let mut buf = vec![0u8; 524_288];
-                    match alg {
-                        ChecksumAlg::Md5 => {
-                            use md5::Digest as _;
-                            let mut h = md5::Md5::new();
-                            loop {
-                                let n = file.read(&mut buf)?;
-                                if n == 0 {
-                                    break;
-                                }
-                                h.update(&buf[..n]);
-                            }
-                            Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
-                        }
-                        ChecksumAlg::Sha256 => {
-                            use sha2::Digest as _;
-                            let mut h = sha2::Sha256::new();
-                            loop {
-                                let n = file.read(&mut buf)?;
-                                if n == 0 {
-                                    break;
-                                }
-                                h.update(&buf[..n]);
-                            }
-                            Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
-                        }
-                        // Blake3 handled above — this branch is unreachable but
-                        // keeps the match exhaustive without an else-clause.
-                        ChecksumAlg::Blake3 => unreachable!(),
-                    }
-                })
-                .await
-                .map_err(|e| std::io::Error::other(format!("hash task join failed: {e}")))?
-            }
-        }
-    }
-
     /// POST /api/uploads/:upload_id/complete - Finalize upload
     ///
-    /// Assembles all chunks into the final file and creates the file record.
-    /// When `body.checksum` is supplied, the assembled file's hash is
-    /// verified before the blob is promoted to storage — mismatch
-    /// returns 400 and the assembled temp is removed (the session
-    /// itself is kept so the client can re-issue complete after
-    /// diagnosing).
+    /// Streams the uploaded chunk parts, in order, straight into the CDC
+    /// chunk store and creates the file record — no assembled temp file is
+    /// ever written. When `body.checksum` is supplied it is verified from
+    /// the same streaming pass (BLAKE3 comes from the store itself;
+    /// MD5/SHA-256 are computed by an in-flight tee) — mismatch returns 400
+    /// with the blob reference released, and the chunk parts stay on disk
+    /// so the client can re-issue complete after diagnosing.
     pub(super) async fn complete_upload_impl(
         State(state): State<Arc<AppState>>,
         auth_user: AuthUser,
@@ -379,10 +321,11 @@ impl ChunkedUploadHandler {
     ) -> impl IntoResponse {
         let chunked_service = &state.core.chunked_upload_service;
         let upload_service = &state.applications.file_upload_service;
+        let dedup = &state.core.dedup_service;
 
-        // ── Parse the optional algorithm BEFORE assembly so a bad
-        //    `checksumalg` doesn't waste the (potentially expensive)
-        //    hash work on a request we'll reject anyway.
+        // ── Parse the optional algorithm BEFORE completion so a bad
+        //    `checksumalg` doesn't waste any work on a request we'll
+        //    reject anyway.
         let alg = match body.checksumalg.as_deref() {
             Some(name) => match ChecksumAlg::parse(name) {
                 Some(a) => Some(a),
@@ -397,37 +340,54 @@ impl ChunkedUploadHandler {
         };
         let expected_checksum = body.checksum.as_deref();
 
-        // Assemble chunks (hash-on-write: BLAKE3 computed during assembly)
-        let (assembled_path, filename, folder_id, content_type, total_size, hash) =
-            match chunked_service
-                .complete_upload(&upload_id, auth_user.id)
-                .await
-            {
-                Ok(result) => result,
-                Err(e) => {
-                    return AppError::from(e).into_response();
-                }
-            };
+        // Validate completion and get the chunk parts in assembly order.
+        let parts = match chunked_service
+            .complete_upload(&upload_id, auth_user.id)
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                return AppError::from(e).into_response();
+            }
+        };
+
+        // MD5/SHA-256 verification taps the stream while it is ingested;
+        // BLAKE3 needs no tee — the store's own content hash IS BLAKE3.
+        let alg = expected_checksum.map(|_| alg.unwrap_or(ChecksumAlg::Blake3));
+        let tee = match alg {
+            Some(ChecksumAlg::Md5) | Some(ChecksumAlg::Sha256) => {
+                Some(upload_ingest::checksum_tee(alg.unwrap()))
+            }
+            _ => None,
+        };
+
+        // ── Stream the parts into the CDC chunk store ───────────────
+        let ingested = match upload_ingest::ingest_stream_to_cas(
+            upload_ingest::stream_from_files(parts.chunk_paths),
+            dedup,
+            &parts.filename,
+            &parts.content_type,
+            usize::MAX,
+            tee.clone(),
+        )
+        .await
+        {
+            Ok(ingested) => ingested,
+            Err(e) => return e.into_response(),
+        };
 
         // ── End-to-end integrity verification ───────────────────────
-        // Only fires when the client supplied an `expected` checksum.
-        // For BLAKE3 (the documented preferred choice) this is a string
-        // comparison against the hash assembly already produced. For
-        // MD5/SHA-256 we re-hash the assembled file on the blocking pool.
-        if let Some(expected) = expected_checksum {
-            let alg = alg.unwrap_or(ChecksumAlg::Blake3);
-            let computed = match Self::compute_assembled_hash(&assembled_path, alg, &hash).await {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = tokio::fs::remove_file(&assembled_path).await;
-                    return AppError::internal_error(format!(
-                        "Failed to compute assembled checksum: {e}"
-                    ))
-                    .into_response();
-                }
+        if let (Some(expected), Some(alg)) = (expected_checksum, alg) {
+            let computed = match alg {
+                ChecksumAlg::Blake3 => Some(ingested.hash.clone()),
+                _ => tee.as_ref().and_then(upload_ingest::finalize_checksum_tee),
+            };
+            let Some(computed) = computed else {
+                upload_ingest::discard_ingested(dedup, &ingested).await;
+                return AppError::internal_error("Checksum tee produced no digest").into_response();
             };
             if !computed.eq_ignore_ascii_case(expected) {
-                let _ = tokio::fs::remove_file(&assembled_path).await;
+                upload_ingest::discard_ingested(dedup, &ingested).await;
                 tracing::warn!(
                     target: "audit",
                     event = "chunked_upload.checksum_mismatch",
@@ -449,36 +409,28 @@ impl ChunkedUploadHandler {
             }
         }
 
-        // ── MIME detection (magic bytes + extension fallback) ─────
-        let content_type = crate::common::mime_detect::refine_content_type_from_file(
-            &assembled_path,
-            &filename,
-            &content_type,
-        )
-        .await;
-
-        // Upload from assembled file on disk — zero extra RAM copies, hash pre-computed
+        // Register the file row against the ingested blob.
+        let size = ingested.size;
         match upload_service
-            .upload_file_from_path(
-                filename.clone(),
-                folder_id.clone(),
-                content_type,
-                &assembled_path,
-                Some(hash),
+            .upload_file_streaming(
+                parts.filename.clone(),
+                parts.folder_id.clone(),
+                ingested.content_type.clone(),
+                ingested.stored(),
             )
             .await
         {
             Ok(file) => {
-                // Cleanup session
+                // Cleanup session (removes the chunk part files)
                 let _ = chunked_service
                     .finalize_upload(&upload_id, auth_user.id)
                     .await;
 
                 tracing::info!(
                     "✅ CHUNKED UPLOAD COMPLETE: {} (ID: {}, {} bytes)",
-                    filename,
+                    parts.filename,
                     file.id,
-                    total_size
+                    size
                 );
 
                 (
@@ -486,14 +438,14 @@ impl ChunkedUploadHandler {
                     Json(CompleteUploadResponse {
                         file_id: file.id,
                         filename: file.name,
-                        size: total_size,
+                        size,
                         path: file.path,
                     }),
                 )
                     .into_response()
             }
             Err(e) => {
-                tracing::error!("Failed to create file from assembled upload: {:?}", e);
+                tracing::error!("Failed to create file from chunked upload: {:?}", e);
                 AppError::internal_error(format!("Failed to create file: {}", e)).into_response()
             }
         }

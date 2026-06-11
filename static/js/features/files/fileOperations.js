@@ -12,6 +12,7 @@ import { i18n } from '../../core/i18n.js';
 import { notifications } from '../../core/notifications.js';
 import { invalidateFolderMeta } from '../../model/filesModel.js';
 import { triggerBrowserDownload } from '../../utils/download.js';
+import { formatSavedSummary, tryDeltaUpload } from './deltaUpload.js';
 
 /**
  * @typedef {Object} BatchResult
@@ -391,6 +392,7 @@ const fileOps = {
             let uploadedCount = 0;
             let successCount = 0;
             let quotaStop = false;
+            let savedBytesTotal = 0;
 
             const targetFolderId = app.currentPath || app.userHomeFolderId;
 
@@ -404,20 +406,35 @@ const fileOps = {
                 if (quotaStop) return;
                 const file = readableFiles[idx];
 
-                const formData = new FormData();
-                if (targetFolderId) formData.append('folder_id', targetFolderId);
-                formData.append('file', file);
-
-                console.log(`Uploading file to folder: ${targetFolderId || 'root'}`, {
-                    file: file.name,
-                    size: file.size
+                // ── Delta upload: chunk + hash locally (worker/WASM) and
+                // transfer only what the server doesn't already have for
+                // this user. Any miss/failure falls back to a byte upload.
+                /** @type {UploadAnswer & { savedBytes?: number } | null} */
+                let result = await tryDeltaUpload(file, targetFolderId, (pct) => {
+                    if (batchId) {
+                        try {
+                            notifications.updateFile(batchId, file.name, pct, 'uploading');
+                        } catch (_) {}
+                    }
                 });
+                if (result) {
+                    savedBytesTotal += result.savedBytes || 0;
+                    if (batchId) {
+                        try {
+                            notifications.updateFile(batchId, file.name, 100, result.ok ? 'done' : 'error');
+                        } catch (_) {}
+                    }
+                } else {
+                    const formData = new FormData();
+                    if (targetFolderId) formData.append('folder_id', targetFolderId);
+                    formData.append('file', file);
 
-                // Scale stall timeout with file size:
-                // base 120s + 60s per GB, so a 7 GB file gets ~540s stall limit
-                const sizeGB = file.size / (1024 * 1024 * 1024);
-                const dynamicTimeout = Math.max(120000, 120000 + Math.ceil(sizeGB) * 60000);
-                const result = await this._uploadFileXHR(formData, batchId, file.name, dynamicTimeout);
+                    // Scale stall timeout with file size:
+                    // base 120s + 60s per GB, so a 7 GB file gets ~540s stall limit
+                    const sizeGB = file.size / (1024 * 1024 * 1024);
+                    const dynamicTimeout = Math.max(120000, 120000 + Math.ceil(sizeGB) * 60000);
+                    result = await this._uploadFileXHR(formData, batchId, file.name, dynamicTimeout);
+                }
 
                 uploadedCount++;
 
@@ -483,6 +500,14 @@ const fileOps = {
 
             // All done
             this._finishUploadToast(successCount, totalFiles);
+            if (savedBytesTotal > 0 && notifications) {
+                notifications.addNotification({
+                    icon: 'fa-bolt',
+                    iconClass: 'upload',
+                    title: i18n?.getCurrentLocale?.()?.startsWith('es') ? 'Subida delta' : 'Delta upload',
+                    text: formatSavedSummary(savedBytesTotal, i18n?.getCurrentLocale?.() || 'en')
+                });
+            }
 
             // Refresh storage usage display
             try {
@@ -634,6 +659,7 @@ const fileOps = {
             let uploadedCount = 0;
             let successCount = 0;
             let quotaStop = false;
+            let savedBytesTotal = 0;
 
             // ── Concurrent upload with limited parallelism ──────────
             // FIFOs are pre-caught by the 0-byte arrayBuffer guard,
@@ -663,48 +689,55 @@ const fileOps = {
                     const parentPath = parts.slice(0, -1).join('/');
                     const targetFolderId = folderMap.get(parentPath) || currentFolderId;
 
-                    // ── FIFO/pipe guard (0-byte files only) ──
-                    // Named pipes (runit supervise/control) report size=0
-                    // but block on open(). Pre-read only 0-byte files into
-                    // memory; files with size>0 are always regular files and
-                    // go straight to FormData (zero extra memory copy).
-                    /** @type {Blob} */
-                    let uploadFile = file; // default: use original File
-                    if (file.size === 0) {
-                        try {
-                            const buf = await Promise.race([
-                                file.arrayBuffer(),
-                                new Promise((_, rej) => setTimeout(() => rej(new Error('read-timeout')), 2000))
-                            ]);
-                            uploadFile = new Blob([buf], {
-                                type: file.type || 'application/octet-stream'
-                            });
-                        } catch {
-                            console.warn(`[SKIP] #${idx} ${rel} — cannot read 0-byte file (FIFO/pipe?), skipping`);
-                            uploadedCount++;
-                            successCount++;
-                            if (batchId) {
-                                try {
-                                    notifications.fileCompleted(batchId, true);
-                                } catch (_) {}
+                    // ── Delta upload (only changed bytes on the wire) ──
+                    // Same fallback contract as uploadFiles: a null result
+                    // means "do the byte upload". The shared accounting
+                    // after this try block handles both outcomes.
+                    const delta = await tryDeltaUpload(file, targetFolderId);
+                    if (delta) {
+                        result = delta;
+                        savedBytesTotal += delta.savedBytes || 0;
+                    } else {
+                        // ── FIFO/pipe guard (0-byte files only) ──
+                        // Named pipes (runit supervise/control) report size=0
+                        // but block on open(). Pre-read only 0-byte files into
+                        // memory; files with size>0 are always regular files and
+                        // go straight to FormData (zero extra memory copy).
+                        /** @type {Blob} */
+                        let uploadFile = file; // default: use original File
+                        if (file.size === 0) {
+                            try {
+                                const buf = await Promise.race([
+                                    file.arrayBuffer(),
+                                    new Promise((_, rej) => setTimeout(() => rej(new Error('read-timeout')), 2000))
+                                ]);
+                                uploadFile = new Blob([buf], {
+                                    type: file.type || 'application/octet-stream'
+                                });
+                            } catch {
+                                console.warn(`[SKIP] #${idx} ${rel} — cannot read 0-byte file (FIFO/pipe?), skipping`);
+                                uploadedCount++;
+                                successCount++;
+                                if (batchId) {
+                                    try {
+                                        notifications.fileCompleted(batchId, true);
+                                    } catch (_) {}
+                                }
+                                return;
                             }
-                            return;
                         }
+
+                        const formData = new FormData();
+                        formData.append('folder_id', targetFolderId);
+                        formData.append('file', uploadFile, file.name);
+
+                        const thisTimeout =
+                            file.size === 0
+                                ? TIMEOUT_MS_ZERO
+                                : Math.max(TIMEOUT_MIN_MS, TIMEOUT_BASE_MS + Math.ceil(file.size / (1024 * 1024)) * TIMEOUT_PER_MB_MS);
+
+                        result = await this._uploadFileFetch(formData, thisTimeout);
                     }
-
-                    const formData = new FormData();
-                    formData.append('folder_id', targetFolderId);
-                    formData.append('file', uploadFile, file.name);
-
-                    const thisTimeout =
-                        file.size === 0
-                            ? TIMEOUT_MS_ZERO
-                            : Math.max(TIMEOUT_MIN_MS, TIMEOUT_BASE_MS + Math.ceil(file.size / (1024 * 1024)) * TIMEOUT_PER_MB_MS);
-                    console.log(`[UPLOAD START] #${idx} ${rel} (${file.size} bytes, timeout=${thisTimeout}ms)`);
-
-                    result = await this._uploadFileFetch(formData, thisTimeout);
-
-                    console.log(`[UPLOAD END]   #${idx} ${rel} ok=${result.ok}${result.errorMsg ? ` err=${result.errorMsg}` : ''}`);
                 } catch (e) {
                     result = {
                         ok: false,
@@ -758,6 +791,14 @@ const fileOps = {
             await Promise.all(workers);
 
             this._finishUploadToast(successCount, totalFiles);
+            if (savedBytesTotal > 0 && notifications) {
+                notifications.addNotification({
+                    icon: 'fa-bolt',
+                    iconClass: 'upload',
+                    title: i18n?.getCurrentLocale?.()?.startsWith('es') ? 'Subida delta' : 'Delta upload',
+                    text: formatSavedSummary(savedBytesTotal, i18n?.getCurrentLocale?.() || 'en')
+                });
+            }
 
             try {
                 await refreshUserData();

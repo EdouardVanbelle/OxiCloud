@@ -47,12 +47,41 @@ impl From<ZipError> for DomainError {
 /// Type alias for the fully-async ZIP writer backed by a buffered tokio file.
 type AsyncZipWriter = ZipFileWriter<Compat<BufWriter<tokio::fs::File>>>;
 
+/// One planned archive entry, in final ZIP order.
+enum ZipPlanEntry {
+    /// Directory entry (Stored, zero-length body).
+    Dir(String),
+    /// File entry: ZIP-relative path + file id to stream from the blob store.
+    File { zip_path: String, file_id: String },
+}
+
+/// Message protocol from the prefetch task to the ZIP writer. For each
+/// planned file, in order: zero or more `Chunk`s, then exactly one `End`;
+/// `Err` aborts the whole archive.
+enum Prefetched {
+    Chunk(bytes::Bytes),
+    End,
+    Err(String),
+}
+
+/// Bound on the prefetch channel (messages of ≤ ~64 KB blob-stream chunks):
+/// ~4 MiB of read-ahead. Enough to hide the per-file open latency of the
+/// blob store (PG lookup + backend round-trip — significant on S3/Azure)
+/// behind the deflate of the previous entry, while keeping RAM flat.
+const PREFETCH_BUFFER_CHUNKS: usize = 64;
+
 /// Service for creating ZIP files.
 ///
 /// Uses `async_zip` for fully-async archive creation.  Every write (headers,
 /// compressed chunk data, central directory) goes through
 /// `tokio::io::BufWriter` → `tokio::fs::File`, so **no Tokio worker is ever
 /// blocked** by disk I/O or compression.
+///
+/// Archive creation is a 2-stage pipeline: a prefetch task reads file
+/// content from the blob store ahead of the writer, so the next file's
+/// read latency overlaps the current file's compression instead of adding
+/// to it. The ZIP entries themselves are still written strictly in order
+/// (the format requires it).
 pub struct ZipService {
     file_service: Arc<FileRetrievalService>,
     folder_service: Arc<FolderService>,
@@ -144,7 +173,22 @@ impl ZipService {
             }
         };
 
-        // ── 4. Open the temp file + ZIP writer ───────────────────────────
+        // ── 4. Plan the archive (folders are already sorted by path) ─────
+        let mut plan: Vec<ZipPlanEntry> = Vec::new();
+        for folder in &all_folders {
+            let zip_dir = format!("{}/", folder_zip_path(&folder.path));
+            plan.push(ZipPlanEntry::Dir(zip_dir.clone()));
+            if let Some(files) = files_by_folder.get(&folder.id) {
+                for file in files {
+                    plan.push(ZipPlanEntry::File {
+                        zip_path: format!("{}{}", zip_dir, file.name),
+                        file_id: file.id.to_string(),
+                    });
+                }
+            }
+        }
+
+        // ── 5. Open the temp file + ZIP writer ───────────────────────────
         let temp = NamedTempFile::new().map_err(ZipError::IoError)?;
         let tokio_file = tokio::fs::File::create(temp.path())
             .await
@@ -152,79 +196,131 @@ impl ZipService {
         let buf_writer = BufWriter::with_capacity(256 * 1024, tokio_file);
         let mut zip = ZipFileWriter::with_tokio(buf_writer);
 
-        // ── 5. Write entries (folders are already sorted by path) ─────────
-        for folder in &all_folders {
-            let zip_dir = format!("{}/", folder_zip_path(&folder.path));
+        // ── 6. Write entries: 2-stage pipeline ───────────────────────────
+        // The prefetch task reads blob streams for the planned files, in
+        // order, ahead of the writer — the next file's blob-store latency
+        // overlaps the current file's deflate. If the writer bails out,
+        // dropping the receiver makes the prefetcher's next send fail and
+        // it stops on its own.
+        let file_ids: Vec<String> = plan
+            .iter()
+            .filter_map(|entry| match entry {
+                ZipPlanEntry::File { file_id, .. } => Some(file_id.clone()),
+                ZipPlanEntry::Dir(_) => None,
+            })
+            .collect();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Prefetched>(PREFETCH_BUFFER_CHUNKS);
+        let _prefetcher = tokio::spawn(Self::prefetch_files(
+            self.file_service.clone(),
+            file_ids,
+            tx,
+        ));
 
-            // Directory entry (Stored, zero-length body)
-            let dir_entry = ZipEntryBuilder::new(zip_dir.clone().into(), Compression::Stored);
-            match zip.write_entry_whole(dir_entry, &[]).await {
-                Ok(()) => debug!("Folder added to ZIP: {}", zip_dir),
-                Err(e) => {
-                    warn!("Could not add folder entry (may already exist): {}", e);
+        for entry in &plan {
+            match entry {
+                ZipPlanEntry::Dir(zip_dir) => {
+                    let dir_entry =
+                        ZipEntryBuilder::new(zip_dir.clone().into(), Compression::Stored);
+                    match zip.write_entry_whole(dir_entry, &[]).await {
+                        Ok(()) => debug!("Folder added to ZIP: {}", zip_dir),
+                        Err(e) => {
+                            warn!("Could not add folder entry (may already exist): {}", e);
+                        }
+                    }
                 }
-            }
-
-            // Files belonging to this folder
-            if let Some(files) = files_by_folder.get(&folder.id) {
-                for file in files {
-                    self.add_file_to_zip_streamed(&mut zip, file, &zip_dir)
-                        .await?;
+                ZipPlanEntry::File { zip_path, .. } => {
+                    Self::write_prefetched_file(&mut zip, zip_path, &mut rx).await?;
                 }
             }
         }
 
-        // ── 6. Finalize ──────────────────────────────────────────────────
+        // ── 7. Finalize ──────────────────────────────────────────────────
         let mut compat_writer = zip.close().await.map_err(ZipError::AsyncZipError)?;
         compat_writer.close().await.map_err(ZipError::IoError)?;
 
         Ok(temp)
     }
 
-    /// Streams file content in chunks (~64 KB) into an async ZIP entry,
-    /// keeping peak memory independent of individual file sizes.
-    async fn add_file_to_zip_streamed(
-        &self,
+    /// Prefetch stage: streams each planned file's content from the blob
+    /// store, in plan order, into the bounded channel. Stops on the first
+    /// read error (after forwarding it) or when the writer hangs up.
+    async fn prefetch_files(
+        file_service: Arc<FileRetrievalService>,
+        file_ids: Vec<String>,
+        tx: tokio::sync::mpsc::Sender<Prefetched>,
+    ) {
+        for file_id in file_ids {
+            let stream = match file_service.get_file_stream(&file_id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    error!("Error opening file stream {}: {}", file_id, e);
+                    let _ = tx
+                        .send(Prefetched::Err(format!(
+                            "Error streaming file {}: {}",
+                            file_id, e
+                        )))
+                        .await;
+                    return;
+                }
+            };
+
+            let mut stream = std::pin::Pin::from(stream);
+            while let Some(chunk_result) = stream.next().await {
+                let message = match chunk_result {
+                    Ok(bytes) => Prefetched::Chunk(bytes),
+                    Err(e) => Prefetched::Err(format!("Error streaming file {}: {}", file_id, e)),
+                };
+                let abort = matches!(message, Prefetched::Err(_));
+                if tx.send(message).await.is_err() || abort {
+                    return; // writer gone, or fatal read error forwarded
+                }
+            }
+
+            if tx.send(Prefetched::End).await.is_err() {
+                return; // writer gone
+            }
+        }
+    }
+
+    /// Writer stage: drains one file's prefetched chunks into a Deflate
+    /// ZIP entry. Peak memory stays bounded by the channel, independent
+    /// of individual file sizes.
+    async fn write_prefetched_file(
         zip: &mut AsyncZipWriter,
-        file: &FileDto,
-        folder_path: &str,
+        zip_path: &str,
+        rx: &mut tokio::sync::mpsc::Receiver<Prefetched>,
     ) -> Result<()> {
-        let file_path = format!("{}{}", folder_path, file.name);
-        info!("Adding file to ZIP: {}", file_path);
+        info!("Adding file to ZIP: {}", zip_path);
 
-        let file_id = file.id.to_string();
-
-        // Open a streaming entry with Deflate compression
-        let entry = ZipEntryBuilder::new(file_path.clone().into(), Compression::Deflate);
+        let entry = ZipEntryBuilder::new(zip_path.to_string().into(), Compression::Deflate);
         let mut entry_writer = zip
             .write_entry_stream(entry)
             .await
             .map_err(ZipError::AsyncZipError)?;
 
-        // Stream file contents in chunks instead of loading all into RAM
-        let stream = match self.file_service.get_file_stream(&file_id).await {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Error opening file stream {}: {}", file_id, e);
-                // Close the partially-opened entry before returning
-                let _ = entry_writer.close().await;
-                return Err(ZipError::FileReadError(format!(
-                    "Error streaming file {}: {}",
-                    file_id, e
-                ))
-                .into());
+        loop {
+            match rx.recv().await {
+                Some(Prefetched::Chunk(bytes)) => {
+                    entry_writer
+                        .write_all(&bytes)
+                        .await
+                        .map_err(ZipError::IoError)?;
+                }
+                Some(Prefetched::End) => break,
+                Some(Prefetched::Err(message)) => {
+                    // Close the partially-written entry before bailing out.
+                    let _ = entry_writer.close().await;
+                    return Err(ZipError::FileReadError(message).into());
+                }
+                None => {
+                    let _ = entry_writer.close().await;
+                    return Err(ZipError::FileReadError(format!(
+                        "Prefetch stage ended unexpectedly while writing {}",
+                        zip_path
+                    ))
+                    .into());
+                }
             }
-        };
-
-        // Pin the stream so StreamExt::next() can be called
-        let mut stream = std::pin::Pin::from(stream);
-
-        while let Some(chunk_result) = stream.next().await {
-            let bytes = chunk_result.map_err(ZipError::IoError)?;
-            entry_writer
-                .write_all(&bytes)
-                .await
-                .map_err(ZipError::IoError)?;
         }
 
         // Finalize the entry (writes data descriptor with CRC + sizes)
@@ -233,7 +329,7 @@ impl ZipService {
             .await
             .map_err(ZipError::AsyncZipError)?;
 
-        debug!("File added to ZIP: {}", file_path);
+        debug!("File added to ZIP: {}", zip_path);
         Ok(())
     }
 }

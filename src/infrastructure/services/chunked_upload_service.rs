@@ -6,14 +6,14 @@
 //!   (updated atomically on each chunk) are stored alongside the chunk files.
 //!   On boot the service scans `temp_base_dir` and recovers any active sessions.
 //! - Parallel chunk transfers (up to 6 concurrent)
-//! - Automatic reassembly with hash-on-write (BLAKE3)
+//! - Completion streams the ordered parts straight into the CDC blob store
 //! - Expiration cleanup (24 h)
 //!
 //! Protocol:
 //! 1. POST /api/uploads     → Create upload session, get upload_id
 //! 2. PATCH /api/uploads/:id → Upload chunks (parallel OK)
 //! 3. HEAD /api/uploads/:id  → Check progress
-//! 4. POST /api/uploads/:id/complete → Finalize and assemble
+//! 4. POST /api/uploads/:id/complete → Stream parts into the blob store
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
@@ -28,7 +28,8 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use crate::application::ports::chunked_upload_ports::{
-    ChunkUploadResponseDto, ChunkedUploadPort, CreateUploadResponseDto, UploadStatusResponseDto,
+    ChunkUploadResponseDto, ChunkedUploadPort, CompletedUploadParts, CreateUploadResponseDto,
+    UploadStatusResponseDto,
 };
 use crate::domain::errors::{DomainError, ErrorKind};
 
@@ -603,7 +604,7 @@ impl ChunkedUploadService {
     ///
     /// Used by the streaming REST PUT path: the handler calls
     /// `prepare_chunk` → streams body to disk via
-    /// `interfaces::upload_spool::stream_body_to_path` → calls
+    /// `interfaces::upload_ingest::stream_body_to_path` → calls
     /// `commit_chunk` to finalise. This lets the body bypass the
     /// in-memory `Bytes` allocation entirely (peak heap ~one HTTP
     /// frame instead of "chunk size").
@@ -936,24 +937,23 @@ impl ChunkedUploadService {
         })
     }
 
-    /// Assemble chunks into final file and return the path + pre-computed BLAKE3 hash.
+    /// Validate completion and return the chunk parts in assembly order.
     ///
-    /// **Hash-on-Write**: BLAKE3 is computed while copying chunks into the
-    /// assembled file, eliminating the second sequential read that dedup_service
-    /// would otherwise need.
-    ///
-    /// Returns `(assembled_file_path, filename, folder_id, content_type, total_size, blake3_hash)`.
+    /// No assembled file is written and nothing is hashed here — the caller
+    /// streams the parts straight into the CDC chunk store, which computes
+    /// BLAKE3 and dedup-checks each CDC chunk in that single read pass. The
+    /// part files stay on disk until `finalize_upload`, so a completion
+    /// that fails downstream (e.g. client checksum mismatch) is retryable.
     async fn complete_upload_inner(
         &self,
         upload_id: &str,
         user_id: &str,
-    ) -> Result<(PathBuf, String, Option<String>, String, u64, String), String> {
-        // Verify ownership before assembly
+    ) -> Result<CompletedUploadParts, String> {
+        // Verify ownership before completion
         self.verify_session_owner(upload_id, user_id)?;
 
         // Get session and validate completion.
-        // Clone the session data and drop the DashMap ref immediately
-        // so the shard is not held during the expensive assembly step.
+        // Clone the session data and drop the DashMap ref immediately.
         let session = {
             let entry = self
                 .sessions
@@ -971,118 +971,29 @@ impl ChunkedUploadService {
             entry.clone()
         };
 
-        // Assemble file with hash-on-write.
-        //
-        // The entire loop is offloaded to spawn_blocking because BLAKE3
-        // hashing is CPU-bound and would otherwise block a Tokio worker,
-        // starving all other connections.
-        // Synchronous I/O is used inside the blocking thread — it avoids
-        // the async reactor overhead and is actually faster for this
-        // sequential workload.
-        let assembled_path = session.temp_dir.join("assembled");
-        let chunks_meta: Vec<(usize, PathBuf)> = session
-            .chunks
+        // Chunk indices are unique (upload_chunk rejects duplicates) but may
+        // have arrived out of order — sort to recover the assembly order.
+        let mut indices: Vec<usize> = session.chunks.iter().map(|c| c.index).collect();
+        indices.sort_unstable();
+        let chunk_paths: Vec<PathBuf> = indices
             .iter()
-            .map(|c| {
-                (
-                    c.index,
-                    session.temp_dir.join(format!("chunk_{:06}", c.index)),
-                )
-            })
+            .map(|index| session.temp_dir.join(format!("chunk_{:06}", index)))
             .collect();
-        let total_size = session.total_size;
-
-        let hash = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            use std::io::{BufWriter as StdBufWriter, Read, Write};
-
-            let raw_output = std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&assembled_path)
-                .map_err(|e| format!("Failed to create assembled file: {e}"))?;
-
-            // Pre-allocate assembled file to reduce fragmentation
-            let _ = raw_output.set_len(total_size);
-
-            // 512 KB I/O buffers — 8× fewer syscalls than 64 KB
-            let mut output = StdBufWriter::with_capacity(524_288, raw_output);
-            let mut hasher = blake3::Hasher::new();
-
-            // For files >10 MB, use multithreaded BLAKE3 hashing (all cores)
-            const RAYON_THRESHOLD: u64 = 10 * 1024 * 1024;
-            let use_rayon = total_size > RAYON_THRESHOLD;
-
-            // Single 512 KB read buffer reused across all chunks (avoids N allocations)
-            let mut buf = vec![0u8; 524_288];
-            for (index, chunk_path) in &chunks_meta {
-                let mut chunk_file = std::fs::File::open(chunk_path)
-                    .map_err(|e| format!("Failed to open chunk {index}: {e}"))?;
-                loop {
-                    let n = chunk_file
-                        .read(&mut buf)
-                        .map_err(|e| format!("Failed to read chunk {index}: {e}"))?;
-                    if n == 0 {
-                        break;
-                    }
-                    if use_rayon {
-                        hasher.update_rayon(&buf[..n]);
-                    } else {
-                        hasher.update(&buf[..n]);
-                    }
-                    output.write_all(&buf[..n]).map_err(|e| {
-                        format!("Failed to write chunk {index} to assembled file: {e}")
-                    })?;
-                }
-            }
-
-            output
-                .flush()
-                .map_err(|e| format!("Failed to flush assembled file: {e}"))?;
-            // ── Durability boundary ────────────────────────────────────
-            // `flush` drains BufWriter's userspace buffer but leaves the
-            // bytes in the kernel page cache. Without `sync_all`, a
-            // power loss between this `complete_upload` returning 2xx
-            // and the OS writeback timer firing (~5 s default) loses
-            // the merged blob — and PG's metadata row references a hash
-            // that no longer exists on disk. Reclaim the BufWriter's
-            // inner File via `into_inner` so we can `sync_all` it; the
-            // BufWriter would otherwise drop without flushing on the
-            // inner handle.
-            let raw_output = output
-                .into_inner()
-                .map_err(|e| format!("into_inner on BufWriter failed: {e}"))?;
-            raw_output
-                .sync_all()
-                .map_err(|e| format!("Failed to fsync assembled file: {e}"))?;
-
-            // Clean up chunk files (keep assembled) — already on a blocking thread
-            for (_index, chunk_path) in &chunks_meta {
-                let _ = std::fs::remove_file(chunk_path);
-            }
-
-            Ok(hasher.finalize().to_hex().to_string())
-        })
-        .await
-        .map_err(|e| format!("Assembly task panicked: {e}"))??;
-
-        let assembled_path = session.temp_dir.join("assembled");
 
         tracing::info!(
-            "✅ Assembled chunked upload: {} ({} bytes from {} chunks)",
+            "✅ Chunked upload complete: {} ({} bytes in {} chunks, streamed to CAS)",
             session.filename,
             session.total_size,
-            session.chunks.len()
+            chunk_paths.len()
         );
 
-        Ok((
-            assembled_path,
-            session.filename.clone(),
-            session.folder_id.clone(),
-            session.content_type.clone(),
-            session.total_size,
-            hash,
-        ))
+        Ok(CompletedUploadParts {
+            chunk_paths,
+            filename: session.filename.clone(),
+            folder_id: session.folder_id.clone(),
+            content_type: session.content_type.clone(),
+            total_size: session.total_size,
+        })
     }
 
     /// Finalize upload: remove session from RAM, then clean disk OUTSIDE lock.
@@ -1187,7 +1098,7 @@ impl ChunkedUploadPort for ChunkedUploadService {
         &self,
         upload_id: &str,
         user_id: Uuid,
-    ) -> Result<(PathBuf, String, Option<String>, String, u64, String), DomainError> {
+    ) -> Result<CompletedUploadParts, DomainError> {
         self.complete_upload_inner(upload_id, &user_id.to_string())
             .await
             .map_err(|e| DomainError::new(ErrorKind::InternalError, "ChunkedUpload", e))
@@ -1458,18 +1369,21 @@ mod tests {
         assert_eq!(status.completed_chunks, 2);
         assert!(status.pending_chunks.is_empty());
 
-        // 4. Complete (assemble)
-        let (path, filename, _folder, _ct, size, hash) = service
+        // 4. Complete — returns the ordered chunk parts, no assembled file
+        let parts = service
             .complete_upload_inner(&id, "test-user")
             .await
             .expect("complete");
-        assert_eq!(filename, "test.txt");
-        assert_eq!(size, 1024);
-        assert!(!hash.is_empty());
-        assert!(path.exists());
+        assert_eq!(parts.filename, "test.txt");
+        assert_eq!(parts.total_size, 1024);
+        assert_eq!(parts.chunk_paths.len(), 2);
 
-        // 5. Verify assembled content
-        let content = fs::read(&path).await.expect("read assembled");
+        // 5. Verify the parts concatenate to the original content in order
+        let mut content = Vec::new();
+        for path in &parts.chunk_paths {
+            assert!(path.exists(), "chunk part must remain until finalize");
+            content.extend_from_slice(&fs::read(path).await.expect("read part"));
+        }
         assert_eq!(&content[..512], &[b'A'; 512]);
         assert_eq!(&content[512..], &[b'B'; 512]);
 

@@ -71,15 +71,15 @@ pub trait FileWriteRepository: Send + Sync + 'static {
         content: Vec<u8>,
     ) -> Result<File, DomainError>;
 
-    /// Streaming upload — saves a file from a temp file already on disk.
-    async fn save_file_from_temp(
+    /// Registers a file row pointing at a blob already stored in the
+    /// content-addressable chunk store (one blob reference is consumed).
+    async fn save_file_with_blob(
         &self,
         name: String,
         folder_id: Option<String>,
         content_type: String,
-        temp_path: &std::path::Path,
+        blob_hash: &str,
         size: u64,
-        pre_computed_hash: Option<String>,
     ) -> Result<File, DomainError>;
 
     /// Moves a file to another folder.

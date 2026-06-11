@@ -5,12 +5,11 @@ use axum::{
     response::IntoResponse,
 };
 use serde::Serialize;
-use tokio::io::AsyncWriteExt;
 use utoipa::ToSchema;
 
-use crate::application::ports::dedup_ports::DedupResultDto;
 use crate::common::di::AppState;
 use crate::interfaces::middleware::auth::AuthUser;
+use crate::interfaces::upload_ingest;
 use std::sync::Arc;
 
 /// Global application state for dependency injection
@@ -155,10 +154,10 @@ impl DedupHandler {
 
     /// Upload content with automatic deduplication (streaming).
     ///
-    /// Spools the upload to a temp file while computing the BLAKE3 hash
-    /// incrementally (hash-on-write). Memory usage is constant (~512 KB)
-    /// regardless of file size. Then delegates to `store_from_file` with
-    /// the pre-computed hash so the file is never re-read for hashing.
+    /// Streams the multipart field straight into the CDC chunk store —
+    /// chunking, BLAKE3 hashing and dedup checks happen while the bytes
+    /// arrive (no temp file, no re-read; peak RAM is bounded regardless
+    /// of file size).
     ///
     /// POST /api/dedup/upload
     pub(super) async fn upload_with_dedup_impl(
@@ -177,64 +176,29 @@ impl DedupHandler {
                     .content_type()
                     .unwrap_or("application/octet-stream")
                     .to_string();
+                let filename = field.file_name().unwrap_or("unnamed").to_string();
 
-                // ── Spool to temp file + BLAKE3 hash-on-write ────────
-                let temp_dir = state.core.path_service.get_root_path().join(".dedup_temp");
-                let temp_path = temp_dir.join(format!("dedup-{}", uuid::Uuid::new_v4()));
-
-                let mut total_size: u64 = 0;
-                let mut hasher = blake3::Hasher::new();
-                let mut field = field;
-
-                let spool_result: Result<(), String> = async {
-                    let file = tokio::fs::File::create(&temp_path)
-                        .await
-                        .map_err(|e| format!("Failed to create temp file: {}", e))?;
-
-                    // 512 KB buffer — reduces write syscalls
-                    let mut writer = tokio::io::BufWriter::with_capacity(524_288, file);
-
-                    loop {
-                        match field.chunk().await {
-                            Ok(Some(chunk)) => {
-                                total_size += chunk.len() as u64;
-                                hasher.update(&chunk);
-                                writer
-                                    .write_all(&chunk)
-                                    .await
-                                    .map_err(|e| format!("Failed to write chunk: {}", e))?;
-                            }
-                            Ok(None) => break,
-                            Err(e) => {
-                                return Err(format!(
-                                    "Connection lost during upload (received {} bytes): {}",
-                                    total_size, e
-                                ));
-                            }
-                        }
+                // ── Stream into the CDC chunk store ──────────────────
+                let source = upload_ingest::multipart_field_stream(field);
+                let ingested = match upload_ingest::ingest_stream_to_cas(
+                    source,
+                    dedup,
+                    &filename,
+                    &content_type,
+                    usize::MAX,
+                    None,
+                )
+                .await
+                {
+                    Ok(ingested) => ingested,
+                    Err(e) => {
+                        tracing::warn!("Dedup upload ingest failed: {}", e.message);
+                        return e.into_response();
                     }
+                };
 
-                    writer
-                        .flush()
-                        .await
-                        .map_err(|e| format!("Failed to flush temp file: {}", e))?;
-                    Ok(())
-                }
-                .await;
-
-                if let Err(msg) = spool_result {
-                    let _ = tokio::fs::remove_file(&temp_path).await;
-                    tracing::warn!("Dedup upload spool failed: {}", msg);
-                    return Response::builder()
-                        .status(StatusCode::BAD_REQUEST)
-                        .header(header::CONTENT_TYPE, "application/json")
-                        .body(Body::from(format!(r#"{{"error": "{}"}}"#, msg)))
-                        .unwrap()
-                        .into_response();
-                }
-
-                if total_size == 0 {
-                    let _ = tokio::fs::remove_file(&temp_path).await;
+                if ingested.size == 0 {
+                    upload_ingest::discard_ingested(dedup, &ingested).await;
                     return Response::builder()
                         .status(StatusCode::BAD_REQUEST)
                         .header(header::CONTENT_TYPE, "application/json")
@@ -243,60 +207,33 @@ impl DedupHandler {
                         .into_response();
                 }
 
-                let hash = hasher.finalize().to_hex().to_string();
+                let metadata = dedup.get_blob_metadata(&ingested.hash).await;
 
-                // ── Store with deduplication (pre-computed hash) ──────
-                match dedup
-                    .store_from_file(&temp_path, Some(content_type), Some(hash))
-                    .await
-                {
-                    Ok(result) => {
-                        let (is_new, bytes_saved) = match &result {
-                            DedupResultDto::NewBlob { .. } => (true, 0),
-                            DedupResultDto::ExistingBlob { saved_bytes, .. } => {
-                                (false, *saved_bytes)
-                            }
-                        };
+                let response = DedupUploadResponse {
+                    is_new: ingested.is_new_blob,
+                    hash: ingested.hash.clone(),
+                    size: ingested.size,
+                    bytes_saved: ingested.bytes_saved,
+                    ref_count: metadata.map(|m| m.ref_count).unwrap_or(1),
+                };
 
-                        let metadata = dedup.get_blob_metadata(result.hash()).await;
+                tracing::info!(
+                    "🔗 Dedup upload: hash={}, new={}, saved={}",
+                    ingested.hash,
+                    ingested.is_new_blob,
+                    ingested.bytes_saved
+                );
 
-                        let response = DedupUploadResponse {
-                            is_new,
-                            hash: result.hash().to_string(),
-                            size: result.size(),
-                            bytes_saved,
-                            ref_count: metadata.map(|m| m.ref_count).unwrap_or(1),
-                        };
-
-                        tracing::info!(
-                            "🔗 Dedup upload: hash={}, new={}, saved={}",
-                            result.hash(),
-                            is_new,
-                            bytes_saved
-                        );
-
-                        return Response::builder()
-                            .status(if is_new {
-                                StatusCode::CREATED
-                            } else {
-                                StatusCode::OK
-                            })
-                            .header(header::CONTENT_TYPE, "application/json")
-                            .body(Body::from(serde_json::to_string(&response).unwrap()))
-                            .unwrap()
-                            .into_response();
-                    }
-                    Err(e) => {
-                        let _ = tokio::fs::remove_file(&temp_path).await;
-                        tracing::error!("Dedup upload failed: {}", e);
-                        return Response::builder()
-                            .status(StatusCode::INTERNAL_SERVER_ERROR)
-                            .header(header::CONTENT_TYPE, "application/json")
-                            .body(Body::from(r#"{"error": "Upload failed"}"#))
-                            .unwrap()
-                            .into_response();
-                    }
-                }
+                return Response::builder()
+                    .status(if ingested.is_new_blob {
+                        StatusCode::CREATED
+                    } else {
+                        StatusCode::OK
+                    })
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_string(&response).unwrap()))
+                    .unwrap()
+                    .into_response();
             }
         }
 

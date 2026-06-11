@@ -228,12 +228,6 @@ pub struct StorageConfig {
     /// returns 413 with a "use chunked upload" hint when a direct PUT
     /// exceeds this cap. Env: `OXICLOUD_DIRECT_PUT_MAX_BYTES`.
     pub direct_put_max_bytes: usize,
-    /// Directory for upload spool temp files. When `Some`, large uploads are
-    /// spooled here instead of the OS default temp dir (often tmpfs/RAM in
-    /// containers, where the spool's page-cache counts against the cgroup
-    /// memory limit and can trigger OOMKill on large files). Env:
-    /// `OXICLOUD_UPLOAD_TMPDIR`.
-    pub upload_temp_dir: Option<PathBuf>,
     /// Root directory for chunked-upload sessions. When `Some`, chunks land
     /// under `{chunk_dir}/{upload_id}/` (REST) and
     /// `{chunk_dir}/nextcloud/{user}/{upload_id}/` (NC). When `None`, falls
@@ -401,7 +395,6 @@ impl Default for StorageConfig {
             max_upload_size: MAX_UPLOAD_SIZE,
             chunk_max_bytes: 100 * 1024 * 1024, // 100 MB — sane upper bound for a single chunked-upload PUT
             direct_put_max_bytes: 1024 * 1024 * 1024, // 1 GiB — pushes larger uploads onto the chunked protocol
-            upload_temp_dir: None,
             chunk_dir: None,
             usage_reconcile_secs: 600, // 10 minutes
             tree_etag_flush_ms: 500,
@@ -1349,18 +1342,10 @@ impl AppConfig {
             config.storage.direct_put_max_bytes = val;
         }
 
-        // Upload spool directory — keep large upload temp files off tmpfs/RAM
-        // (otherwise their page-cache counts against the cgroup memory limit).
-        if let Ok(dir) = env::var("OXICLOUD_UPLOAD_TMPDIR")
-            && !dir.trim().is_empty()
-        {
-            config.storage.upload_temp_dir = Some(PathBuf::from(dir.trim()));
-        }
-        // Chunked-upload session root — separate from the PUT spool because
-        // chunked sessions accumulate disk on long uploads (multi-chunk
-        // resumable transfers) while PUT spool is short-lived. Sysadmins
-        // commonly want one of them on fast/local storage (NVMe) and the
-        // other on bulk storage; this knob lets that be expressed.
+        // Chunked-upload session root — chunked sessions accumulate disk on
+        // long uploads (multi-chunk resumable transfers); sysadmins commonly
+        // want them on fast/local storage (NVMe). This knob lets that be
+        // expressed.
         if let Ok(dir) = env::var("OXICLOUD_CHUNK_DIR")
             && !dir.trim().is_empty()
         {

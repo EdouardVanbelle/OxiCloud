@@ -1,6 +1,5 @@
 use bytes::Bytes;
 use futures::Stream;
-use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -17,74 +16,51 @@ use crate::domain::services::authorization::Permission;
 // Upload port
 // ─────────────────────────────────────────────────────
 
+/// A blob already stored in the content-addressable chunk store, carrying
+/// exactly ONE reference that the receiving method takes ownership of.
+///
+/// Produced by the upload-ingest layer (`interfaces::upload_ingest`), which
+/// streams the request body straight into the CDC dedup store. Methods that
+/// accept a `StoredBlob` either attach the reference to a file row or
+/// release it on failure — callers never need to compensate themselves.
+#[derive(Debug, Clone)]
+pub struct StoredBlob {
+    /// BLAKE3 of the full content (manifest / blob key).
+    pub hash: String,
+    /// Content size in bytes.
+    pub size: u64,
+    /// `false` when the content already existed (dedup hit) — forwarded to
+    /// lifecycle hooks so e.g. thumbnails aren't regenerated for known blobs.
+    pub is_new_blob: bool,
+}
+
 /// Primary port for file upload operations.
 ///
-/// **All upload paths converge on streaming-to-disk** — no method accepts
-/// `Vec<u8>` for content.  Even `create_file` / `update_file` (WebDAV
-/// helpers that receive `&[u8]`) spool to a temp file internally so that
-/// peak RAM stays at ~256 KB regardless of file size.
-///
-/// - Normal uploads: handler spools multipart to temp file → `upload_file_streaming`
-/// - Chunked uploads: chunks already on disk → `upload_file_from_path`
-/// - WebDAV PUT (new): handler streams to temp file → `update_file_streaming`
-/// - WebDAV PUT (small/compat): `create_file` / `update_file` spool internally
+/// **All upload paths converge on streaming-into-the-chunk-store** — content
+/// never passes through this port; it is ingested by the interface layer
+/// (CDC chunking + hashing while the body arrives, no spool file) and only
+/// the resulting [`StoredBlob`] reference travels through here.
 pub trait FileUploadUseCase: Send + Sync + 'static {
-    /// Upload from a temp file already on disk (true streaming, ~256 KB RAM).
+    /// Register a new file row pointing at an already-ingested blob.
     ///
-    /// When `pre_computed_hash` is `Some`, the blob store skips the hash
-    /// re-read — the handler already computed it during the multipart spool.
+    /// Takes ownership of the blob's reference (released on failure).
     async fn upload_file_streaming(
         &self,
         name: String,
         folder_id: Option<String>,
         content_type: String,
-        temp_path: &Path,
-        size: u64,
-        pre_computed_hash: Option<String>,
+        blob: StoredBlob,
     ) -> Result<FileDto, DomainError>;
 
-    /// Upload from a file already assembled on disk (chunked uploads).
+    /// Replace the content of the file at `path` with an already-ingested
+    /// blob, or create the file when it doesn't exist (WebDAV/WOPI PUT).
     ///
-    /// Same as `upload_file_streaming` but with a separate name for clarity.
-    async fn upload_file_from_path(
-        &self,
-        name: String,
-        folder_id: Option<String>,
-        content_type: String,
-        file_path: &Path,
-        pre_computed_hash: Option<String>,
-    ) -> Result<FileDto, DomainError>;
-
-    /// Creates a new file at the specified path (for WebDAV)
-    async fn create_file(
-        &self,
-        parent_path: &str,
-        filename: &str,
-        content: &[u8],
-        content_type: &str,
-    ) -> Result<FileDto, DomainError>;
-
-    /// Updates the content of an existing file (for WebDAV)
-    async fn update_file(
-        &self,
-        path: &str,
-        content: &[u8],
-        content_type: &str,
-        modified_at: Option<i64>,
-    ) -> Result<FileDto, DomainError>;
-
-    /// Streaming update — spools body to a temp file with incremental hash,
-    /// then atomically replaces the file content via dedup store.
-    ///
-    /// Peak RAM: ~256 KB regardless of file size.
-    /// Used by WebDAV PUT for large files.
+    /// Takes ownership of the blob's reference (released on failure).
     async fn update_file_streaming(
         &self,
         path: &str,
-        temp_path: &Path,
-        size: u64,
+        blob: StoredBlob,
         content_type: &str,
-        pre_computed_hash: Option<String>,
         modified_at: Option<i64>,
     ) -> Result<FileDto, DomainError>;
 }

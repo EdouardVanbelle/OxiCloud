@@ -7,7 +7,7 @@
         }
     },
     "files": {
-        "includes": ["static/**/*.js", "static/**/*.css", "static/**/*.json", "!static/js/vendors/"]
+        "includes": ["static/**/*.js", "static/**/*.css", "static/**/*.json", "!static/js/vendors"]
     },
     "formatter": {
         "enabled": true,

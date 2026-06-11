@@ -22,12 +22,12 @@ use crate::application::ports::file_ports::{
 use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::common::di::AppState;
-use crate::common::mime_detect::{filename_from_path, refine_content_type_from_file};
+use crate::common::mime_detect::filename_from_path;
 use crate::interfaces::api::handlers::webdav_handler::PROPFIND_BATCH_SIZE;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::{AuthUser, CurrentUser};
 use crate::interfaces::range_requests::{not_modified_response, range_response};
-use crate::interfaces::upload_spool::spool_body_to_temp;
+use crate::interfaces::upload_ingest::ingest_body_to_cas;
 
 /// Extension trait to map XML write errors to `String` concisely.
 trait XmlResultExt<T> {
@@ -575,45 +575,34 @@ async fn handle_put(
     // at 95 % loses everything.
     let max_upload = state.core.config.storage.direct_put_max_bytes;
 
-    // Stream the body to a temp file + incremental hash — never buffer the
-    // full upload in RAM.  The old `body::to_bytes` path loaded the entire
-    // file (e.g. an 800 MB ISO) into anonymous memory before any dedup logic,
-    // OOMKilling the process even on dedup hits.  Shared with the native
-    // WebDAV PUT handler; peak heap ~one frame regardless of file size.
-    let spooled = spool_body_to_temp(
-        req.into_body(),
-        max_upload,
-        state.core.config.storage.upload_temp_dir.clone(),
-    )
-    .await?;
-
-    // Detect real MIME type from the first bytes on disk (no full read).
+    // Stream the body straight into the CDC chunk store — never buffer the
+    // full upload in RAM and never spool it to disk. Chunking, hashing,
+    // dedup checks and MIME sniffing (magic bytes off the first frames)
+    // all run while the body arrives; chunks the store already has are
+    // never written at all. Shared with the native WebDAV PUT handler.
+    //
     // `filename` is owned so we don't hold a borrow of the `subpath` param
     // across the await (which would make the handler future non-Send).
     let filename = filename_from_path(subpath).to_string();
-    let content_type =
-        refine_content_type_from_file(spooled.temp.path(), &filename, &claimed_type).await;
+    let ingested = ingest_body_to_cas(
+        req.into_body(),
+        &state.core.dedup_service,
+        &filename,
+        &claimed_type,
+        max_upload,
+    )
+    .await?;
+    let content_type = ingested.content_type.clone();
 
     // Distinguish create (201) vs update (204) for the response status.
     let existed = file_service.get_file_by_path(&internal_path).await.is_ok();
 
     // Single streaming path — handles both update and create internally,
-    // passing the precomputed hash so the dedup fast path can short-circuit
-    // without re-reading the file.
+    // swapping the file row onto the already-ingested blob.
     let stored = upload_service
-        .update_file_streaming(
-            &internal_path,
-            spooled.temp.path(),
-            spooled.size,
-            &content_type,
-            Some(spooled.hash),
-            oc_mtime,
-        )
+        .update_file_streaming(&internal_path, ingested.stored(), &content_type, oc_mtime)
         .await
         .map_err(|e| AppError::internal_error(format!("Failed to store file: {}", e)))?;
-
-    // dedup may have already moved the temp on a new-blob store; ignore error.
-    let _ = tokio::fs::remove_file(spooled.temp.path()).await;
 
     let status = if existed {
         StatusCode::NO_CONTENT

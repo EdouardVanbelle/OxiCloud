@@ -251,21 +251,21 @@ pub struct CopyFolderTreeResult {
 
 /// Secondary port for file **writing**.
 ///
-/// Covers: upload (buffered + streaming), move, delete, update,
-/// and deferred registration for the write-behind cache.
+/// Covers: upload registration, move, delete, update, and deferred
+/// registration for the write-behind cache.
 pub trait FileWritePort: Send + Sync + 'static {
-    /// Streaming upload — saves a file from a temp file already on disk.
+    /// Register a file row pointing at a blob already stored in the
+    /// content-addressable chunk store.
     ///
-    /// When `pre_computed_hash` is provided, the dedup service skips the
-    /// hash re-read — zero extra I/O beyond the initial spool.
-    async fn save_file_from_temp(
+    /// Takes ownership of one blob reference: on any failure the reference
+    /// is released before the error is returned.
+    async fn save_file_with_blob(
         &self,
         name: String,
         folder_id: Option<String>,
         content_type: String,
-        temp_path: &std::path::Path,
+        blob_hash: &str,
         size: u64,
-        pre_computed_hash: Option<String>,
     ) -> Result<File, DomainError>;
 
     /// Moves a file to another folder.
@@ -281,22 +281,20 @@ pub trait FileWritePort: Send + Sync + 'static {
     /// Deletes a file.
     async fn delete_file(&self, id: &str) -> Result<(), DomainError>;
 
-    /// Streaming update — replaces file content from a temp file on disk.
+    /// Atomically swap a file's content to a blob already stored in the
+    /// content-addressable chunk store.
     ///
-    /// When `pre_computed_hash` is provided, the dedup service skips the
-    /// hash re-read — zero extra I/O beyond the initial spool.
-    /// Peak RAM: ~256 KB regardless of file size.
+    /// Takes ownership of one blob reference (released on failure); the
+    /// previous content's reference is dropped after the swap.
     ///
     /// Returns `(new_blob_hash, updated_at_epoch)` — everything a caller
     /// needs to rebuild the fresh entity/ETag from a `File` it already
     /// holds, without re-reading the row it just updated.
-    async fn update_file_content_from_temp(
+    async fn update_file_content_with_blob(
         &self,
         file_id: &str,
-        temp_path: &std::path::Path,
+        blob_hash: &str,
         size: u64,
-        content_type: Option<String>,
-        pre_computed_hash: Option<String>,
         modified_at: Option<i64>,
     ) -> Result<(String, i64), DomainError>;
 
