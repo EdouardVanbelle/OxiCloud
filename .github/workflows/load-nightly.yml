@@ -39,9 +39,11 @@ jobs:
         uses: grafana/setup-k6-action@v1
 
       - name: Build OxiCloud + load-seed (release)
+        # load-seed is gated behind `test_utils` so prod builds skip it; we
+        # opt in here explicitly. Matches tests/load/run.sh.
         run: |
           cargo build --release --bin oxicloud
-          cargo build --release --bin load-seed
+          cargo build --release --features test_utils --bin load-seed
 
       - name: Run full load suite
         id: load
