@@ -1,51 +1,51 @@
 {
   "_comment": "Baseline for `just load` — the long scenarios. Each entry: p50/p95/p99 (ms) + tolerance_pct (regression threshold). Updated by `just load-baseline`. Keys must match the `op` tag the matching scenario emits — adding a scenario means adding entries here in the same PR. Smoke metrics live in smoke.json.",
   "folder_cascade.list_depth1": {
-    "p50": 0.97,
-    "p95": 2.04,
-    "p99": 4.82,
+    "p50": 0.83,
+    "p95": 2.85,
+    "p99": 5.99,
     "tolerance_pct": 10
   },
   "folder_cascade.list_depth4": {
-    "p50": 1,
-    "p95": 1.92,
-    "p99": 2.46,
+    "p50": 0.81,
+    "p95": 2.1,
+    "p99": 3.8,
     "tolerance_pct": 10
   },
   "folder_cascade.list_depth_deep": {
-    "p50": 0.97,
-    "p95": 1.18,
-    "p99": 2.05,
+    "p50": 0.76,
+    "p95": 1.1,
+    "p99": 5.18,
     "tolerance_pct": 10
   },
   "share_cascade_rebac.list_grants": {
-    "p50": 0.98,
-    "p95": 1.91,
-    "p99": 2.06,
+    "p50": 0.87,
+    "p95": 2.33,
+    "p99": 3.37,
     "tolerance_pct": 10
   },
   "share_cascade_rebac.fetch_as_grantee_depth1": {
-    "p50": 1.48,
-    "p95": 1.78,
-    "p99": 4.07,
+    "p50": 1.49,
+    "p95": 1.85,
+    "p99": 4.79,
     "tolerance_pct": 10
   },
   "share_cascade_rebac.fetch_as_grantee_depth_deep": {
-    "p50": 1.49,
-    "p95": 2.13,
-    "p99": 2.29,
+    "p50": 1.41,
+    "p95": 2.29,
+    "p99": 3.71,
     "tolerance_pct": 10
   },
   "subject_group_nested.fetch_as_member_depth1": {
-    "p50": 1.4,
-    "p95": 2.44,
-    "p99": 2.73,
+    "p50": 1.14,
+    "p95": 1.38,
+    "p99": 2.35,
     "tolerance_pct": 10
   },
   "subject_group_nested.fetch_as_member_depth_deep": {
-    "p50": 1.31,
-    "p95": 1.57,
-    "p99": 1.65,
+    "p50": 1.07,
+    "p95": 1.23,
+    "p99": 1.24,
     "tolerance_pct": 10
   }
 }
