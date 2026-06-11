@@ -1,5 +1,5 @@
 # ─── Stage 1: Shared build base (avoids duplicate apk install) ────────────────
-FROM rust:1.94.1-alpine3.23 AS base
+FROM rust:1.96-alpine3.24 AS base
 # sqlx's postgres driver speaks the wire protocol in pure Rust (no pq-sys in
 # Cargo.lock) and TLS goes through rustls, so libpq headers are never needed at
 # build time. perl/make/gcc/musl-dev remain for the C builds of aws-lc-sys.
@@ -41,7 +41,7 @@ ARG DATABASE_URL="postgres://postgres:postgres@localhost/oxicloud"
 RUN DATABASE_URL="${DATABASE_URL}" cargo build --release
 
 # ─── Stage 4: Minimal runtime image ──────────────────────────────────────────
-FROM alpine:3.23.3
+FROM alpine:3.24.0
 
 # OCI image metadata
 LABEL org.opencontainers.image.title="OxiCloud" \

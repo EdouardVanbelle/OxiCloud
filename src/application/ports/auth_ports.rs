@@ -3,6 +3,7 @@ use crate::domain::entities::app_password::AppPassword;
 use crate::domain::entities::device_code::DeviceCode;
 use crate::domain::entities::session::Session;
 use crate::domain::entities::user::User;
+use std::sync::Arc;
 use uuid::Uuid;
 
 // ============================================================================
@@ -51,8 +52,14 @@ pub trait TokenServicePort: Send + Sync + 'static {
     /// Generate an access token for a user
     fn generate_access_token(&self, user: &User) -> Result<String, DomainError>;
 
-    /// Validate a token and extract its claims
-    fn validate_token(&self, token: &str) -> Result<TokenClaims, DomainError>;
+    /// Validate a token and extract its claims.
+    ///
+    /// Returns `Arc<TokenClaims>` so the implementation's validation cache can
+    /// hand back a hot entry with a refcount bump instead of deep-cloning the
+    /// (multi-`String`) claims on every authenticated request. Callers that
+    /// only read fields go through `Deref`; the few that retain a field clone
+    /// just that one.
+    fn validate_token(&self, token: &str) -> Result<Arc<TokenClaims>, DomainError>;
 
     /// Generate a refresh token
     fn generate_refresh_token(&self) -> String;

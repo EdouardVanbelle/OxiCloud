@@ -183,9 +183,9 @@ pub async fn auth_middleware(
                             })?;
                             let current_user = Arc::new(CurrentUser {
                                 id: user_id,
-                                username: claims.username,
-                                email: claims.email,
-                                role: claims.role,
+                                username: claims.username.clone(),
+                                email: claims.email.clone(),
+                                role: claims.role.clone(),
                             });
                             request.extensions_mut().insert(current_user);
                             tracing::Span::current().record("user_id", user_id.to_string());
@@ -287,9 +287,9 @@ pub async fn auth_middleware(
                         })?;
                         let current_user = Arc::new(CurrentUser {
                             id: user_id,
-                            username: claims.username,
-                            email: claims.email,
-                            role: claims.role,
+                            username: claims.username.clone(),
+                            email: claims.email.clone(),
+                            role: claims.role.clone(),
                         });
                         request.extensions_mut().insert(current_user);
                         request.extensions_mut().insert(CookieAuthenticated);

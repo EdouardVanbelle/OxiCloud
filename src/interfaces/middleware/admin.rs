@@ -54,7 +54,7 @@ pub async fn require_admin(
     Ok((
         Uuid::parse_str(&claims.sub)
             .map_err(|_| AppError::internal_error("Invalid user ID in token"))?,
-        claims.role,
+        claims.role.clone(),
     ))
 }
 
@@ -87,6 +87,6 @@ pub async fn require_authenticated(
     Ok((
         Uuid::parse_str(&claims.sub)
             .map_err(|_| AppError::internal_error("Invalid user ID in token"))?,
-        claims.role,
+        claims.role.clone(),
     ))
 }

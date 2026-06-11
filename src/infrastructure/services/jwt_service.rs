@@ -13,6 +13,7 @@ use chrono::Utc;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use uuid::Uuid;
@@ -69,8 +70,9 @@ impl From<JwtClaims> for TokenClaims {
 ///
 /// The cache uses the **BLAKE3** hash of the raw token string as key (32-byte,
 /// ~0.1 µs to compute — 20× cheaper than HMAC verification) and stores the
-/// validated `TokenClaims`.  On a cache hit the HMAC step is completely
-/// skipped.
+/// validated claims behind an `Arc`.  On a cache hit the HMAC step is
+/// completely skipped and the lookup returns a refcount bump rather than a
+/// deep clone of the (multi-`String`) `TokenClaims`.
 ///
 /// **Security properties**:
 /// - TTL of 30 s bounds the window in which a revoked token remains valid.
@@ -84,8 +86,9 @@ pub struct JwtTokenService {
     access_token_expiry: i64,
     /// Expiration time for refresh tokens in seconds
     refresh_token_expiry: i64,
-    /// Validation result cache: blake3(token) → TokenClaims
-    validation_cache: Cache<[u8; 32], TokenClaims>,
+    /// Validation result cache: blake3(token) → Arc<TokenClaims>.
+    /// `Arc` so a cache hit is a refcount bump, not a multi-`String` clone.
+    validation_cache: Cache<[u8; 32], Arc<TokenClaims>>,
     /// Cache hit counter (for observability / metrics)
     cache_hits: AtomicU64,
     /// Cache miss counter
@@ -194,7 +197,7 @@ impl TokenServicePort for JwtTokenService {
         })
     }
 
-    fn validate_token(&self, token: &str) -> Result<TokenClaims, DomainError> {
+    fn validate_token(&self, token: &str) -> Result<Arc<TokenClaims>, DomainError> {
         // ── 1. Fast-path: check the validation cache ─────────────
         let key = Self::token_hash(token);
 
@@ -232,14 +235,15 @@ impl TokenServicePort for JwtTokenService {
             ),
         })?;
 
-        let claims: TokenClaims = token_data.claims.into();
+        let claims = Arc::new(TokenClaims::from(token_data.claims));
 
         // ── 3. Store in cache for subsequent requests ────────────
         // Only cache tokens that won't expire within the cache TTL window,
         // avoiding stale positives right at the boundary.
         let remaining_secs = claims.exp - Utc::now().timestamp();
         if remaining_secs > VALIDATION_CACHE_TTL_SECS as i64 {
-            self.validation_cache.insert(key, claims.clone());
+            // Refcount bump — the claims live once behind the `Arc`.
+            self.validation_cache.insert(key, Arc::clone(&claims));
         }
 
         Ok(claims)
@@ -346,6 +350,31 @@ mod tests {
         let (hits, misses) = service.cache_stats();
         assert_eq!(hits, 1, "Expected 1 cache hit");
         assert_eq!(misses, 1, "Expected 1 cache miss");
+    }
+
+    #[test]
+    fn test_cache_hit_returns_same_arc_not_a_clone() {
+        let service = JwtTokenService::new(
+            "test_secret_key_at_least_32_bytes_long".to_string(),
+            3600,
+            86400,
+        );
+        let token = service
+            .generate_access_token(&create_test_user())
+            .expect("Should generate token");
+
+        // Miss populates the cache; hit must hand back the very same
+        // allocation (pointer-equal Arc), proving the hot path is a refcount
+        // bump rather than a deep clone of the claims' Strings.
+        let first = service.validate_token(&token).expect("miss");
+        let second = service.validate_token(&token).expect("hit");
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "cache hit must return the same Arc, not a fresh allocation"
+        );
+        let (hits, misses) = service.cache_stats();
+        assert_eq!((hits, misses), (1, 1));
     }
 
     #[test]
