@@ -82,7 +82,11 @@ jobs:
           } > regression-issue.md
 
       - name: Open issue on regression
-        if: steps.load.outcome == 'failure'
+        # Skip on forks where Issues are disabled — the regression report is
+        # already in the artifact, and the workflow's exit code marks the run
+        # as failed regardless. Forks that want issue notifications can enable
+        # issues on their repo and remove this condition.
+        if: steps.load.outcome == 'failure' && github.repository == 'AtalayaLabs/OxiCloud'
         uses: peter-evans/create-issue-from-file@v5
         with:
           title: "Load nightly: regression on ${{ github.sha }}"
