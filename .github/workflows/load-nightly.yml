@@ -34,6 +34,13 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The self-hosted runner bind-mounts target/ as a persistent volume
+          # for fast incremental rebuilds. actions/checkout's default cleanup
+          # tries to rmdir it and hits EBUSY on the mount point. Git still
+          # syncs the working tree to the target SHA — only non-git files
+          # (target/, tests/load/results/) persist, which is what we want.
+          clean: false
 
       - uses: dtolnay/rust-toolchain@stable
 
