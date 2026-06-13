@@ -57,6 +57,13 @@ check:
     cargo fmt --all
     cargo clippy --all-features --all-targets -- -D warnings
 
+wasm-check:
+    cd wasm/oxicloud-hash; cargo fmt --all
+    cd wasm/oxicloud-hash; cargo clippy --all-features --release -- -D warnings
+
+wasm-test:
+    cd wasm/oxicloud-hash; cargo test --release
+
 # audit security (condition: cargo install cargo-audit)
 audit:
     cargo audit

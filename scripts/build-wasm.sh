@@ -20,6 +20,19 @@ cd "$(dirname "$0")/.."
 CRATE=wasm/oxicloud-hash
 OUT=static/js/vendors/hash-wasm
 
+if ! ( rustup target list --installed | grep -q wasm32-unknown-unknown )
+then
+    echo -e "install first wasm32-unknown-unknown via:\n\trustup target add wasm32-unknown-unknown"
+    exit 1
+fi
+
+if ! which wasm-bindgen >/dev/null 2>/dev/null
+then
+    WASM_BINDGEN_VERSION=$(grep -A1 'name = "wasm-bindgen"' $CREATE/Cargo.lock | head -2 | grep version | sed 's/version = //')
+    echo -e "wasm-bindgen not found, install it via:\n\tcargo install wasm-bindgen-cli --version $WASM_BINDGEN_VERSION"
+    exit 1
+fi
+
 # SIMD128 is baseline in every evergreen browser (Chrome 91+, Firefox 89+,
 # Safari 16.4+) and is worth ~3-4× in hashing throughput. Browsers without
 # it fail instantiation; the frontend detects that and falls back to a

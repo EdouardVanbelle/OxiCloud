@@ -153,7 +153,7 @@ impl DeltaChunker {
                 let bytes = &self.buf[chunk.offset..chunk.offset + chunk.length];
                 push_chunk_json(
                     &mut out,
-                    &blake3::hash(bytes).to_hex().to_string(),
+                    blake3::hash(bytes).to_hex().as_ref(),
                     chunk.length,
                 );
                 consumed = chunk.offset + chunk.length;
@@ -175,13 +175,13 @@ impl DeltaChunker {
         if !self.buf.is_empty() {
             push_chunk_json(
                 &mut out,
-                &blake3::hash(&self.buf).to_hex().to_string(),
+                blake3::hash(&self.buf).to_hex().as_ref(),
                 self.buf.len(),
             );
             self.buf.clear();
         }
         out.push_str("],\"file_hash\":\"");
-        out.push_str(&self.file_hasher.finalize().to_hex().to_string());
+        out.push_str(self.file_hasher.finalize().to_hex().as_ref());
         out.push_str("\",\"total\":");
         out.push_str(&self.total.to_string());
         out.push('}');
@@ -238,7 +238,7 @@ mod tests {
     fn run_chunker(data: &[u8], slice: usize) -> (Vec<(String, usize)>, String) {
         let mut chunker = DeltaChunker::new();
         let mut chunks: Vec<(String, usize)> = Vec::new();
-        let mut parse = |json: &str, into: &mut Vec<(String, usize)>| {
+        let parse = |json: &str, into: &mut Vec<(String, usize)>| {
             // items look like ["<hex>",N] — split on '[' groups.
             for item in json.split("[\"").skip(1) {
                 let hash = &item[..64];

@@ -23,6 +23,7 @@ jobs:
     outputs:
       frontend: ${{ steps.filter.outputs.frontend }}
       backend: ${{ steps.filter.outputs.backend }}
+      wasm: ${{ steps.filter.outputs.wasm }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -44,6 +45,9 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'tests/**'
+            wasm:
+              - 'wasm/**'
+              - 'scripts/build-wasm.sh'
 
   frontend-check:
     name: Frontend — CSS and JS checks (format, lint, css-rules, types)
@@ -121,6 +125,51 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # Mirrors the `wasm-check` justfile recipe. The wasm crate is a
+  # standalone workspace under `wasm/oxicloud-hash/` and is NOT
+  # built by the server's `cargo build` — these checks have to run
+  # explicitly from inside the sub-workspace. clippy + tests run
+  # against the HOST target (no wasm32 target needed in CI) which
+  # is enough to cover the algorithmic logic; the wasm32 build is
+  # exercised by `scripts/build-wasm.sh` and the frontend tests.
+  wasm-check:
+    name: Wasm — fmt + clippy
+    needs: changes
+    if: needs.changes.outputs.wasm == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: wasm/oxicloud-hash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: wasm/oxicloud-hash
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-features --release -- -D warnings
+
+  # Mirrors the `wasm-test` justfile recipe. Tests run in release
+  # mode because the FastCDC + BLAKE3 workload takes minutes in
+  # the default debug profile (no inlining / no SIMD).
+  wasm-test:
+    name: Wasm — release tests
+    needs: changes
+    if: needs.changes.outputs.wasm == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: wasm/oxicloud-hash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: wasm/oxicloud-hash
+      - run: cargo test --release
 
   rust-test:
     name: Server Unit and Functionnal Tests
