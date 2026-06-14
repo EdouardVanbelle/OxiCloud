@@ -1,0 +1,81 @@
+{
+  "_comment": "Baseline for `just load` — the long scenarios. Each entry: p50/p95/p99 (ms) + tolerance_pct (regression threshold). Updated by `just load-baseline`. Keys must match the `op` tag the matching scenario emits — adding a scenario means adding entries here in the same PR. Smoke metrics live in smoke.json.",
+  "folder_cascade.list_depth1": {
+    "p50": 0.35,
+    "p95": 2.25,
+    "p99": 4.73,
+    "tolerance_pct": 10
+  },
+  "folder_cascade.list_depth4": {
+    "p50": 0.36,
+    "p95": 0.92,
+    "p99": 2.39,
+    "tolerance_pct": 10
+  },
+  "folder_cascade.list_depth8": {
+    "p50": 0.34,
+    "p95": 0.63,
+    "p99": 1.9,
+    "tolerance_pct": 10
+  },
+  "folder_cascade.list_depth_deep": {
+    "p50": 0.3,
+    "p95": 0.61,
+    "p99": 2.03,
+    "tolerance_pct": 10
+  },
+  "share_cascade_rebac.list_grants": {
+    "p50": 0.4,
+    "p95": 1.16,
+    "p99": 1.68,
+    "tolerance_pct": 10
+  },
+  "share_cascade_rebac.fetch_as_grantee_depth1": {
+    "p50": 0.51,
+    "p95": 1.14,
+    "p99": 3.02,
+    "tolerance_pct": 10
+  },
+  "share_cascade_rebac.fetch_as_grantee_depth4": {
+    "p50": 0.53,
+    "p95": 1.43,
+    "p99": 2.22,
+    "tolerance_pct": 10
+  },
+  "share_cascade_rebac.fetch_as_grantee_depth8": {
+    "p50": 0.52,
+    "p95": 0.89,
+    "p99": 1.48,
+    "tolerance_pct": 10
+  },
+  "share_cascade_rebac.fetch_as_grantee_depth_deep": {
+    "p50": 0.51,
+    "p95": 1.04,
+    "p99": 1.64,
+    "tolerance_pct": 10
+  },
+  "subject_group_nested.fetch_as_member_depth1": {
+    "p50": 0.48,
+    "p95": 0.63,
+    "p99": 1.41,
+    "tolerance_pct": 10
+  },
+  "subject_group_nested.fetch_as_member_depth4": {
+    "p50": 0.5,
+    "p95": 0.58,
+    "p99": 0.65,
+    "tolerance_pct": 10
+  },
+  "subject_group_nested.fetch_as_member_depth8": {
+    "p50": 0.48,
+    "p95": 0.53,
+    "p99": 0.62,
+    "tolerance_pct": 10
+  },
+  "subject_group_nested.fetch_as_member_depth_deep": {
+    "p50": 0.45,
+    "p95": 0.62,
+    "p99": 0.63,
+    "tolerance_pct": 10
+  }
+}

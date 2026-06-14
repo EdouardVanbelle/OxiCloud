@@ -32,11 +32,24 @@ wait_for_postgres_ready() {
   # Belt-and-braces: pg_isready returns 0 as soon as the server accepts
   # connections, but a query may still race the very first request. One
   # successful SELECT confirms the round-trip works end-to-end.
-  PGPASSWORD=oxicloud_test psql -h 127.0.0.1 -p 5433 -U oxicloud_test -d oxicloud_test \
-    -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null 2>&1 || {
-      echo "Postgres reported ready but a sample query failed" >&2
-      exit 1
-    }
+  #
+  # Retry the probe a handful of times — under CPU pressure (e.g. a parallel
+  # cargo build hammering a self-hosted runner) the role/db init can complete
+  # a beat after pg_isready returns success. A single-shot probe in that
+  # window produces spurious "Postgres reported ready but a sample query
+  # failed" failures. Show the last error if every retry fails so operators
+  # see the actual psql diagnostic.
+  local last_err
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if last_err=$(PGPASSWORD=oxicloud_test psql -h 127.0.0.1 -p 5433 \
+                    -U oxicloud_test -d oxicloud_test \
+                    -v ON_ERROR_STOP=1 -c 'SELECT 1' 2>&1 >/dev/null); then
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "Postgres reported ready but a sample query failed after 10 retries: $last_err" >&2
+  exit 1
 }
 
 echo "[setup] Starting test postgres..."

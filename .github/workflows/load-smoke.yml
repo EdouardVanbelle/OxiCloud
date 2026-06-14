@@ -1,0 +1,45 @@
+name: Load Smoke
+
+# PR-tier liveness check. Verifies the k6 load harness still builds and a
+# single happy-path iteration runs against a freshly built server.
+# NO regression gate — that's the nightly workflow's job.
+
+on:
+  pull_request:
+    branches: [ main, dev ]
+    paths:
+      - 'tests/load/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'migrations/**'
+      - '.github/workflows/load-smoke.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smoke:
+    name: k6 smoke (load harness)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: load
+
+      - name: Install k6
+        uses: grafana/setup-k6-action@v1
+
+      - name: Build OxiCloud (debug)
+        run: cargo build --bin oxicloud
+
+      - name: Run smoke scenario
+        run: bash tests/load/smoke.sh
+        env:
+          BUILD_TARGET: debug

@@ -109,3 +109,7 @@ wasm/oxicloud-hash/target/
 .devenv/
 .direnv/
 .devenv-state/
+
+# K6 load-test raw run outputs and per-run storage (baseline is committed)
+tests/load/results/*.json
+tests/load/storage/

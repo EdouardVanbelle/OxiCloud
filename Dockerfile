@@ -18,7 +18,7 @@ RUN mkdir -p src/bin && \
     echo 'fn main() { println!("Dummy build for caching dependencies"); }' > src/main.rs && \
     echo 'fn main() {}' > src/bin/generate-openapi.rs && \
     echo 'fn main() {}' > src/bin/migrate-nfc-filenames.rs && \
-    cargo build --release && \
+    cargo build --release --bin oxicloud --bin generate-openapi --bin migrate-nfc-filenames && \
     rm -rf src static-dist target/release/deps/oxicloud* target/release/build/oxicloud-*
 
 # ─── Stage 3: Build the application ──────────────────────────────────────────
@@ -38,7 +38,10 @@ COPY migrations migrations
 COPY templates templates
 # Build with all optimizations (DATABASE_URL only needed at compile-time for sqlx)
 ARG DATABASE_URL="postgres://postgres:postgres@localhost/oxicloud"
-RUN DATABASE_URL="${DATABASE_URL}" cargo build --release
+# Explicit --bin list: defence-in-depth so the prod image never ships
+# test-only bins (e.g. load-seed) even if `required-features` gating
+# changes upstream.
+RUN DATABASE_URL="${DATABASE_URL}" cargo build --release --bin oxicloud --bin generate-openapi --bin migrate-nfc-filenames
 
 # ─── Stage 4: Minimal runtime image ──────────────────────────────────────────
 FROM alpine:3.24.0

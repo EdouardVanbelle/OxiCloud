@@ -153,3 +153,25 @@ front-design:
 api-test:
     bash tests/api/run.sh
     bash tests/webdav/run.sh
+
+# k6 load suite — full scenarios + regression diff vs baseline/load.json.
+# Used by the nightly workflow and on demand. Release build for fair timings.
+load:
+    bash tests/load/run.sh
+
+# k6 smoke — single happy-path iteration. PR-tier liveness check, no gate.
+load-smoke:
+    bash tests/load/smoke.sh
+
+# Re-run the full suite, then bake the latest summary into baseline/load.json.
+# The leading `-` lets `run.sh`'s regression-exit not abort the bake step;
+# review the diff and commit deliberately:
+#   chore(load): accept new baseline for <reason>
+load-baseline:
+    -bash tests/load/run.sh
+    node tests/load/bake-baseline.mjs
+
+# Standalone seeder (poking around in psql). Needs the test DB up:
+#   just db
+load-seed:
+    cargo run --bin load-seed -- --depth 5 --fanout 4 --files-per-leaf 3

@@ -89,6 +89,12 @@ integration_tests = []
 # WASM plugin runtime (Extism). Opt-in: bundles wasmtime, a large engine most
 # deployments won't use. Activation also requires OXICLOUD_ENABLE_PLUGINS=true.
 plugins = ["dep:extism", "dep:toml", "dep:file-rotate"]
+# Empty marker feature that gates the `load-seed` binary so it isn't built
+# by default (and skipped in prod Docker builds). Kept separate from
+# test_utils so enabling it doesn't change the oxicloud dependency graph —
+# this lets one `cargo build` produce both `oxicloud` and `load-seed`
+# without recompiling oxicloud with mockall in scope.
+load_seed_bin = []
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(integration_tests)'] }
@@ -100,6 +106,14 @@ path = "src/bin/generate-openapi.rs"
 [[bin]]
 name = "migrate-nfc-filenames"
 path = "src/bin/migrate-nfc-filenames.rs"
+
+[[bin]]
+name = "load-seed"
+path = "src/bin/load-seed.rs"
+# Test fixture seeder. Gated behind the empty `load_seed_bin` feature so
+# `cargo build --release` (and the prod Dockerfile) skip it. tests/load/run.sh
+# and load-nightly.yml build it explicitly with --features load_seed_bin.
+required-features = ["load_seed_bin"]
 
 [build-dependencies]
 oxc_allocator = "0.125.0"

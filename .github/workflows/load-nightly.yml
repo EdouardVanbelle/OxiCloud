@@ -1,0 +1,111 @@
+name: Load Nightly
+
+# Nightly regression gate. Runs every k6 scenario, diffs against
+# baseline/load.json, opens an issue if any metric regresses.
+#
+# IMPORTANT: shared GitHub-hosted runners produce noisy timings —
+# regression signal is unreliable until this workflow is moved to a
+# pinned self-hosted runner with consistent hardware. The cron run is
+# informational until then; treat opened issues as "investigate" not
+# "broken main."
+
+on:
+  schedule:
+    # 03:00 UTC daily — outside US/EU working hours, low contention.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  load:
+    name: k6 load suite + baseline diff
+    # Skip the scheduled run on forks — nightly is only meaningful against the
+    # canonical baseline.json on the upstream repo. Forks can still hit it
+    # manually via `workflow_dispatch` if they want, and the guard is bypassed
+    # for that path (event != schedule). Additional fork repositories are
+    # opted-in explicitly below.
+    if: github.event_name != 'schedule' || github.repository == 'AtalayaLabs/OxiCloud' || github.repository == 'EdouardVanbelle/OxiCloud'
+    # tunning on Ed's nuc to ensure stable environment
+    # treating regressions here as merge-blocking. ubuntu-latest is too noisy
+    # for trustworthy p95/p99 deltas.
+    runs-on: [self-hosted, nuc-loadtest]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The self-hosted runner bind-mounts target/ as a persistent volume
+          # for fast incremental rebuilds. actions/checkout's default cleanup
+          # tries to rmdir it and hits EBUSY on the mount point. Git still
+          # syncs the working tree to the target SHA — only non-git files
+          # (target/, tests/load/results/) persist, which is what we want.
+          clean: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: load
+
+      - name: Install Node 20
+        # The self-hosted runner image ships Node 12, which can't parse the
+        # ES-module `.mjs` helpers (compare.mjs / merge-summaries.mjs /
+        # bake-baseline.mjs). Pin to a current LTS for both runners.
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install k6
+        uses: grafana/setup-k6-action@v1
+
+      - name: Build OxiCloud + load-seed (release)
+        # Single cargo invocation: load_seed_bin is an empty marker feature
+        # that gates the load-seed bin without changing oxicloud's dep
+        # graph, so cargo compiles oxicloud exactly once.
+        run: cargo build --release --features load_seed_bin --bin oxicloud --bin load-seed
+
+      - name: Run full load suite
+        id: load
+        run: bash tests/load/run.sh
+        env:
+          BUILD_TARGET: release
+        continue-on-error: true
+
+      - name: Upload raw k6 summaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-results-${{ github.run_id }}
+          path: tests/load/results/*.json
+          retention-days: 30
+
+      - name: Prepare regression report
+        if: steps.load.outcome == 'failure'
+        run: |
+          {
+            echo "## Load nightly regression"
+            echo ""
+            echo "Run: \`${{ github.run_id }}\`  ·  Commit: \`${{ github.sha }}\`"
+            echo "Runner: \`${{ runner.name }}\` (\`${{ runner.os }}/${{ runner.arch }}\`)"
+            echo ""
+            echo "Compare exited non-zero — see uploaded artifact \`load-results-${{ github.run_id }}\` for raw summaries."
+            echo ""
+            echo "Baseline is anchored to the runner that produced it; cross-runner"
+            echo "comparisons (e.g. an artifact baked on different hardware) will"
+            echo "show large \"regressions\" that are really hardware deltas."
+          } > regression-issue.md
+
+      - name: Open issue on regression
+        # Skip on forks where Issues are disabled — the regression report is
+        # already in the artifact, and the workflow's exit code marks the run
+        # as failed regardless. Forks that want issue notifications can enable
+        # issues on their repo and remove this condition.
+        if: steps.load.outcome == 'failure' && github.repository == 'AtalayaLabs/OxiCloud'
+        uses: peter-evans/create-issue-from-file@v5
+        with:
+          title: "Load nightly: regression on ${{ github.sha }}"
+          content-filepath: regression-issue.md
+          labels: |
+            load-test
+            regression
