@@ -10,6 +10,7 @@
 import { loadFiles, renderItems } from '../../app/filesView.js';
 import { app } from '../../app/state.js';
 import { ui } from '../../app/ui.js';
+import { i18n } from '../../core/i18n.js';
 import { getAuthHeaders } from './fileOperations.js';
 
 /**
@@ -69,7 +70,7 @@ const search = {
             }
         } catch (error) {
             console.error('Error performing search:', error);
-            ui.showNotification('Error', 'Error performing search');
+            ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.searchError'));
             return {
                 files: [],
                 folders: [],
@@ -216,15 +217,15 @@ const search = {
             });
 
             if (response.ok) {
-                ui.showNotification('Cache cleared', 'Search cache cleared successfully');
+                ui.showNotification(i18n.t('notif.cacheCleared'), i18n.t('notif.cacheClearedBody'));
                 return true;
             } else {
-                ui.showNotification('Error', 'Error clearing search cache');
+                ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.cacheClearError'));
                 return false;
             }
         } catch (error) {
             console.error('Error clearing search cache:', error);
-            ui.showNotification('Error', 'Error clearing search cache');
+            ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.cacheClearError'));
             return false;
         }
     }

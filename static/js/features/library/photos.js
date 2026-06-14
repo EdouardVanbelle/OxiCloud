@@ -181,6 +181,7 @@ const photosView = {
         html += '<div class="photos-sentinel"></div>';
         this._container.innerHTML = html;
         this._container.onclick = (e) => this._handleClick(e);
+        this._fadeInTiles();
         this._renderedCount = this.items.length;
         this._observeSentinel();
         this._setupVideoThumbnails();
@@ -237,6 +238,7 @@ const photosView = {
         this._renderedCount = this.items.length;
         this._observeSentinel();
         this._setupVideoThumbnails(startIndex);
+        this._fadeInTiles();
     },
 
     /**
@@ -250,10 +252,30 @@ const photosView = {
         const thumbUrl = cachedThumb || `/api/files/${file.id}/thumbnail/preview`;
         let h = `<div class="photo-tile${selected}" data-id="${this._escAttr(file.id)}" data-mime="${this._escAttr(file.mime_type)}" data-name="${this._escAttr(file.name)}">`;
         h += `<div class="photo-check"><i class="fas fa-check"></i></div>`;
-        h += `<img src="${thumbUrl}" loading="lazy" alt="${this._escAttr(file.name)}">`;
+        const srcset = cachedThumb
+            ? ''
+            : ` srcset="/api/files/${file.id}/thumbnail/icon 150w, /api/files/${file.id}/thumbnail/preview 400w, /api/files/${file.id}/thumbnail/large 800w" sizes="(max-width: 768px) 33vw, 200px"`;
+        h += `<img src="${thumbUrl}"${srcset} loading="lazy" decoding="async" alt="${this._escAttr(file.name)}">`;
         if (isVideo) h += `<div class="video-badge"><i class="fas fa-play"></i></div>`;
         h += `</div>`;
         return h;
+    },
+
+    /**
+     * Fade tiles in as their thumbnails finish loading (kills the pop-in).
+     * Idempotent — only wires images not already marked loaded.
+     */
+    _fadeInTiles() {
+        this._container?.querySelectorAll('.photo-tile img:not(.is-loaded)').forEach((el) => {
+            const img = /** @type {HTMLImageElement} */ (el);
+            if (img.complete) {
+                img.classList.add('is-loaded');
+            } else {
+                const done = () => img.classList.add('is-loaded');
+                img.addEventListener('load', done, { once: true });
+                img.addEventListener('error', done, { once: true });
+            }
+        });
     },
 
     /** (Re-)observe the sentinel element for infinite scroll */

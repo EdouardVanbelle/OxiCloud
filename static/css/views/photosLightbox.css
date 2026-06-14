@@ -33,7 +33,7 @@
     max-width: 90vw;
     max-height: 85vh;
     object-fit: contain;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     user-select: none;
 }
 
@@ -48,7 +48,7 @@
     border: none;
     background: var(--color-lightbox-btn-bg);
     color: var(--color-lightbox-btn-text);
-    font-size: 20px;
+    font-size: var(--text-xl);
     cursor: pointer;
     display: flex;
     align-items: center;
@@ -80,7 +80,7 @@
     border: none;
     background: var(--color-lightbox-btn-bg);
     color: var(--color-lightbox-btn-text);
-    font-size: 18px;
+    font-size: var(--text-lg);
     cursor: pointer;
     display: flex;
     align-items: center;
@@ -99,7 +99,7 @@
     top: 0;
     left: 0;
     right: 0;
-    padding: 16px 70px 16px 20px;
+    padding: var(--space-4) 70px var(--space-4) var(--space-5);
     background: var(--color-lightbox-gradient-top);
     color: var(--color-lightbox-btn-text);
     z-index: 10001;
@@ -107,18 +107,18 @@
 
 .lightbox-filename {
     font-size: 15px;
-    font-weight: 600;
-    margin-bottom: 2px;
+    font-weight: var(--weight-semibold);
+    margin-bottom: var(--space-0-5);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
 .lightbox-meta {
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--color-lightbox-text-muted);
     display: flex;
-    gap: 12px;
+    gap: var(--space-3);
     flex-wrap: wrap;
 }
 
@@ -128,12 +128,12 @@
     bottom: 0;
     left: 0;
     right: 0;
-    padding: 16px 20px;
+    padding: var(--space-4) var(--space-5);
     background: var(--color-lightbox-gradient-bottom);
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 8px;
+    gap: var(--space-2);
     z-index: 10001;
 }
 
@@ -148,7 +148,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 16px;
+    font-size: var(--text-md);
     transition: background 0.15s;
 }
 
@@ -166,7 +166,7 @@
     bottom: 16px;
     left: 20px;
     color: var(--color-lightbox-text-faint);
-    font-size: 13px;
+    font-size: var(--text-sm);
     z-index: 10001;
 }
 
@@ -175,7 +175,7 @@
     .lightbox-nav {
         width: 36px;
         height: 36px;
-        font-size: 16px;
+        font-size: var(--text-md);
     }
 
     .lightbox-prev {

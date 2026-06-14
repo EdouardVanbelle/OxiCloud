@@ -853,7 +853,7 @@ const fileOps = {
                 // — no reload needed since the backend already confirmed creation.
                 filesViewAddItem(folder);
 
-                ui.showNotification('Folder created', `"${name}" created successfully`);
+                ui.showNotification(i18n.t('notif.folderCreated'), i18n.t('notif.folderCreatedBody', { name }));
             } else {
                 const errorText = await response.text();
                 console.error('Create folder error:', errorText);
@@ -894,7 +894,7 @@ const fileOps = {
             if (response.ok) {
                 // Reload files after moving
                 await loadFiles();
-                ui.showNotification('File moved', 'File moved successfully');
+                ui.showNotification(i18n.t('notif.fileMoved'), i18n.t('notif.fileMovedBody'));
                 return true;
             } else {
                 let errorMessage = 'Unknown error';
@@ -904,12 +904,12 @@ const fileOps = {
                 } catch (_e) {
                     errorMessage = 'Error processing server response';
                 }
-                ui.showNotification('Error', `Error moving the file: ${errorMessage}`);
+                ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.fileMoveError', { error: errorMessage }));
                 return false;
             }
         } catch (error) {
             console.error('Error moving file:', error);
-            ui.showNotification('Error', 'Error moving the file');
+            ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.fileMoveErrorGeneric'));
             return false;
         }
     },
@@ -938,7 +938,7 @@ const fileOps = {
                 invalidateFolderMeta(folderId);
                 // Reload files after moving
                 await loadFiles();
-                ui.showNotification('Folder moved', 'Folder moved successfully');
+                ui.showNotification(i18n.t('notif.folderMoved'), i18n.t('notif.folderMovedBody'));
                 return true;
             } else {
                 let errorMessage = 'Unknown error';
@@ -948,12 +948,12 @@ const fileOps = {
                 } catch (_e) {
                     errorMessage = 'Error processing server response';
                 }
-                ui.showNotification('Error', `Error moving the folder: ${errorMessage}`);
+                ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.folderMoveError', { error: errorMessage }));
                 return false;
             }
         } catch (error) {
             console.error('Error moving folder:', error);
-            ui.showNotification('Error', 'Error moving the folder');
+            ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.folderMoveErrorGeneric'));
             return false;
         }
     },
@@ -1037,7 +1037,7 @@ const fileOps = {
                 await response.json();
                 // Reload files after copying
                 await loadFiles();
-                ui.showNotification('File copied', 'File copied successfully');
+                ui.showNotification(i18n.t('notif.fileCopied'), i18n.t('notif.fileCopiedBody'));
                 return true;
             } else {
                 let errorMessage = 'Unknown error';
@@ -1047,12 +1047,12 @@ const fileOps = {
                 } catch (_e) {
                     errorMessage = 'Error processing server response';
                 }
-                ui.showNotification('Error', `Error copying the file: ${errorMessage}`);
+                ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.fileCopyError', { error: errorMessage }));
                 return false;
             }
         } catch (error) {
             console.error('Error copying file:', error);
-            ui.showNotification('Error', 'Error copying the file');
+            ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.fileCopyErrorGeneric'));
             return false;
         }
     },
@@ -1195,7 +1195,7 @@ const fileOps = {
             if (response.ok) {
                 // Name changed — drop the cached breadcrumb metadata
                 invalidateFolderMeta(folderId);
-                ui.showNotification('Folder renamed', `Folder renamed to "${newName}"`);
+                ui.showNotification(i18n.t('notif.folderRenamed'), i18n.t('notif.folderRenamedBody', { name: newName }));
             } else {
                 const errorText = await response.text();
                 console.error('Error response:', errorText);
@@ -1239,7 +1239,7 @@ const fileOps = {
 
             if (response.ok) {
                 loadFiles();
-                ui.showNotification('File moved to trash', `"${fileName}" moved to trash`);
+                ui.showNotification(i18n.t('notif.fileTrashed'), i18n.t('notif.fileTrashedBody', { name: fileName }));
                 return true;
             } else {
                 // Fallback to direct deletion if trash fails
@@ -1250,16 +1250,16 @@ const fileOps = {
 
                 if (fallbackResponse.ok) {
                     loadFiles();
-                    ui.showNotification('File deleted', `"${fileName}" deleted successfully`);
+                    ui.showNotification(i18n.t('notif.fileDeleted'), i18n.t('notif.fileDeletedBody', { name: fileName }));
                     return true;
                 } else {
-                    ui.showNotification('Error', 'Error deleting the file');
+                    ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.fileDeleteError'));
                     return false;
                 }
             }
         } catch (error) {
             console.error('Error deleting file:', error);
-            ui.showNotification('Error', 'Error deleting the file');
+            ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.fileDeleteError'));
             return false;
         }
     },
@@ -1292,7 +1292,7 @@ const fileOps = {
                     ui.updateBreadcrumb();
                 }
                 loadFiles();
-                ui.showNotification('Folder moved to trash', `"${folderName}" moved to trash`);
+                ui.showNotification(i18n.t('notif.folderTrashed'), i18n.t('notif.folderTrashedBody', { name: folderName }));
                 return true;
             } else {
                 // Fallback to direct deletion if trash fails
@@ -1308,16 +1308,16 @@ const fileOps = {
                         ui.updateBreadcrumb();
                     }
                     loadFiles();
-                    ui.showNotification('Folder deleted', `"${folderName}" deleted successfully`);
+                    ui.showNotification(i18n.t('notif.folderDeleted'), i18n.t('notif.folderDeletedBody', { name: folderName }));
                     return true;
                 } else {
-                    ui.showNotification('Error', 'Error deleting the folder');
+                    ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.folderDeleteError'));
                     return false;
                 }
             }
         } catch (error) {
             console.error('Error deleting folder:', error);
-            ui.showNotification('Error', 'Error deleting the folder');
+            ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.folderDeleteError'));
             return false;
         }
     },
@@ -1339,15 +1339,15 @@ const fileOps = {
             });
 
             if (response.ok) {
-                ui.showNotification('Item restored', 'Item restored successfully');
+                ui.showNotification(i18n.t('notif.itemRestored'), i18n.t('notif.itemRestoredBody'));
                 return true;
             } else {
-                ui.showNotification('Error', 'Error restoring the item');
+                ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.itemRestoreError'));
                 return false;
             }
         } catch (error) {
             console.error('Error restoring item from trash:', error);
-            ui.showNotification('Error', 'Error restoring the item');
+            ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.itemRestoreError'));
             return false;
         }
     },
@@ -1372,15 +1372,15 @@ const fileOps = {
             });
 
             if (response.ok) {
-                ui.showNotification('Item deleted', 'Item permanently deleted');
+                ui.showNotification(i18n.t('notif.itemDeleted'), i18n.t('notif.itemDeletedBody'));
                 return true;
             } else {
-                ui.showNotification('Error', 'Error deleting the item');
+                ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.itemDeleteError'));
                 return false;
             }
         } catch (error) {
             console.error('Error deleting item permanently:', error);
-            ui.showNotification('Error', 'Error deleting the item');
+            ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.itemDeleteError'));
             return false;
         }
     },
@@ -1404,15 +1404,15 @@ const fileOps = {
             });
 
             if (response.ok) {
-                ui.showNotification('Trash emptied', 'The trash has been emptied successfully');
+                ui.showNotification(i18n.t('notif.trashEmptied'), i18n.t('notif.trashEmptiedBody'));
                 return true;
             } else {
-                ui.showNotification('Error', 'Error emptying the trash');
+                ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.trashEmptyError'));
                 return false;
             }
         } catch (error) {
             console.error('Error emptying trash:', error);
-            ui.showNotification('Error', 'Error emptying the trash');
+            ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.trashEmptyError'));
             return false;
         }
     },
@@ -1435,7 +1435,7 @@ const fileOps = {
     async downloadFolder(folderId, folderName) {
         // Show notification to user (the server still has to assemble the
         // ZIP before the browser's own download UI takes over).
-        ui.showNotification('Preparing download', 'Preparing the folder for download...');
+        ui.showNotification(i18n.t('notif.preparingDownload'), i18n.t('notif.preparingDownloadBody'));
         triggerBrowserDownload(`/api/folders/${folderId}/download?format=zip`, `${folderName}.zip`);
     }
 };

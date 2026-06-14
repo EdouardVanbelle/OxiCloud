@@ -2,7 +2,7 @@
  * User menu, profile modal and logout logic
  */
 
-import { createUserVignette } from '../components/userVignette.js';
+import { createUserVignette, disposeVignette } from '../components/userVignette.js';
 import { getCsrfHeaders } from '../core/csrf.js';
 import { formatFileSize, formatQuotaSize } from '../core/formatters.js';
 import { i18n } from '../core/i18n.js';
@@ -183,11 +183,17 @@ function setupUserMenu() {
 function _mountAvatarVignettes(userId) {
     const avatarBtn = document.getElementById('user-avatar-btn');
     if (avatarBtn) {
-        avatarBtn.replaceChildren(createUserVignette(userId, 'menu', { showName: false }));
+        // Dispose the outgoing vignette's tooltip before replacing it, or its
+        // body-portalled popover orphans (the "email tooltip stays stuck" bug).
+        disposeVignette(/** @type {HTMLElement | null} */ (avatarBtn.firstElementChild));
+        // No hover-tooltip on your own avatar — the email is already in the open
+        // menu header, so it'd be redundant and overlap the notification bell.
+        avatarBtn.replaceChildren(createUserVignette(userId, 'menu', { showName: false, noTooltip: true }));
     }
 
     const menuHeader = document.querySelector('.user-menu-header');
     if (menuHeader) {
+        disposeVignette(/** @type {HTMLElement | null} */ (menuHeader.firstElementChild));
         menuHeader.replaceChildren(createUserVignette(userId, 'xl', { showName: true, showEmail: true }));
     }
 }

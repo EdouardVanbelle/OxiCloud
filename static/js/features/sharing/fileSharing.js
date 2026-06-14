@@ -8,6 +8,7 @@ import { switchToSharedSection } from '../../app/navigation.js';
 import { ui } from '../../app/ui.js';
 import { getCsrfHeaders } from '../../core/csrf.js';
 import { formatDateTime } from '../../core/formatters.js';
+import { i18n } from '../../core/i18n.js';
 
 /**
  * @import {CreateShare, ShareItem, UpdateShare} from '../../core/types.js'
@@ -169,11 +170,11 @@ const fileSharing = {
     async copyLinkToClipboard(url) {
         try {
             await navigator.clipboard.writeText(url);
-            ui.showNotification('Link copied', 'Link copied to clipboard');
+            ui.showNotification(i18n.t('notif.linkCopied'), i18n.t('notif.linkCopiedBody'));
             return true;
         } catch (error) {
             console.error('Error copying to clipboard:', error);
-            ui.showNotification('Error', 'Could not copy link');
+            ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.linkCopyError'));
             return false;
         }
     },
@@ -198,7 +199,7 @@ const fileSharing = {
     async sendShareNotification(shareUrl, recipientEmail, _message = '') {
         // TODO: implement backend endpoint for email notifications
         console.log(`Share notification for ${shareUrl} sent to ${recipientEmail}`);
-        ui.showNotification('Notification sent', `Notification sent to ${recipientEmail}`);
+        ui.showNotification(i18n.t('notif.notificationSent'), i18n.t('notif.notificationSentBody', { email: recipientEmail }));
         return true;
     },
 

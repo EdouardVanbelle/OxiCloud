@@ -9,5 +9,5 @@
 .swm-load-more-wrapper {
     display: flex;
     justify-content: center;
-    padding: 16px 0 24px;
+    padding: var(--space-4) 0 var(--space-6);
 }

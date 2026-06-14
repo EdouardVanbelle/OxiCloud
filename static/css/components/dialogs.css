@@ -37,7 +37,7 @@
 
 .rename-dialog-content {
     background-color: var(--color-bg-surface);
-    border-radius: 16px;
+    border-radius: var(--radius-3xl);
     width: 420px;
     max-width: 90%;
     box-shadow: 0 20px 60px var(--color-shadow-2xl);
@@ -47,24 +47,24 @@
 
 .rename-dialog-header {
     font-size: 17px;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--color-text-heading);
-    padding: 20px 24px;
+    padding: var(--space-5) var(--space-6);
     border-bottom: 1px solid var(--color-border);
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: var(--space-3);
 }
 
 .rename-dialog-body {
-    padding: 24px;
+    padding: var(--space-6);
 }
 
 .rename-dialog input {
     width: 100%;
-    padding: 12px 16px;
+    padding: var(--space-3) var(--space-4);
     border: 2px solid var(--color-border);
-    border-radius: 10px;
+    border-radius: var(--radius-xl);
     font-size: 15px;
     background: var(--color-bg-hover);
     color: var(--color-text-heading);
@@ -85,8 +85,8 @@
 .rename-dialog-buttons {
     display: flex;
     justify-content: flex-end;
-    gap: 12px;
-    padding: 16px 24px;
+    gap: var(--space-3);
+    padding: var(--space-4) var(--space-6);
     background: var(--color-bg-hover);
     border-top: 1px solid var(--color-border);
 }
@@ -120,7 +120,7 @@
 
 .share-dialog-content {
     background-color: var(--color-bg-surface);
-    border-radius: 16px;
+    border-radius: var(--radius-3xl);
     width: 480px;
     max-width: 90%;
     box-shadow: 0 20px 60px var(--color-shadow-2xl);
@@ -132,22 +132,22 @@
 
 .share-dialog-header {
     font-size: 17px;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--color-text-heading);
-    padding: 20px 24px;
+    padding: var(--space-5) var(--space-6);
     border-bottom: 1px solid var(--color-border);
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: var(--space-3);
 }
 
 .share-dialog input,
 .share-dialog textarea {
     width: 100%;
-    padding: 10px 14px;
+    padding: var(--space-2-5) var(--space-3-5);
     border: 2px solid var(--color-border);
-    border-radius: 10px;
-    font-size: 14px;
+    border-radius: var(--radius-xl);
+    font-size: var(--text-base);
     background: var(--color-bg-input);
     color: var(--color-text-heading);
     transition: all 0.15s ease;
@@ -164,35 +164,35 @@
 .share-dialog-buttons {
     display: flex;
     justify-content: flex-end;
-    gap: 12px;
-    padding: 16px 24px;
+    gap: var(--space-3);
+    padding: var(--space-4) var(--space-6);
     background: var(--color-bg-hover);
     border-top: 1px solid var(--color-border);
 }
 
 .shared-item-info {
-    padding: 12px 24px;
+    padding: var(--space-3) var(--space-6);
     background: var(--color-bg-hover);
     border-bottom: 1px solid var(--color-border);
-    font-size: 14px;
+    font-size: var(--text-base);
 }
 
 .share-options {
-    padding: 20px 24px 20px;
+    padding: var(--space-5) var(--space-6) var(--space-5);
 }
 
 .share-options > #share-confirm-btn {
     display: block;
     margin-left: auto;
-    margin-top: 16px;
+    margin-top: var(--space-4);
 }
 
 .share-options h3,
 #existing-shares-section h3,
 #new-share-section h3 {
-    font-size: 13px;
-    font-weight: 600;
-    margin-bottom: 10px;
+    font-size: var(--text-sm);
+    font-weight: var(--weight-semibold);
+    margin-bottom: var(--space-2-5);
     color: var(--color-text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -200,7 +200,7 @@
 
 #existing-shares-section,
 #new-share-section {
-    padding: 0 24px;
+    padding: 0 var(--space-6);
 }
 
 .share-dialog .form-group {
@@ -225,7 +225,7 @@
 
 .shared-dialog-content {
     background-color: var(--color-bg-surface);
-    border-radius: 16px;
+    border-radius: var(--radius-3xl);
     width: 480px;
     max-width: 90%;
     box-shadow: 0 20px 60px var(--color-shadow-2xl);
@@ -238,13 +238,13 @@
 
 .shared-dialog-header {
     font-size: 17px;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--color-text-heading);
-    padding: 20px 24px;
+    padding: var(--space-5) var(--space-6);
     border-bottom: 1px solid var(--color-border);
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: var(--space-3);
 }
 
 .shared-dialog-header .close-dialog-btn {
@@ -254,8 +254,8 @@
     font-size: 22px;
     cursor: pointer;
     color: var(--color-text-muted);
-    padding: 4px 8px;
-    border-radius: 6px;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-md);
     transition: all 0.15s;
 }
 
@@ -269,30 +269,30 @@
 .shared-dialog .share-password-section,
 .shared-dialog .share-expiration-section,
 .shared-dialog .notification-form {
-    padding: 16px 24px;
+    padding: var(--space-4) var(--space-6);
 }
 
 .shared-dialog .share-link-section label,
 .shared-dialog .share-permissions-section h4,
 .shared-dialog .notification-form label {
     display: block;
-    font-weight: 600;
-    margin-bottom: 8px;
+    font-weight: var(--weight-semibold);
+    margin-bottom: var(--space-2);
     color: var(--color-text);
-    font-size: 14px;
+    font-size: var(--text-base);
 }
 
 .shared-dialog .share-link-input {
     display: flex;
-    gap: 8px;
+    gap: var(--space-2);
 }
 
 .shared-dialog .share-link-input input {
     flex: 1;
-    padding: 8px 12px;
+    padding: var(--space-2) var(--space-3);
     border: 2px solid var(--color-border);
-    border-radius: 8px;
-    font-size: 13px;
+    border-radius: var(--radius-lg);
+    font-size: var(--text-sm);
     background: var(--color-bg-hover);
     color: var(--color-text-heading);
 }
@@ -302,42 +302,42 @@
 .shared-dialog .share-expiration-section label {
     display: flex;
     align-items: center;
-    gap: 8px;
-    margin-bottom: 8px;
-    font-size: 14px;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
+    font-size: var(--text-base);
     color: var(--color-text-secondary);
 }
 
 .shared-dialog .password-input-group {
     display: flex;
-    gap: 8px;
-    margin-top: 8px;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
 }
 
 .shared-dialog .password-input-group input {
     flex: 1;
-    padding: 8px 12px;
+    padding: var(--space-2) var(--space-3);
     border: 2px solid var(--color-border);
-    border-radius: 8px;
-    font-size: 13px;
+    border-radius: var(--radius-lg);
+    font-size: var(--text-sm);
     background: var(--color-bg-hover);
 }
 
 .shared-dialog .share-expiration-section input[type="date"] {
-    padding: 8px 12px;
+    padding: var(--space-2) var(--space-3);
     border: 2px solid var(--color-border);
-    border-radius: 8px;
-    font-size: 13px;
+    border-radius: var(--radius-lg);
+    font-size: var(--text-sm);
     background: var(--color-bg-hover);
-    margin-top: 8px;
+    margin-top: var(--space-2);
 }
 
 .shared-dialog .share-actions,
 .shared-dialog .notification-actions {
     display: flex;
     justify-content: flex-end;
-    gap: 12px;
-    padding: 16px 24px;
+    gap: var(--space-3);
+    padding: var(--space-4) var(--space-6);
     background: var(--color-bg-hover);
     border-top: 1px solid var(--color-border);
 }
@@ -345,10 +345,10 @@
 .shared-dialog .notification-form input,
 .shared-dialog .notification-form textarea {
     width: 100%;
-    padding: 10px 14px;
+    padding: var(--space-2-5) var(--space-3-5);
     border: 2px solid var(--color-border);
-    border-radius: 10px;
-    font-size: 14px;
+    border-radius: var(--radius-xl);
+    font-size: var(--text-base);
     background: var(--color-bg-hover);
     color: var(--color-text-heading);
     outline: none;
@@ -373,20 +373,20 @@
     display: none; /* Hidden by default, shown via JS when navigating into subfolders */
     align-items: center;
     flex-wrap: wrap;
-    gap: 4px;
-    padding: 8px 12px;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
     background: var(--color-bg-hover);
-    border-radius: 8px;
-    margin-bottom: 12px;
-    font-size: 13px;
+    border-radius: var(--radius-lg);
+    margin-bottom: var(--space-3);
+    font-size: var(--text-sm);
     overflow-x: auto;
 }
 
 .move-breadcrumb-item {
     color: var(--color-text-secondary);
     cursor: pointer;
-    padding: 2px 6px;
-    border-radius: 4px;
+    padding: var(--space-0-5) var(--space-1-5);
+    border-radius: var(--radius-sm);
     transition: all 0.15s ease;
     white-space: nowrap;
 }
@@ -398,26 +398,26 @@
 
 .move-breadcrumb-item.current {
     color: var(--color-accent);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     cursor: default;
 }
 
 .move-breadcrumb-separator {
     color: var(--color-text-placeholder);
-    margin: 0 2px;
+    margin: 0 var(--space-0-5);
 }
 
 /* Folder select items in move dialog */
 .folder-select-item {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 10px 14px;
-    border-radius: 8px;
+    gap: var(--space-2-5);
+    padding: var(--space-2-5) var(--space-3-5);
+    border-radius: var(--radius-lg);
     cursor: pointer;
     transition: all 0.15s ease;
     color: var(--color-text-secondary);
-    font-size: 14px;
+    font-size: var(--text-base);
 }
 
 .folder-select-item:hover {
@@ -427,12 +427,12 @@
 .folder-select-item.selected {
     background-color: var(--color-accent-ring);
     color: var(--color-accent);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
 }
 
 .folder-select-item i {
     color: var(--color-cal-1);
-    font-size: 16px;
+    font-size: var(--text-md);
 }
 
 .folder-select-item.selected i {
@@ -443,7 +443,7 @@
 .folder-select-item.folder-select-current {
     background-color: var(--color-success-ring);
     color: var(--color-success-text-strong);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
 }
 
 .folder-select-item.folder-select-current:hover {
@@ -479,7 +479,7 @@
 
 .folder-select-item.folder-navigate .folder-navigate-icon {
     color: var(--color-text-placeholder);
-    font-size: 12px;
+    font-size: var(--text-xs);
     opacity: 0;
     transition: opacity 0.15s ease;
 }
@@ -493,20 +493,20 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 8px;
-    padding: 24px;
+    gap: var(--space-2);
+    padding: var(--space-6);
     color: var(--color-text-placeholder);
-    font-size: 14px;
+    font-size: var(--text-base);
 }
 
 .folder-select-empty i {
-    font-size: 20px;
+    font-size: var(--text-xl);
 }
 
 /* Playlist track count in selector */
 .playlist-track-count {
     margin-left: auto;
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--color-text-muted);
 }
 
@@ -533,7 +533,7 @@
 
 .confirm-dialog-content {
     background: var(--color-bg-surface);
-    border-radius: 16px;
+    border-radius: var(--radius-3xl);
     width: 400px;
     max-width: 90%;
     box-shadow: 0 20px 60px var(--color-shadow-2xl);
@@ -543,32 +543,32 @@
 }
 
 .confirm-dialog-icon {
-    padding: 28px 24px 12px;
+    padding: var(--space-7) var(--space-6) var(--space-3);
 }
 
 .confirm-dialog-icon i {
-    font-size: 40px;
+    font-size: var(--text-5xl);
     color: var(--color-danger-bg);
 }
 
 .confirm-dialog-title {
     font-size: 17px;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--color-text-heading);
-    padding: 0 24px 8px;
+    padding: 0 var(--space-6) var(--space-2);
 }
 
 .confirm-dialog-message {
-    font-size: 14px;
+    font-size: var(--text-base);
     color: var(--color-text-muted);
-    padding: 0 24px 20px;
-    line-height: 1.5;
+    padding: 0 var(--space-6) var(--space-5);
+    line-height: var(--leading-normal);
 }
 
 .confirm-dialog-buttons {
     display: flex;
-    gap: 12px;
-    padding: 16px 24px;
+    gap: var(--space-3);
+    padding: var(--space-4) var(--space-6);
     background: var(--color-bg-hover);
     border-top: 1px solid var(--color-border);
     justify-content: flex-end;
@@ -578,9 +578,9 @@
     background: linear-gradient(135deg, var(--color-danger-bg) 0%, var(--color-danger-bg-hover) 100%);
     color: var(--color-danger-text);
     border: none;
-    padding: 10px 20px;
-    border-radius: 10px;
-    font-weight: 500;
+    padding: var(--space-2-5) var(--space-5);
+    border-radius: var(--radius-xl);
+    font-weight: var(--weight-medium);
     cursor: pointer;
     transition: all 0.15s ease;
     box-shadow: 0 2px 8px var(--color-danger-ring);
@@ -607,7 +607,7 @@
 
 .dialog-content {
     background-color: var(--color-bg-surface);
-    border-radius: 10px;
+    border-radius: var(--radius-xl);
     box-shadow: 0 10px 25px var(--color-shadow);
     width: 500px;
     max-width: 90%;
@@ -616,7 +616,7 @@
 }
 
 .dialog-header {
-    padding: 15px 20px;
+    padding: 15px var(--space-5);
     border-bottom: 1px solid var(--color-border);
     display: flex;
     align-items: center;
@@ -624,7 +624,7 @@
 }
 
 .dialog-header h3 {
-    font-size: 18px;
+    font-size: var(--text-lg);
     color: var(--color-text);
     margin: 0;
 }
@@ -632,31 +632,31 @@
 .close-dialog-btn {
     background: none;
     border: none;
-    font-size: 24px;
+    font-size: var(--text-2xl);
     cursor: pointer;
     color: var(--color-text-placeholder);
 }
 
 .dialog-body {
-    padding: 20px;
+    padding: var(--space-5);
 }
 
 .share-item-info {
     display: flex;
     align-items: center;
-    gap: 10px;
-    margin-bottom: 20px;
+    gap: var(--space-2-5);
+    margin-bottom: var(--space-5);
 }
 
 .share-link-container {
     display: flex;
-    gap: 10px;
+    gap: var(--space-2-5);
 }
 
 .share-link-container input {
     flex-grow: 1;
-    padding: 10px;
+    padding: var(--space-2-5);
     border: 1px solid var(--color-border);
-    border-radius: 6px;
-    font-size: 14px;
+    border-radius: var(--radius-md);
+    font-size: var(--text-base);
 }

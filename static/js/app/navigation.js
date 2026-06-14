@@ -73,16 +73,25 @@ function initSidebarToggle() {
 
     if (!sidebarToggle || !sidebar || !sidebarOverlay) return;
 
+    /** @type {HTMLElement | null} */
+    let drawerPrevFocus = null;
+
     function openSidebar() {
+        drawerPrevFocus = /** @type {HTMLElement | null} */ (document.activeElement);
         sidebar?.classList.add('open');
         sidebarOverlay?.classList.add('active');
         document.body.style.overflow = 'hidden';
+        sidebarToggle?.setAttribute('aria-expanded', 'true');
+        /** @type {HTMLElement | null} */ (sidebar?.querySelector('.nav-item'))?.focus();
     }
 
     function closeSidebar() {
         sidebar?.classList.remove('open');
         sidebarOverlay?.classList.remove('active');
         document.body.style.overflow = '';
+        sidebarToggle?.setAttribute('aria-expanded', 'false');
+        drawerPrevFocus?.focus?.();
+        drawerPrevFocus = null;
     }
 
     function toggleSidebar() {
@@ -98,6 +107,24 @@ function initSidebarToggle() {
 
     // Close sidebar when clicking overlay
     sidebarOverlay.addEventListener('click', closeSidebar);
+
+    // Trap Tab focus inside the open drawer (mobile).
+    sidebar.addEventListener('keydown', (e) => {
+        if (e.key !== 'Tab' || !sidebar.classList.contains('open')) return;
+        const f = /** @type {NodeListOf<HTMLElement>} */ (
+            sidebar.querySelectorAll('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])')
+        );
+        if (!f.length) return;
+        const first = f[0];
+        const last = f[f.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+        }
+    });
 
     // Close sidebar on escape key
     document.addEventListener('keydown', (e) => {
@@ -155,7 +182,13 @@ function setCurrentSection(section) {
     // Update nav item active classes by finding matching item from DOM
     appElements.navItems?.forEach((item) => {
         const itemSection = getSectionFromNavItem(item);
-        item.classList.toggle('active', itemSection === section);
+        const isActive = itemSection === section;
+        item.classList.toggle('active', isActive);
+        if (isActive) {
+            item.setAttribute('aria-current', 'page');
+        } else {
+            item.removeAttribute('aria-current');
+        }
     });
 
     // Update page title

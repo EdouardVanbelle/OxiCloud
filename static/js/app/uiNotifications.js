@@ -4,6 +4,7 @@
  */
 
 import { notifications } from '../core/notifications.js';
+import { announce } from '../core/liveRegion.js';
 
 const uiNotifications = {
     /**
@@ -40,6 +41,10 @@ const uiNotifications = {
             title: title || '',
             text: message || ''
         });
+
+        // Announce to screen readers — errors interrupt, everything else is polite.
+        const spoken = [title, message].filter(Boolean).join('. ');
+        announce(spoken, { assertive: iconClass === 'error' });
         return;
     }
 };

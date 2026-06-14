@@ -48,6 +48,10 @@ const Modal = {
     /** @private */
     _savedBodyHTML: '',
 
+    // Element focused before the modal opened — focus returns here on close.
+    /** @private @type {HTMLElement|null} */
+    _previousFocus: null,
+
     /**
      * Initialize modal system
      */
@@ -78,6 +82,11 @@ const Modal = {
             if (e.target === this.overlay) {
                 this.close(false);
             }
+        });
+
+        // Trap Tab focus within the dialog while it is open.
+        this.overlay.addEventListener('keydown', (e) => {
+            if (e.key === 'Tab') this._trapFocus(e);
         });
 
         // Clear inline error as soon as the user starts typing
@@ -228,11 +237,37 @@ const Modal = {
     },
 
     /**
+     * Keep Tab focus cycling within the dialog container (focus trap).
+     * @private
+     * @param {KeyboardEvent} e
+     */
+    _trapFocus(e) {
+        const container = this.overlay?.querySelector('.modal-container');
+        if (!container) return;
+        const focusables = /** @type {NodeListOf<HTMLElement>} */ (
+            container.querySelectorAll(
+                'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+            )
+        );
+        if (!focusables.length) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+        }
+    },
+
+    /**
      * Open the modal
      */
     open() {
         if (!this.overlay) return;
 
+        this._previousFocus = /** @type {HTMLElement|null} */ (document.activeElement);
         this.confirmBtn.disabled = false;
 
         // Show overlay
@@ -295,6 +330,10 @@ const Modal = {
                 this._panelMode = false;
                 this._savedBodyHTML = '';
             }
+
+            // Return focus to whatever was focused before the modal opened.
+            this._previousFocus?.focus?.();
+            this._previousFocus = null;
         }, 200);
     },
 

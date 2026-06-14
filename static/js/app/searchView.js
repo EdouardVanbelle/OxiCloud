@@ -2,6 +2,7 @@
  * Search view orchestration logic
  */
 
+import { i18n } from '../core/i18n.js';
 import { search } from '../features/files/search.js';
 import { resolveHomeFolder } from './authSession.js';
 import { app } from './state.js';
@@ -50,7 +51,7 @@ async function performSearch(query, sortBy) {
         search.displaySearchResults(searchResults);
     } catch (error) {
         console.error('Search error:', error);
-        ui.showNotification('Error', 'Error performing search');
+        ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.searchError'));
     }
 }
 

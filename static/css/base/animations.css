@@ -1,0 +1,18 @@
+/* ============================================================
+ * Canonical keyframes — single source for shared animations.
+ *
+ * Loaded early via main.css so every component and view reuses
+ * these by name instead of redefining them. This file replaced
+ * 6 duplicate `@keyframes spin` definitions (spinner / admin /
+ * music / photos / profile / share-public).
+ *
+ * NOTE: `oxi-spin` (icons.css) and `smdSpin` (shareModal.css) are
+ * still defined locally — folding them in needs touching their
+ * `animation-name` consumers, deferred to Fase 1.
+ * ============================================================ */
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}

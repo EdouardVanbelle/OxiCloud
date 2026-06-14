@@ -12,6 +12,7 @@ pub mod image_transcode_service;
 pub mod jwt_service;
 pub mod local_blob_backend;
 pub mod login_lockout_service;
+pub mod media_metadata_service;
 pub mod migration_blob_backend;
 pub mod migration_job;
 pub mod mock_email_sender;

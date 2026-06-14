@@ -9,7 +9,7 @@
 .ms-load-more-wrapper {
     display: flex;
     justify-content: center;
-    padding: 16px 0 8px;
+    padding: var(--space-4) 0 var(--space-2);
 }
 
 .ms-load-more-wrapper.hidden {
@@ -23,7 +23,7 @@
     box-shadow: none;
     border-radius: 0;
     overflow: visible;
-    gap: 10px;
+    gap: var(--space-2-5);
     display: flex;
     flex-direction: column;
 }
@@ -32,7 +32,7 @@
 
 .ms-lane {
     background-color: var(--color-item);
-    border-radius: 10px;
+    border-radius: var(--radius-xl);
     box-shadow: 0 1px 3px var(--color-shadow-xs);
     overflow: hidden;
 }
@@ -44,14 +44,14 @@
 
 /* Vignette lane headers need the same padding as the resource row */
 .ms-lane__header .user-vignette {
-    padding: 10px 14px;
-    font-weight: 600;
+    padding: var(--space-2-5) var(--space-3-5);
+    font-weight: var(--weight-semibold);
 }
 
 .ms-lane__header .user-vignette .user-vignette__name {
-    font-size: 13px;
+    font-size: var(--text-sm);
     color: var(--color-text-heading);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
 }
 
 .ms-lane__body {
@@ -63,16 +63,16 @@
 .ms-resource-row {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 10px 14px;
+    gap: var(--space-2);
+    padding: var(--space-2-5) var(--space-3-5);
 }
 
 /* Size the shared .file-icon component for inline use in myShares rows */
 .ms-resource-row .file-icon {
     width: 36px;
     height: 36px;
-    border-radius: 6px;
-    font-size: 14px;
+    border-radius: var(--radius-md);
+    font-size: var(--text-base);
     flex-shrink: 0;
 }
 
@@ -81,14 +81,14 @@
 .ms-link-identity__resource .file-icon {
     width: 24px;
     height: 24px;
-    border-radius: 4px;
-    font-size: 11px;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-2xs);
     flex-shrink: 0;
 }
 
 .ms-resource-row__name {
     flex: 1;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--color-text);
     text-decoration: none;
     overflow: hidden;
@@ -103,8 +103,8 @@
 
 .ms-resource-row__edit {
     flex-shrink: 0;
-    font-size: 12px;
-    padding: 3px 8px;
+    font-size: var(--text-xs);
+    padding: 3px var(--space-2);
     opacity: 0.6;
     transition: opacity 0.15s;
 }
@@ -118,16 +118,16 @@
 .ms-link-lane-label {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 8px 14px;
-    font-size: 12px;
-    font-weight: 600;
+    gap: var(--space-1-5);
+    padding: var(--space-2) var(--space-3-5);
+    font-size: var(--text-xs);
+    font-weight: var(--weight-semibold);
     color: var(--color-text-secondary);
 }
 
 .ms-link-lane-label__icon {
     color: var(--color-text-faint);
-    font-size: 12px;
+    font-size: var(--text-xs);
 }
 
 /* ── Grant row ───────────────────────────────────────────────────────────── */
@@ -139,8 +139,8 @@
     display: grid;
     grid-template-columns: 1fr 110px 180px auto;
     align-items: center;
-    gap: 8px;
-    padding: 7px 14px 7px 28px;
+    gap: var(--space-2);
+    padding: 7px var(--space-3-5) 7px var(--space-7);
     border-bottom: 1px solid var(--color-border-faint);
     transition: background 0.1s;
 }
@@ -171,12 +171,12 @@
     min-width: 0;
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: var(--space-1-5);
 }
 
 .ms-identity__name {
-    font-size: 13px;
-    font-weight: 500;
+    font-size: var(--text-sm);
+    font-weight: var(--weight-medium);
     color: var(--color-text);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -184,8 +184,8 @@
 }
 
 .ms-identity__resource-name {
-    font-size: 13px;
-    font-weight: 500;
+    font-size: var(--text-sm);
+    font-weight: var(--weight-medium);
     color: var(--color-text);
     text-decoration: none;
     overflow: hidden;
@@ -201,13 +201,13 @@
 /* Token in sharedWith mode: arrow + resource link */
 
 .ms-link-identity__arrow {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--color-text-faint);
     flex-shrink: 0;
 }
 
 .ms-link-identity__resource {
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--color-text-secondary);
     text-decoration: none;
     display: inline-flex;
@@ -235,11 +235,11 @@
     width: 22px;
     height: 22px;
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--color-text-muted);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     flex-shrink: 0;
     transition:
         background 0.12s,
@@ -263,7 +263,7 @@
 /* ── Context menu current-item indicator ─────────────────────────────────── */
 
 .ms-menu-item--current {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
 }
 
 /* ── Context menu expiry row ─────────────────────────────────────────────── */
@@ -272,12 +272,12 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 8px;
-    padding: 6px 12px;
+    gap: var(--space-2);
+    padding: var(--space-1-5) var(--space-3);
 }
 
 .ms-menu-expiry-label {
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--color-text-muted);
     white-space: nowrap;
     flex-shrink: 0;

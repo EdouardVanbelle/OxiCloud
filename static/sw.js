@@ -1,6 +1,6 @@
 // OxiCloud Service Worker
 // FIXME: generate cache name according build ?
-const CACHE_NAME = 'oxicloud-cache-v26';
+const CACHE_NAME = 'oxicloud-cache-v27';
 
 // Only cache static assets — NOT HTML files.
 // HTML files are served network-first so browsers always get the latest
@@ -50,6 +50,11 @@ self.addEventListener('activate', (event) => {
                         })
                 );
             })
+            .then(() => {
+                // Navigation preload: let the browser fetch the navigation in
+                // parallel with the service worker booting (faster first paint).
+                return self.registration.navigationPreload?.enable();
+            })
             .then(() => self.clients.claim()) // Take control of clients
     );
 });
@@ -65,7 +70,17 @@ self.addEventListener('fetch', (event) => {
     const pathname = new URL(event.request.url).pathname;
     const isHtml = HTML_PATHS.includes(pathname) || pathname.endsWith('.html') || event.request.headers.get('accept')?.includes('text/html');
     if (isHtml) {
-        event.respondWith(fetch(event.request).catch(() => caches.match(event.request)));
+        event.respondWith(
+            (async () => {
+                try {
+                    // Use the navigation-preload response when present.
+                    const preload = await event.preloadResponse;
+                    return preload || (await fetch(event.request));
+                } catch {
+                    return (await caches.match(event.request)) || Response.error();
+                }
+            })()
+        );
         return;
     }
 

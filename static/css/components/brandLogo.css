@@ -1,0 +1,24 @@
+/* ============================================================
+ * Canonical brand mark — the OxiCloud cloud glyph on the accent
+ * gradient tile. Reusable lockup for external surfaces (share,
+ * device-verify) so they present the real mark, not text/emoji.
+ * Uses the single --color-logo-gradient token.
+ * ============================================================ */
+
+.brand-mark {
+    width: 56px;
+    height: 56px;
+    border-radius: var(--radius-3xl);
+    background: var(--color-logo-gradient);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: var(--space-3);
+    box-shadow: 0 4px 14px var(--color-accent-shadow);
+}
+
+.brand-mark svg {
+    width: 32px;
+    height: 32px;
+    fill: var(--color-on-accent);
+}

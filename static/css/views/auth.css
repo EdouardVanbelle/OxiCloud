@@ -7,9 +7,33 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    height: 100vh;
+    height: 100dvh;
     width: 100%;
-    background-color: var(--color-bg-page);
+    position: relative;
+    /* Spotlight + warm brand blobs — seats the card in a pool of light
+       instead of a flat near-white field. */
+    background: var(--brand-ambient);
+}
+
+/* Fine film grain over the backdrop (not the card). `overlay` neutralises the
+   mid-grey noise so it adds texture without shifting brightness; works in both
+   light and dark. Tune the whole effect with `opacity`. */
+.auth-container::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background-image: var(--brand-grain);
+    background-size: 180px 180px;
+    opacity: 0.6;
+    mix-blend-mode: overlay;
+}
+
+/* Keep the card (and every panel) above the grain layer. */
+.auth-panel {
+    position: relative;
+    z-index: 1;
 }
 
 .auth-panel {
@@ -18,9 +42,9 @@
     margin: 0 auto;
     background-color: var(--color-bg-surface);
     border: 1px solid var(--color-border);
-    border-radius: 16px;
-    box-shadow: 0 8px 30px var(--color-shadow);
-    padding: 36px;
+    border-radius: var(--radius-3xl);
+    box-shadow: var(--shadow-xl);
+    padding: var(--space-9);
     text-align: center;
 }
 
@@ -28,7 +52,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    margin-bottom: 20px;
+    margin-bottom: var(--space-5);
 }
 
 .auth-logo-icon {
@@ -39,26 +63,27 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    margin-right: 12px;
-    box-shadow: 0 4px 12px var(--color-accent-shadow);
+    margin-right: var(--space-3);
+    /* Tighter glow (negative spread) reads more premium than a wide halo. */
+    box-shadow: 0 4px 14px -4px var(--color-accent-shadow);
 }
 
 .auth-logo-icon svg {
     width: 30px;
     height: 30px;
-    fill: var(--color-danger-text);
+    fill: var(--color-on-accent);
 }
 
 .auth-logo-text {
-    font-size: 24px;
-    font-weight: bold;
+    font-size: var(--text-2xl);
+    font-weight: var(--weight-bold);
     color: var(--color-text);
 }
 
 .auth-title {
     font-size: 22px;
-    font-weight: 700;
-    margin-bottom: 28px;
+    font-weight: var(--weight-bold);
+    margin-bottom: var(--space-7);
     color: var(--color-text-heading);
 }
 
@@ -72,22 +97,23 @@
 }
 
 .auth-input-group {
-    margin-bottom: 20px;
+    margin-bottom: var(--space-5);
 }
 
 .auth-label {
     display: block;
-    margin-bottom: 8px;
-    font-size: 14px;
+    margin-bottom: var(--space-2);
+    font-size: var(--text-base);
     color: var(--color-text-heading);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
 }
 
 .auth-input {
     width: 100%;
-    padding: 14px 18px;
-    border-radius: 12px;
-    border: 2px solid var(--color-border);
+    padding: var(--space-3-5) 18px;
+    border-radius: var(--radius-2xl);
+    /* Stronger resting border so fields read as crafted, not flat fills. */
+    border: 2px solid var(--color-border-medium);
     font-size: 15px;
     background-color: var(--color-bg-input);
     color: var(--color-text);
@@ -95,7 +121,7 @@
 }
 
 .auth-input::placeholder {
-    color: var(--color-text-faint);
+    color: var(--color-text-muted);
 }
 
 .auth-input:hover {
@@ -111,22 +137,26 @@
 }
 
 .auth-input[readonly] {
-    opacity: 0.7;
     cursor: default;
+    /* A locked value, not a placeholder: full-strength text on a subtly
+       distinct "locked" fill (no dimming that reads as empty). */
+    color: var(--color-text);
+    font-weight: var(--weight-semibold);
+    background-color: var(--color-bg-input-alt);
 }
 
 .auth-button {
     width: 100%;
-    padding: 14px 18px;
-    border-radius: 12px;
+    padding: var(--space-3-5) 18px;
+    border-radius: var(--radius-2xl);
     background: var(--color-accent-gradient);
-    color: var(--color-danger-text);
-    font-weight: 700;
+    color: var(--color-on-accent);
+    font-weight: var(--weight-bold);
     border: none;
     cursor: pointer;
-    font-size: 16px;
+    font-size: var(--text-md);
     transition: all 0.3s ease;
-    margin-top: 12px;
+    margin-top: var(--space-3);
     box-shadow: 0 4px 12px var(--color-accent-shadow);
 }
 
@@ -137,7 +167,8 @@
 }
 
 .auth-button:active {
-    transform: translateY(0);
+    /* Tactile press — the button dips slightly under the resting plane. */
+    transform: translateY(1px);
     box-shadow: 0 2px 8px var(--color-accent-shadow);
 }
 
@@ -148,13 +179,37 @@
     filter: none;
 }
 
+/* Loading — hide the label, show an inline spinner (toggled via .is-loading /
+   aria-busy by auth.js on submit). */
+.auth-button.is-loading,
+.auth-button[aria-busy="true"] {
+    color: transparent;
+    pointer-events: none;
+    position: relative;
+}
+
+.auth-button.is-loading::after,
+.auth-button[aria-busy="true"]::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 18px;
+    height: 18px;
+    margin: -9px 0 0 -9px;
+    border: 2px solid var(--color-on-accent);
+    border-top-color: transparent;
+    border-radius: var(--radius-full);
+    animation: spin var(--spin-duration) linear infinite;
+}
+
 .auth-subtitle {
-    margin: 20px 0;
+    margin: var(--space-5) 0;
     color: var(--color-text-muted);
-    font-size: 14px;
+    font-size: var(--text-base);
 }
 .auth-action-wrap {
-    margin-top: 20px;
+    margin-top: var(--space-5);
 }
 
 /* SSO / OIDC button */
@@ -164,7 +219,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 10px;
+    gap: var(--space-2-5);
 }
 
 .auth-button-oidc:hover {
@@ -180,14 +235,14 @@
 }
 
 .auth-button-oidc i {
-    font-size: 14px;
+    font-size: var(--text-base);
 }
 
 /* Helper text above the magic-link form ("No password? Enter your
    email…"). Quieter visual weight than the form labels. */
 .auth-hint {
-    margin: 0 0 12px;
-    font-size: 13px;
+    margin: 0 0 var(--space-3);
+    font-size: var(--text-sm);
     line-height: 1.4;
     color: var(--color-text-secondary);
 }
@@ -196,10 +251,10 @@
    message rendered on every successful 2xx; error variant only used
    for the 503-not-configured branch or network failures. */
 .auth-status {
-    margin-top: 12px;
-    padding: 10px 14px;
-    border-radius: 8px;
-    font-size: 13px;
+    margin-top: var(--space-3);
+    padding: var(--space-2-5) var(--space-3-5);
+    border-radius: var(--radius-lg);
+    font-size: var(--text-sm);
     line-height: 1.4;
 }
 .auth-status-success {
@@ -217,9 +272,9 @@
 .auth-divider {
     display: flex;
     align-items: center;
-    margin: 20px 0;
+    margin: var(--space-5) 0;
     color: var(--color-text-faint);
-    font-size: 13px;
+    font-size: var(--text-sm);
 }
 
 .auth-divider::before,
@@ -231,7 +286,13 @@
 }
 
 .auth-divider span {
-    padding: 0 12px;
+    padding: 0 var(--space-3);
+    /* Quiet, deliberate label rather than a stray lowercase letter. */
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-wide, 0.08em);
+    font-size: var(--text-2xs);
+    font-weight: var(--weight-semibold);
+    color: var(--color-text-muted);
 }
 
 /* OIDC-only mode: hide password form */
@@ -241,15 +302,15 @@
 
 .auth-toggle {
     margin-top: 22px;
-    font-size: 14px;
+    font-size: var(--text-base);
     color: var(--color-text-muted);
 }
 
 .auth-toggle-link {
-    color: var(--color-accent);
+    color: var(--color-accent-text);
     cursor: pointer;
     text-decoration: none;
-    font-weight: 500;
+    font-weight: var(--weight-medium);
 }
 
 .auth-toggle-link:hover {
@@ -259,33 +320,49 @@
 .auth-error {
     background-color: var(--color-error-bg);
     color: var(--color-error-text);
-    padding: 12px 18px;
-    border-radius: 12px;
-    margin-bottom: 20px;
-    font-size: 14px;
+    padding: var(--space-3) 18px;
+    border-radius: var(--radius-2xl);
+    margin-bottom: var(--space-5);
+    font-size: var(--text-base);
     display: none;
 }
 
 .auth-success {
     background-color: var(--color-success-bg);
     color: var(--color-success-text);
-    padding: 12px 18px;
-    border-radius: 12px;
-    margin-bottom: 20px;
-    font-size: 14px;
+    padding: var(--space-3) 18px;
+    border-radius: var(--radius-2xl);
+    margin-bottom: var(--space-5);
+    font-size: var(--text-base);
     display: none;
 }
 
 /* Admin setup panel styles — visibility controlled via .hidden class */
 
 .setup-steps {
-    margin-bottom: 28px;
-    display: flex;
-    justify-content: center;
-    gap: 32px;
+    margin-bottom: var(--space-7);
+    /* 3 equal columns → circle centres land at 1/6, 1/2, 5/6, so the
+       connector track can be placed deterministically between them. */
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    position: relative;
+}
+
+/* Connector track behind the step circles (z-index 0; circles sit above). */
+.setup-steps::before {
+    content: "";
+    position: absolute;
+    top: 17px; /* half of the 34px circle */
+    left: 16.667%;
+    right: 16.667%;
+    height: 2px;
+    background: var(--color-border);
+    z-index: 0;
 }
 
 .setup-step {
+    position: relative;
+    z-index: 1;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -301,28 +378,29 @@
     align-items: center;
     justify-content: center;
     color: var(--color-text-faint);
-    font-weight: 700;
-    font-size: 14px;
-    margin-bottom: 6px;
+    font-weight: var(--weight-bold);
+    font-size: var(--text-base);
+    margin-bottom: var(--space-1-5);
     transition: all 0.2s ease;
 }
 
 .step-number.active {
     background: var(--color-accent-gradient);
     border-color: transparent;
-    color: var(--color-danger-text);
-    box-shadow: 0 2px 8px var(--color-accent-shadow);
+    color: var(--color-on-accent);
+    /* Subtle halo lifts the active step off the connector track. */
+    box-shadow: 0 0 0 4px var(--color-accent-ring), 0 4px 12px var(--color-accent-shadow);
 }
 
 .step-title {
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--color-text-faint);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
 }
 
 .step-title.active {
     color: var(--color-text-heading);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
 }
 
 /* Language selector panel styles */
@@ -332,23 +410,23 @@
 
 .language-subtitle {
     color: var(--color-text-muted);
-    font-size: 16px;
-    margin-bottom: 24px;
+    font-size: var(--text-md);
+    margin-bottom: var(--space-6);
 }
 
 /* ====== Compact Language Picker ====== */
 .lang-picker {
     position: relative;
-    margin-bottom: 24px;
+    margin-bottom: var(--space-6);
     text-align: left;
 }
 
 .lang-picker-selected {
     display: flex;
     align-items: center;
-    padding: 14px 18px;
+    padding: var(--space-3-5) 18px;
     border: 2px solid var(--color-border);
-    border-radius: 12px;
+    border-radius: var(--radius-2xl);
     cursor: pointer;
     background-color: var(--color-bg-input);
     transition: all 0.2s ease;
@@ -370,20 +448,20 @@
 
 .lang-picker-flag {
     font-size: 26px;
-    margin-right: 14px;
+    margin-right: var(--space-3-5);
     flex-shrink: 0;
 }
 
 .lang-picker-name {
-    font-size: 16px;
-    font-weight: 600;
+    font-size: var(--text-md);
+    font-weight: var(--weight-semibold);
     color: var(--color-text-heading);
     flex: 1;
 }
 
 .lang-picker-arrow {
     color: var(--color-text-faint);
-    font-size: 13px;
+    font-size: var(--text-sm);
     transition: transform 0.2s ease;
     flex-shrink: 0;
 }
@@ -402,8 +480,8 @@
     background: var(--color-bg-surface);
     border: 2px solid var(--color-accent);
     border-top: 1px solid var(--color-border-light);
-    border-bottom-left-radius: 12px;
-    border-bottom-right-radius: 12px;
+    border-bottom-left-radius: var(--radius-2xl);
+    border-bottom-right-radius: var(--radius-2xl);
     box-shadow: 0 12px 32px var(--color-shadow-lg);
     z-index: 100;
     overflow: hidden;
@@ -428,7 +506,7 @@
 /* Search inside dropdown */
 .lang-picker-search {
     position: relative;
-    padding: 10px 14px;
+    padding: var(--space-2-5) var(--space-3-5);
     border-bottom: 1px solid var(--color-border-light);
 }
 
@@ -438,15 +516,15 @@
     top: 50%;
     transform: translateY(-50%);
     color: var(--color-text-faint);
-    font-size: 13px;
+    font-size: var(--text-sm);
 }
 
 .lang-picker-search input {
     width: 100%;
-    padding: 8px 12px 8px 32px;
+    padding: var(--space-2) var(--space-3) var(--space-2) var(--space-8);
     border: 1px solid var(--color-border);
-    border-radius: 8px;
-    font-size: 14px;
+    border-radius: var(--radius-lg);
+    font-size: var(--text-base);
     outline: none;
     box-sizing: border-box;
     background-color: var(--color-bg-input);
@@ -466,16 +544,16 @@
 .lang-picker-list {
     max-height: 240px;
     overflow-y: auto;
-    padding: 6px;
+    padding: var(--space-1-5);
 }
 
 /* Language item in dropdown */
 .lang-picker-item {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 10px 12px;
-    border-radius: 8px;
+    gap: var(--space-2-5);
+    padding: var(--space-2-5) var(--space-3);
+    border-radius: var(--radius-lg);
     cursor: pointer;
     transition: all 0.12s ease;
 }
@@ -495,40 +573,231 @@
 
 .lang-picker-item-name {
     font-size: 15px;
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     color: var(--color-text-heading);
 }
 
 .lang-picker-item-english {
-    font-size: 13px;
+    font-size: var(--text-sm);
     color: var(--color-text-faint);
     margin-left: auto;
 }
 
 .lang-picker-item-check {
     color: var(--color-accent);
-    font-size: 13px;
+    font-size: var(--text-sm);
     flex-shrink: 0;
 }
 
 .lang-picker-empty {
     text-align: center;
     color: var(--color-text-faint);
-    padding: 20px;
-    font-size: 14px;
+    padding: var(--space-5);
+    font-size: var(--text-base);
 }
 
 @media (max-width: 480px) {
     .auth-panel {
         width: 95%;
-        padding: 24px;
+        padding: var(--space-6);
     }
 
     .lang-picker-selected {
-        padding: 12px 14px;
+        padding: var(--space-3) var(--space-3-5);
     }
 
     .lang-picker-list {
         max-height: 200px;
     }
+}
+
+/* ============================================================
+   Premium polish — brand lockup, CTA hierarchy, field icons,
+   password reveal, progressive disclosure, match feedback.
+   Icons are token-safe CSS masks (no inline SVG, no raw colour):
+   the glyph alpha comes from the data-URI, the colour from a token.
+   ============================================================ */
+
+/* — Brand wordmark: the ownable "Oxi" accent lockup (DESIGN-SYSTEM §3) — */
+.brand-oxi {
+    background: var(--color-accent-gradient);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+}
+
+/* — CTA hierarchy: exactly one primary per screen. The secondary action
+     (magic-link, etc.) is a quiet tinted/ghost button, never a 2nd gradient. — */
+.auth-button-secondary {
+    background: var(--color-accent-tint);
+    color: var(--color-accent-text);
+    border: 1.5px solid var(--color-border-medium);
+    box-shadow: none;
+}
+
+.auth-button-secondary:hover {
+    background: var(--color-bg-surface);
+    border-color: var(--color-accent);
+    box-shadow: none;
+    filter: none;
+    transform: translateY(-1px);
+}
+
+.auth-button-secondary:active {
+    transform: translateY(1px);
+    box-shadow: none;
+}
+
+/* — Leading field icons (user / mail / lock) via masked pseudo-element — */
+.auth-input-wrap {
+    position: relative;
+}
+
+.auth-input-wrap .auth-input {
+    padding-left: 44px;
+}
+
+.auth-input-wrap.has-toggle .auth-input {
+    padding-right: 44px;
+}
+
+.auth-input-wrap::before {
+    content: "";
+    position: absolute;
+    left: 16px;
+    top: 50%;
+    width: 18px;
+    height: 18px;
+    transform: translateY(-50%);
+    background-color: var(--color-text-muted);
+    pointer-events: none;
+    z-index: 1;
+    transition: background-color 0.2s ease;
+    -webkit-mask: var(--icon-url, none) center / contain no-repeat;
+    mask: var(--icon-url, none) center / contain no-repeat;
+}
+
+.auth-input-wrap:focus-within::before {
+    background-color: var(--color-accent);
+}
+
+.auth-input-wrap--user {
+    --icon-url: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2'/><circle cx='12' cy='7' r='4'/></svg>");
+}
+
+.auth-input-wrap--mail {
+    --icon-url: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><rect x='2' y='4' width='20' height='16' rx='2'/><path d='m2 7 10 6 10-6'/></svg>");
+}
+
+.auth-input-wrap--lock {
+    --icon-url: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='11' width='18' height='11' rx='2'/><path d='M7 11V7a5 5 0 0 1 10 0v4'/></svg>");
+}
+
+/* — Password show/hide toggle — */
+.auth-pw-toggle {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 32px;
+    height: 32px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    border-radius: var(--radius-lg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2;
+}
+
+.auth-pw-toggle::before {
+    content: "";
+    width: 18px;
+    height: 18px;
+    background-color: var(--color-text-muted);
+    transition: background-color 0.2s ease;
+    --eye: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z'/><circle cx='12' cy='12' r='3'/></svg>");
+    -webkit-mask: var(--eye) center / contain no-repeat;
+    mask: var(--eye) center / contain no-repeat;
+}
+
+.auth-pw-toggle:hover::before {
+    background-color: var(--color-accent);
+}
+
+.auth-pw-toggle[aria-pressed="true"]::before {
+    --eye: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M9.9 4.2A9 9 0 0 1 12 4c6.5 0 10 7 10 7a13 13 0 0 1-2 2.7M6.6 6.6A13 13 0 0 0 2 11s3.5 7 10 7a9 9 0 0 0 3.6-.7'/><path d='m2 2 20 20'/></svg>");
+}
+
+/* — Progressive disclosure of the magic-link form — */
+.auth-magic-toggle {
+    display: block;
+    width: 100%;
+    margin-top: var(--space-1);
+    padding: var(--space-2);
+    background: none;
+    border: none;
+    color: var(--color-accent-text);
+    font-size: var(--text-sm);
+    font-weight: var(--weight-medium);
+    cursor: pointer;
+    text-align: center;
+}
+
+.auth-magic-toggle:hover {
+    text-decoration: underline;
+}
+
+.auth-magic-reveal {
+    margin-top: var(--space-3);
+}
+
+.auth-magic-reveal:not(.hidden) {
+    animation: langPickerSlideDown 0.2s ease;
+}
+
+/* — Live password-match feedback (sits inside the confirm field group) — */
+.auth-match {
+    margin-top: var(--space-2);
+    font-size: var(--text-xs);
+    font-weight: var(--weight-medium);
+    display: none;
+    align-items: center;
+    gap: var(--space-1-5);
+}
+
+.auth-match.show {
+    display: flex;
+}
+
+.auth-match::before {
+    content: "";
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+    background-color: currentColor;
+    -webkit-mask: var(--match-icon) center / contain no-repeat;
+    mask: var(--match-icon) center / contain no-repeat;
+}
+
+.auth-match--ok {
+    color: var(--color-success-text);
+    --match-icon: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'><path d='M20 6 9 17l-5-5'/></svg>");
+}
+
+.auth-match--bad {
+    color: var(--color-error-text);
+    --match-icon: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'><path d='M18 6 6 18M6 6l12 12'/></svg>");
+}
+
+/* "Caps Lock is on" hint under a password field (toggled by auth.js). */
+.auth-caps-warning {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1-5);
+    margin-top: var(--space-2);
+    font-size: var(--text-xs);
+    font-weight: var(--weight-medium);
+    color: var(--color-warning-orange-text);
 }

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -9,6 +9,20 @@
     <meta name="color-scheme" content="light dark">
     <title data-i18n="app.title">OxiCloud - Login</title>
     <link rel="icon" type="image/svg+xml" href="/logo/logo-plain.svg">
+    <link rel="icon" href="/favicon.ico" sizes="32x32">
+    <link rel="apple-touch-icon" href="/logo/apple-touch-icon.png">
+    <link rel="mask-icon" href="/logo/logo-plain.svg" color="#ff5e3a">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f7fa">
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f172a">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="OxiCloud">
+    <meta property="og:description" content="Fast, private cloud storage built with Rust.">
+    <meta property="og:image" content="/logo/og-image.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="OxiCloud">
+    <meta name="twitter:description" content="Fast, private cloud storage built with Rust.">
+    <meta name="twitter:image" content="/logo/og-image.png">
     <!-- Apply saved theme immediately to prevent flash of light mode -->
     <script src="/js/core/theme-init.js"></script>
     
@@ -20,7 +34,8 @@
     <script type="module" src="/js/features/auth/auth.js"></script>
 </head>
 <body>
-    <div class="auth-container">
+    <div class="auth-container" role="main">
+        <h1 class="sr-only" data-i18n="app.title">OxiCloud</h1>
         <!-- Language Selector Panel - Shown first on fresh install -->
         <div class="auth-panel language-selector-panel hidden" id="language-panel">
             <div class="auth-logo">
@@ -29,7 +44,7 @@
                         <path d="M345 310c32 0 58-26 58-58s-26-58-58-58c-6.2 0-12 0.9-17.5 2.7C318 166 289 143 255 143c-34.3 0-63.1 22.6-73 53.7C176.9 195.7 171 195 165 195c-32 0-58 26-58 58s26 58 58 58h180z" fill="#fff"/>
                     </svg>
                 </div>
-                <div class="auth-logo-text">OxiCloud</div>
+                <div class="auth-logo-text"><span class="brand-oxi">Oxi</span>Cloud</div>
             </div>
             
             <h2 class="auth-title" id="language-title">Welcome!</h2>
@@ -63,7 +78,7 @@
                         <path d="M345 310c32 0 58-26 58-58s-26-58-58-58c-6.2 0-12 0.9-17.5 2.7C318 166 289 143 255 143c-34.3 0-63.1 22.6-73 53.7C176.9 195.7 171 195 165 195c-32 0-58 26-58 58s26 58 58 58h180z" fill="#fff"/>
                     </svg>
                 </div>
-                <div class="auth-logo-text">OxiCloud</div>
+                <div class="auth-logo-text"><span class="brand-oxi">Oxi</span>Cloud</div>
             </div>
             
             <h2 class="auth-title" data-i18n="auth.login_title">Log in</h2>
@@ -73,28 +88,35 @@
             <form class="auth-form" id="login-form">
                 <div class="auth-input-group">
                     <label class="auth-label" for="login-username" data-i18n="auth.login_identifier">Username or email</label>
-                    <input
-                        type="text"
-                        id="login-username"
-                        class="auth-input"
-                        data-i18n-placeholder="auth.login_identifier_placeholder"
-                        placeholder="Enter your username or email"
-                        required
-                    >
+                    <div class="auth-input-wrap auth-input-wrap--user">
+                        <input
+                            type="text"
+                            id="login-username"
+                            class="auth-input"
+                            autocomplete="username"
+                            data-i18n-placeholder="auth.login_identifier_placeholder"
+                            placeholder="Enter your username or email"
+                            required
+                        >
+                    </div>
                 </div>
-                
+
                 <div class="auth-input-group">
                     <label class="auth-label" for="login-password" data-i18n="auth.password">Password</label>
-                    <input 
-                        type="password" 
-                        id="login-password" 
-                        class="auth-input" 
-                        data-i18n-placeholder="auth.password_placeholder" 
-                        placeholder="Enter your password"
-                        required
-                    >
+                    <div class="auth-input-wrap auth-input-wrap--lock has-toggle">
+                        <input
+                            type="password"
+                            id="login-password"
+                            autocomplete="current-password"
+                            class="auth-input"
+                            data-i18n-placeholder="auth.password_placeholder"
+                            placeholder="Enter your password"
+                            required
+                        >
+                        <button type="button" class="auth-pw-toggle" data-pw-toggle aria-pressed="false" aria-label="Show password"></button>
+                    </div>
                 </div>
-                
+
                 <button type="submit" class="auth-button" id="login-submit" data-i18n="auth.login_button">Log in</button>
             </form>
             
@@ -119,30 +141,46 @@
                 <div class="auth-divider">
                     <span data-i18n="auth.or">or</span>
                 </div>
-                <p class="auth-hint" data-i18n="auth.magicLinkHint">
-                    No password? Enter your email and we'll send you a one-time sign-in link.
-                </p>
-                <form class="auth-form" id="magic-link-form">
-                    <div class="auth-input-group">
-                        <label class="auth-label" for="magic-link-email" data-i18n="auth.magicLinkEmailLabel">
-                            Email address
-                        </label>
-                        <input
-                            type="email"
-                            id="magic-link-email"
-                            class="auth-input"
-                            name="email"
-                            required
-                            autocomplete="email"
-                            placeholder="you@example.com"
-                            data-i18n-placeholder="auth.magicLinkEmailPlaceholder"
-                        >
-                    </div>
-                    <button type="submit" class="auth-button" id="magic-link-submit" data-i18n="auth.magicLinkSubmit">
-                        Send sign-in link
-                    </button>
-                </form>
-                <div id="magic-link-status" class="auth-status hidden" role="status"></div>
+                <!-- Progressive disclosure: the form stays collapsed behind a
+                     quiet link so the screen leads with one clear primary path. -->
+                <button
+                    type="button"
+                    class="auth-magic-toggle"
+                    id="magic-link-toggle"
+                    aria-expanded="false"
+                    aria-controls="magic-link-reveal"
+                    data-i18n="auth.magicLinkToggle"
+                >
+                    No password? Email me a sign-in link
+                </button>
+                <div class="auth-magic-reveal hidden" id="magic-link-reveal">
+                    <p class="auth-hint" data-i18n="auth.magicLinkHint">
+                        No password? Enter your email and we'll send you a one-time sign-in link.
+                    </p>
+                    <form class="auth-form" id="magic-link-form">
+                        <div class="auth-input-group">
+                            <label class="auth-label" for="magic-link-email" data-i18n="auth.magicLinkEmailLabel">
+                                Email address
+                            </label>
+                            <div class="auth-input-wrap auth-input-wrap--mail">
+                                <input
+                                    type="email"
+                                    id="magic-link-email"
+                                    class="auth-input"
+                                    name="email"
+                                    autocomplete="email"
+                                    required
+                                    placeholder="you@example.com"
+                                    data-i18n-placeholder="auth.magicLinkEmailPlaceholder"
+                                >
+                            </div>
+                        </div>
+                        <button type="submit" class="auth-button auth-button-secondary" id="magic-link-submit" data-i18n="auth.magicLinkSubmit">
+                            Send sign-in link
+                        </button>
+                    </form>
+                    <div id="magic-link-status" class="auth-status hidden" role="status"></div>
+                </div>
             </div>
             
             <div class="auth-toggle">
@@ -163,7 +201,7 @@
                         <path d="M345 310c32 0 58-26 58-58s-26-58-58-58c-6.2 0-12 0.9-17.5 2.7C318 166 289 143 255 143c-34.3 0-63.1 22.6-73 53.7C176.9 195.7 171 195 165 195c-32 0-58 26-58 58s26 58 58 58h180z" fill="#fff"/>
                     </svg>
                 </div>
-                <div class="auth-logo-text">OxiCloud</div>
+                <div class="auth-logo-text"><span class="brand-oxi">Oxi</span>Cloud</div>
             </div>
             
             <h2 class="auth-title" data-i18n="auth.register_title">Create account</h2>
@@ -174,53 +212,67 @@
             <form class="auth-form" id="register-form">
                 <div class="auth-input-group">
                     <label class="auth-label" for="register-username" data-i18n="auth.username">Username</label>
-                    <input 
-                        type="text" 
-                        id="register-username" 
-                        class="auth-input" 
-                        data-i18n-placeholder="auth.username_placeholder" 
-                        placeholder="Enter a username"
-                        required
-                        minlength="3"
-                        maxlength="32"
-                    >
+                    <div class="auth-input-wrap auth-input-wrap--user">
+                        <input
+                            type="text"
+                            id="register-username"
+                            class="auth-input"
+                            data-i18n-placeholder="auth.username_placeholder"
+                            placeholder="Enter a username"
+                            required
+                            minlength="3"
+                            maxlength="32"
+                        >
+                    </div>
                 </div>
                 
                 <div class="auth-input-group">
                     <label class="auth-label" for="register-email" data-i18n="auth.email">Email</label>
-                    <input 
-                        type="email" 
-                        id="register-email" 
-                        class="auth-input" 
-                        data-i18n-placeholder="auth.email_placeholder" 
-                        placeholder="Enter your email"
-                        required
-                    >
+                    <div class="auth-input-wrap auth-input-wrap--mail">
+                        <input
+                            type="email"
+                            id="register-email"
+                            class="auth-input"
+                            data-i18n-placeholder="auth.email_placeholder"
+                            placeholder="Enter your email"
+                            autocomplete="email"
+                            required
+                        >
+                    </div>
                 </div>
                 
                 <div class="auth-input-group">
                     <label class="auth-label" for="register-password" data-i18n="auth.password">Password</label>
-                    <input 
-                        type="password" 
-                        id="register-password" 
-                        class="auth-input" 
-                        data-i18n-placeholder="auth.password_placeholder" 
-                        placeholder="Enter a secure password"
-                        required
-                        minlength="8"
-                    >
+                    <div class="auth-input-wrap auth-input-wrap--lock has-toggle">
+                        <input
+                            type="password"
+                            id="register-password"
+                            class="auth-input"
+                            autocomplete="new-password"
+                            data-i18n-placeholder="auth.password_placeholder"
+                            placeholder="Enter a secure password"
+                            required
+                            minlength="8"
+                        >
+                        <button type="button" class="auth-pw-toggle" data-pw-toggle aria-pressed="false" aria-label="Show password"></button>
+                    </div>
                 </div>
                 
                 <div class="auth-input-group">
                     <label class="auth-label" for="register-password-confirm" data-i18n="auth.confirm_password">Confirm password</label>
-                    <input 
-                        type="password" 
-                        id="register-password-confirm" 
-                        class="auth-input" 
-                        data-i18n-placeholder="auth.confirm_password_placeholder" 
-                        placeholder="Confirm your password"
-                        required
-                    >
+                    <div class="auth-input-wrap auth-input-wrap--lock has-toggle">
+                        <input
+                            type="password"
+                            id="register-password-confirm"
+                            class="auth-input"
+                            autocomplete="new-password"
+                            data-i18n-placeholder="auth.confirm_password_placeholder"
+                            placeholder="Confirm your password"
+                            required
+                        >
+                        <button type="button" class="auth-pw-toggle" data-pw-toggle aria-pressed="false" aria-label="Show password"></button>
+                    </div>
+                    <div class="auth-match" id="register-match" aria-live="polite"></div>
                 </div>
                 
                 <button type="submit" class="auth-button" data-i18n="auth.register_button">Create account</button>
@@ -239,7 +291,7 @@
                         <path d="M345 310c32 0 58-26 58-58s-26-58-58-58c-6.2 0-12 0.9-17.5 2.7C318 166 289 143 255 143c-34.3 0-63.1 22.6-73 53.7C176.9 195.7 171 195 165 195c-32 0-58 26-58 58s26 58 58 58h180z" fill="#fff"/>
                     </svg>
                 </div>
-                <div class="auth-logo-text">OxiCloud</div>
+                <div class="auth-logo-text"><span class="brand-oxi">Oxi</span>Cloud</div>
             </div>
             
             <h2 class="auth-title" data-i18n="auth.setup_title">Initial setup</h2>
@@ -265,50 +317,64 @@
             <form class="auth-form" id="admin-setup-form">
                 <div class="auth-input-group">
                     <label class="auth-label" for="admin-username" data-i18n="auth.admin_username">Administrator username</label>
-                    <input 
-                        type="text" 
-                        id="admin-username" 
-                        class="auth-input" 
-                        value="admin"
-                        readonly
-                    >
+                    <div class="auth-input-wrap auth-input-wrap--user">
+                        <input
+                            type="text"
+                            id="admin-username"
+                            class="auth-input"
+                            value="admin"
+                            readonly
+                        >
+                    </div>
                 </div>
                 
                 <div class="auth-input-group">
                     <label class="auth-label" for="admin-email" data-i18n="auth.admin_email">Administrator email</label>
-                    <input 
-                        type="email" 
-                        id="admin-email" 
-                        class="auth-input" 
-                        data-i18n-placeholder="auth.email_placeholder" 
-                        placeholder="Enter the administrator email"
-                        required
-                    >
+                    <div class="auth-input-wrap auth-input-wrap--mail">
+                        <input
+                            type="email"
+                            id="admin-email"
+                            class="auth-input"
+                            data-i18n-placeholder="auth.email_placeholder"
+                            placeholder="Enter the administrator email"
+                            autocomplete="email"
+                            required
+                        >
+                    </div>
                 </div>
                 
                 <div class="auth-input-group">
                     <label class="auth-label" for="admin-password" data-i18n="auth.admin_password">Administrator password</label>
-                    <input 
-                        type="password" 
-                        id="admin-password" 
-                        class="auth-input" 
-                        data-i18n-placeholder="auth.password_placeholder" 
-                        placeholder="Enter a secure password"
-                        required
-                        minlength="8"
-                    >
+                    <div class="auth-input-wrap auth-input-wrap--lock has-toggle">
+                        <input
+                            type="password"
+                            id="admin-password"
+                            class="auth-input"
+                            autocomplete="new-password"
+                            data-i18n-placeholder="auth.password_placeholder"
+                            placeholder="Enter a secure password"
+                            required
+                            minlength="8"
+                        >
+                        <button type="button" class="auth-pw-toggle" data-pw-toggle aria-pressed="false" aria-label="Show password"></button>
+                    </div>
                 </div>
                 
                 <div class="auth-input-group">
                     <label class="auth-label" for="admin-password-confirm" data-i18n="auth.confirm_password">Confirm password</label>
-                    <input 
-                        type="password" 
-                        id="admin-password-confirm" 
-                        class="auth-input" 
-                        data-i18n-placeholder="auth.confirm_password_placeholder" 
-                        placeholder="Confirm the password"
-                        required
-                    >
+                    <div class="auth-input-wrap auth-input-wrap--lock has-toggle">
+                        <input
+                            type="password"
+                            id="admin-password-confirm"
+                            class="auth-input"
+                            autocomplete="new-password"
+                            data-i18n-placeholder="auth.confirm_password_placeholder"
+                            placeholder="Confirm the password"
+                            required
+                        >
+                        <button type="button" class="auth-pw-toggle" data-pw-toggle aria-pressed="false" aria-label="Show password"></button>
+                    </div>
+                    <div class="auth-match" id="admin-match" aria-live="polite"></div>
                 </div>
                 
                 <button type="submit" class="auth-button" data-i18n="auth.create_admin">Create administrator</button>

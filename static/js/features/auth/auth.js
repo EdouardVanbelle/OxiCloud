@@ -705,6 +705,9 @@ async function showInitialPanel() {
     showPanel(loginPanel);
     hidePanel(registerPanel);
     hidePanel(adminSetupPanel);
+    // Cursor ready on the identifier field (panels start hidden, so a static
+    // `autofocus` attribute wouldn't fire — focus once the panel is shown).
+    /** @type {HTMLInputElement | null} */ (document.getElementById('login-username'))?.focus();
 
     // Hide the admin setup link if admin already exists
     const showAdminSetupLink = document.getElementById('show-admin-setup');
@@ -807,6 +810,7 @@ function initLoginElements() {
         showPanel(loginPanel);
         hidePanel(registerPanel);
         hidePanel(adminSetupPanel);
+        /** @type {HTMLInputElement | null} */ (document.getElementById('login-username'))?.focus();
     });
 
     document.getElementById('show-admin-setup').addEventListener('click', () => {
@@ -821,7 +825,117 @@ function initLoginElements() {
         hidePanel(adminSetupPanel);
     });
 
+    // UX affordances: password reveal, magic-link disclosure, live match feedback,
+    // Caps-Lock warning on password fields.
+    initPasswordToggles();
+    initMagicLinkDisclosure();
+    initPasswordMatch('register-password', 'register-password-confirm', 'register-match');
+    initPasswordMatch('admin-password', 'admin-password-confirm', 'admin-match');
+    ['login-password', 'register-password', 'admin-password'].forEach((id) =>
+        initCapsLockWarning(/** @type {HTMLInputElement | null} */ (document.getElementById(id)))
+    );
+
     return true;
+}
+
+/**
+ * Wire every password show/hide toggle. Each button sits next to the
+ * <input> it controls inside an `.auth-input-wrap`.
+ */
+function initPasswordToggles() {
+    document.querySelectorAll('[data-pw-toggle]').forEach((btn) => {
+        const wrap = btn.closest('.auth-input-wrap');
+        const input = /** @type {HTMLInputElement | null} */ (wrap?.querySelector('input') ?? null);
+        if (!input) return;
+        const sync = () => {
+            const shown = input.type === 'text';
+            btn.setAttribute('aria-pressed', String(shown));
+            btn.setAttribute(
+                'aria-label',
+                shown ? i18n.t('auth.hidePassword', 'Hide password') : i18n.t('auth.showPassword', 'Show password')
+            );
+        };
+        sync();
+        btn.addEventListener('click', () => {
+            input.type = input.type === 'password' ? 'text' : 'password';
+            sync();
+            input.focus();
+        });
+    });
+}
+
+/**
+ * Show a "Caps Lock is on" hint under a password field while the key is active
+ * and the field is focused — saves a failed-login round-trip.
+ * @param {HTMLInputElement | null} input
+ */
+function initCapsLockWarning(input) {
+    if (!input) return;
+    const warn = document.createElement('div');
+    warn.className = 'auth-caps-warning hidden';
+    warn.setAttribute('role', 'status');
+    const icon = document.createElement('i');
+    icon.className = 'fas fa-arrow-up';
+    icon.setAttribute('aria-hidden', 'true');
+    const text = document.createElement('span');
+    text.textContent = i18n.t('auth.capsLock', 'Caps Lock is on');
+    warn.append(icon, text);
+    input.closest('.auth-input-group')?.appendChild(warn);
+
+    /** @param {KeyboardEvent} e */
+    const sync = (e) => {
+        const on = typeof e.getModifierState === 'function' && e.getModifierState('CapsLock');
+        warn.classList.toggle('hidden', !(on && document.activeElement === input));
+    };
+    input.addEventListener('keydown', sync);
+    input.addEventListener('keyup', sync);
+    input.addEventListener('blur', () => warn.classList.add('hidden'));
+}
+
+/**
+ * Progressive disclosure: keep the magic-link form collapsed behind a quiet
+ * toggle so the login screen leads with a single primary path.
+ */
+function initMagicLinkDisclosure() {
+    const toggle = document.getElementById('magic-link-toggle');
+    const reveal = document.getElementById('magic-link-reveal');
+    if (!toggle || !reveal) return;
+    toggle.addEventListener('click', () => {
+        // classList.toggle returns true when the class is now PRESENT (collapsed).
+        const open = reveal.classList.toggle('hidden') === false;
+        toggle.setAttribute('aria-expanded', String(open));
+        if (open) {
+            const email = /** @type {HTMLInputElement | null} */ (document.getElementById('magic-link-email'));
+            email?.focus();
+        }
+    });
+}
+
+/**
+ * Live "passwords match" feedback rendered under a confirm field.
+ * @param {string} passId
+ * @param {string} confirmId
+ * @param {string} indicatorId
+ */
+function initPasswordMatch(passId, confirmId, indicatorId) {
+    const pass = /** @type {HTMLInputElement | null} */ (document.getElementById(passId));
+    const confirmEl = /** @type {HTMLInputElement | null} */ (document.getElementById(confirmId));
+    const out = document.getElementById(indicatorId);
+    if (!pass || !confirmEl || !out) return;
+    const update = () => {
+        if (!confirmEl.value) {
+            out.className = 'auth-match';
+            out.textContent = '';
+            return;
+        }
+        const ok = pass.value === confirmEl.value;
+        out.className = `auth-match show ${ok ? 'auth-match--ok' : 'auth-match--bad'}`;
+        out.textContent = ok
+            ? i18n.t('auth.passwordsMatch', 'Passwords match')
+            : i18n.t('auth.passwords_mismatch', "Passwords don't match");
+    };
+    pass.addEventListener('input', update);
+    confirmEl.addEventListener('input', update);
 }
 
 // Initialize login elements if on login page
@@ -993,6 +1107,13 @@ if (isLoginPage && loginForm) {
         const username = inputVal('login-username');
         const password = inputVal('login-password');
 
+        const loginSubmit = /** @type {HTMLButtonElement | null} */ (
+            document.getElementById('login-submit')
+        );
+        loginSubmit?.classList.add('is-loading');
+        loginSubmit?.setAttribute('aria-busy', 'true');
+        if (loginSubmit) loginSubmit.disabled = true;
+
         try {
             const data = await login(username, password);
 
@@ -1030,6 +1151,10 @@ if (isLoginPage && loginForm) {
         } catch (error) {
             loginError.textContent = errMessage(error) || 'Error logging in';
             loginError.style.display = 'block';
+        } finally {
+            loginSubmit?.classList.remove('is-loading');
+            loginSubmit?.removeAttribute('aria-busy');
+            if (loginSubmit) loginSubmit.disabled = false;
         }
     });
 }

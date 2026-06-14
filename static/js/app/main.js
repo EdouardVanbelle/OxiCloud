@@ -371,7 +371,7 @@ function setupActionsBarDelegation() {
                 if (recent) {
                     await recent.clearRecentFiles();
                     await recentView.init();
-                    ui.showNotification('Cleanup completed', 'Recent files history has been cleared');
+                    ui.showNotification(i18n.t('notif.cleanupCompleted'), i18n.t('notif.cleanupCompletedBody'));
                 }
                 break;
             default:

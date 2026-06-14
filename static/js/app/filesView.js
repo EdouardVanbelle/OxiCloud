@@ -153,6 +153,21 @@ let _groupBy = '';
 /** Whether the current sort order is reversed. */
 let _reversed = false;
 
+/**
+ * Flat column sort set by clicking a list-view header. When non-empty it
+ * overrides the group-by's `orderBy` and forces `_groupBy = ''`, so the list
+ * is a flat sort (no swimlanes) — the Drive/Finder column-sort behaviour.
+ * '' = follow the active group-by.
+ * @type {string}
+ */
+let _sortField = '';
+
+/** The order field the server is currently sorting by (group-by or flat). */
+function _currentOrderBy() {
+    if (_sortField) return _sortField;
+    return GROUP_BY_DEFS.find((d) => d.key === _groupBy)?.orderBy ?? 'name';
+}
+
 // ── Group-by controller (public API, consumed by navigation.js / main.js) ───
 
 /**
@@ -177,8 +192,11 @@ const filesView = {
      * @param {string} key  '' | 'type' | 'modifiedAt' | 'createdAt' | 'size'
      */
     setGroupBy(key) {
-        if (_groupBy === key) return;
+        // Re-pick the same group while a flat column-sort is active → still
+        // exit flat-sort and return to grouping, so don't early-return then.
+        if (_groupBy === key && !_sortField) return;
         _groupBy = key;
+        _sortField = ''; // grouping takes over → follow the group's order field
         viewPrefs.save('files', _groupBy, _reversed, viewPrefs.load('files').view);
         _nextCursor = null;
         _component?.clear();
@@ -197,6 +215,29 @@ const filesView = {
         _nextCursor = null;
         _component?.clear();
         _loadPage({ isFirstPage: true });
+    },
+
+    /**
+     * Flat-sort the list by a column field (clicking a list-view header).
+     * Drops any grouping (no swimlanes); re-picking the active field flips the
+     * direction. Synchronous state update — read `currentSort` right after to
+     * refresh the header arrow, the async reload follows.
+     * @param {string} field  'name' | 'type' | 'size' | 'modified_at'
+     */
+    setSortField(field) {
+        const sameField = _currentOrderBy() === field;
+        _reversed = sameField ? !_reversed : false;
+        _sortField = field;
+        _groupBy = '';
+        viewPrefs.save('files', _groupBy, _reversed, viewPrefs.load('files').view);
+        _nextCursor = null;
+        _component?.clear();
+        _loadPage({ isFirstPage: true });
+    },
+
+    /** Current effective sort `{ field, reversed }` — for the column-header arrows. */
+    get currentSort() {
+        return { field: _currentOrderBy(), reversed: _reversed };
     }
 };
 
@@ -315,7 +356,9 @@ async function _loadPage({ isFirstPage = false } = {}) {
 
     try {
         const def = GROUP_BY_DEFS.find((d) => d.key === _groupBy);
-        const orderBy = def?.orderBy ?? 'name';
+        // Flat column-sort (`_sortField`) overrides the group's order field. When
+        // it's set, `_groupBy` is '' so `def` has no keyFn → a flat list.
+        const orderBy = _currentOrderBy();
 
         const { items, nextCursor } = await fetchResourcesPage(app.currentPath, {
             cursor: _nextCursor,
@@ -334,6 +377,10 @@ async function _loadPage({ isFirstPage = false } = {}) {
 
         if (isFirstPage) {
             _component?.render(items, def?.keyFn, def?.labelFn);
+            // Keep the list-view column-header arrow in sync however the sort
+            // changed — header click, toolbar group-by, or direction toggle.
+            // No-op in grid view (no sortable headers present).
+            ui.updateListHeaderSort?.();
         } else {
             _component?.append(items, def?.keyFn, def?.labelFn);
         }
@@ -399,14 +446,18 @@ async function loadFiles(options = { insertHistory: true }) {
     _groupBy = _savedPrefs.groupBy;
     _reversed = _savedPrefs.reversed;
 
-    // Delay spinner so fast loads avoid the flash
+    // Delay the loading skeleton so fast loads avoid a flash of placeholders.
+    // Skeleton cards/rows hold the layout (no empty-list flash) and mirror the
+    // current view; reduced-motion is honoured via the global guard.
     const spinnerTimeout = setTimeout(() => {
-        ui.showError(`
-            <div class="files-loading-spinner">
-                <div class="spinner"></div>
-                <span>${i18n.t('files.loading')}</span>
-            </div>
-        `);
+        const isList = app.currentView === 'list';
+        const cell = isList
+            ? '<div class="skeleton-row"><div class="skeleton skeleton-icon"></div><div class="skeleton skeleton-line skeleton-line--medium"></div><div class="skeleton skeleton-line skeleton-line--short"></div></div>'
+            : '<div class="skeleton-card"><div class="skeleton skeleton-thumb"></div><div class="skeleton skeleton-line skeleton-line--medium"></div><div class="skeleton skeleton-line skeleton-line--short"></div></div>';
+        const wrapper = isList ? 'files-skeleton' : 'files-grid-view files-skeleton';
+        ui.showError(
+            `<div class="${wrapper}" role="status" aria-busy="true" aria-label="${i18n.t('files.loading')}">${cell.repeat(8)}</div>`
+        );
     }, 100);
 
     // A temporary guard: _loadPage sets _loading itself, but we need to

@@ -1,6 +1,7 @@
 import { getCsrfHeaders } from '../../core/csrf.js';
 import { installFetchInterceptor } from '../../core/fetchWrapper.js';
 import { i18n } from '../../core/i18n.js';
+import { formatRelativeTime } from '../../core/formatters.js';
 import { oxiIconsInit } from '../../core/icons.js';
 import { resizeImageToDataUrl } from '../../utils/imageResize.js';
 
@@ -32,14 +33,7 @@ function formatBytes(bytes) {
 /** @param {string | null | undefined} dateStr */
 function timeAgo(dateStr) {
     if (!dateStr) return i18n.t('profile.never');
-    const d = new Date(dateStr);
-    const now = Date.now();
-    const secs = Math.floor((now - d.valueOf()) / 1000);
-    if (secs < 60) return i18n.t('profile.just_now');
-    if (secs < 3600) return i18n.t('profile.minutes_ago', { n: Math.floor(secs / 60) });
-    if (secs < 86400) return i18n.t('profile.hours_ago', { n: Math.floor(secs / 3600) });
-    if (secs < 2592000) return i18n.t('profile.days_ago', { n: Math.floor(secs / 86400) });
-    return d.toLocaleDateString();
+    return formatRelativeTime(dateStr);
 }
 
 // ── Avatar helpers ─────────────────────────────────────────────────────────────

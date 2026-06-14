@@ -27,8 +27,11 @@ function formatFileSize(bytes) {
     const k = 1024;
     const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const num = new Intl.NumberFormat(i18n.getCurrentLocale(), { maximumFractionDigits: 2 }).format(
+        bytes / k ** i
+    );
 
-    return `${parseFloat((bytes / k ** i).toFixed(2))} ${sizes[i]}`;
+    return `${num} ${sizes[i]}`;
 }
 
 /// Formats a byte count for quota display. When bytes is 0, returns "∞" (unlimited).
@@ -58,7 +61,8 @@ function formatDateTime(value) {
         dateValue = new Date(value);
     }
     if (Number.isNaN(dateValue.getTime())) return String(value);
-    return `${dateValue.toLocaleDateString()} ${dateValue.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    const loc = i18n.getCurrentLocale();
+    return `${dateValue.toLocaleDateString(loc)} ${dateValue.toLocaleTimeString(loc, { hour: '2-digit', minute: '2-digit' })}`;
 }
 
 /**
@@ -70,11 +74,42 @@ function formatDateShort(value) {
     if (!value) return 'N/A';
     const dateValue = typeof value === 'number' ? new Date(value * 1000) : new Date(value);
     if (Number.isNaN(dateValue.getTime())) return String(value);
-    return dateValue.toLocaleDateString(undefined, {
+    return dateValue.toLocaleDateString(i18n.getCurrentLocale(), {
         year: 'numeric',
         month: 'short',
         day: 'numeric'
     });
+}
+
+/**
+ * Locale-aware "time ago" via Intl.RelativeTimeFormat (replaces the per-view
+ * hand-rolled timeAgo helpers).
+ * @param {Date | number | string | null} value
+ * @returns {string}
+ */
+function formatRelativeTime(value) {
+    if (!value) return '';
+    const date =
+        value instanceof Date
+            ? value
+            : new Date(typeof value === 'number' && value < 1e12 ? value * 1000 : value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    const diffSec = Math.round((date.getTime() - Date.now()) / 1000);
+    const abs = Math.abs(diffSec);
+    const rtf = new Intl.RelativeTimeFormat(i18n.getCurrentLocale(), { numeric: 'auto' });
+    /** @type {Array<[Intl.RelativeTimeFormatUnit, number]>} */
+    const units = [
+        ['year', 31536000],
+        ['month', 2592000],
+        ['week', 604800],
+        ['day', 86400],
+        ['hour', 3600],
+        ['minute', 60]
+    ];
+    for (const [unit, secs] of units) {
+        if (abs >= secs) return rtf.format(Math.round(diffSec / secs), unit);
+    }
+    return rtf.format(diffSec, 'second');
 }
 
 const TEXT_TYPES = [
@@ -363,6 +398,7 @@ export {
     formatExpiryDate,
     formatFileSize,
     formatQuotaSize,
+    formatRelativeTime,
     isEmailValid,
     isTextViewable,
     normalizeDateBucket,

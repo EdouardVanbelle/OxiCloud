@@ -191,10 +191,16 @@ fn process_release(manifest_dir: &Path, static_dir: &Path, out_dir: &Path) {
     minify_tree_js(&dist_dir.join("js"));
 
     // ── 7. Rewrite index.html ────────────────────────────────────────────────
+    // Inline the tiny render-blocking theme-init.js (classic script) so the
+    // critical path drops a request. Other pages keep the external reference.
+    let theme_init_min = js_minify_script_safe(
+        &fs::read_to_string(static_dir.join("js/core/theme-init.js")).unwrap_or_default(),
+    );
     let rewritten_index = rewrite_index_html(
         &index_html,
         &format!("/css/{css_name}"),
         &format!("/js/{js_name}"),
+        &theme_init_min,
     );
     fs::write(dist_dir.join("index.html"), &rewritten_index).expect("write dist index.html");
 
@@ -1099,13 +1105,48 @@ fn json_minify(source: &str) -> String {
 ///   - Collapse all `<link stylesheet href="/css/…">` into the single CSS bundle.
 ///   - Replace all `<script type="module" src="…">` with the single JS bundle.
 ///   - Leave `theme-init.js` and `sw-register.js` as external src references.
-fn rewrite_index_html(html: &str, css_path: &str, js_path: &str) -> String {
-    let mut out: Vec<String> = Vec::with_capacity(html.lines().count());
+fn rewrite_index_html(html: &str, css_path: &str, js_path: &str, theme_init_js: &str) -> String {
+    let mut out: Vec<String> = Vec::with_capacity(html.lines().count() + 3);
     let mut css_done = false;
     let mut js_done = false;
 
     for line in html.lines() {
         let t = line.trim();
+
+        // ── Early resource hints, injected right after <meta charset> ────────
+        // The render-blocking classic theme-init <script> below would otherwise
+        // delay discovery of the parser-blocked stylesheet/module bundles.
+        // Preloading them near the top of <head> lets the preload scanner fetch
+        // both critical bundles in parallel with (not behind) theme-init.
+        // Placed after <meta charset> so charset stays the first element.
+        // Costs two tags; saves a serialized RTT.
+        if t.starts_with("<meta charset") {
+            out.push(line.to_string());
+            out.push(
+                "    <!-- Early resource hints (build.rs): fetch critical bundles up front -->"
+                    .to_string(),
+            );
+            out.push(format!(
+                "    <link rel=\"preload\" href=\"{css_path}\" as=\"style\">"
+            ));
+            out.push(format!(
+                "    <link rel=\"modulepreload\" href=\"{js_path}\">"
+            ));
+            continue;
+        }
+
+        // ── Inline the tiny render-blocking theme-init script ────────────────
+        // It must run before paint (avoids a theme flash) and is only ~400B, so
+        // inlining drops one request off the critical path. Falls back to the
+        // external <script src> if the source couldn't be read/minified.
+        if t.starts_with("<script") && t.contains("theme-init.js") {
+            if theme_init_js.trim().is_empty() {
+                out.push(line.to_string());
+            } else {
+                out.push(format!("    <script>{}</script>", theme_init_js.trim()));
+            }
+            continue;
+        }
 
         // ── Replace all stylesheet <link>s with single bundle ────────────────
         if t.starts_with("<link") && t.contains("stylesheet") && t.contains("href=\"/css/") {

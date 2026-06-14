@@ -58,6 +58,8 @@ pub fn admin_routes() -> Router<Arc<AppState>> {
         .route("/settings/registration", put(set_registration_setting))
         // Audio metadata
         .route("/audio/metadata/reextract", post(reextract_audio_metadata))
+        // Image/video capture metadata (Photos timeline backfill)
+        .route("/photos/metadata/reextract", post(reextract_image_metadata))
         // SMTP diagnostics
         .route("/smtp/info", get(get_smtp_info))
         .route("/smtp/test", post(send_smtp_test))
@@ -1210,6 +1212,32 @@ async fn reextract_audio_metadata(
 
     Ok(Json(serde_json::json!({
         "message": "Audio metadata extraction complete",
+        "total": result.total,
+        "processed": result.processed,
+        "failed": result.failed,
+    })))
+}
+
+/// Backfill image/video capture dates (EXIF / container creation time) into
+/// `storage.file_metadata` for every existing media file, re-bucketing the
+/// Photos timeline by real capture date. Safe to re-run (idempotent upsert).
+async fn reextract_image_metadata(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AppError> {
+    admin_guard(&state, &headers).await?;
+
+    let result = state
+        .applications
+        .media_metadata_service
+        .reextract_all_image_metadata()
+        .await
+        .map_err(|e| {
+            AppError::internal_error(format!("Failed to re-extract capture metadata: {}", e))
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "message": "Image/video capture-metadata extraction complete",
         "total": result.total,
         "processed": result.processed,
         "failed": result.failed,

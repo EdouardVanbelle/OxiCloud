@@ -1,0 +1,146 @@
+/* ============================================================
+ * Accessibility baseline — keyboard focus.
+ *
+ * Pointer / programmatic focus stays ring-free (no "ring on every
+ * click" noise); KEYBOARD focus (:focus-visible) always gets a clear
+ * accent ring. Every interactive element inherits this automatically,
+ * so components only need their own :focus-visible rule when they want
+ * a custom ring — and must never strip it for keyboard users.
+ *
+ * The outline follows the element's border-radius in modern browsers,
+ * so rounded controls get a rounded ring for free.
+ * ============================================================ */
+
+:focus:not(:focus-visible) {
+    outline: none;
+}
+
+:focus-visible {
+    outline: 2px solid var(--color-focus-ring);
+    outline-offset: 2px;
+}
+
+/* Skip link — visually hidden until focused, then slides in at top-left.
+   Lets keyboard users jump straight to <main id="main">. */
+.skip-link {
+    position: absolute;
+    top: var(--space-2);
+    left: var(--space-2);
+    z-index: var(--z-max);
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-bg-surface);
+    color: var(--color-text);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-lg);
+    transform: translateY(-150%);
+    transition: transform var(--motion-fast) var(--ease-standard);
+}
+
+.skip-link:focus {
+    transform: translateY(0);
+}
+
+/* ── prefers-reduced-motion ──────────────────────────────────
+   Vestibular safety: near-instant transitions/animations and no
+   smooth scroll for users who ask the OS to reduce motion. */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+}
+
+/* ── prefers-contrast: more ──────────────────────────────────
+   Collapse the muted text tiers up to the stronger secondary tier and
+   thicken the focus ring. The high-contrast border ramp (raw colour) lives
+   in base/variables.css — the token layer — so this file stays hex-free. */
+@media (prefers-contrast: more) {
+    :root {
+        --color-text-muted: var(--color-text-secondary);
+        --color-text-subtle: var(--color-text-secondary);
+        --color-text-faint: var(--color-text-secondary);
+    }
+
+    :focus-visible {
+        outline-width: 3px;
+    }
+}
+
+/* ── forced-colors (Windows High Contrast) ───────────────────
+   Custom colors are overridden by the OS; ensure the keyboard
+   focus ring uses a real system colour. */
+@media (forced-colors: active) {
+    :focus-visible {
+        outline-color: Highlight;
+    }
+}
+
+/* ── Global error-boundary toast (js/core/errorBoundary.js) ─── */
+.error-toast {
+    position: fixed;
+    bottom: var(--space-5);
+    left: 50%;
+    z-index: var(--z-toast);
+    max-width: min(90vw, 420px);
+    padding: var(--space-3) var(--space-4);
+    background: var(--color-error-bg);
+    color: var(--color-error-text);
+    border: 1px solid var(--color-badge-error-border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+    font-size: var(--text-sm);
+    transform: translate(-50%, calc(100% + var(--space-5)));
+    transition: transform var(--motion-base) var(--ease-standard);
+}
+
+.error-toast.is-visible {
+    transform: translate(-50%, 0);
+}
+
+/* ── Print: drop the app chrome, show clean content ────────── */
+@media print {
+    .sidebar,
+    .sidebar-overlay,
+    .top-bar,
+    .actions-bar,
+    .page-sticky-header,
+    .cmdk-overlay,
+    .skip-link,
+    .error-toast {
+        display: none !important;
+    }
+
+    .content-area,
+    .main-content {
+        overflow: visible !important;
+    }
+
+    * {
+        box-shadow: none !important;
+    }
+}
+
+/* ── Touch targets ───────────────────────────────────────────
+   ≥44px hit areas for the key controls on touch/phone widths. */
+@media (max-width: 768px) {
+    .sidebar-toggle,
+    .search-toggle-btn,
+    .search-back-btn,
+    .notif-bell-btn,
+    .user-avatar-btn {
+        min-width: 44px;
+        min-height: 44px;
+    }
+
+    .nav-item {
+        min-height: 44px;
+    }
+
+    .files-list-view .file-item {
+        min-height: 48px;
+    }
+}

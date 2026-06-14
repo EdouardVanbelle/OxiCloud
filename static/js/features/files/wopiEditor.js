@@ -7,6 +7,7 @@
 
 import { loadFiles } from '../../app/filesView.js';
 import { ui } from '../../app/ui.js';
+import { i18n } from '../../core/i18n.js';
 
 class WopiEditor {
     constructor() {
@@ -54,7 +55,7 @@ class WopiEditor {
             window.open(hostUrl, '_blank');
         } catch (error) {
             console.error('Failed to open WOPI editor in tab:', error);
-            ui.showNotification('Could not open the document editor.', 'error');
+            ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.wopiOpenError'));
         }
     }
 

@@ -5,27 +5,32 @@
 
 .user-avatar-btn {
     background: none;
-    border: 2px solid transparent;
+    border: none;
     border-radius: 50%;
-    padding: 2px;
+    padding: 0;
     cursor: pointer;
-    transition: all 0.25s ease;
+    transition: transform var(--motion-base) var(--ease-standard);
     display: flex;
     align-items: center;
     justify-content: center;
 }
 
+/* Premium hover: ONE soft accent ring hugging the avatar + a gentle warm glow
+   + a subtle pop — replaces the old heavy double halo (button border ring with
+   a gap + a second avatar ring). */
 .user-avatar-btn:hover {
-    border-color: var(--color-accent-ring-xl);
     transform: scale(1.05);
 }
 
 .user-avatar-btn:hover .user-vignette__avatar {
-    box-shadow: 0 0 0 2px var(--color-accent-ring-strong);
+    box-shadow:
+        0 0 0 3px var(--color-accent-ring),
+        0 3px 12px -2px var(--color-accent-shadow);
 }
 
-.user-menu-wrapper.open .user-avatar-btn {
-    border-color: var(--color-accent);
+/* Menu open: a slightly firmer ring (same clean single-ring language). */
+.user-menu-wrapper.open .user-avatar-btn .user-vignette__avatar {
+    box-shadow: 0 0 0 3px var(--color-accent-ring-strong);
 }
 
 /* ── Avatar vignette overrides ────────────────────────────────────────────── */
@@ -37,6 +42,9 @@
 .user-avatar-btn .user-vignette__avatar {
     letter-spacing: 0.5px;
     user-select: none;
+    /* Animate the ring/glow smoothly in AND out (transition on the base, not
+       :hover). */
+    transition: box-shadow var(--motion-base) var(--ease-standard);
 }
 
 .user-menu-header .user-vignette__avatar {
@@ -52,7 +60,7 @@
     left: auto;
     width: 300px;
     background: var(--color-bg-surface);
-    border-radius: 16px;
+    border-radius: var(--radius-3xl);
     box-shadow:
         0 12px 40px var(--color-shadow-md),
         0 0 0 1px var(--color-shadow-xs);
@@ -84,8 +92,8 @@
 .user-menu-header {
     display: flex;
     align-items: center;
-    gap: 14px;
-    padding: 20px 20px 16px;
+    gap: var(--space-3-5);
+    padding: var(--space-5) var(--space-5) var(--space-4);
     background: var(--color-user-menu-header-bg);
     border-bottom: 1px solid var(--color-user-menu-header-border);
 }
@@ -99,7 +107,7 @@
 /* Increase name prominence relative to the base vignette style. */
 .user-menu-header .user-vignette__name {
     font-size: 15px;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--color-text-heading);
 }
 
@@ -109,23 +117,23 @@
 }
 
 .user-menu-storage {
-    padding: 14px 20px;
+    padding: var(--space-3-5) var(--space-5);
 }
 
 .user-menu-storage-label {
     display: flex;
     align-items: center;
-    gap: 8px;
-    font-size: 12px;
-    font-weight: 600;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+    font-weight: var(--weight-semibold);
     color: var(--color-text-subtle);
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    margin-bottom: 8px;
+    margin-bottom: var(--space-2);
 }
 
 .user-menu-storage-label i {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--color-text-faint);
 }
 
@@ -134,7 +142,7 @@
     background: var(--color-border-light);
     border-radius: 3px;
     overflow: hidden;
-    margin-bottom: 6px;
+    margin-bottom: var(--space-1-5);
 }
 
 .user-menu-storage-fill {
@@ -153,25 +161,26 @@
 .user-menu-divider {
     height: 1px;
     background: var(--color-border-light);
-    margin: 4px 0;
+    margin: var(--space-1) 0;
 }
 
 .user-menu-item {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: var(--space-3);
     width: 100%;
-    padding: 12px 20px;
+    padding: var(--space-3) var(--space-5);
     border: none;
     background: none;
     color: var(--color-text-dark);
-    font-size: 14px;
+    font-size: var(--text-base);
     cursor: pointer;
     transition: background 0.15s ease;
     text-align: left;
 }
 
-.user-menu-item:hover {
+.user-menu-item:hover,
+.user-menu-item:focus-visible {
     background: var(--color-bg-hover);
 }
 
@@ -200,9 +209,9 @@
     display: inline-flex;
     background: var(--color-bg-muted);
     border: 1px solid var(--color-border);
-    border-radius: 999px;
-    padding: 2px;
-    gap: 2px;
+    border-radius: var(--radius-full);
+    padding: var(--space-0-5);
+    gap: var(--space-0-5);
 }
 
 .theme-segmented__opt {
@@ -214,9 +223,9 @@
     border: none;
     background: transparent;
     color: var(--color-text-subtle);
-    border-radius: 999px;
+    border-radius: var(--radius-full);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0;
     transition:
         background 0.15s ease,
@@ -249,17 +258,17 @@
 }
 
 .user-menu-role-badge {
-    padding: 0 20px 4px;
+    padding: 0 var(--space-5) var(--space-1);
 }
 
 .role-badge {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    font-size: 11px;
-    font-weight: 600;
-    padding: 2px 10px;
-    border-radius: 10px;
+    gap: var(--space-1);
+    font-size: var(--text-2xs);
+    font-weight: var(--weight-semibold);
+    padding: var(--space-0-5) var(--space-2-5);
+    border-radius: var(--radius-xl);
 }
 
 .role-badge-admin {
@@ -273,7 +282,7 @@
 
 .user-menu-logout {
     color: var(--color-danger-alt);
-    margin-bottom: 4px;
+    margin-bottom: var(--space-1);
 }
 
 .user-menu-logout i {

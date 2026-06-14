@@ -16,7 +16,7 @@ import { wopiEditor } from '../features/files/wopiEditor.js';
 import { recent } from '../features/library/recent.js';
 import { buildBatchDownloadUrl } from '../utils/download.js';
 import { positionMenu } from '../utils/menuPosition.js';
-import { loadFiles } from './filesView.js';
+import { loadFiles, filesView } from './filesView.js';
 import { updateHistory } from './main.js';
 import { activateFilesUI, switchToFilesSection, syncViewContainers } from './navigation.js';
 import { app } from './state.js';
@@ -497,10 +497,14 @@ const ui = {
             separator.textContent = '>';
             breadcrumb?.appendChild(separator);
 
-            // Segment item
+            // Segment item. The home folder's raw name ("My Folder - admin")
+            // is a technical default — show the friendly "Files" label for it
+            // (the real name stays as the tooltip).
             const item = document.createElement('span');
             item.className = 'breadcrumb-item';
-            item.textContent = segment.name;
+            const isHomeFolder = app.userHomeFolderId && segment.id === app.userHomeFolderId;
+            item.textContent = isHomeFolder ? i18n.t('nav.files') : segment.name;
+            if (isHomeFolder) item.title = segment.name;
             item.dataset.folderId = segment.id;
 
             if (!isLast) {
@@ -1007,21 +1011,65 @@ const ui = {
         // Let ui.js delegation handle this container again
         delete filesList.dataset.managedBy;
 
+        // A clickable, flat-sorting column header (Drive-style). The arrow is
+        // shown only on the active column; direction toggles on re-click.
+        const sortCol = (field, key, label) =>
+            `<button type="button" class="list-header-sort" data-sort-field="${field}">` +
+            `<span data-i18n="${key}">${label}</span>` +
+            `<i class="fas fa-arrow-up list-header-sort__arrow hidden" aria-hidden="true"></i></button>`;
+
         filesList.innerHTML = `
             <div class="list-header">
                 <div class="list-header-checkbox"><input type="checkbox" id="select-all-checkbox" title="Select all"></div>
-                <div data-i18n="files.name">Name</div>
+                ${sortCol('name', 'files.name', 'Name')}
                 <div class="owner-cell${this._ownerVisible ? '' : ' hidden'}" data-i18n="files.owner">Owner</div>
-                <div data-i18n="files.type">Type</div>
-                <div data-i18n="files.size">Size</div>
-                <div data-i18n="files.modified">Modified</div>
+                ${sortCol('type', 'files.type', 'Type')}
+                ${sortCol('size', 'files.size', 'Size')}
+                ${sortCol('modified_at', 'files.modified', 'Modified')}
                 <div></div><!-- actions -->
             </div>`;
 
         i18n.translateElement(filesList);
 
+        // Wire column-header sorting; _loadPage doesn't rebuild the header, so
+        // reflect the new sort in-place after each click.
+        filesList.querySelectorAll('.list-header-sort').forEach((el) => {
+            el.addEventListener('click', () => {
+                filesView.setSortField(/** @type {HTMLElement} */ (el).dataset.sortField || 'name');
+                this.updateListHeaderSort();
+            });
+        });
+        this.updateListHeaderSort();
+
         filesList.classList.remove('hidden');
         filesContainerError?.classList.add('hidden');
+    },
+
+    /**
+     * Reflect filesView's active sort on the list-view column headers: highlight
+     * the active column, point its arrow, and describe the state for AT.
+     * @returns {void}
+     */
+    updateListHeaderSort() {
+        const { field, reversed } = filesView.currentSort;
+        document.querySelectorAll('#files-list .list-header-sort').forEach((el) => {
+            const btn = /** @type {HTMLElement} */ (el);
+            const active = btn.dataset.sortField === field;
+            btn.classList.toggle('is-active', active);
+            const colName = btn.querySelector('span')?.textContent || '';
+            btn.setAttribute(
+                'aria-label',
+                active
+                    ? `${colName}: ${reversed ? i18n.t('sort.desc', 'descending') : i18n.t('sort.asc', 'ascending')}`
+                    : colName
+            );
+            const arrow = btn.querySelector('.list-header-sort__arrow');
+            if (arrow) {
+                arrow.classList.toggle('hidden', !active);
+                arrow.classList.toggle('fa-arrow-down', active && reversed);
+                arrow.classList.toggle('fa-arrow-up', !(active && reversed));
+            }
+        });
     },
 
     showEmptyList() {
@@ -1029,7 +1077,14 @@ const ui = {
                 <i class="fas fa-folder-open empty-state-icon"></i>
                 <p data-i18n="files.no_files"></p>
                 <p data-i18n="files.empty_hint"></p>
+                <button type="button" class="btn btn-primary" id="empty-upload-btn">
+                    <i class="fas fa-cloud-upload-alt" aria-hidden="true"></i>
+                    <span data-i18n="actions.upload_files">Upload files</span>
+                </button>
             `);
+        document.getElementById('empty-upload-btn')?.addEventListener('click', () => {
+            document.getElementById('file-input')?.click();
+        });
     },
 
     /**

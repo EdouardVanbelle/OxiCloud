@@ -2,6 +2,9 @@
 @import url("./base/variables.css");
 
 @import url("./base/reset.css");
+@import url("./base/typography.css");
+@import url("./base/animations.css");
+@import url("./base/a11y.css");
 @import url("./base/forms.css");
 
 /* Layout */
@@ -10,6 +13,7 @@
 @import url("./layout/content.css");
 
 /* Components */
+@import url("./components/brandLogo.css");
 @import url("./components/breadcrumb.css");
 @import url("./components/buttons.css");
 @import url("./components/fileType.css");
@@ -32,10 +36,12 @@
 @import url("./components/languageSelector.css");
 @import url("./components/batchToolbar.css");
 @import url("./components/spinner.css");
+@import url("./components/skeleton.css");
 @import url("./components/search.css");
 @import url("./components/icons.css");
 @import url("./components/csp-utilities.css");
 @import url("./components/itemTooltip.css");
+@import url("./components/commandPalette.css");
 
 /* Theme */
 @import url("./themes/dark.css");

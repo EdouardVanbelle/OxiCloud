@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -9,6 +9,20 @@
     <meta name="color-scheme" content="light dark">
     <title data-i18n="app.title">OxiCloud</title>
     <link rel="icon" type="image/svg+xml" href="/logo/logo-plain.svg">
+    <link rel="icon" href="/favicon.ico" sizes="32x32">
+    <link rel="apple-touch-icon" href="/logo/apple-touch-icon.png">
+    <link rel="mask-icon" href="/logo/logo-plain.svg" color="#ff5e3a">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f7fa">
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f172a">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="OxiCloud">
+    <meta property="og:description" content="Fast, private cloud storage built with Rust.">
+    <meta property="og:image" content="/logo/og-image.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="OxiCloud">
+    <meta name="twitter:description" content="Fast, private cloud storage built with Rust.">
+    <meta name="twitter:image" content="/logo/og-image.png">
     <!-- Apply saved theme immediately to prevent flash of light mode -->
     <script src="/js/core/theme-init.js"></script>
 
@@ -25,6 +39,7 @@
     <link rel="stylesheet" href="/css/views/music.css">
 
     <!-- Scripts (defer: download in parallel, execute in order, after HTML parsed) -->
+    <script defer type="module" src="/js/core/errorBoundary.js"></script>
     <script defer type="module" src="/js/core/i18n.js"></script>
     <script defer type="module" src="/js/core/csrf.js"></script>
     <script defer type="module" src="/js/core/languageSelector.js"></script>
@@ -52,6 +67,7 @@
     <script defer type="module" src="/js/app/navigation.js"></script>
     <script defer type="module" src="/js/app/authSession.js"></script>
     <script defer type="module" src="/js/app/userMenu.js"></script>
+    <script defer type="module" src="/js/app/commandPalette.js"></script>
     <script defer type="module" src="/js/app/filesView.js"></script>
     <script defer type="module" src="/js/views/trash/trashView.js"></script>
     <script defer type="module" src="/js/app/searchView.js"></script>
@@ -62,6 +78,7 @@
     <script defer src="/js/core/sw-register.js"></script>
 </head>
 <body>
+    <a href="#main" class="skip-link" data-i18n="a11y.skip_to_content">Skip to content</a>
     <!-- Mobile sidebar overlay -->
     <div class="sidebar-overlay" id="sidebar-overlay"></div>
     <!-- Sidebar -->
@@ -76,40 +93,40 @@
             <div class="app-name">OxiCloud</div>
         </a>
 
-        <div class="nav-menu">
-            <div class="nav-item">
-                <i class="fas fa-folder"></i>
+        <nav class="nav-menu" aria-label="Primary" data-i18n-aria-label="nav.primary">
+            <button class="nav-item" type="button">
+                <i class="fas fa-folder" aria-hidden="true"></i>
                 <span data-i18n="nav.files">Files</span>
-            </div>
-            <div class="nav-item" id="nav-shared">
-                <i class="fas fa-oxiexport"></i>
+            </button>
+            <button class="nav-item" type="button" id="nav-shared">
+                <i class="fas fa-oxiexport" aria-hidden="true"></i>
                 <span data-i18n="nav.shared">Shared</span>
-            </div>
-            <div class="nav-item" id="nav-sharedwithme">
-                <i class="fas fa-oxiimport"></i>
+            </button>
+            <button class="nav-item" type="button" id="nav-sharedwithme">
+                <i class="fas fa-oxiimport" aria-hidden="true"></i>
                 <span data-i18n="nav.sharedwithme">Shared with me</span>
-            </div>
-            <div class="nav-item">
-                <i class="fas fa-clock"></i>
+            </button>
+            <button class="nav-item" type="button">
+                <i class="fas fa-clock" aria-hidden="true"></i>
                 <span data-i18n="nav.recent">Recent</span>
-            </div>
-            <div class="nav-item">
-                <i class="fas fa-star"></i>
+            </button>
+            <button class="nav-item" type="button">
+                <i class="fas fa-star" aria-hidden="true"></i>
                 <span data-i18n="nav.favorites">Favorites</span>
-            </div>
-            <div class="nav-item" id="nav-photos">
-                <i class="fas fa-images"></i>
+            </button>
+            <button class="nav-item" type="button" id="nav-photos">
+                <i class="fas fa-images" aria-hidden="true"></i>
                 <span data-i18n="nav.photos">Photos</span>
-            </div>
-            <div class="nav-item" id="nav-music">
-                <i class="fas fa-music"></i>
+            </button>
+            <button class="nav-item" type="button" id="nav-music">
+                <i class="fas fa-music" aria-hidden="true"></i>
                 <span data-i18n="nav.music">Music</span>
-            </div>
-            <div class="nav-item">
-                <i class="fas fa-trash"></i>
+            </button>
+            <button class="nav-item" type="button">
+                <i class="fas fa-trash" aria-hidden="true"></i>
                 <span data-i18n="nav.trash">Trash</span>
-            </div>
-        </div>
+            </button>
+        </nav>
 
         <div class="storage-container">
             <div class="storage-title"><i class="fas fa-database"></i> <span data-i18n="storage.title">Storage</span></div>
@@ -125,7 +142,7 @@
         <!-- Top Bar -->
         <div class="top-bar">
             <!-- Mobile menu toggle -->
-            <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation menu">
+            <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle navigation menu" aria-controls="sidebar" aria-expanded="false">
                 <i class="fas fa-bars"></i>
             </button>
             <!-- Mobile search icon (replaces full bar on small screens) -->
@@ -152,8 +169,8 @@
             <div class="user-controls">
                 <!-- Notification Bell -->
                 <div class="notif-wrapper" id="notif-wrapper">
-                    <button class="notif-bell-btn" id="notif-bell-btn" title="Notifications">
-                        <i class="fas fa-bell"></i>
+                    <button class="notif-bell-btn" id="notif-bell-btn" title="Notifications" aria-label="Notifications" data-i18n-aria-label="notifications.title" aria-haspopup="true">
+                        <i class="fas fa-bell" aria-hidden="true"></i>
                         <span class="notif-badge hidden" id="notif-badge">0</span>
                     </button>
                     <div class="notif-panel" id="notif-panel">
@@ -173,7 +190,7 @@
                 </div>
 
                 <div class="user-menu-wrapper" id="user-menu-wrapper">
-                    <button class="user-avatar-btn" id="user-avatar-btn">
+                    <button class="user-avatar-btn" id="user-avatar-btn" aria-label="User menu" aria-haspopup="true">
                         <!-- avatar-only userVignette mounted here by updateUserMenuData() -->
                     </button>
                     <div class="user-menu" id="user-menu">
@@ -209,7 +226,7 @@
                         <div class="user-menu-divider hidden" id="user-menu-admin-divider"></div>
                         <div id="language-selector"></div>
                         <div class="user-menu-item user-menu-item--theme">
-                            <i class="fas fa-moon"></i>
+                            <i class="fas fa-adjust" aria-hidden="true"></i>
                             <span data-i18n="user_menu.appearance">Appearance</span>
                             <div class="theme-segmented" id="user-menu-theme-segmented" role="radiogroup" data-i18n-aria-label="user_menu.appearance" aria-label="Appearance">
                                 <button type="button" class="theme-segmented__opt" data-mode="light"
@@ -246,7 +263,7 @@
             </div>
         </div>
 
-        <div class="content-area">
+        <div class="content-area" role="main" id="main">
             <h1 class="page-title" data-i18n="nav.files">Files</h1>
 
             <div class="page-sticky-header" id="page-sticky-header">
@@ -284,14 +301,14 @@
 
     <!-- Input Modal (for New Folder, Rename, etc.) -->
     <div id="input-modal" class="modal-overlay hidden">
-        <div class="modal-container">
+        <div class="modal-container" role="dialog" aria-modal="true" aria-labelledby="modal-title">
             <div class="modal-header">
                 <div class="modal-icon">
                     <i id="modal-icon" class="fas fa-folder-plus"></i>
                 </div>
-                <h3 id="modal-title" data-i18n="dialogs.new_folder_title">New folder</h3>
-                <button class="modal-close-btn" id="modal-close-btn">
-                    <i class="fas fa-times"></i>
+                <h2 id="modal-title" data-i18n="dialogs.new_folder_title">New folder</h2>
+                <button class="modal-close-btn" id="modal-close-btn" aria-label="Close" data-i18n-aria-label="actions.close">
+                    <i class="fas fa-times" aria-hidden="true"></i>
                 </button>
             </div>
             <div class="modal-body">
@@ -308,11 +325,11 @@
 
     <!-- About Modal -->
     <div class="about-modal-overlay hidden" id="about-modal-overlay">
-        <div class="about-modal">
+        <div class="about-modal" role="dialog" aria-modal="true" aria-labelledby="about-modal-title">
             <div class="about-modal-logo">
-                <i class="fas fa-cloud"></i>
+                <svg viewBox="120 120 280 280"><path d="M345 310c32 0 58-26 58-58s-26-58-58-58c-6.2 0-12 0.9-17.5 2.7C318 166 289 143 255 143c-34.3 0-63.1 22.6-73 53.7C176.9 195.7 171 195 165 195c-32 0-58 26-58 58s26 58 58 58h180z"/></svg>
             </div>
-            <h2>OxiCloud</h2>
+            <h2 id="about-modal-title">OxiCloud</h2>
             <div class="about-version" id="about-version">v...</div>
             <div class="about-description" data-i18n="user_menu.about_description">
                 Cloud storage platform built with Rust &amp; Clean Architecture. Fast, secure, and private.
@@ -336,9 +353,6 @@
     </div>
 
     <div id="debug"></div>
-
-    <!-- Upload Progress Toast (hidden – driven by notification bell) -->
-    <div class="upload-toast hidden" id="upload-toast"></div>
 
 </body>
 </html>

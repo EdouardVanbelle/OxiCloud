@@ -7,7 +7,7 @@
 .upload-dropdown .btn-primary {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: var(--space-1-5);
 }
 
 .upload-dropdown-menu {
@@ -17,7 +17,7 @@
     left: 0;
     min-width: 200px;
     background: var(--color-bg-surface);
-    border-radius: 12px;
+    border-radius: var(--radius-2xl);
     box-shadow: 0 8px 30px var(--color-shadow-md);
     border: 1px solid var(--color-border);
     z-index: 1000;
@@ -39,13 +39,13 @@
 .upload-dropdown-item {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: var(--space-3);
     width: 100%;
-    padding: 12px 16px;
+    padding: var(--space-3) var(--space-4);
     border: none;
     background: none;
     color: var(--color-text-dark);
-    font-size: 14px;
+    font-size: var(--text-base);
     cursor: pointer;
     transition: background 0.15s ease;
     text-align: left;
@@ -71,6 +71,6 @@
 }
 
 .upload-caret {
-    margin-left: 4px;
-    font-size: 12px;
+    margin-left: var(--space-1);
+    font-size: var(--text-xs);
 }

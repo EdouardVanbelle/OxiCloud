@@ -57,6 +57,18 @@ check:
     cargo fmt --all
     cargo clippy --all-features --all-targets -- -D warnings
 
+# Frontend design-system / a11y guardrails — pure Node, no extra deps.
+# Single gate: WCAG contrast, heading order, locale completeness, dead tokens,
+# brand-mark drift.
+# (Also run `stylelint static/css/**/*.css`, `biome check`, `tsc -p jsconfig.json
+#  --noEmit` once node_modules is installed — those need devDependencies.)
+frontend-check:
+    node scripts/check-contrast.mjs
+    node scripts/check-headings.mjs
+    node scripts/check-locales.mjs
+    node scripts/check-dead-tokens.mjs
+    node scripts/check-brand-drift.mjs
+
 # audit security (condition: cargo install cargo-audit)
 audit:
     cargo audit

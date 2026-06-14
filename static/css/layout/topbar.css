@@ -15,7 +15,7 @@
     border-bottom: 1px solid var(--color-border);
     display: flex;
     align-items: center;
-    padding: 0 30px;
+    padding: 0 var(--gutter);
     justify-content: space-between;
     flex-shrink: 0;
 }
@@ -25,14 +25,14 @@
     display: none;
     background: none;
     border: none;
-    padding: 10px;
+    padding: var(--space-2-5);
     cursor: pointer;
     color: var(--color-text-secondary);
-    border-radius: 8px;
+    border-radius: var(--radius-lg);
     transition:
         background-color 0.2s,
         color 0.2s;
-    margin-right: 12px;
+    margin-right: var(--space-3);
     flex-shrink: 0;
 }
 
@@ -42,7 +42,7 @@
 }
 
 .sidebar-toggle i {
-    font-size: 20px;
+    font-size: var(--text-xl);
 }
 
 /* Mobile search toggle button — hidden on desktop */
@@ -50,11 +50,11 @@
     display: none;
     background: none;
     border: none;
-    padding: 10px;
+    padding: var(--space-2-5);
     cursor: pointer;
     color: var(--color-text-secondary);
-    border-radius: 8px;
-    font-size: 18px;
+    border-radius: var(--radius-lg);
+    font-size: var(--text-lg);
     transition:
         background-color 0.2s,
         color 0.2s;
@@ -70,11 +70,11 @@
     display: none;
     background: none;
     border: none;
-    padding: 10px;
+    padding: var(--space-2-5);
     cursor: pointer;
     color: var(--color-text-secondary);
-    border-radius: 8px;
-    font-size: 18px;
+    border-radius: var(--radius-lg);
+    font-size: var(--text-lg);
     transition:
         background-color 0.2s,
         color 0.2s;
@@ -92,13 +92,13 @@
 .search-slot {
     flex-grow: 1;
     max-width: 600px;
-    margin-right: 20px;
+    margin-right: var(--space-5);
     position: relative;
     display: flex;
     align-items: center;
 
     [dir="rtl"] & {
-        margin-left: 20px;
+        margin-left: var(--space-5);
         margin-right: unset;
     }
 }
@@ -112,11 +112,11 @@
 
 .search-container input {
     width: 100%;
-    padding: 12px 50px 12px 44px;
-    border-radius: 12px;
+    padding: var(--space-3) 50px var(--space-3) var(--space-11);
+    border-radius: var(--radius-2xl);
     border: 2px solid var(--color-border);
     background-color: var(--color-bg-input);
-    font-size: 14px;
+    font-size: var(--text-base);
     height: 46px;
     color: var(--color-text-heading);
     transition: all 0.2s ease;
@@ -144,7 +144,7 @@
     top: 50%;
     transform: translateY(-50%);
     color: var(--color-text-placeholder);
-    font-size: 16px;
+    font-size: var(--text-md);
     pointer-events: none;
     transition: color 0.2s ease;
 
@@ -167,7 +167,7 @@
     background: var(--color-accent-gradient);
     color: var(--color-danger-text);
     border: none;
-    border-radius: 10px;
+    border-radius: var(--radius-xl);
     width: 36px;
     height: 36px;
     cursor: pointer;
@@ -193,19 +193,19 @@
 }
 
 .search-button i {
-    font-size: 14px;
+    font-size: var(--text-base);
 }
 
 .user-controls {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: var(--space-3);
 }
 
 /* Mobile responsive styles for top bar */
 @media (max-width: 768px) {
     .top-bar {
-        padding: 0 16px;
+        padding: 0 var(--space-4);
     }
 
     .sidebar-toggle {
@@ -246,7 +246,7 @@
     }
 
     .top-bar--search-active .search-container input {
-        padding-left: 16px;
+        padding-left: var(--space-4);
     }
 
     .top-bar--search-active .sidebar-toggle,

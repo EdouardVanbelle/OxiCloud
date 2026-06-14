@@ -3,37 +3,37 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 10px 0;
+    padding: var(--space-2-5) 0;
     margin-bottom: 15px;
     border-bottom: 1px solid var(--color-bg-empty);
     width: 100%;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: var(--space-2);
 }
 
 .search-results-header h3 {
     margin: 0;
-    font-size: 16px;
+    font-size: var(--text-md);
     color: var(--color-text-dim);
 }
 
 .search-results-header .search-time {
-    font-size: 12px;
-    font-weight: normal;
+    font-size: var(--text-xs);
+    font-weight: var(--weight-normal);
     color: var(--color-text-light);
 }
 
 .search-controls {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-2);
 }
 
 .search-sort-select {
-    padding: 4px 8px;
+    padding: var(--space-1) var(--space-2);
     border: 1px solid var(--color-border-ddd);
-    border-radius: 4px;
-    font-size: 13px;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
     background: var(--color-bg-surface);
     color: var(--color-text-black);
     cursor: pointer;

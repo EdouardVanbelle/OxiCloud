@@ -6,7 +6,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 16px;
+    gap: var(--space-4);
     min-width: 0;
 }
 
@@ -15,10 +15,10 @@
     align-items: center;
     background: var(--color-multiselect-bg);
     color: var(--color-multiselect-text);
-    padding: 10px 20px;
-    border-radius: 12px;
+    padding: var(--space-2-5) var(--space-5);
+    border-radius: var(--radius-2xl);
     overflow: hidden;
-    margin-right: 12px;
+    margin-right: var(--space-3);
     height: 60px;
     transform: translateY(-8px);
     transition:
@@ -35,9 +35,9 @@
     border: none;
     color: var(--color-multiselect-text-faint);
     cursor: pointer;
-    font-size: 14px;
-    padding: 4px 6px;
-    border-radius: 6px;
+    font-size: var(--text-base);
+    padding: var(--space-1) var(--space-1-5);
+    border-radius: var(--radius-md);
     transition:
         background 0.15s,
         color 0.15s;
@@ -49,28 +49,28 @@
 }
 
 .batch-bar-count {
-    font-size: 14px;
-    font-weight: 600;
+    font-size: var(--text-base);
+    font-weight: var(--weight-semibold);
     white-space: nowrap;
 }
 
 .batch-bar-actions {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: var(--space-1-5);
 }
 
 .batch-btn {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 7px 14px;
+    gap: var(--space-1-5);
+    padding: 7px var(--space-3-5);
     border: none;
-    border-radius: 8px;
+    border-radius: var(--radius-lg);
     background: var(--color-multiselect-hover-bg);
     color: var(--color-multiselect-action-text);
-    font-size: 13px;
-    font-weight: 500;
+    font-size: var(--text-sm);
+    font-weight: var(--weight-medium);
     cursor: pointer;
     transition: background 0.15s;
     white-space: nowrap;
@@ -96,6 +96,6 @@
     }
 
     .batch-btn {
-        padding: 7px 10px;
+        padding: 7px var(--space-2-5);
     }
 }

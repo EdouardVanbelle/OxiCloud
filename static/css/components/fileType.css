@@ -12,7 +12,7 @@
     right: 0;
     height: 22%;
     background-color: var(--color-ft-folder-tab);
-    border-radius: 8px 8px 0 0;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
 }
 
 /* don't use FontAwesome / svg for folders and prefer CSS trick */
@@ -57,7 +57,7 @@
     color: var(--color-video-play);
     text-shadow: 0 0 3px var(--color-video-play-shadow);
     z-index: 2; /* above the img */
-    font-weight: bold;
+    font-weight: var(--weight-bold);
 }
 
 .code-icon {

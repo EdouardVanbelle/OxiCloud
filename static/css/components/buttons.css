@@ -1,14 +1,14 @@
 .btn {
-    padding: 12px 24px;
-    border-radius: 12px;
+    padding: var(--space-3) var(--space-6);
+    border-radius: var(--radius-2xl);
     border: none;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 14px;
-    font-weight: 500;
-    gap: 8px;
+    font-size: var(--text-base);
+    font-weight: var(--weight-medium);
+    gap: var(--space-2);
     transition: all 0.2s ease;
 }
 
@@ -66,13 +66,65 @@
     box-shadow: 0 2px 10px var(--color-danger-ring);
 }
 
+/* ── State matrix: focus / disabled / loading ───────────────── */
+
+/* Keyboard focus ring (explicit so the gradient variants get a crisp ring;
+   mirrors the global a11y baseline). */
+.btn:focus-visible {
+    outline: 2px solid var(--color-focus-ring);
+    outline-offset: 2px;
+}
+
+/* Disabled — dimmed, no hover lift, non-interactive. */
+.btn:disabled,
+.btn[disabled],
+.btn.is-disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    box-shadow: none;
+    transform: none;
+    filter: none;
+    pointer-events: none;
+}
+
+/* Loading — hide the label, show an inline spinner, block interaction.
+   Toggle with the `.is-loading` class or `aria-busy="true"`. */
+.btn.is-loading,
+.btn[aria-busy="true"] {
+    position: relative;
+    color: transparent;
+    pointer-events: none;
+}
+
+.btn.is-loading::after,
+.btn[aria-busy="true"]::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 16px;
+    height: 16px;
+    margin: -8px 0 0 -8px;
+    border: 2px solid var(--color-on-accent);
+    border-top-color: transparent;
+    border-radius: var(--radius-full);
+    animation: spin var(--spin-duration) linear infinite;
+}
+
+/* The secondary button's text isn't white — tint its spinner to the text. */
+.btn-secondary.is-loading::after,
+.btn-secondary[aria-busy="true"]::after {
+    border-color: var(--color-text-secondary);
+    border-top-color: transparent;
+}
+
 /* View Toggle Buttons */
 .view-toggle {
     display: flex;
-    gap: 2px;
+    gap: var(--space-0-5);
     padding: 3px;
     background-color: var(--color-bg-muted);
-    border-radius: 10px;
+    border-radius: var(--radius-xl);
     border: 1px solid var(--color-border);
 }
 
@@ -84,10 +136,10 @@
     height: 32px;
     background-color: transparent;
     border: none;
-    border-radius: 8px;
+    border-radius: var(--radius-lg);
     cursor: pointer;
     color: var(--color-text-faint);
-    font-size: 14px;
+    font-size: var(--text-base);
     transition: all 0.2s ease;
 }
 
@@ -113,7 +165,7 @@
     height: 20px;
     background: var(--color-border-medium);
     align-self: center;
-    margin: 0 2px;
+    margin: 0 var(--space-0-5);
 }
 
 .view-toggle-separator.hidden {
@@ -147,14 +199,14 @@
 .group-by-label {
     display: none;
     font-size: 0.78rem;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     white-space: nowrap;
 }
 
 /* When a group-by is selected the label has text — expand the button to fit */
 .group-by-btn:has(.group-by-label:not(:empty)) {
     width: auto;
-    padding: 0 8px;
+    padding: 0 var(--space-2);
     gap: 5px;
 }
 
@@ -170,12 +222,12 @@
     min-width: 140px;
     background: var(--color-bg-surface);
     border: 1px solid var(--color-border);
-    border-radius: 8px;
+    border-radius: var(--radius-lg);
     box-shadow: 0 4px 16px var(--color-shadow);
-    padding: 4px;
+    padding: var(--space-1);
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-0-5);
 }
 
 .group-by-menu.hidden {
@@ -185,11 +237,11 @@
 .group-by-option {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 6px 10px;
+    gap: var(--space-2);
+    padding: var(--space-1-5) var(--space-2-5);
     border: none;
     background: transparent;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     cursor: pointer;
     font-size: 0.85rem;
     color: var(--color-text);
@@ -203,5 +255,5 @@
 
 .group-by-option.active {
     color: var(--color-accent);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
 }

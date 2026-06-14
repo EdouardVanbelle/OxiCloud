@@ -66,6 +66,7 @@ use crate::infrastructure::services::chunked_upload_service::ChunkedUploadServic
 use crate::infrastructure::services::dedup_service::DedupService;
 use crate::infrastructure::services::image_transcode_service::ImageTranscodeService;
 use crate::infrastructure::services::jwt_service::JwtTokenService;
+use crate::infrastructure::services::media_metadata_service::MediaMetadataService;
 use crate::infrastructure::services::password_hasher::Argon2PasswordHasher;
 use crate::infrastructure::services::path_resolver_service::PathResolverService;
 use crate::infrastructure::services::thumbnail_service::{ThumbnailRefreshHook, ThumbnailService};
@@ -340,6 +341,10 @@ impl AppServiceFactory {
         // Audio metadata service — created here so it can be wired into file_lifecycle.
         let audio_metadata_service = self.create_audio_metadata_service(db_pool);
 
+        // Image/video capture-metadata service — extracts EXIF/container capture
+        // dates so the Photos timeline groups by real capture time, not upload time.
+        let media_metadata_service = self.create_media_metadata_service(db_pool);
+
         // ThumbnailRefreshHook: handles FileLifecycleHook events (create/update/delete).
         // Implemented on ThumbnailRefreshHook (not ThumbnailService) to avoid circular Arc:
         //   DedupService → BlobLifecycleService → ThumbnailRefreshHook → DedupService.
@@ -353,6 +358,7 @@ impl AppServiceFactory {
         if let Some(audio) = &audio_metadata_service {
             fls = fls.with_hook(audio.clone());
         }
+        fls = fls.with_hook(media_metadata_service.clone());
         let file_lifecycle = Arc::new(fls);
 
         Ok(CoreServices {
@@ -361,6 +367,7 @@ impl AppServiceFactory {
             thumbnail_service,
             file_lifecycle,
             audio_metadata_service,
+            media_metadata_service,
             chunked_upload_service,
             image_transcode_service,
             dedup_service,
@@ -538,6 +545,7 @@ impl AppServiceFactory {
             favorites_service: None, // Configured later with create_favorites_service
             recent_service: None,    // Configured later with create_recent_service
             audio_metadata_service: core.audio_metadata_service.clone(),
+            media_metadata_service: core.media_metadata_service.clone(),
         }
     }
 
@@ -555,6 +563,16 @@ impl AppServiceFactory {
             db_pool.clone(),
             blob_root,
         )))
+    }
+
+    /// Creates the image/video capture-metadata service (EXIF + container
+    /// creation dates). Always enabled — the Photos timeline relies on it.
+    pub fn create_media_metadata_service(
+        &self,
+        db_pool: &Arc<PgPool>,
+    ) -> Arc<MediaMetadataService> {
+        let blob_root = self.storage_path.join(".blobs");
+        Arc::new(MediaMetadataService::new(db_pool.clone(), blob_root))
     }
 
     /// Creates the trash service
@@ -1448,6 +1466,8 @@ pub struct CoreServices {
     /// Composite lifecycle dispatcher — wires thumbnails + audio metadata for all file events.
     pub file_lifecycle: Arc<FileLifecycleService>,
     pub audio_metadata_service: Option<Arc<AudioMetadataService>>,
+    /// Image/video capture-metadata extractor (EXIF + container dates).
+    pub media_metadata_service: Arc<MediaMetadataService>,
     pub chunked_upload_service: Arc<ChunkedUploadService>,
     pub image_transcode_service: Arc<ImageTranscodeService>,
     pub dedup_service: Arc<DedupService>,
@@ -1487,6 +1507,7 @@ pub struct ApplicationServices {
     pub favorites_service: Option<Arc<FavoritesService>>,
     pub recent_service: Option<Arc<RecentService>>,
     pub audio_metadata_service: Option<Arc<AudioMetadataService>>,
+    pub media_metadata_service: Arc<MediaMetadataService>,
 }
 
 /// Container for authentication services

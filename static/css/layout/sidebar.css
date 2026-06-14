@@ -8,7 +8,7 @@
     height: 100%;
     flex-shrink: 0;
     box-shadow: 2px 0 12px var(--color-shadow-md);
-    transition: transform 0.3s ease;
+    transition: transform var(--motion-slow) var(--ease-emphasized);
 }
 
 /* Sidebar overlay for mobile */
@@ -56,11 +56,11 @@
 }
 
 .logo-container {
-    padding: 22px 20px;
+    padding: 22px var(--space-5);
     display: flex;
     align-items: center;
     border-bottom: 1px solid var(--color-sidebar-separator);
-    margin-bottom: 8px;
+    margin-bottom: var(--space-2);
     text-decoration: none;
     color: inherit;
 }
@@ -69,18 +69,18 @@
     width: 40px;
     height: 40px;
     background: var(--color-sidebar-logo-gradient);
-    border-radius: 12px;
+    border-radius: var(--radius-2xl);
     display: flex;
     align-items: center;
     justify-content: center;
-    margin-right: 12px;
+    margin-right: var(--space-3);
     box-shadow: 0 3px 10px var(--color-sidebar-shadow);
     transition:
         transform 0.2s,
         box-shadow 0.2s;
 
     [dir="rtl"] & {
-        margin-left: 12px;
+        margin-left: var(--space-3);
         margin-right: unset;
     }
 }
@@ -98,7 +98,7 @@
 
 .app-name {
     font-size: 19px;
-    font-weight: 700;
+    font-weight: var(--weight-bold);
     color: var(--color-sidebar-text-active);
     letter-spacing: 0.3px;
 }
@@ -107,21 +107,28 @@
     display: flex;
     flex-direction: column;
     flex-grow: 1;
-    padding: 8px 12px;
-    gap: 2px;
+    padding: var(--space-2) var(--space-3);
+    gap: var(--space-0-5);
 }
 
 .nav-item {
     display: flex;
     align-items: center;
-    padding: 11px 14px;
-    border-radius: 10px;
+    width: 100%;
+    padding: 11px var(--space-3-5);
+    border-radius: var(--radius-xl);
     cursor: pointer;
     color: var(--color-sidebar-text);
     font-size: 14.5px;
-    font-weight: 500;
+    font-weight: var(--weight-medium);
+    /* Button resets — .nav-item is a <button> (keyboard-operable nav). */
+    font-family: inherit;
+    text-align: left;
+    appearance: none;
+    background: none;
     transition: all 0.2s ease;
     position: relative;
+    border: none;
     border-left: 3px solid transparent;
 
     [dir="rtl"] & {
@@ -139,7 +146,7 @@
     background-color: var(--color-sidebar-active-bg);
     color: var(--color-sidebar-text-active);
     border-left-color: var(--color-accent);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
 
     [dir="rtl"] & {
         border-left-color: transparent;
@@ -150,18 +157,18 @@
 .nav-item i,
 .nav-item .nav-icon,
 .nav-item .oxi-icon {
-    margin-right: 14px;
+    margin-right: var(--space-3-5);
     width: 20px;
     height: 20px;
     text-align: center;
-    font-size: 16px;
+    font-size: var(--text-md);
     transition:
         color 0.2s,
         transform 0.2s;
     flex-shrink: 0;
 
     [dir="rtl"] & {
-        margin-left: 14px;
+        margin-left: var(--space-3-5);
         margin-right: unset;
     }
 }
@@ -192,29 +199,13 @@
     color: var(--color-cal-6);
 } /* Trash - red */
 
-.nav-item.active:nth-child(1) i,
-.nav-item.active:nth-child(1) .oxi-icon {
+/* Colourful icons at rest, but the ACTIVE item is always accent — one
+   coherent active state instead of a colour that changes per item.
+   Same specificity as the per-child rest rules, so source order (this comes
+   after them) makes it win for the active item. */
+.nav-item.active i,
+.nav-item.active .oxi-icon {
     color: var(--color-accent);
-}
-.nav-item.active:nth-child(2) i,
-.nav-item.active:nth-child(2) .oxi-icon {
-    color: var(--color-cal-7);
-}
-.nav-item.active:nth-child(3) i,
-.nav-item.active:nth-child(3) .oxi-icon {
-    color: var(--color-cal-8);
-}
-.nav-item.active:nth-child(4) i,
-.nav-item.active:nth-child(4) .oxi-icon {
-    color: var(--color-cal-9);
-}
-.nav-item.active:nth-child(5) i,
-.nav-item.active:nth-child(5) .oxi-icon {
-    color: var(--color-cal-10);
-}
-.nav-item.active:nth-child(6) i,
-.nav-item.active:nth-child(6) .oxi-icon {
-    color: var(--color-cal-11);
 }
 
 .nav-item:hover i,
@@ -224,21 +215,21 @@
 
 /* Storage indicator */
 .storage-container {
-    margin: auto 12px 16px 12px;
+    margin: auto var(--space-3) var(--space-4) var(--space-3);
     background: var(--color-sidebar-storage-bg);
     border: 1px solid var(--color-sidebar-storage-border);
-    border-radius: 12px;
-    padding: 16px;
+    border-radius: var(--radius-2xl);
+    padding: var(--space-4);
 }
 
 .storage-title {
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 6px;
-    margin-bottom: 12px;
-    font-size: 13px;
-    font-weight: 600;
+    gap: var(--space-1-5);
+    margin-bottom: var(--space-3);
+    font-size: var(--text-sm);
+    font-weight: var(--weight-semibold);
     color: var(--color-sidebar-storage-text);
     letter-spacing: 0.3px;
 }
@@ -248,7 +239,7 @@
     background-color: var(--color-sidebar-storage-bar);
     border-radius: 3px;
     overflow: hidden;
-    margin-bottom: 10px;
+    margin-bottom: var(--space-2-5);
 }
 
 .storage-fill {
@@ -263,5 +254,5 @@
     text-align: center;
     font-size: 11.5px;
     color: var(--color-sidebar-storage-faint);
-    font-weight: 400;
+    font-weight: var(--weight-normal);
 }

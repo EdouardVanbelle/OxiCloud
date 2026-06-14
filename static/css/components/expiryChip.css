@@ -20,10 +20,10 @@
     display: inline-flex;
     align-items: center;
     flex-shrink: 0;
-    gap: 4px;
-    padding: 2px 7px;
-    border-radius: 10px;
-    font-size: 11px;
+    gap: var(--space-1);
+    padding: var(--space-0-5) 7px;
+    border-radius: var(--radius-xl);
+    font-size: var(--text-2xs);
     white-space: nowrap;
 }
 

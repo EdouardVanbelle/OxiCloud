@@ -744,14 +744,14 @@ const contextMenus = {
         const shareUrl = app.notificationShareUrl;
 
         if (!email || !shareUrl) {
-            ui.showNotification('Error', 'Please enter a valid email address');
+            ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.invalidEmail'));
             return;
         }
 
         // Validate email format
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         if (!emailRegex.test(email)) {
-            ui.showNotification('Error', 'Please enter a valid email address');
+            ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.invalidEmail'));
             return;
         }
 
@@ -760,7 +760,7 @@ const contextMenus = {
             document.getElementById('notification-dialog')?.classList.add('hidden');
         } catch (error) {
             console.error('Error sending notification:', error);
-            ui.showNotification('Error', 'Could not send notification');
+            ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.notificationSendError'));
         }
     },
 

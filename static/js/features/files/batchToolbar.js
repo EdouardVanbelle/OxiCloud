@@ -202,15 +202,15 @@ const batchToolbar = {
     showBatchResult(action, result) {
         if (action === 'copy') {
             if (result.errors > 0) {
-                ui.showNotification('Batch copy', `${result.success} copied, ${result.errors} failed`);
+                ui.showNotification(i18n.t('notif.batchCopy'), i18n.t('notif.batchCopyBody', { success: result.success, errors: result.errors }));
             } else {
-                ui.showNotification('Items copied', `${result.success} item${result.success !== 1 ? 's' : ''} copied successfully`);
+                ui.showNotification(i18n.t('notif.itemsCopied'), i18n.t('notif.itemsCopiedBody', { count: result.success }));
             }
         } else {
             if (result.errors > 0) {
-                ui.showNotification('Batch move', `${result.success} moved, ${result.errors} failed`);
+                ui.showNotification(i18n.t('notif.batchMove'), i18n.t('notif.batchMoveBody', { success: result.success, errors: result.errors }));
             } else {
-                ui.showNotification('Items moved', `${result.success} item${result.success !== 1 ? 's' : ''} moved successfully`);
+                ui.showNotification(i18n.t('notif.itemsMoved'), i18n.t('notif.itemsMovedBody', { count: result.success }));
             }
         }
     },
@@ -421,13 +421,13 @@ const batchToolbar = {
             loadFiles();
 
             if (errors > 0) {
-                ui.showNotification('Batch delete', `${success} moved to trash, ${errors} failed`);
+                ui.showNotification(i18n.t('notif.batchDelete'), i18n.t('notif.batchDeleteBody', { success, errors }));
             } else {
-                ui.showNotification('Moved to trash', `${success} item${success !== 1 ? 's' : ''} moved to trash`);
+                ui.showNotification(i18n.t('notif.movedToTrash'), i18n.t('notif.movedToTrashBody', { count: success }));
             }
         } catch (e) {
             console.error('Batch trash error:', e);
-            ui.showNotification('Error', 'Could not move items to trash');
+            ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.trashItemsError'));
             this.clear();
             loadFiles();
         }
@@ -458,7 +458,7 @@ const batchToolbar = {
         const items = this.items;
         if (items.length === 0) return;
 
-        ui.showNotification('Preparing download', 'Creating ZIP archive...');
+        ui.showNotification(i18n.t('notif.preparingDownload'), i18n.t('notif.preparingDownloadBody'));
 
         const fileIds = items.filter((i) => i.type === 'file').map((i) => i.id);
         const folderIds = items.filter((i) => i.type === 'folder').map((i) => i.id);
@@ -495,7 +495,7 @@ const batchToolbar = {
             URL.revokeObjectURL(blobUrl);
         } catch (e) {
             console.error('Batch download error:', e);
-            ui.showNotification('Error', 'Could not download selected items');
+            ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.downloadItemsError'));
         }
     },
 
@@ -539,7 +539,7 @@ const batchToolbar = {
             }
         } catch (e) {
             console.error('Batch favorites error:', e);
-            ui.showNotification('Error', 'Could not add items to favorites');
+            ui.showNotification(i18n.t('notif.errorTitle'), i18n.t('notif.favoritesAddError'));
         }
     },
 

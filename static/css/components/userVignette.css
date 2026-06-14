@@ -16,7 +16,7 @@
 .user-vignette {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: var(--space-1-5);
     min-width: 0;
     overflow: hidden;
 }
@@ -32,7 +32,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-weight: 700;
+    font-weight: var(--weight-bold);
     flex-shrink: 0;
     /* Diameter comes from `--avatar-size`, declared per size variant on
        the wrapper so the origin badge (a wrapper sibling or an avatar
@@ -50,7 +50,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 14px;
+    font-size: var(--text-base);
     color: var(--color-text-secondary);
 }
 
@@ -67,7 +67,7 @@
 }
 
 .user-vignette__email {
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--color-text-faint);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -102,14 +102,14 @@
     --avatar-size: 36px;
 }
 .user-vignette--list .user-vignette__avatar {
-    font-size: 13px;
+    font-size: var(--text-sm);
 }
 
 .user-vignette--md {
     --avatar-size: 32px;
 }
 .user-vignette--md .user-vignette__avatar {
-    font-size: 12px;
+    font-size: var(--text-xs);
 }
 
 .user-vignette--lg {
@@ -123,7 +123,7 @@
     --avatar-size: 38px;
 }
 .user-vignette--menu .user-vignette__avatar {
-    font-size: 14px;
+    font-size: var(--text-base);
 }
 
 .user-vignette--xl {
@@ -220,7 +220,7 @@
 
 .user-vignette__origin {
     flex-shrink: 0;
-    line-height: 1;
+    line-height: var(--leading-none);
     /* Default (sibling mode, with name): track the avatar's font-size
        so the badge matches the row's text scale. The overlay mode
        overrides this below with the explicit 30%-of-avatar-diameter

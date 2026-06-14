@@ -1,0 +1,93 @@
+/* ============================================================
+ * Reusable loading-skeleton primitive.
+ *
+ * A `.skeleton` element pulses; modifiers shape it into lines,
+ * list rows (mirroring the file-list grid), or grid tiles. Used to
+ * hold layout during first load instead of a centred spinner that
+ * makes the list flash empty. Honors reduced-motion via the global
+ * guard in base/a11y.css.
+ *
+ * (shareModal's bespoke .smd-skeleton predates this and can migrate
+ * onto it when its loader is next touched.)
+ * ============================================================ */
+
+.skeleton {
+    background: var(--color-bg-muted);
+    border-radius: var(--radius-md);
+    animation: skeletonPulse 1.4s ease-in-out infinite;
+}
+
+.skeleton-line {
+    height: 14px;
+}
+
+.skeleton-line--short {
+    width: 40%;
+}
+
+.skeleton-line--medium {
+    width: 65%;
+}
+
+.skeleton-line--full {
+    width: 100%;
+}
+
+/* A loading row shaped like a file-list row (inherits the list's grid
+   columns; falls back to icon + name + meta when used standalone). */
+.skeleton-row {
+    display: grid;
+    grid-template-columns: var(--files-list-columns, 36px 1fr 90px);
+    column-gap: var(--space-3);
+    align-items: center;
+    padding: var(--space-3) 15px;
+    border-bottom: 1px solid var(--color-border-xfaint);
+}
+
+/* A square loading tile for the photo/file grid. */
+.skeleton-tile {
+    aspect-ratio: 1;
+    width: 100%;
+    border-radius: var(--radius-lg);
+}
+
+/* File-grid loading card — mirrors the real grid card (4:3 thumbnail tile +
+   name line + meta line). The card frame itself doesn't pulse; its inner
+   `.skeleton` elements do. Dropped straight into `.files-grid-view`. */
+.skeleton-card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-4);
+    border: 2px solid var(--color-border);
+    border-radius: var(--radius-2xl);
+}
+
+.skeleton-card .skeleton-thumb {
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    border-radius: var(--radius-lg);
+    margin-bottom: var(--space-2);
+}
+
+.skeleton-card .skeleton-line {
+    align-self: center;
+}
+
+/* Small leading icon block for list-row skeletons. */
+.skeleton-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: var(--radius-md);
+}
+
+@keyframes skeletonPulse {
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.4;
+    }
+}

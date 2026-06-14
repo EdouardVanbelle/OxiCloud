@@ -6,14 +6,14 @@
 .language-selector-toggle {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 8px 14px;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3-5);
     background-color: var(--color-bg-muted);
     border: 1px solid var(--color-border);
     border-radius: 50px;
     cursor: pointer;
-    font-size: 14px;
-    font-weight: 500;
+    font-size: var(--text-base);
+    font-weight: var(--weight-medium);
     color: var(--color-text-secondary);
     transition: all 0.2s ease;
     user-select: none;
@@ -25,12 +25,12 @@
 }
 
 .language-selector-toggle i {
-    font-size: 14px;
+    font-size: var(--text-base);
     color: var(--color-text-muted);
 }
 
 .language-selector-toggle .lang-code {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--color-text);
 }
 
@@ -38,7 +38,7 @@
     font-size: 10px;
     color: var(--color-text-muted);
     transition: transform 0.2s ease;
-    margin-left: 2px;
+    margin-left: var(--space-0-5);
 }
 
 .language-selector.open .dropdown-arrow {
@@ -53,7 +53,7 @@
     max-height: 420px;
     overflow-y: auto;
     background-color: var(--color-bg-surface);
-    border-radius: 12px;
+    border-radius: var(--radius-2xl);
     box-shadow: 0 4px 20px var(--color-shadow-lg);
     border: 1px solid var(--color-border);
     opacity: 0;
@@ -72,10 +72,10 @@
 .language-option {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 12px 16px;
+    gap: var(--space-2-5);
+    padding: var(--space-3) var(--space-4);
     cursor: pointer;
-    font-size: 14px;
+    font-size: var(--text-base);
     color: var(--color-text-secondary);
     transition: background-color 0.15s ease;
 }
@@ -86,12 +86,12 @@
 
 .language-option.active {
     background-color: var(--color-accent-bg-sm);
-    color: var(--color-accent);
+    color: var(--color-accent-text);
 }
 
 .language-option .lang-flag {
-    font-size: 18px;
-    line-height: 1;
+    font-size: var(--text-lg);
+    line-height: var(--leading-none);
 }
 
 .language-option .lang-name {
@@ -100,7 +100,7 @@
 
 .language-option .lang-check {
     color: var(--color-accent);
-    font-size: 12px;
+    font-size: var(--text-xs);
     opacity: 0;
 }
 
@@ -120,11 +120,10 @@
     border: none !important;
     border-radius: 0 !important;
     box-shadow: none !important;
-    outline: none !important;
-    padding: 12px 20px;
-    gap: 12px;
+    padding: var(--space-3) var(--space-5);
+    gap: var(--space-3);
     color: var(--color-text-dark);
-    font-size: 14px;
+    font-size: var(--text-base);
     cursor: pointer;
 }
 
@@ -132,7 +131,6 @@
 .user-menu .language-selector-toggle:focus {
     background: var(--color-bg-hover) !important;
     border: none !important;
-    outline: none !important;
 }
 
 .user-menu .language-selector-toggle i.fa-globe {
@@ -143,8 +141,8 @@
 }
 
 .user-menu .language-selector-toggle .lang-code {
-    font-weight: 500;
-    font-size: 13px;
+    font-weight: var(--weight-medium);
+    font-size: var(--text-sm);
     color: var(--color-text-dark);
 }
 
@@ -172,6 +170,6 @@
 
 /* Language options inside user menu — compact rows */
 .user-menu .language-option {
-    padding: 10px 20px 10px 28px;
+    padding: var(--space-2-5) var(--space-5) var(--space-2-5) var(--space-7);
     font-size: 13.5px;
 }

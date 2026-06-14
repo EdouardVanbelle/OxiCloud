@@ -91,6 +91,10 @@ function _applyPhoto(avatar, photoUrl, name) {
  *   When true (and showName is true), the primary email address is shown below
  *   the name in a lighter style.  Name and email are wrapped in a
  *   `.user-vignette__info` column.  Has no effect when showName is false.
+ * @property {boolean} [noTooltip=false]
+ *   When true, skip the email hover-tooltip. Use for the user's own avatar in
+ *   the toolbar — the email is already shown in the open menu header, so the
+ *   tooltip is redundant (and would overlap the bell).
  * @property {boolean} [showOrigin=true]
  *   When true (the default), an `is_external` badge overlays the
  *   bottom-right of the avatar for external users only — internal
@@ -108,7 +112,14 @@ function _applyPhoto(avatar, photoUrl, name) {
  * @param {VignetteOptions} [options]
  * @returns {HTMLElement}
  */
-export function createUserVignette(userId, size = 'sm', { showName = true, showEmail = false, showOrigin = true } = {}) {
+// Tracks the hover-tooltip cleanup for each vignette so a caller that
+// re-renders the vignette (e.g. replaceChildren on a storage update) can
+// dispose the previous tooltip — otherwise its body-portalled popover orphans
+// and, if it was visible at re-render time, stays stuck on screen.
+/** @type {WeakMap<HTMLElement, () => void>} */
+const _tooltipCleanups = new WeakMap();
+
+export function createUserVignette(userId, size = 'sm', { showName = true, showEmail = false, showOrigin = true, noTooltip = false } = {}) {
     const colorIdx = _colorIndex(userId);
 
     const wrapper = /** @type {HTMLElement} */ (document.createElement('span'));
@@ -182,9 +193,9 @@ export function createUserVignette(userId, size = 'sm', { showName = true, showE
         // than the native `title` attribute's ~500–1500 ms wait).
         // `aria-label` is set in parallel so screen readers still get
         // the email — popover content is mouse/keyboard-hover only.
-        if (email && !showEmail) {
+        if (email && !showEmail && !noTooltip) {
             wrapper.setAttribute('aria-label', email);
-            attachTooltip(wrapper, email);
+            _tooltipCleanups.set(wrapper, attachTooltip(wrapper, email));
         }
         if (photo) {
             _applyPhoto(avatar, photo, name);
@@ -213,4 +224,19 @@ export function createUserVignette(userId, size = 'sm', { showName = true, showE
     });
 
     return wrapper;
+}
+
+/**
+ * Dispose a vignette before discarding it: tears down its hover-tooltip and
+ * removes the body-portalled popover so nothing orphans on re-render.
+ * Safe to call on any element (no-op if it has no tracked tooltip).
+ * @param {HTMLElement | null} el
+ */
+export function disposeVignette(el) {
+    if (!el) return;
+    const cleanup = _tooltipCleanups.get(el);
+    if (cleanup) {
+        cleanup();
+        _tooltipCleanups.delete(el);
+    }
 }

@@ -157,6 +157,17 @@ export const photosLightbox = {
         requestAnimationFrame(() => el.classList.add('active'));
     },
 
+    /** Preload the immediate prev/next thumbnails so navigation is instant. */
+    _preloadNeighbors() {
+        [this.index - 1, this.index + 1].forEach((i) => {
+            const it = this.items[i];
+            if (it && !it.mime_type?.startsWith('video/')) {
+                const pre = new Image();
+                pre.src = this._thumbUrl(it);
+            }
+        });
+    },
+
     /** Display the current item */
     _show() {
         if (!this._overlay || this.index < 0) return;
@@ -192,6 +203,9 @@ export const photosLightbox = {
         fullResBtn.disabled = false;
         const fullResIcon = fullResBtn.querySelector('i');
         if (fullResIcon) fullResIcon.className = 'fas fa-expand';
+
+        // Preload neighbours so prev/next is instant.
+        this._preloadNeighbors();
 
         // Load content
         content.innerHTML = '<div class="photos-loading"><i class="fas fa-spinner"></i></div>';

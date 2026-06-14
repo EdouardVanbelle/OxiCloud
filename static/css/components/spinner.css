@@ -4,8 +4,8 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 80px 20px;
-    gap: 16px;
+    padding: var(--space-20) var(--space-5);
+    gap: var(--space-4);
     grid-column: 1 / -1;
 }
 
@@ -18,36 +18,61 @@
     animation: spin 0.7s linear infinite;
 }
 
-@keyframes spin {
-    to {
-        transform: rotate(360deg);
-    }
-}
+/* @keyframes spin → base/animations.css (canonical, loaded via main.css). */
 
 .files-loading-spinner span {
-    font-size: 14px;
+    font-size: var(--text-base);
     color: var(--color-text-placeholder);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
 }
 
+/* Full-area drop overlay. Hidden by default; shown over the content region
+   (right of the sidebar) while files are dragged into the Files section
+   (toggled in ui.js). Frosted backdrop + dashed border = a clear "drop here"
+   affordance instead of a small inline box. */
 .dropzone {
-    border: 2px dashed var(--color-border-ddd);
-    border-radius: 8px;
-    padding: 20px;
+    position: fixed;
+    top: var(--space-4);
+    right: var(--space-4);
+    bottom: var(--space-4);
+    left: calc(var(--sidebar-width) + var(--space-4));
+    z-index: var(--z-overlay);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-4);
+    border: 3px dashed var(--color-border-medium);
+    border-radius: var(--radius-3xl);
+    background: var(--color-scrim-control);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    color: var(--color-text-secondary);
+    font-size: var(--text-lg);
+    font-weight: var(--weight-semibold);
     text-align: center;
-    margin: 20px 0;
-    color: var(--color-text-medium);
-    display: block;
+}
+
+/* Children don't catch pointer events, so moving over the icon/text doesn't
+   fire dragleave on the overlay (avoids show/hide flicker). */
+.dropzone > * {
+    pointer-events: none;
 }
 
 .dropzone-icon {
-    font-size: 32px;
-    margin-bottom: 10px;
+    font-size: var(--text-6xl);
+    color: var(--color-accent);
 }
 
 .dropzone.active {
     border-color: var(--color-accent);
-    background-color: var(--color-accent-ring-xs);
+    color: var(--color-accent-text);
+}
+
+@media (max-width: 768px) {
+    .dropzone {
+        left: var(--space-4);
+    }
 }
 
 .upload-progress {

@@ -7,7 +7,7 @@
     box-shadow:
         0 10px 36px var(--color-shadow-lg),
         0 0 0 1px var(--color-shadow-xs);
-    padding: 6px;
+    padding: var(--space-1-5);
     min-width: 200px;
     z-index: 2000;
     display: block;
@@ -26,14 +26,14 @@
 }
 
 .context-menu-item {
-    padding: 10px 14px;
+    padding: var(--space-2-5) var(--space-3-5);
     cursor: pointer;
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: var(--space-3);
     color: var(--color-text-dark);
-    font-size: 14px;
-    border-radius: 8px;
+    font-size: var(--text-base);
+    border-radius: var(--radius-lg);
     transition: background 0.12s ease;
 }
 
@@ -48,7 +48,7 @@
 .context-menu-item i {
     width: 18px;
     text-align: center;
-    font-size: 14px;
+    font-size: var(--text-base);
     color: var(--color-text-subtle);
 
     [dir="rtl"] & {
@@ -72,5 +72,5 @@
 .context-menu-separator {
     height: 1px;
     background: var(--color-border-light);
-    margin: 4px 8px;
+    margin: var(--space-1) var(--space-2);
 }

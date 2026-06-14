@@ -1,5 +1,5 @@
 {
-  "files": ["statc/css/**/*.css"],
+  "files": ["static/css/**/*.css"],
   "plugins": [
     "stylelint-value-no-unknown-custom-properties"
   ],

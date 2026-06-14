@@ -1,5 +1,5 @@
 import { getCsrfHeaders } from '../../core/csrf.js';
-import { escapeHtml } from '../../core/formatters.js';
+import { escapeHtml, formatRelativeTime } from '../../core/formatters.js';
 import { i18n } from '../../core/i18n.js';
 import { oxiIconsInit } from '../../core/icons.js';
 
@@ -63,14 +63,7 @@ function formatBytes(bytes) {
 /** @param {string|null} dateStr */
 function timeAgo(dateStr) {
     if (!dateStr) return i18n.t('admin.never');
-    const d = new Date(dateStr);
-    const now = new Date();
-    const secs = Math.floor((now.getTime() - d.getTime()) / 1000);
-    if (secs < 60) return i18n.t('admin.just_now');
-    if (secs < 3600) return i18n.t('admin.minutes_ago', { n: Math.floor(secs / 60) });
-    if (secs < 86400) return i18n.t('admin.hours_ago', { n: Math.floor(secs / 3600) });
-    if (secs < 2592000) return i18n.t('admin.days_ago', { n: Math.floor(secs / 86400) });
-    return d.toLocaleDateString();
+    return formatRelativeTime(dateStr);
 }
 
 /* ── Custom confirm modal ── */

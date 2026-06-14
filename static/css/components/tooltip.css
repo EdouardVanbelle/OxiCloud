@@ -32,13 +32,13 @@
     position: fixed;
     min-width: 0;
     max-width: 280px;
-    padding: 6px 10px;
+    padding: var(--space-1-5) var(--space-2-5);
     background-color: var(--color-text);
     color: var(--color-bg-page);
-    font-size: 12px;
-    line-height: 1.5;
+    font-size: var(--text-xs);
+    line-height: var(--leading-normal);
     text-align: left;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     box-shadow: 0 2px 8px var(--color-shadow);
     pointer-events: none;
     opacity: 0;
@@ -76,13 +76,13 @@
    so the count reads as meta-information, not just another line. */
 .oxi-tooltip-popover__overflow {
     display: inline-block;
-    margin-top: 4px;
+    margin-top: var(--space-1);
     padding: 1px 7px;
-    font-size: 11px;
-    font-weight: 600;
+    font-size: var(--text-2xs);
+    font-weight: var(--weight-semibold);
     color: var(--color-bg-page);
     background-color: var(--color-text-faint);
-    border-radius: 9999px;
+    border-radius: var(--radius-full);
 }
 
 /* Placeholder line shown briefly between the first hover and the

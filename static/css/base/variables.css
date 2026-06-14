@@ -22,7 +22,177 @@
     /* Default: follow the OS preference. Overridden by html[data-color-scheme]. */
     color-scheme: light dark;
 
-    --sidebar-width: 250px;
+    /* ════════════════════════════════════════════════════════════════
+     * NON-COLOR DESIGN SCALES  (Fase 0 — fundamentos)
+     *
+     * Single source of truth for spacing, radius, typography, z-index,
+     * motion, elevation, breakpoints and density. Components are migrated
+     * onto these in Fase 1; until then raw px still coexist. Do NOT add
+     * raw px for spacing/radius/font-size in new code — consume a token.
+     * ════════════════════════════════════════════════════════════════ */
+
+    /* ── Layout shell ──────────────────────────────────────────── */
+    /* Fluid sidebar: tracks viewport but clamped to a sane band. */
+    --sidebar-width: clamp(220px, 18vw, 280px);
+    --sidebar-width-min: 200px;          /* resizable rail floor (Fase 1) */
+    --sidebar-width-max: 320px;          /* resizable rail ceiling (Fase 1) */
+    --sidebar-width-collapsed: 72px;     /* icon-rail mode (Fase 1) */
+    --gutter: var(--space-6);            /* shared topbar/content horizontal gutter (drops to 16px on phones) */
+    --grid-card-min: 200px;             /* min width of a grid card (tightens on phones) */
+
+    /* ── Spacing — 4px grid ────────────────────────────────────── */
+    /* Direct steps are multiples of 4; half-steps (0-5/1-5/2-5/3-5)
+     * cover the high-frequency 2/6/10/14px raw values found in audit. */
+    --space-0: 0;
+    --space-px: 1px;
+    --space-0-5: 2px;
+    --space-1: 4px;
+    --space-1-5: 6px;
+    --space-2: 8px;
+    --space-2-5: 10px;
+    --space-3: 12px;
+    --space-3-5: 14px;
+    --space-4: 16px;
+    --space-5: 20px;
+    --space-6: 24px;
+    --space-7: 28px;
+    --space-8: 32px;
+    --space-9: 36px;
+    --space-10: 40px;
+    --space-11: 44px;
+    --space-12: 48px;
+    --space-14: 56px;
+    --space-16: 64px;
+    --space-20: 80px;
+    --space-24: 96px;
+
+    /* ── Radius ─────────────────────────────────────────────────── */
+    --radius-none: 0;
+    --radius-xs: 2px;
+    --radius-sm: 4px;
+    --radius-md: 6px;
+    --radius-lg: 8px;
+    --radius-xl: 10px;
+    --radius-2xl: 12px;
+    --radius-3xl: 16px;
+    --radius-4xl: 20px;
+    --radius-full: 9999px;
+    /* Semantic default — resolves the legacy `var(--radius, 12px)` fallbacks
+     * in share-public.css / device-verify.css (token was never defined). */
+    --radius: var(--radius-2xl);
+
+    /* ── Typography ────────────────────────────────────────────── */
+    /* Font families (single source — reset.css `*` consumes --font-sans). */
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+    /* Modular size scale in rem (root = 16px) so it honors user zoom.
+     * --text-base (14px) is the app body default. */
+    --text-2xs: 0.6875rem;  /* 11px */
+    --text-xs: 0.75rem;     /* 12px */
+    --text-sm: 0.8125rem;   /* 13px */
+    --text-base: 0.875rem;  /* 14px */
+    --text-md: 1rem;        /* 16px */
+    --text-lg: 1.125rem;    /* 18px */
+    --text-xl: 1.25rem;     /* 20px */
+    --text-2xl: 1.5rem;     /* 24px */
+    --text-3xl: 1.75rem;    /* 28px */
+    --text-4xl: 2rem;       /* 32px */
+    --text-5xl: 2.5rem;     /* 40px */
+    --text-6xl: 3rem;       /* 48px */
+
+    /* Line-heights (leading) — unitless ratios. */
+    --leading-none: 1;
+    --leading-tight: 1.25;
+    --leading-snug: 1.375;
+    --leading-normal: 1.5;
+    --leading-relaxed: 1.625;
+    --leading-loose: 1.8;
+
+    /* Font weights — numeric only (no bold/normal keywords). */
+    --weight-normal: 400;
+    --weight-medium: 500;
+    --weight-semibold: 600;
+    --weight-bold: 700;
+    --weight-extrabold: 800;
+
+    /* Letter-spacing (tracking) — em-relative. */
+    --tracking-tighter: -0.02em;
+    --tracking-tight: -0.01em;
+    --tracking-normal: 0;
+    --tracking-wide: 0.02em;
+    --tracking-wider: 0.04em;
+    --tracking-widest: 0.08em;
+
+    /* Prose measure — comfortable line length for running text. */
+    --measure-prose: 65ch;
+
+    /* Icon glyph sizing — separate axis from the text scale. */
+    --icon-xs: 12px;
+    --icon-sm: 14px;
+    --icon-md: 16px;
+    --icon-lg: 20px;
+    --icon-xl: 24px;
+
+    /* ── Z-index — semantic stacking layers ────────────────────── */
+    /* Gaps left between layers so new surfaces slot in without renumber. */
+    --z-below: -1;
+    --z-base: 0;
+    --z-raised: 10;
+    --z-sticky: 100;
+    --z-dropdown: 1000;
+    --z-overlay: 2000;
+    --z-drawer: 2500;
+    --z-modal: 3000;
+    --z-popover: 3500;
+    --z-toast: 4000;
+    --z-tooltip: 5000;
+    --z-notification: 6000;
+    --z-max: 9999;
+
+    /* ── Motion — durations + easing curves ────────────────────── */
+    --motion-instant: 0ms;
+    --motion-fast: 120ms;
+    --motion-base: 160ms;
+    --motion-moderate: 200ms;
+    --motion-slow: 300ms;
+    --motion-slower: 500ms;
+    --motion-spinner: 1s;
+    --spin-duration: var(--motion-spinner);
+    /* Decelerate is the default for entrances / positive feedback. */
+    --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+    --ease-emphasized: cubic-bezier(0.3, 0, 0, 1);
+    --ease-in: cubic-bezier(0.4, 0, 1, 1);
+    --ease-out: cubic-bezier(0, 0, 0.2, 1);
+    --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+
+    /* ── Elevation — composed box-shadow recipes ───────────────── */
+    /* Full recipes (not bare alphas) layered on the --color-shadow-*
+     * alpha tokens below, so they adapt to light/dark automatically. */
+    --shadow-xs: 0 1px 2px var(--color-shadow-xs);
+    --shadow-sm: 0 1px 3px var(--color-shadow-sm), 0 1px 2px var(--color-shadow-xs);
+    --shadow-md: 0 4px 6px var(--color-shadow-sm), 0 2px 4px var(--color-shadow-xs);
+    --shadow-lg: 0 10px 15px var(--color-shadow-md), 0 4px 6px var(--color-shadow-sm);
+    --shadow-xl: 0 20px 25px var(--color-shadow-md), 0 8px 10px var(--color-shadow-sm);
+    --shadow-2xl: 0 25px 50px var(--color-shadow-lg);
+
+    /* ── Breakpoints (reference tokens) ────────────────────────── */
+    /* NOTE: @media cannot consume custom properties. These are the canonical
+     * values for JS (matchMedia) and documentation; consuming them in @media
+     * needs @custom-media via a postcss build step — pending dep approval. */
+    --bp-xs: 480px;
+    --bp-sm: 640px;
+    --bp-md: 768px;
+    --bp-lg: 1024px;
+    --bp-xl: 1280px;
+
+    /* ── Density — comfortable (default) vs compact ────────────── */
+    /* Gated by html[data-density="compact"] below. Consumed by list rows
+     * and controls in Fase 1. */
+    --density-row-py: var(--space-3);    /* 12px */
+    --density-row-px: var(--space-3-5);  /* 14px */
+    --density-gap: var(--space-3);
+    --density-control-h: 40px;
 
     /* Backgrounds */
     --color-bg-page: light-dark(#f5f7fa, #0f172a);
@@ -44,25 +214,41 @@
     --color-border-xfaint: light-dark(#f0f0f0, #1e293b);
     --color-border-ddd: light-dark(#ddd, #334155);
 
-    /* Text */
-    --color-text: light-dark(#2d3748, #e2e8f0);
-    --color-text-heading: light-dark(#1e293b, #f1f5f9);
-    --color-text-muted: light-dark(#718096, #94a3b8);
-    --color-text-faint: light-dark(#94a3b8, #7a8a9f);
-    --color-text-secondary: light-dark(#4a5568, #cbd5e1);
-    --color-text-subtle: light-dark(#64748b, #94a3b8);
-    --color-text-dark: light-dark(#334155, #cbd5e1);
-    --color-text-placeholder: light-dark(#a0aec0, #64748b);
-    --color-text-gray: light-dark(#6c757d, #94a3b8);
-    --color-text-medium: light-dark(#666, #94a3b8);
-    --color-text-faint2: light-dark(#888, #64748b);
-    --color-text-light: light-dark(#999, #64748b);
-    --color-text-black: light-dark(#333, #e2e8f0);
-    --color-text-dim: light-dark(#555, #94a3b8);
+    /* Text — collapsed to a few AA-passing tiers; every legacy name is kept as
+     * an alias so no consumer breaks (migration to the canonical names → Fase 1).
+     * Each tier clears WCAG AA 4.5:1 on #fff AND the page bg, light and dark. The
+     * muted/faint/placeholder tiers used to FAIL (2.3–4.0:1) and are now darkened. */
+    --color-text: light-dark(#2d3748, #e2e8f0);            /* primary body */
+    --color-text-heading: light-dark(#1e293b, #f1f5f9);    /* headings */
+    --color-text-secondary: light-dark(#475569, #cbd5e1);  /* strong secondary */
+    /* muted/subtle/faint converge: AA 4.5:1 on the grayish page/muted bgs AND
+     * on the lighter dark hover bg leaves only a narrow passing window. */
+    --color-text-muted: light-dark(#5e6a78, #9fadbe);      /* muted */
+    --color-text-subtle: light-dark(#5e6a78, #9fadbe);     /* subtle */
+    --color-text-faint: light-dark(#5e6a78, #9fadbe);      /* faintest still-AA */
+    /* legacy aliases → one of the tiers above */
+    --color-text-dark: var(--color-text-secondary);
+    --color-text-dim: var(--color-text-secondary);
+    --color-text-black: var(--color-text);
+    --color-text-gray: var(--color-text-muted);
+    --color-text-medium: var(--color-text-muted);
+    --color-text-faint2: var(--color-text-faint);
+    --color-text-light: var(--color-text-faint);
+    --color-text-placeholder: var(--color-text-faint);
 
     /* Accent (orange) — mostly mode-agnostic. */
     --color-accent: #ff5e3a;
     --color-accent-hover: light-dark(#e04520, #ff7a5c);
+    /* AA-compliant accent for TEXT/LINKS: bare #ff5e3a only reaches 3.04:1 on
+     * white. Link/toggle-link consumers migrate onto this in Fase 2. */
+    --color-accent-text: light-dark(#cc3a16, #ff8a5c);
+    /* Solid foreground on accent fills (replaces reusing --color-danger-text). */
+    --color-on-accent: #ffffff;
+    /* Canonical keyboard focus-ring color (applied globally in Fase 2). */
+    --color-focus-ring: #ff5e3a;
+    /* Canonical logo gradient — unifies the divergent sidebar (#ff5e3a→#ff8a5c)
+     * vs accent (#ff5e3a→#ff2d55) logo fills. Consumers migrate in Fase 1. */
+    --color-logo-gradient: linear-gradient(135deg, #ff5e3a 0%, #ff8a5c 100%);
     --color-accent-gradient: linear-gradient(135deg, #ff5e3a 0%, #ff2d55 100%);
     --color-accent-shadow: rgba(255, 94, 58, 0.3);
     --color-accent-ring: light-dark(rgba(255, 94, 58, 0.1), rgba(255, 94, 58, 0.15));
@@ -75,69 +261,97 @@
     --color-accent-ring-strong: rgba(255, 94, 58, 0.2);
     --color-accent-ring-xl: rgba(255, 94, 58, 0.4);
     --color-accent-ring-xs: rgba(255, 94, 58, 0.05);
+    --color-accent-glow: rgba(255, 94, 58, 0.2);
+    --color-accent-glow-soft: rgba(255, 94, 58, 0.1);
 
-    /* Feedback */
+    /* Ambient brand backdrop — shared by the external surfaces (login / share /
+       device). A centred "spotlight" (surface is brighter than page in BOTH
+       light and dark) seats the card in a pool of light; four warm brand blobs
+       fill the field so it reads as a deliberate, dimensional canvas rather than
+       flat near-white. Resolves through light-dark() automatically. */
+    --brand-ambient:
+        radial-gradient(55% 50% at 8% 4%, var(--color-accent-glow), transparent 60%),
+        radial-gradient(55% 55% at 95% 98%, var(--color-accent-glow), transparent 58%),
+        radial-gradient(48% 48% at 88% 12%, var(--color-accent-glow-soft), transparent 55%),
+        radial-gradient(50% 45% at 6% 92%, var(--color-accent-glow-soft), transparent 55%),
+        radial-gradient(78% 64% at 50% 33%, var(--color-bg-surface), transparent 70%),
+        var(--color-bg-page);
+    /* Desaturated fractal-noise grain — kills gradient banding and adds a
+       tactile, "expensive" film. No colour inside the data-URI (token-safe);
+       applied via a low-opacity overlay pseudo-element. */
+    --brand-grain: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='g'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix type='saturate' values='0'/></filter><rect width='180' height='180' filter='url(%23g)'/></svg>");
+
+    /* Feedback — success unified to one restrained emerald; the 6 green variants
+     * now alias the canonical bg/text. (error-* is the danger tint, kept.) */
     --color-error-bg: light-dark(#fee2e2, #3b1111);
     --color-error-text: light-dark(#b91c1c, #fca5a5);
     --color-success-bg: light-dark(#dcfce7, #052e16);
     --color-success-text: light-dark(#15803d, #86efac);
-    --color-success-border: #48bb78;
-    --color-success-alt: #34c759;
-    --color-success-bg-alt: light-dark(#e6f4ea, #0a2015);
-    --color-success-text-alt: #0d904f;
-    --color-success-bg-green: light-dark(#e8f5e9, #0a2015);
-    --color-success-text-green: #4eaa25;
+    --color-success-border: #16a34a;
+    --color-success-alt: #16a34a;
+    --color-success-bg-alt: var(--color-success-bg);
+    --color-success-text-alt: var(--color-success-text);
+    --color-success-bg-green: var(--color-success-bg);
+    --color-success-text-green: var(--color-success-text);
 
-    /* Dangerous actions */
-    --color-danger-bg: #f56565;
-    --color-danger-text: white;
-    --color-danger-bg-hover: #e53e3e;
+    /* Dangerous actions — unified on #ef4444 / #dc2626; danger text-alt now uses
+     * the AA-passing error-text instead of a sub-4.5:1 red. */
+    --color-danger-bg: #ef4444;
+    --color-danger-text: #ffffff;
+    --color-danger-bg-hover: #dc2626;
     --color-danger-alt: #ef4444;
     --color-danger-ring: rgba(239, 68, 68, 0.3);
     --color-danger-ring-lg: rgba(239, 68, 68, 0.4);
     --color-danger-light-bg: light-dark(#fef2f2, #2a0c0c);
     --color-danger-lighter: light-dark(#fef2f2, #2a0c0c);
-    --color-danger-text-alt: #e53e3e;
+    --color-danger-text-alt: var(--color-error-text);
     --color-danger-gradient: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
 
-    /* Warning/feedback */
-    --color-warning-bg: light-dark(#ffeaa7, #3d2e00);
-    --color-warning-bg-dark: light-dark(#fdcb6e, #5a4200);
-    --color-warning-text: #ffc107;
-    --color-warning-border: #ffc107;
-    --color-warning-ring: rgba(255, 193, 7, 0.1);
-    --color-warning-shadow: rgba(255, 193, 7, 0.5);
-    --color-warning-orange-bg: light-dark(#fff3e0, #2a1c10);
-    --color-warning-orange-border: #f57c00;
-    --color-warning-orange-text: light-dark(#f57c00, #fb923c);
-    --color-warning-bg-light: light-dark(#fef3c7, #2a2410);
-    --color-warning-text-amber: light-dark(#f59e0b, #fbbf24);
-    --color-warning-bg-orange: #fef3e2;
-    --color-warning-text-orange: #d04423;
+    /* Warning — unified to one restrained amber. Text tier (#b45309) clears AA;
+     * the bright #ffc107 gold is replaced by amber-500 for borders/fills. Legacy
+     * orange/amber variants alias the canonical tokens. */
+    --color-warning-bg: light-dark(#fef3c7, #2a2410);
+    --color-warning-text: light-dark(#b45309, #fbbf24);
+    --color-warning-border: #f59e0b;
+    --color-warning-bg-dark: light-dark(#fde68a, #3d2e00);
+    --color-warning-ring: rgba(245, 158, 11, 0.12);
+    --color-warning-shadow: rgba(245, 158, 11, 0.4);
+    --color-warning-orange-bg: var(--color-warning-bg);
+    --color-warning-orange-border: var(--color-warning-border);
+    --color-warning-orange-text: var(--color-warning-text);
+    --color-warning-bg-light: var(--color-warning-bg);
+    --color-warning-text-amber: var(--color-warning-text);
+    --color-warning-bg-orange: var(--color-warning-bg);
+    --color-warning-text-orange: var(--color-warning-text);
 
-    /* Info */
-    --color-info-bg: light-dark(#ebf5fb, #0c1e35);
-    --color-info-border: #2b6cb0;
-    --color-info-text: #2b6cb0;
-    --color-info-bg-alt: light-dark(#e0ecff, #0c1e35);
-    --color-info-text-alt: #3171d8;
-    --color-info-surface: light-dark(#e0e7ff, #0c1e35);
+    /* Info — unified to one blue (AA text #1d4ed8, with a light-dark dark tier).
+     * Variants alias the canonical tokens. */
+    --color-info-bg: light-dark(#eff6ff, #0c2d48);
+    --color-info-text: light-dark(#1d4ed8, #93c5fd);
+    --color-info-border: #3b82f6;
     --color-info-blue: #3b82f6;
+    --color-info-bg-alt: var(--color-info-bg);
+    --color-info-text-alt: var(--color-info-text);
+    --color-info-surface: var(--color-info-bg);
 
-    /* Shadows — slightly stronger in dark mode for parity. */
+    /* Shadows — stronger in dark mode for parity. Dark values form a
+     * deliberate progression (base 0.3 < md 0.34 < lg 0.38) so elevation
+     * levels stay perceptually distinct; they used to all collapse to 0.3. */
     --color-shadow: light-dark(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.3));
-    --color-shadow-lg: light-dark(rgba(0, 0, 0, 0.12), rgba(0, 0, 0, 0.3));
+    --color-shadow-lg: light-dark(rgba(0, 0, 0, 0.12), rgba(0, 0, 0, 0.38));
     --color-shadow-xs: rgba(0, 0, 0, 0.05);
     --color-shadow-sm: rgba(0, 0, 0, 0.08);
-    --color-shadow-md: light-dark(rgba(0, 0, 0, 0.15), rgba(0, 0, 0, 0.3));
+    --color-shadow-md: light-dark(rgba(0, 0, 0, 0.15), rgba(0, 0, 0, 0.34));
     --color-shadow-xl: rgba(0, 0, 0, 0.2);
     --color-shadow-2xl: rgba(0, 0, 0, 0.25);
     --color-shadow-3xl: rgba(0, 0, 0, 0.3);
     --color-shadow-4xl: rgba(0, 0, 0, 0.4);
-    --color-shadow-5xl: rgba(0, 0, 0, 0.5);
 
     /* Overlays — same in both modes; they sit on top of arbitrary content. */
     --color-overlay: rgba(0, 0, 0, 0.5);
+    /* Frosted scrim behind overlay controls (favorite/kebab/checkbox) so they
+       stay legible on top of any thumbnail, light or dark. */
+    --color-scrim-control: light-dark(rgba(255, 255, 255, 0.92), rgba(15, 23, 42, 0.82));
     --color-overlay-light: rgba(0, 0, 0, 0.45);
     --color-overlay-heavy: rgba(0, 0, 0, 0.85);
     --color-overlay-darkest: rgba(0, 0, 0, 0.92);
@@ -178,18 +392,20 @@
     --color-sidebar-shadow: rgba(255, 94, 58, 0.35);
     --color-sidebar-shadow-lg: rgba(255, 94, 58, 0.45);
 
-    /* Calendar dot colors */
-    --color-cal-1: #ffa94d;
-    --color-cal-2: #74b9ff;
-    --color-cal-3: #81ecec;
-    --color-cal-4: #ffd43b;
-    --color-cal-5: #ff6b9d;
-    --color-cal-6: #ff7675;
-    --color-cal-7: #0984e3;
-    --color-cal-8: #00cec9;
-    --color-cal-9: #f0c800;
-    --color-cal-10: #e84393;
-    --color-cal-11: #e74c3c;
+    /* Calendar dots — regenerated at fixed S=55% L=62%, hues evenly around the
+     * wheel, so they read as one curated family (not confetti). These also tint
+     * the sidebar nav icons (sidebar.css :nth-child rules). */
+    --color-cal-1: #d36868;
+    --color-cal-2: #d3a268;
+    --color-cal-3: #c9d368;
+    --color-cal-4: #8fd368;
+    --color-cal-5: #68d37c;
+    --color-cal-6: #68d3b6;
+    --color-cal-7: #68b6d3;
+    --color-cal-8: #687cd3;
+    --color-cal-9: #8f68d3;
+    --color-cal-10: #c968d3;
+    --color-cal-11: #d368a2;
 
     /* File type badge colors */
     --color-ft-html: #e34c26;
@@ -274,17 +490,11 @@
     --color-lightbox-text-faint: rgba(255, 255, 255, 0.5);
     --color-lightbox-text-muted: rgba(255, 255, 255, 0.7);
 
-    /* Purple/special */
-    --color-purple-bg: light-dark(#f3e8ff, #1a0a33);
-    --color-purple-border: #7c3aed;
-    --color-purple-text: #7c3aed;
-    --color-purple-bg-gradient: linear-gradient(135deg, #e0e7ff 0%, #ede9fe 50%, #fce7f3 100%);
-    --color-purple-gradient: linear-gradient(135deg, #8b5cf6 0%, #a855f7 100%);
-    --color-purple-shadow: rgba(139, 92, 246, 0.35);
-    --color-purple-border-light: rgba(139, 92, 246, 0.15);
+    /* (Removed: the --color-purple-* family had zero consumers. The music
+     * gradient and the video file-type purple are separate, retained tokens.) */
 
     /* OIDC / auth */
-    --color-oidc-bg: #4f46e5;
+    --color-oidc-bg: var(--color-info-blue);
     --color-oidc-shadow: rgba(79, 70, 229, 0.3);
     --color-oidc-shadow-lg: rgba(79, 70, 229, 0.4);
 
@@ -300,22 +510,22 @@
     --color-content-muted: #888;
     --color-content-bg-warn: light-dark(#ffeaa7, #3d2e00);
     --color-content-bg-warn-dark: light-dark(#fdcb6e, #5a4200);
-    --color-content-debug-bg: red;
-    --color-content-debug-text: white;
 
     /* User menu */
     --color-user-menu-header-bg: light-dark(linear-gradient(135deg, #fef5f3 0%, #fdf2f8 100%), linear-gradient(135deg, #1a2332 0%, #1e2940 100%));
     --color-user-menu-header-border: light-dark(#fce7e1, #3a2520);
 
     /* Share dialog */
-    --color-share-link-text: #1565c0;
-    --color-share-link-hover: #1565c0;
+    --color-share-link-text: var(--color-info-text);
+    --color-share-link-hover: var(--color-info-text);
     --color-share-remove-text: #b71c1c;
     --color-share-owner-text: #757575;
 
     /* Primary (style.css) */
-    --color-primary: light-dark(#2563eb, #60a5fa);
-    --color-primary-hover: light-dark(#1d4ed8, #6fa8ee);
+    /* Demoted: orange is the sole brand/primary — primary now aliases the accent
+     * (was a competing blue #2563eb). Flips device-verify / share / userMenu to brand. */
+    --color-primary: var(--color-accent);
+    --color-primary-hover: var(--color-accent-hover);
 
     /* Recent view */
     --color-recent-muted: #6c757d;
@@ -432,19 +642,8 @@
     /* Status badge — gray/disabled */
     --color-badge-gray: #d1d5db;
 
-    /* FIXME: legacy dark-mode badge tokens — kept for now; can be folded into
-     * the main badges once their last consumers migrate. */
-    --color-badge-success-dark-bg: #052e16;
-    --color-badge-success-dark-border: #065f46;
-    --color-badge-error-dark-bg: #3b1111;
-    --color-badge-error-dark-bg-hover: #4a1515;
-    --color-badge-error-dark-text: #fca5a5;
-    --color-badge-warning-dark-bg: #422006;
-    --color-badge-warning-dark-border: #92400e;
-    --color-badge-indigo-dark-bg: #2e1065;
-    --color-badge-indigo-dark-text: #c4b5fd;
-    --color-badge-blue-dark-bg: #0c2d48;
-    --color-badge-blue-dark-text: #93c5fd;
+    /* (Removed: the legacy dark-mode badge tokens that lived here had zero
+     * consumers — the light-dark() badge tokens above are the single source.) */
 
     /* Dark structural */
     --color-dark-footer: #162032;
@@ -460,8 +659,8 @@
     --color-music-background: var(--color-bg-surface);
     --color-music-public-bg: rgba(74, 144, 217, 0.12);
 
-    --color-video-play: white;
-    --color-video-play-shadow: black;
+    --color-video-play: #ffffff;
+    --color-video-play-shadow: #000000;
 }
 
 /* Explicit user choice overrides the OS preference. `theme-init.js` writes
@@ -472,4 +671,25 @@ html[data-color-scheme="light"] {
 
 html[data-color-scheme="dark"] {
     color-scheme: dark;
+}
+
+/* Compact density — tighter rows/controls. Toggled by writing
+ * data-density="compact" on <html>; consumed by list/control CSS in Fase 1. */
+html[data-density="compact"] {
+    --density-row-py: var(--space-2);    /* 8px */
+    --density-row-px: var(--space-2-5);  /* 10px */
+    --density-gap: var(--space-2);
+    --density-control-h: 32px;
+}
+
+/* High-contrast border ramp (prefers-contrast: more). Lives here in the token
+ * layer — the only place raw colour values belong — so the "no raw hex outside
+ * variables/themes" invariant holds. The matching text-tier collapse + focus
+ * ring (token/outline only) stay in base/a11y.css. */
+@media (prefers-contrast: more) {
+    :root {
+        --color-border: light-dark(#64748b, #94a3b8);
+        --color-border-light: light-dark(#64748b, #94a3b8);
+        --color-border-medium: light-dark(#475569, #cbd5e1);
+    }
 }

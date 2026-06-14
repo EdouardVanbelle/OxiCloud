@@ -1,0 +1,82 @@
+/* ============================================================
+ * Typography utilities — Fase 0 foundations.
+ *
+ * Semantic heading roles DECOUPLED from element level, so any
+ * h1–h6 can carry the correct visual weight while the document
+ * keeps a correct, accessible heading order. All values route
+ * through the type/leading/weight/tracking tokens in variables.css.
+ *
+ * Views are migrated onto these classes in Fase 1 (replacing the
+ * per-page raw font-size/weight headings the audit flagged).
+ * ============================================================ */
+
+/* Page title — one per page (the h1 role). */
+.heading-page {
+    font-size: var(--text-2xl);
+    line-height: var(--leading-tight);
+    font-weight: var(--weight-bold);
+    letter-spacing: var(--tracking-tight);
+    color: var(--color-text-heading);
+}
+
+/* Section heading. */
+.heading-section {
+    font-size: var(--text-xl);
+    line-height: var(--leading-snug);
+    font-weight: var(--weight-semibold);
+    letter-spacing: var(--tracking-tight);
+    color: var(--color-text-heading);
+}
+
+/* Card / panel heading. */
+.heading-card {
+    font-size: var(--text-md);
+    line-height: var(--leading-snug);
+    font-weight: var(--weight-semibold);
+    color: var(--color-text-heading);
+}
+
+/* Eyebrow / overline label (uppercase caps with tracking). */
+.heading-eyebrow {
+    font-size: var(--text-xs);
+    line-height: var(--leading-normal);
+    font-weight: var(--weight-semibold);
+    letter-spacing: var(--tracking-widest);
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+}
+
+/* Constrain running text to a comfortable measure (~65ch). */
+.prose {
+    max-width: var(--measure-prose);
+}
+
+/* Headings wrap with balanced line lengths (no single orphan word). */
+h1,
+h2,
+h3,
+.heading-page,
+.heading-section,
+.heading-card,
+.page-title {
+    text-wrap: balance;
+}
+
+/* Running prose wraps "pretty" (avoids orphans and short last lines). */
+.prose,
+.empty-state p,
+.about-description,
+.auth-subtitle,
+.auth-hint,
+.language-subtitle {
+    text-wrap: pretty;
+}
+
+/* Tabular figures for numeric UI so digits align and don't jitter as they
+   change (storage readouts, badges, stat counters). */
+.storage-info,
+.user-menu-storage-text,
+.notif-badge,
+.stat-value {
+    font-variant-numeric: tabular-nums;
+}

@@ -7,7 +7,7 @@
 body {
     background: var(--color-bg-page);
     color: var(--color-text-heading);
-    min-height: 100vh;
+    min-height: 100dvh;
     height: auto;
     display: flex;
     flex-direction: column;
@@ -29,56 +29,56 @@ body {
     color: inherit;
     display: flex;
     align-items: center;
-    gap: 14px;
+    gap: var(--space-3-5);
 }
 .width-zero {
     width: 0%;
 }
 .mt-14 {
-    margin-top: 14px;
+    margin-top: var(--space-3-5);
 }
 .toggle-row-strong {
-    margin-top: 10px;
-    padding: 12px 0;
+    margin-top: var(--space-2-5);
+    padding: var(--space-3) 0;
     border-top: 1px solid var(--color-border);
 }
 .icon-muted-right {
     color: var(--color-text-subtle);
-    margin-right: 6px;
+    margin-right: var(--space-1-5);
 }
 .h2-space-between {
     justify-content: space-between;
 }
 .flex-gap-6 {
     display: flex;
-    gap: 6px;
+    gap: var(--space-1-5);
 }
 .oidc-discover-wrap {
-    margin-bottom: 12px;
+    margin-bottom: var(--space-3);
 }
 .secret-icon {
     color: var(--color-secret-green);
 }
 .small-muted {
-    font-weight: 400;
+    font-weight: var(--weight-normal);
     color: var(--color-text-faint);
 }
 .summary-icon-right {
-    margin-right: 6px;
+    margin-right: var(--space-1-5);
 }
 .oidc-actions {
     display: flex;
-    gap: 10px;
-    margin-top: 24px;
+    gap: var(--space-2-5);
+    margin-top: var(--space-6);
     justify-content: flex-end;
 }
 .modal-title-icon {
     color: var(--color-accent);
-    margin-right: 8px;
+    margin-right: var(--space-2);
 }
 .quota-input-row {
     display: flex;
-    gap: 10px;
+    gap: var(--space-2-5);
     align-items: center;
 }
 .flex-1 {
@@ -86,34 +86,34 @@ body {
 }
 .select-qm-unit {
     width: 90px;
-    padding: 10px 14px;
+    padding: var(--space-2-5) var(--space-3-5);
     border: 2px solid var(--color-border);
-    border-radius: 10px;
-    font-size: 14px;
+    border-radius: var(--radius-xl);
+    font-size: var(--text-base);
     background: var(--color-bg-hover);
 }
 .form-row {
     display: flex;
-    gap: 14px;
+    gap: var(--space-3-5);
 }
 .select-cu-role {
     width: 100%;
-    padding: 10px 14px;
+    padding: var(--space-2-5) var(--space-3-5);
     border: 2px solid var(--color-border);
-    border-radius: 10px;
-    font-size: 14px;
+    border-radius: var(--radius-xl);
+    font-size: var(--text-base);
     background: var(--color-bg-hover);
 }
 .quota-row {
     display: flex;
-    gap: 6px;
+    gap: var(--space-1-5);
 }
 .select-cu-quota-unit {
     width: 70px;
-    padding: 10px 8px;
+    padding: var(--space-2-5) var(--space-2);
     border: 2px solid var(--color-border);
-    border-radius: 10px;
-    font-size: 13px;
+    border-radius: var(--radius-xl);
+    font-size: var(--text-sm);
     background: var(--color-bg-hover);
 }
 .alert-no-margin {
@@ -121,21 +121,21 @@ body {
 }
 .table-loading-cell {
     text-align: center;
-    padding: 28px;
+    padding: var(--space-7);
     color: var(--color-text-faint);
 }
 .table-status-error {
     color: var(--color-error-text-dark);
-    padding: 20px;
+    padding: var(--space-5);
 }
 .table-status-empty {
     text-align: center;
-    padding: 28px;
+    padding: var(--space-7);
     color: var(--color-text-faint);
 }
 .user-self-badge {
     color: var(--color-text-faint);
-    font-weight: 400;
+    font-weight: var(--weight-normal);
 }
 .badge-admin-icon-small {
     font-size: 10px;
@@ -144,14 +144,14 @@ body {
     width: 80px;
 }
 .user-last-login-cell {
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--color-text);
 }
 
 /* ── Top Header Bar ── */
 .admin-header {
     background: linear-gradient(135deg, var(--color-sidebar-bg-from) 0%, var(--color-sidebar-bg-to) 100%);
-    padding: 0 32px;
+    padding: 0 var(--space-8);
     height: 64px;
     display: flex;
     align-items: center;
@@ -164,7 +164,7 @@ body {
 .admin-header-left {
     display: flex;
     align-items: center;
-    gap: 14px;
+    gap: var(--space-3-5);
 }
 .admin-logo {
     width: 38px;
@@ -183,24 +183,24 @@ body {
 }
 .admin-title-text {
     font-size: 17px;
-    font-weight: 700;
+    font-weight: var(--weight-bold);
     color: var(--color-sidebar-text-active);
     letter-spacing: 0.3px;
 }
 .admin-title-separator {
     font-size: 17px;
     color: var(--color-sidebar-storage-faint);
-    font-weight: 400;
-    margin-left: 6px;
+    font-weight: var(--weight-normal);
+    margin-left: var(--space-1-5);
 }
 .admin-header-right a {
     color: var(--color-sidebar-text);
     text-decoration: none;
-    font-size: 13px;
-    font-weight: 500;
+    font-size: var(--text-sm);
+    font-weight: var(--weight-medium);
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: var(--space-1-5);
     transition: color 0.2s;
 }
 .admin-header-right a:hover {
@@ -211,7 +211,7 @@ body {
 .admin-container {
     max-width: 1080px;
     margin: 0 auto;
-    padding: 28px 24px 60px;
+    padding: var(--space-7) var(--space-6) 60px;
     width: 100%;
     flex: 1;
 }
@@ -219,29 +219,29 @@ body {
 /* ── Tabs ── */
 .admin-tabs {
     display: flex;
-    gap: 6px;
-    margin-bottom: 28px;
+    gap: var(--space-1-5);
+    margin-bottom: var(--space-7);
     background: var(--color-bg-surface);
     border-radius: 14px;
-    padding: 6px;
+    padding: var(--space-1-5);
     box-shadow: 0 1px 4px var(--color-shadow-xs);
     position: sticky;
     top: 64px;
     z-index: 50;
 }
 .admin-tab {
-    padding: 10px 22px;
+    padding: var(--space-2-5) 22px;
     cursor: pointer;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     font-size: 13.5px;
     color: var(--color-text-subtle);
     border: none;
     background: none;
-    border-radius: 10px;
+    border-radius: var(--radius-xl);
     transition: all 0.2s;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-2);
 }
 .admin-tab:hover {
     color: var(--color-text-heading);
@@ -256,7 +256,7 @@ body {
     color: var(--color-sidebar-text-active);
 }
 .admin-tab i {
-    font-size: 14px;
+    font-size: var(--text-base);
     width: 16px;
     text-align: center;
 }
@@ -296,21 +296,21 @@ body {
 /* ── Cards ── */
 .admin-card {
     background: var(--color-bg-surface);
-    border-radius: 16px;
+    border-radius: var(--radius-3xl);
     box-shadow:
         0 1px 4px var(--color-shadow-xs),
         0 0 0 1px var(--color-shadow-xs);
-    padding: 28px;
+    padding: var(--space-7);
     margin-bottom: 22px;
 }
 .admin-card h2 {
-    font-size: 16px;
-    font-weight: 700;
-    margin-bottom: 20px;
+    font-size: var(--text-md);
+    font-weight: var(--weight-bold);
+    margin-bottom: var(--space-5);
     color: var(--color-text-heading);
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: var(--space-2-5);
 }
 .admin-card h2 i {
     color: var(--color-accent);
@@ -335,11 +335,11 @@ body {
 .stats-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 14px;
+    gap: var(--space-3-5);
     margin-bottom: 22px;
 }
 .stat-card {
-    padding: 20px;
+    padding: var(--space-5);
     background: var(--color-bg-hover);
     border-radius: 14px;
     text-align: center;
@@ -353,8 +353,8 @@ body {
     box-shadow: 0 4px 12px var(--color-shadow-xs);
 }
 .stat-value {
-    font-size: 1.75rem;
-    font-weight: 800;
+    font-size: var(--text-3xl);
+    font-weight: var(--weight-extrabold);
     color: var(--color-text-heading);
 }
 .stat-label {
@@ -362,8 +362,8 @@ body {
     color: var(--color-text-faint);
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    margin-top: 4px;
-    font-weight: 600;
+    margin-top: var(--space-1);
+    font-weight: var(--weight-semibold);
 }
 .stat-card.warn {
     border-color: var(--color-stat-warn-border);
@@ -391,12 +391,12 @@ body {
     width: 100%;
     height: 8px;
     background: var(--color-border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     overflow: hidden;
 }
 .progress-fill {
     height: 100%;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     transition: width 0.5s ease;
 }
 .progress-fill.green {
@@ -412,7 +412,7 @@ body {
 /* ── Table ── */
 .table-wrap {
     overflow-x: auto;
-    border-radius: 12px;
+    border-radius: var(--radius-2xl);
     border: 1px solid var(--color-border);
 }
 table {
@@ -422,18 +422,18 @@ table {
 }
 th {
     text-align: left;
-    padding: 12px 16px;
+    padding: var(--space-3) var(--space-4);
     background: var(--color-bg-subtle);
     color: var(--color-text-faint);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    font-weight: 700;
+    font-weight: var(--weight-bold);
     white-space: nowrap;
     border-bottom: 1px solid var(--color-border);
 }
 td {
-    padding: 14px 16px;
+    padding: var(--space-3-5) var(--space-4);
     border-bottom: 1px solid var(--color-border-light);
     vertical-align: middle;
 }
@@ -446,14 +446,14 @@ tr:hover {
 .user-info {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-0-5);
 }
 .user-name {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--color-text-heading);
 }
 .user-email {
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--color-text-faint);
 }
 
@@ -461,11 +461,11 @@ tr:hover {
 .badge {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    font-size: 11px;
-    padding: 3px 10px;
-    border-radius: 20px;
-    font-weight: 600;
+    gap: var(--space-1);
+    font-size: var(--text-2xs);
+    padding: 3px var(--space-2-5);
+    border-radius: var(--radius-4xl);
+    font-weight: var(--weight-semibold);
 }
 .badge-admin {
     background: var(--color-role-admin-bg);
@@ -495,28 +495,28 @@ tr:hover {
     background: var(--color-warning-bg-light);
     color: var(--color-badge-warning-text);
     font-size: 10px;
-    padding: 1px 6px;
-    margin-left: 4px;
+    padding: 1px var(--space-1-5);
+    margin-left: var(--space-1);
 }
 
 /* ── Buttons ── */
 .btn {
-    padding: 8px 18px;
+    padding: var(--space-2) 18px;
     border: none;
-    border-radius: 10px;
-    font-size: 13px;
-    font-weight: 600;
+    border-radius: var(--radius-xl);
+    font-size: var(--text-sm);
+    font-weight: var(--weight-semibold);
     cursor: pointer;
     transition: all 0.15s;
     white-space: nowrap;
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: var(--space-1-5);
 }
 .btn-sm {
-    padding: 6px 12px;
-    font-size: 12px;
-    border-radius: 8px;
+    padding: var(--space-1-5) var(--space-3);
+    font-size: var(--text-xs);
+    border-radius: var(--radius-lg);
 }
 .btn-primary {
     background: var(--color-accent-gradient);
@@ -559,19 +559,19 @@ tr:hover {
 }
 .actions-row {
     display: flex;
-    gap: 6px;
+    gap: var(--space-1-5);
     flex-wrap: wrap;
 }
 
 /* ── Forms ── */
 .form-group {
-    margin-bottom: 16px;
+    margin-bottom: var(--space-4);
 }
 .form-group label {
     display: block;
-    font-size: 13px;
-    font-weight: 600;
-    margin-bottom: 4px;
+    font-size: var(--text-sm);
+    font-weight: var(--weight-semibold);
+    margin-bottom: var(--space-1);
     color: var(--color-text-dark);
 }
 .form-group input[type="text"],
@@ -580,10 +580,10 @@ tr:hover {
 .form-group input[type="number"],
 .form-group select {
     width: 100%;
-    padding: 10px 14px;
+    padding: var(--space-2-5) var(--space-3-5);
     border: 2px solid var(--color-border);
-    border-radius: 10px;
-    font-size: 14px;
+    border-radius: var(--radius-xl);
+    font-size: var(--text-base);
     background: var(--color-bg-hover);
     transition: all 0.2s;
     font-family: inherit;
@@ -598,7 +598,7 @@ tr:hover {
 }
 .form-group small {
     color: var(--color-text-faint);
-    font-size: 12px;
+    font-size: var(--text-xs);
     display: block;
     margin-top: 3px;
 }
@@ -607,11 +607,11 @@ tr:hover {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 10px 0;
+    padding: var(--space-2-5) 0;
 }
 .toggle-row label {
-    font-size: 14px;
-    font-weight: 500;
+    font-size: var(--text-base);
+    font-weight: var(--weight-medium);
     color: var(--color-text-dark);
 }
 .switch {
@@ -655,24 +655,24 @@ tr:hover {
 .readonly-field {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-2);
     background: var(--color-bg-hover);
     border: 2px solid var(--color-border);
-    border-radius: 10px;
-    padding: 10px 14px;
+    border-radius: var(--radius-xl);
+    padding: var(--space-2-5) var(--space-3-5);
     font-family: "SF Mono", Monaco, Consolas, monospace;
-    font-size: 13px;
+    font-size: var(--text-sm);
     word-break: break-all;
     color: var(--color-text-dark);
 }
 .readonly-field button {
     flex-shrink: 0;
-    padding: 6px 10px;
+    padding: var(--space-1-5) var(--space-2-5);
     border: 1px solid var(--color-border);
-    border-radius: 8px;
+    border-radius: var(--radius-lg);
     background: var(--color-bg-surface);
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--text-xs);
     transition: all 0.15s;
     color: var(--color-text-subtle);
 }
@@ -683,12 +683,12 @@ tr:hover {
 
 /* ── Alerts ── */
 .alert {
-    padding: 12px 16px;
-    border-radius: 10px;
-    font-size: 13px;
-    margin-top: 14px;
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-xl);
+    font-size: var(--text-sm);
+    margin-top: var(--space-3-5);
     display: none;
-    font-weight: 500;
+    font-weight: var(--weight-medium);
 }
 .alert-success {
     background: var(--color-badge-success-bg);
@@ -711,23 +711,23 @@ tr:hover {
 .warning {
     background: var(--color-warning-bg-faint);
     border: 1px solid var(--color-badge-warning-border);
-    border-radius: 10px;
-    padding: 10px 14px;
-    font-size: 13px;
+    border-radius: var(--radius-xl);
+    padding: var(--space-2-5) var(--space-3-5);
+    font-size: var(--text-sm);
     color: var(--color-badge-warning-text);
-    margin-top: 8px;
+    margin-top: var(--space-2);
     display: flex;
     align-items: center;
-    gap: 6px;
-    font-weight: 500;
+    gap: var(--space-1-5);
+    font-weight: var(--weight-medium);
 }
 
 /* ── Discovery ── */
 .discovery-result {
-    margin: 12px 0;
-    padding: 14px;
-    border-radius: 10px;
-    font-size: 13px;
+    margin: var(--space-3) 0;
+    padding: var(--space-3-5);
+    border-radius: var(--radius-xl);
+    font-size: var(--text-sm);
 }
 .discovery-result.ok {
     background: var(--color-badge-success-bg);
@@ -740,8 +740,8 @@ tr:hover {
     color: var(--color-error-text-dark);
 }
 .discovery-result dt {
-    font-weight: 700;
-    margin-top: 6px;
+    font-weight: var(--weight-bold);
+    margin-top: var(--space-1-5);
 }
 .discovery-result dd {
     margin-left: 0;
@@ -750,16 +750,16 @@ tr:hover {
 
 /* ── Details ── */
 details {
-    margin-top: 14px;
+    margin-top: var(--space-3-5);
     border-top: 1px solid var(--color-border);
-    padding-top: 12px;
+    padding-top: var(--space-3);
 }
 details summary {
     cursor: pointer;
-    font-weight: 600;
-    font-size: 14px;
+    font-weight: var(--weight-semibold);
+    font-size: var(--text-base);
     color: var(--color-text-subtle);
-    padding: 6px 0;
+    padding: var(--space-1-5) 0;
     user-select: none;
     transition: color 0.2s;
 }
@@ -767,7 +767,7 @@ details summary:hover {
     color: var(--color-accent);
 }
 details[open] summary {
-    margin-bottom: 14px;
+    margin-bottom: var(--space-3-5);
     color: var(--color-accent);
 }
 
@@ -785,8 +785,8 @@ details[open] summary {
 }
 .modal {
     background: var(--color-bg-surface);
-    border-radius: 20px;
-    padding: 28px;
+    border-radius: var(--radius-4xl);
+    padding: var(--space-7);
     width: 420px;
     max-width: 90vw;
     box-shadow: 0 20px 60px var(--color-shadow-xl);
@@ -811,7 +811,7 @@ details[open] summary {
 }
 .modal-actions {
     display: flex;
-    gap: 8px;
+    gap: var(--space-2);
     justify-content: flex-end;
     margin-top: 18px;
 }
@@ -820,14 +820,14 @@ details[open] summary {
 .quota-bar {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: var(--space-2-5);
 }
 .quota-bar .progress-bar {
     flex: 1;
     height: 6px;
 }
 .quota-text {
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--color-text-faint);
     white-space: nowrap;
 }
@@ -836,7 +836,7 @@ details[open] summary {
 #access-denied {
     display: none;
     text-align: center;
-    padding: 80px 20px;
+    padding: var(--space-20) var(--space-5);
 }
 #access-denied .access-icon {
     width: 80px;
@@ -846,33 +846,33 @@ details[open] summary {
     display: flex;
     align-items: center;
     justify-content: center;
-    margin: 0 auto 20px;
+    margin: 0 auto var(--space-5);
 }
 #access-denied .access-icon i {
-    font-size: 32px;
+    font-size: var(--text-4xl);
     color: var(--color-danger-alt);
 }
 #access-denied h2 {
     color: var(--color-error-text-dark);
-    margin-bottom: 8px;
-    font-size: 20px;
+    margin-bottom: var(--space-2);
+    font-size: var(--text-xl);
 }
 #access-denied p {
     color: var(--color-text-subtle);
-    margin-bottom: 20px;
-    font-size: 14px;
+    margin-bottom: var(--space-5);
+    font-size: var(--text-base);
 }
 #access-denied a {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 10px 24px;
+    gap: var(--space-1-5);
+    padding: var(--space-2-5) var(--space-6);
     background: var(--color-accent-gradient);
     color: var(--color-sidebar-text-active);
     text-decoration: none;
-    border-radius: 10px;
-    font-weight: 600;
-    font-size: 14px;
+    border-radius: var(--radius-xl);
+    font-weight: var(--weight-semibold);
+    font-size: var(--text-base);
     box-shadow: 0 3px 12px var(--color-accent-shadow);
     transition: all 0.2s;
 }
@@ -882,35 +882,31 @@ details[open] summary {
 }
 #loading {
     text-align: center;
-    padding: 80px;
+    padding: var(--space-20);
     color: var(--color-text-faint);
     font-size: 15px;
 }
 #loading i {
-    font-size: 32px;
+    font-size: var(--text-4xl);
     color: var(--color-accent);
     display: block;
-    margin-bottom: 12px;
+    margin-bottom: var(--space-3);
     animation: spin 1s linear infinite;
 }
-@keyframes spin {
-    to {
-        transform: rotate(360deg);
-    }
-}
+/* @keyframes spin → base/animations.css (canonical, loaded via main.css). */
 
 /* ── Pagination ── */
 .pagination {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-top: 14px;
-    font-size: 13px;
+    margin-top: var(--space-3-5);
+    font-size: var(--text-sm);
     color: var(--color-text-faint);
-    padding: 0 4px;
+    padding: 0 var(--space-1);
 }
 .pagination button {
-    padding: 6px 14px;
+    padding: var(--space-1-5) var(--space-3-5);
 }
 
 /* ── Confirm modal ── */
@@ -921,8 +917,8 @@ details[open] summary {
     color: var(--color-error-text-dark);
 }
 .modal-confirm p {
-    margin: 14px 0 22px;
-    font-size: 14px;
+    margin: var(--space-3-5) 0 22px;
+    font-size: var(--text-base);
     line-height: 1.55;
     color: var(--color-dark-mid);
 }
@@ -930,9 +926,9 @@ details[open] summary {
     background: var(--color-danger-gradient);
     color: var(--color-danger-text);
     border: none;
-    padding: 10px 22px;
-    border-radius: 10px;
-    font-weight: 600;
+    padding: var(--space-2-5) 22px;
+    border-radius: var(--radius-xl);
+    font-weight: var(--weight-semibold);
     cursor: pointer;
     transition: opacity 0.15s;
 }
@@ -945,28 +941,28 @@ details[open] summary {
 .storage-status-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 12px;
-    margin-bottom: 24px;
+    gap: var(--space-3);
+    margin-bottom: var(--space-6);
 }
 .storage-stat {
-    padding: 14px;
+    padding: var(--space-3-5);
     background: var(--color-bg-hover);
-    border-radius: 12px;
+    border-radius: var(--radius-2xl);
     text-align: center;
     border: 1px solid var(--color-border);
 }
 .storage-stat__label {
     display: block;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.5px;
     color: var(--color-text-secondary);
-    margin-bottom: 4px;
+    margin-bottom: var(--space-1);
 }
 .storage-stat__value {
     display: block;
     font-size: 1.35rem;
-    font-weight: 700;
+    font-weight: var(--weight-bold);
     color: var(--color-text-heading);
 }
 
@@ -977,15 +973,15 @@ details[open] summary {
 .smtp-info-table {
     width: 100%;
     border-collapse: collapse;
-    margin-bottom: 24px;
+    margin-bottom: var(--space-6);
     background: var(--color-bg-hover);
     border: 1px solid var(--color-border);
-    border-radius: 12px;
+    border-radius: var(--radius-2xl);
     overflow: hidden;
 }
 .smtp-info-table th,
 .smtp-info-table td {
-    padding: 10px 14px;
+    padding: var(--space-2-5) var(--space-3-5);
     text-align: left;
     border-bottom: 1px solid var(--color-border);
     vertical-align: middle;
@@ -997,7 +993,7 @@ details[open] summary {
 }
 .smtp-info-table th {
     font-size: 0.85rem;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--color-text-secondary);
     width: 220px;
     white-space: nowrap;
@@ -1011,8 +1007,8 @@ details[open] summary {
 
 .storage-backend-selector {
     display: flex;
-    gap: 12px;
-    margin-bottom: 20px;
+    gap: var(--space-3);
+    margin-bottom: var(--space-5);
 }
 .storage-backend-option {
     flex: 1;
@@ -1025,18 +1021,18 @@ details[open] summary {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 8px;
-    padding: 18px 14px;
+    gap: var(--space-2);
+    padding: 18px var(--space-3-5);
     border: 2px solid var(--color-border);
-    border-radius: 12px;
+    border-radius: var(--radius-2xl);
     transition:
         border-color 0.2s,
         background 0.2s;
     text-align: center;
-    font-weight: 500;
+    font-weight: var(--weight-medium);
 }
 .storage-backend-option__card i {
-    font-size: 1.5rem;
+    font-size: var(--text-2xl);
     color: var(--color-text-secondary);
     transition: color 0.2s;
 }
@@ -1049,29 +1045,29 @@ details[open] summary {
 }
 
 .storage-form {
-    margin-top: 8px;
+    margin-top: var(--space-2);
 }
 
 .storage-actions {
     display: flex;
-    gap: 10px;
-    margin-top: 24px;
+    gap: var(--space-2-5);
+    margin-top: var(--space-6);
     justify-content: flex-end;
 }
 
 .storage-migration-section {
-    margin-top: 32px;
-    padding-top: 20px;
+    margin-top: var(--space-8);
+    padding-top: var(--space-5);
     border-top: 1px solid var(--color-border);
 }
 .storage-migration-section h3 {
-    font-size: 1rem;
-    margin-bottom: 8px;
+    font-size: var(--text-md);
+    margin-bottom: var(--space-2);
     color: var(--color-text-heading);
 }
 .storage-migration-section h3 i {
     color: var(--color-text-secondary);
-    margin-right: 6px;
+    margin-right: var(--space-1-5);
 }
 
 /* ── Migration UI ── */
@@ -1079,16 +1075,16 @@ details[open] summary {
 .migration-status-row {
     display: flex;
     align-items: center;
-    gap: 8px;
-    margin-bottom: 14px;
-    font-size: 14px;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3-5);
+    font-size: var(--text-base);
 }
 
 .badge-migration {
-    padding: 3px 10px;
-    border-radius: 10px;
-    font-size: 12px;
-    font-weight: 600;
+    padding: 3px var(--space-2-5);
+    border-radius: var(--radius-xl);
+    font-size: var(--text-xs);
+    font-weight: var(--weight-semibold);
     text-transform: uppercase;
     letter-spacing: 0.4px;
 }
@@ -1117,39 +1113,39 @@ details[open] summary {
     width: 100%;
     height: 10px;
     background: var(--color-bg-hover);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     overflow: hidden;
-    margin-bottom: 6px;
+    margin-bottom: var(--space-1-5);
 }
 .migration-progress-bar__fill {
     height: 100%;
     background: var(--color-accent);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     transition: width 0.3s ease;
 }
 
 .migration-progress-text {
     display: flex;
     justify-content: space-between;
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--color-text-secondary);
-    margin-bottom: 4px;
+    margin-bottom: var(--space-1);
 }
 
 .migration-failed-list {
     max-height: 150px;
     overflow-y: auto;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     background: var(--color-bg-hover);
-    padding: 8px 12px;
-    border-radius: 8px;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-lg);
     border: 1px solid var(--color-border);
-    margin-top: 6px;
+    margin-top: var(--space-1-5);
 }
 
 .migration-actions {
     display: flex;
-    gap: 10px;
-    margin-top: 16px;
+    gap: var(--space-2-5);
+    margin-top: var(--space-4);
     flex-wrap: wrap;
 }

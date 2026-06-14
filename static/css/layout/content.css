@@ -18,22 +18,40 @@
 /* Content area */
 .content-area {
     flex-grow: 1;
-    padding: 20px;
+    padding: var(--space-5) var(--gutter);
     overflow-y: scroll;
     scrollbar-gutter: stable;
 }
 
+/* Phones: tighten the shared gutter and let the actions bar wrap. */
+@media (max-width: 640px) {
+    :root {
+        --gutter: var(--space-4);
+    }
+
+    /* Mobile uses overlay scrollbars — don't reserve a phantom gutter. */
+    .content-area {
+        scrollbar-gutter: auto;
+    }
+
+    .actions-bar {
+        flex-wrap: wrap;
+        height: auto;
+        gap: var(--space-2);
+    }
+}
+
 .page-title {
-    font-size: 24px;
-    font-weight: bold;
-    margin-bottom: 20px;
+    font-size: var(--text-2xl);
+    font-weight: var(--weight-bold);
+    margin-bottom: var(--space-5);
     color: var(--color-text);
 }
 
 .page-sticky-header {
     position: sticky;
     margin: 0px;
-    padding: 10px 0px;
+    padding: var(--space-2-5) 0px;
     top: -20px; /* due to padding top of content-area */
     background-color: var(--color-bg-page);
     z-index: 100; /* ensure header is above image preview */
@@ -42,15 +60,15 @@
 .actions-bar {
     display: flex;
     justify-content: space-between;
-    margin: 0 0 12px;
+    margin: 0 0 var(--space-3);
     height: 60px;
-    padding: 10px;
+    padding: var(--space-2-5);
 }
 
 .action-buttons {
     display: flex;
     flex: auto;
-    gap: 12px;
+    gap: var(--space-3);
 }
 
 .empty-state {
@@ -58,12 +76,31 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 40px;
+    gap: var(--space-2);
+    padding: var(--space-12) var(--space-6);
     text-align: center;
-    color: var(--color-content-muted);
+    color: var(--color-text-muted);
     width: 100%;
-    height: 300px;
+    min-height: 320px;
     grid-column: 1 / -1;
+}
+
+.empty-state p {
+    margin: 0;
+    max-width: 42ch;
+    color: var(--color-text-muted);
+}
+
+/* First paragraph acts as the title. */
+.empty-state p:first-of-type {
+    font-size: var(--text-lg);
+    font-weight: var(--weight-semibold);
+    color: var(--color-text-heading);
+}
+
+/* Call-to-action button spacing. */
+.empty-state .btn {
+    margin-top: var(--space-4);
 }
 
 /* invisible element, permits building of drag element without altering display */

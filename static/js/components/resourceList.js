@@ -18,7 +18,7 @@
 
 // @ts-check
 
-import { escapeHtml, formatDateTime, formatFileSize } from '../core/formatters.js';
+import { escapeHtml, formatDateShort, formatDateTime, formatFileSize, formatRelativeTime } from '../core/formatters.js';
 import { i18n } from '../core/i18n.js';
 import { systemUsers } from '../model/systemUsers.js';
 import { buildResourceIcon } from './resourceIcon.js';
@@ -36,6 +36,23 @@ import { createUserVignette } from './userVignette.js';
  * @type {string}
  */
 const JUST_ADDED_KEY = '__oxicloud_just_added__';
+
+/**
+ * Recency label for a grid card's metadata line: a relative "time ago"
+ * ("hace 3 días") within the last ~30 days — the dominant retrieval cue under
+ * a thumbnail — collapsing to a compact absolute date ("13 jun 2026") beyond
+ * that, so stale files don't read as a vague "hace 8 meses".
+ * @param {number|string|Date|null|undefined} value  Unix seconds, ISO string or Date.
+ * @returns {string}
+ */
+function gridMetaDate(value) {
+    if (!value) return '';
+    const date =
+        value instanceof Date ? value : new Date(typeof value === 'number' && value < 1e12 ? value * 1000 : value);
+    if (Number.isNaN(date.getTime())) return '';
+    const ageDays = (Date.now() - date.getTime()) / 86_400_000;
+    return ageDays > 30 ? formatDateShort(value) : formatRelativeTime(value);
+}
 
 /**
  * @typedef {Object} CustomAction
@@ -681,15 +698,23 @@ export class ResourceListComponent {
         const isFav = cfg.isFavorite ? cfg.isFavorite(folder.id, 'folder') : false;
         const isShared = cfg.isShared ? cfg.isShared(folder.id, 'folder') : false;
         const dateVal = /** @type {Record<string,string>} */ (/** @type {unknown} */ (folder))[cfg.dateField] ?? folder.modified_at;
-        const formattedDate = cfg.dateFormatter ? cfg.dateFormatter(dateVal) : formatDateTime(new Date(dateVal));
+        // Pass the raw value (Unix seconds) straight to formatDateTime — it does
+        // the seconds→ms conversion. Wrapping it in new Date() first treated the
+        // seconds value as milliseconds → every date showed as Jan 1970.
+        const formattedDate = cfg.dateFormatter ? cfg.dateFormatter(dateVal) : formatDateTime(dateVal);
+        const relDate = gridMetaDate(dateVal);
 
         el.innerHTML = `
             ${cfg.selectable ? '<div class="checkbox-cell"><input type="checkbox" class="item-checkbox"></div>' : ''}
             <div class="name-cell">
                 <div class="resource-icon-slot"></div>
-                <span>${escapeHtml(folder.name)}</span>
+                <span title="${escapeHtml(folder.name)}">${escapeHtml(folder.name)}</span>
                 ${cfg.showFavorite ? `<div class="file-badge file-badge-favorite${isFav ? '' : ' hidden'}"><i class="fas fa-star favorite-star-inline"></i></div>` : ''}
                 ${cfg.showShareBadge ? `<div class="file-badge file-badge-shared${isShared ? '' : ' hidden'}"><i class="fas fa-oxiexport"></i></div>` : ''}
+            </div>
+            <div class="grid-meta" title="${escapeHtml(formattedDate)}">
+                <span class="grid-meta__date">${escapeHtml(relDate)}</span>
+                ${isShared && folder.owner_id ? `<span class="grid-meta__owner-slot" data-owner-id="${escapeHtml(folder.owner_id)}"></span>` : ''}
             </div>
             <div class="owner-cell${this._ownerVisible ? '' : ' hidden'}" data-owner-id="${escapeHtml(folder.owner_id || '')}"></div>
             ${cfg.showPath ? `<div class="path-cell" title="${escapeHtml(folder.path || '')}">${escapeHtml(folder.path || '')}</div>` : ''}
@@ -704,6 +729,9 @@ export class ResourceListComponent {
         `;
 
         el.querySelector('.resource-icon-slot')?.replaceWith(buildResourceIcon(folder, 'folder'));
+        if (isShared && folder.owner_id) {
+            el.querySelector('.grid-meta__owner-slot')?.replaceWith(createUserVignette(folder.owner_id, 'xs', { showName: false }));
+        }
         return el;
     }
 
@@ -718,7 +746,11 @@ export class ResourceListComponent {
         const typeLabel = labels.fileTypeLabel(file.category || '');
         const fileSize = file.size_formatted || formatFileSize(file.size);
         const dateVal = /** @type {Record<string,string>} */ (/** @type {unknown} */ (file))[cfg.dateField] ?? file.modified_at;
-        const formattedDate = cfg.dateFormatter ? cfg.dateFormatter(dateVal) : formatDateTime(new Date(dateVal));
+        // Pass the raw value (Unix seconds) straight to formatDateTime — it does
+        // the seconds→ms conversion. Wrapping it in new Date() first treated the
+        // seconds value as milliseconds → every date showed as Jan 1970.
+        const formattedDate = cfg.dateFormatter ? cfg.dateFormatter(dateVal) : formatDateTime(dateVal);
+        const relDate = gridMetaDate(dateVal);
         const isFav = cfg.isFavorite ? cfg.isFavorite(file.id, 'file') : false;
         const isShared = cfg.isShared ? cfg.isShared(file.id, 'file') : false;
 
@@ -736,10 +768,15 @@ export class ResourceListComponent {
             ${cfg.selectable ? '<div class="checkbox-cell"><input type="checkbox" class="item-checkbox"></div>' : ''}
             <div class="name-cell">
                 <div class="resource-icon-slot"></div>
-                <span>${escapeHtml(file.name)}</span>
+                <span title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</span>
                 ${cfg.showFavorite ? `<div class="file-badge file-badge-favorite${isFav ? '' : ' hidden'}"><i class="fas fa-star favorite-star-inline"></i></div>` : ''}
                 ${cfg.showShareBadge ? `<div class="file-badge file-badge-shared${isShared ? '' : ' hidden'}"><i class="fas fa-oxiexport"></i></div>` : ''}
                 ${file.snippet ? `<span class="file-item__snippet" title="${escapeHtml(file.snippet)}">${escapeHtml(file.snippet)}</span>` : ''}
+            </div>
+            <div class="grid-meta" title="${escapeHtml(formattedDate)}">
+                <span class="grid-meta__date">${escapeHtml(relDate)}</span>
+                <span class="grid-meta__size">${escapeHtml(fileSize)}</span>
+                ${isShared && file.owner_id ? `<span class="grid-meta__owner-slot" data-owner-id="${escapeHtml(file.owner_id)}"></span>` : ''}
             </div>
             <div class="owner-cell${this._ownerVisible ? '' : ' hidden'}" data-owner-id="${escapeHtml(file.owner_id || '')}"></div>
             ${cfg.showPath ? `<div class="path-cell" title="${escapeHtml(file.path || '')}">${escapeHtml(file.path || '')}</div>` : ''}
@@ -754,6 +791,9 @@ export class ResourceListComponent {
         `;
 
         el.querySelector('.resource-icon-slot')?.replaceWith(buildResourceIcon(file, 'file'));
+        if (isShared && file.owner_id) {
+            el.querySelector('.grid-meta__owner-slot')?.replaceWith(createUserVignette(file.owner_id, 'xs', { showName: false }));
+        }
         return el;
     }
 
