@@ -13,6 +13,7 @@ html {
 body {
     display: flex;
     height: 100vh; /* fallback for browsers without dvh */
+    /* biome-ignore lint/suspicious/noDuplicateProperties: explicit fallback */
     height: 100dvh;
     font-size: var(--text-base);
     line-height: var(--leading-normal);

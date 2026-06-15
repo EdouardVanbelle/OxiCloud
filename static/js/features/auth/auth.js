@@ -831,9 +831,9 @@ function initLoginElements() {
     initMagicLinkDisclosure();
     initPasswordMatch('register-password', 'register-password-confirm', 'register-match');
     initPasswordMatch('admin-password', 'admin-password-confirm', 'admin-match');
-    ['login-password', 'register-password', 'admin-password'].forEach((id) =>
-        initCapsLockWarning(/** @type {HTMLInputElement | null} */ (document.getElementById(id)))
-    );
+    ['login-password', 'register-password', 'admin-password'].forEach((id) => {
+        initCapsLockWarning(/** @type {HTMLInputElement | null} */ (document.getElementById(id)));
+    });
 
     return true;
 }
