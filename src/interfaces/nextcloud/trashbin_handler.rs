@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::common::di::AppState;
 use crate::interfaces::errors::AppError;
-use crate::interfaces::middleware::auth::{AuthUser, CurrentUser};
+use crate::interfaces::middleware::auth::CurrentUser;
 use crate::interfaces::nextcloud::webdav_handler::{
     batch_resolve_ids, format_oc_id, write_text_element,
 };
@@ -25,7 +25,7 @@ const HEADER_DAV: HeaderName = HeaderName::from_static("dav");
 pub async fn handle_nc_trashbin(
     state: Arc<AppState>,
     req: Request<Body>,
-    user: AuthUser,
+    session: crate::interfaces::nextcloud::session::NcSession,
     subpath: String,
 ) -> Result<Response<Body>, AppError> {
     let method = req.method().clone();
@@ -34,16 +34,16 @@ pub async fn handle_nc_trashbin(
     match method.as_str() {
         "OPTIONS" => handle_options(),
         "PROPFIND" if subpath_trimmed == "trash" || subpath_trimmed.is_empty() => {
-            handle_propfind(state, &user).await
+            handle_propfind(state, &session.user).await
         }
         "MOVE" if subpath_trimmed.starts_with("trash/") => {
-            handle_restore(state, &user, subpath_trimmed).await
+            handle_restore(state, &session.user, subpath_trimmed).await
         }
         "DELETE" if subpath_trimmed == "trash" || subpath_trimmed.is_empty() => {
-            handle_empty_trash(state, &user).await
+            handle_empty_trash(state, &session.user).await
         }
         "DELETE" if subpath_trimmed.starts_with("trash/") => {
-            handle_delete_permanent(state, &user, subpath_trimmed).await
+            handle_delete_permanent(state, &session.user, subpath_trimmed).await
         }
         _ => Ok(Response::builder()
             .status(StatusCode::METHOD_NOT_ALLOWED)

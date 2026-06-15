@@ -5,6 +5,7 @@ pub mod ocs_handler;
 pub mod preview_handler;
 pub mod report_handler;
 pub mod routes;
+pub mod session;
 pub mod status_handler;
 pub mod trashbin_handler;
 pub mod uploads_handler;

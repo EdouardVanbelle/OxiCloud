@@ -10,13 +10,14 @@ use axum::{
 use std::sync::Arc;
 
 use crate::common::di::AppState;
-use crate::interfaces::middleware::auth::{AuthUser, CurrentUser};
+use crate::interfaces::middleware::auth::AuthUser;
 use crate::interfaces::middleware::rate_limit::{RateLimiter, rate_limit_login};
 use crate::interfaces::nextcloud::avatar_handler;
 use crate::interfaces::nextcloud::basic_auth_middleware::basic_auth_middleware;
 use crate::interfaces::nextcloud::login_v2_handler;
 use crate::interfaces::nextcloud::ocs_handler;
 use crate::interfaces::nextcloud::preview_handler;
+use crate::interfaces::nextcloud::session::NcSession;
 use crate::interfaces::nextcloud::status_handler;
 use crate::interfaces::nextcloud::trashbin_handler;
 use crate::interfaces::nextcloud::uploads_handler;
@@ -57,6 +58,14 @@ pub fn nextcloud_routes_with_state(state: Arc<AppState>) -> Router<Arc<AppState>
                     nc_login_limiter,
                     rate_limit_login,
                 )),
+        )
+        // Drive picker submission — finalises a multi-drive flow that
+        // paused after password verification. Public route by design:
+        // the flow token + single-use `pending_user_id` slot is the
+        // proof of authentication. See `login_v2_handler::handle_drive_pick`.
+        .route(
+            "/login/v2/flow/{token}/drive",
+            post(login_v2_handler::handle_drive_pick),
         )
         // OIDC initiation from Nextcloud login page
         .route(
@@ -178,60 +187,46 @@ pub fn nextcloud_routes_with_state(state: Arc<AppState>) -> Router<Arc<AppState>
 
 // ──────────────── Handler glue ────────────────
 
-/// Reject requests where the URL `{user}` doesn't match the authenticated user.
-#[allow(clippy::result_large_err)]
-fn verify_url_user(url_user: &str, auth_user: &CurrentUser) -> Result<(), Response> {
-    if url_user != auth_user.username {
-        Err(StatusCode::FORBIDDEN.into_response())
-    } else {
-        Ok(())
-    }
-}
-
 async fn handle_dav_files(
     State(state): State<Arc<AppState>>,
-    Path((url_user, subpath)): Path<(String, String)>,
-    user_ext: AuthUser,
+    Path((_url_user, subpath)): Path<(String, String)>,
+    session: NcSession,
     req: Request<Body>,
 ) -> Result<Response, Response> {
-    verify_url_user(&url_user, &user_ext)?;
-    webdav_handler::handle_nc_webdav(state, req, user_ext, subpath)
+    webdav_handler::handle_nc_webdav(state, req, session, subpath)
         .await
         .map_err(|e| e.into_response())
 }
 
 async fn handle_dav_files_root(
     State(state): State<Arc<AppState>>,
-    Path(url_user): Path<String>,
-    user_ext: AuthUser,
+    Path(_url_user): Path<String>,
+    session: NcSession,
     req: Request<Body>,
 ) -> Result<Response, Response> {
-    verify_url_user(&url_user, &user_ext)?;
-    webdav_handler::handle_nc_webdav(state, req, user_ext, String::new())
+    webdav_handler::handle_nc_webdav(state, req, session, String::new())
         .await
         .map_err(|e| e.into_response())
 }
 
 async fn handle_dav_uploads(
     State(state): State<Arc<AppState>>,
-    Path((url_user, upload_id, rest)): Path<(String, String, String)>,
-    user_ext: AuthUser,
+    Path((_url_user, upload_id, rest)): Path<(String, String, String)>,
+    session: NcSession,
     req: Request<Body>,
 ) -> Result<Response, Response> {
-    verify_url_user(&url_user, &user_ext)?;
-    uploads_handler::handle_nc_uploads(state, req, user_ext, upload_id, rest)
+    uploads_handler::handle_nc_uploads(state, req, session, upload_id, rest)
         .await
         .map_err(|e| e.into_response())
 }
 
 async fn handle_dav_uploads_root(
     State(state): State<Arc<AppState>>,
-    Path((url_user, upload_id)): Path<(String, String)>,
-    user_ext: AuthUser,
+    Path((_url_user, upload_id)): Path<(String, String)>,
+    session: NcSession,
     req: Request<Body>,
 ) -> Result<Response, Response> {
-    verify_url_user(&url_user, &user_ext)?;
-    uploads_handler::handle_nc_uploads(state, req, user_ext, upload_id, String::new())
+    uploads_handler::handle_nc_uploads(state, req, session, upload_id, String::new())
         .await
         .map_err(|e| e.into_response())
 }
@@ -257,24 +252,22 @@ async fn handle_legacy_webdav_root(user_ext: AuthUser) -> Response {
 
 async fn handle_dav_trashbin(
     State(state): State<Arc<AppState>>,
-    Path((url_user, subpath)): Path<(String, String)>,
-    user_ext: AuthUser,
+    Path((_url_user, subpath)): Path<(String, String)>,
+    session: NcSession,
     req: Request<Body>,
 ) -> Result<Response, Response> {
-    verify_url_user(&url_user, &user_ext)?;
-    trashbin_handler::handle_nc_trashbin(state, req, user_ext, subpath)
+    trashbin_handler::handle_nc_trashbin(state, req, session, subpath)
         .await
         .map_err(|e| e.into_response())
 }
 
 async fn handle_dav_trashbin_root(
     State(state): State<Arc<AppState>>,
-    Path(url_user): Path<String>,
-    user_ext: AuthUser,
+    Path(_url_user): Path<String>,
+    session: NcSession,
     req: Request<Body>,
 ) -> Result<Response, Response> {
-    verify_url_user(&url_user, &user_ext)?;
-    trashbin_handler::handle_nc_trashbin(state, req, user_ext, String::new())
+    trashbin_handler::handle_nc_trashbin(state, req, session, String::new())
         .await
         .map_err(|e| e.into_response())
 }

@@ -9,7 +9,7 @@ use crate::application::ports::file_ports::{FileRetrievalUseCase, FileUploadUseC
 use crate::common::di::AppState;
 use crate::common::mime_detect::filename_from_path;
 use crate::interfaces::errors::AppError;
-use crate::interfaces::middleware::auth::{AuthUser, CurrentUser};
+use crate::interfaces::middleware::auth::CurrentUser;
 use crate::interfaces::upload_ingest::{
     discard_ingested, ingest_stream_to_cas, stream_body_to_path, stream_from_files,
 };
@@ -25,17 +25,17 @@ use crate::interfaces::upload_ingest::{
 pub async fn handle_nc_uploads(
     state: Arc<AppState>,
     req: Request<Body>,
-    user: AuthUser,
+    session: crate::interfaces::nextcloud::session::NcSession,
     upload_id: String,
     rest: String, // chunk name or ".file" or empty
 ) -> Result<Response<Body>, AppError> {
     let method = req.method().clone();
     match method.as_str() {
-        "MKCOL" => handle_mkcol(state, &user, &upload_id).await,
-        "PUT" => handle_put_chunk(state, req, &user, &upload_id, &rest).await,
-        "MOVE" => handle_assemble(state, req, &user, &upload_id).await,
-        "DELETE" => handle_abort(state, &user, &upload_id).await,
-        "PROPFIND" => handle_propfind_session(state, &user, &upload_id).await,
+        "MKCOL" => handle_mkcol(state, &session.user, &upload_id).await,
+        "PUT" => handle_put_chunk(state, req, &session.user, &upload_id, &rest).await,
+        "MOVE" => handle_assemble(state, req, &session.user, &upload_id).await,
+        "DELETE" => handle_abort(state, &session.user, &upload_id).await,
+        "PROPFIND" => handle_propfind_session(state, &session.user, &upload_id).await,
         _ => Ok(Response::builder()
             .status(StatusCode::METHOD_NOT_ALLOWED)
             .body(Body::empty())

@@ -46,9 +46,12 @@ pub async fn handle_capabilities_v2(State(state): State<Arc<AppState>>) -> Respo
     Json(payload).into_response()
 }
 
-pub async fn handle_user_info(State(state): State<Arc<AppState>>, user: AuthUser) -> Response {
+pub async fn handle_user_info(
+    State(state): State<Arc<AppState>>,
+    session: crate::interfaces::nextcloud::session::NcSession,
+) -> Response {
     let quota: (i64, i64) = match state.storage_usage_service.as_ref() {
-        Some(service) => match service.get_user_storage_info(user.id).await {
+        Some(service) => match service.get_user_storage_info(session.user.id).await {
             Ok((used, total)) => (used, total),
             Err(_) => (0, 0),
         },
@@ -62,15 +65,36 @@ pub async fn handle_user_info(State(state): State<Arc<AppState>>, user: AuthUser
         0.0
     };
 
+    // `id` MUST echo the raw wire username the client used at Basic
+    // Auth time — NC desktop reads `data.id` from this endpoint and
+    // splices it into every subsequent WebDAV path it builds
+    // (`/remote.php/dav/files/{id}/…`). Returning the bare canonical
+    // username on a `~{uuid}` session would make the client strip
+    // the marker and revert to the home drive.
+    //
+    // Display fields stay short on the default drive (bare
+    // username); on a marker session we render `username@<drive>`
+    // using the resolved chroot's stored name, which is friendlier
+    // than the raw UUID the wire form carries.
+    let id = session.raw_username.clone();
+    let displayname = if session.is_home() {
+        session.user.username.clone()
+    } else {
+        match session.chroot.as_ref() {
+            Some(chroot) => format!("{}@{}", session.user.username, chroot.name),
+            None => session.user.username.clone(),
+        }
+    };
+
     Json(json!({
         "ocs": {
             "meta": { "status": "ok", "statuscode": 200, "message": "OK" },
             "data": {
                 "enabled": true,
-                "id": user.username,
-                "display-name": user.username,
-                "displayname": user.username,
-                "email": user.email,
+                "id": id,
+                "display-name": displayname,
+                "displayname": displayname,
+                "email": session.user.email,
                 "quota": {
                     "used": quota.0,
                     "total": quota.1,
