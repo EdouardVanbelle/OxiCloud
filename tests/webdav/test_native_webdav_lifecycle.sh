@@ -180,39 +180,18 @@ pass "M4: Range bytes=0-9 → 206 + 10 bytes"
 # code path where it should actually work: root-level MOVE of a
 # file PUT at root. If even this 404s, the bug is broader and
 # native MOVE is unusable, not just nested.
-echo "  M5: MOVE /webdav/m3-sample.txt → /webdav/m5-moved.txt"
+echo "  M5: MOVE /webdav/m3-sample.txt → /webdav/m5-moved.txt → 201/204"
 STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X MOVE \
     -H "Destination: $DAV_BASE/m5-moved.txt" \
     "$DAV_BASE/m3-sample.txt")
-case "$STATUS" in
-    201|204)
-        pass "M5: root-level MOVE → $STATUS"
-        ;;
-    404)
-        # KNOWN BUG: native MOVE returns 404 on a file that was
-        # PUT at the same path, even at root level. The strict
-        # `resolve_path_for_user` SQL query doesn't match what
-        # the PUT's `save_file_from_temp_with_dedup` stored —
-        # most likely because the WebDAV dispatcher's path
-        # prepending (`resolve_webdav_path` → "My Folder - X/foo")
-        # doesn't match the user's actual home folder path
-        # field in the DB. Same root cause makes nested MOVE
-        # (see M3 comment) unusable too.
-        #
-        # Where the fix lives:
-        # `interfaces/api/handlers/webdav_handler.rs::handle_move`
-        # currently calls `resolver.resolve_path_for_user`. It
-        # should either:
-        #   (a) fall back to `file_retrieval_service.get_file_by_path`
-        #       (the same lookup GET uses successfully), or
-        #   (b) normalise the source path through the same
-        #       transformer the PUT writes through.
-        pass "M5: root-level MOVE → 404 (KNOWN BUG: resolve_path_for_user mismatch — pinned)"
-        ;;
-    *)
-        fail "M5: unexpected status $STATUS"
-        ;;
-esac
+[[ "$STATUS" == "201" || "$STATUS" == "204" ]] \
+    || fail "M5: root-level MOVE expected 201/204, got $STATUS"
+# Source is gone, destination present.
+[[ "$(dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$DAV_BASE/m3-sample.txt")" == "404" ]] \
+    || fail "M5: source still resolvable after MOVE"
+[[ "$(dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$DAV_BASE/m5-moved.txt")" == "207" ]] \
+    || fail "M5: destination not found after MOVE"
+pass "M5: root-level MOVE → $STATUS, source gone, destination present"
 
 # ─────────────────────────────────────────────────────────────
 # M6 — MKCOL sub/ → 201
@@ -228,16 +207,11 @@ pass "M6: native MKCOL → 201"
 # ─────────────────────────────────────────────────────────────
 echo "  M7: DELETE /webdav/m6-sub/ → 204"
 STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X DELETE "$DAV_BASE/m6-sub/")
-case "$STATUS" in
-    204) pass "M7: native DELETE → 204" ;;
-    404)
-        # If DELETE also hits the resolve_path_for_user 404 trap
-        # (it uses the same resolver), pin as same root-cause
-        # KNOWN BUG.
-        pass "M7: native DELETE → 404 (KNOWN BUG: same resolve_path_for_user mismatch as M5 — pinned)"
-        ;;
-    *) fail "M7: unexpected status $STATUS" ;;
-esac
+[[ "$STATUS" == "204" ]] \
+    || fail "M7: native DELETE expected 204, got $STATUS"
+[[ "$(dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$DAV_BASE/m6-sub/")" == "404" ]] \
+    || fail "M7: folder still resolvable after DELETE"
+pass "M7: native DELETE → 204, folder gone"
 
 # ─────────────────────────────────────────────────────────────
 # M8 — COPY a.txt → b.txt (pin whatever current behaviour is)
@@ -245,57 +219,25 @@ esac
 # M8 source depends on whether M5 MOVE actually worked. If M5 was
 # pinned as KNOWN BUG (404), the source for M8 is still
 # m3-sample.txt at root, not m5-moved.txt.
-echo "  M8: COPY native source → /webdav/m8-copy.txt"
-M8_SOURCE_URL="$DAV_BASE/m3-sample.txt"
-# If M5 actually moved the file, the source name changed.
-if dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$DAV_BASE/m5-moved.txt" | grep -q "207"; then
-    M8_SOURCE_URL="$DAV_BASE/m5-moved.txt"
+echo "  M8: COPY /webdav/m5-moved.txt → /webdav/m8-copy.txt"
+# M5 now succeeds, so the source is at m5-moved.txt. (Kept fallback
+# to m3-sample.txt to surface a clear error if M5 regressed.)
+M8_SOURCE_URL="$DAV_BASE/m5-moved.txt"
+if ! dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$DAV_BASE/m5-moved.txt" | grep -q "207"; then
+    M8_SOURCE_URL="$DAV_BASE/m3-sample.txt"
 fi
 STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X COPY \
     -H "Destination: $DAV_BASE/m8-copy.txt" \
     "$M8_SOURCE_URL")
-case "$STATUS" in
-    201|204)
-        # Confirm source still exists (COPY != MOVE).
-        SRC_STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$M8_SOURCE_URL")
-        DST_STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$DAV_BASE/m8-copy.txt")
-        [[ "$SRC_STATUS" == "207" ]] \
-            || fail "M8: COPY removed source ($SRC_STATUS instead of 207) — that's MOVE behaviour, not COPY"
-        [[ "$DST_STATUS" == "207" ]] \
-            || fail "M8: destination not present after COPY ($DST_STATUS)"
-        pass "M8: native COPY → $STATUS, source preserved, destination present"
-        ;;
-    405)
-        pass "M8: native COPY → 405 METHOD_NOT_ALLOWED — handler not implemented, pinned"
-        ;;
-    404)
-        pass "M8: native COPY → 404 (KNOWN BUG: same resolve_path_for_user mismatch as M5/M7 — pinned)"
-        ;;
-    500)
-        # KNOWN BUG: the COPY file branch at
-        # `interfaces/api/handlers/webdav_handler.rs::handle_copy`
-        # line ~1639 passes `(file.id, user.id, target_folder_id)`
-        # to `copy_file_with_perms` — no destination NAME. The
-        # copy therefore lands in the target folder under the
-        # SOURCE's name, ignoring the rename the client requested.
-        # When source and destination resolve to the same folder
-        # (common for root-level COPY), this collides with the
-        # source itself → AlreadyExists → leaks as 500.
-        #
-        # Where the fix lives: same handler — either
-        #   (a) extend `copy_file_with_perms` to accept an
-        #       optional new name (the folder-tree branch on
-        #       line ~1591 already passes a name into
-        #       `copy_folder_tree_with_perms`), or
-        #   (b) follow the copy with a `rename_file_with_perms`
-        #       call if `dest_filename != source.name` (mirrors
-        #       what MOVE does at line ~1347).
-        pass "M8: native COPY → 500 (KNOWN BUG: dest filename discarded, collides with source — pinned)"
-        ;;
-    *)
-        fail "M8: unexpected COPY status $STATUS"
-        ;;
-esac
+[[ "$STATUS" == "201" || "$STATUS" == "204" ]] \
+    || fail "M8: native COPY expected 201/204, got $STATUS"
+SRC_STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$M8_SOURCE_URL")
+DST_STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$DAV_BASE/m8-copy.txt")
+[[ "$SRC_STATUS" == "207" ]] \
+    || fail "M8: COPY removed source ($SRC_STATUS instead of 207) — that's MOVE behaviour, not COPY"
+[[ "$DST_STATUS" == "207" ]] \
+    || fail "M8: destination not present after COPY ($DST_STATUS)"
+pass "M8: native COPY → $STATUS, source preserved, destination renamed correctly"
 
 # ═════════════════════════════════════════════════════════════
 # Group N — LOCK / UNLOCK
