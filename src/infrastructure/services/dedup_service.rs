@@ -508,9 +508,11 @@ impl DedupService {
     // that from becoming a content oracle or a poisoning vector:
     //
     // 1. **Ownership**: without bytes, a caller may only claim chunks that
-    //    are already reachable through their own (non-trashed) files, or
-    //    unreferenced orphans (ref_count = 0 — i.e. "I just uploaded it").
-    //    Everything else must be uploaded; the store dedups it on write.
+    //    are already reachable through their own files (live OR trashed,
+    //    since trash is a deferred-delete state — the user can restore the
+    //    file at any time, so the content is still theirs), or unreferenced
+    //    orphans (ref_count = 0 — i.e. "I just uploaded it"). Everything
+    //    else must be uploaded; the store dedups it on write.
     // 2. **Verification**: a declared file_hash is never trusted — the
     //    commit re-reads the proposed chunk sequence server-side and
     //    recomputes BLAKE3 before any manifest row exists. A forged hash
@@ -589,8 +591,16 @@ impl DedupService {
 
     /// Of `hashes` (distinct), the subset `caller_id` may claim without
     /// uploading bytes: chunks referenced by manifests of the caller's
-    /// non-trashed files, or directly referenced as (legacy) whole-file
-    /// blobs. Backed by the GIN index on `chunk_manifests.chunk_hashes`.
+    /// files (live or trashed), or directly referenced as (legacy)
+    /// whole-file blobs. Backed by the GIN index on
+    /// `chunk_manifests.chunk_hashes`.
+    ///
+    /// Trashed files count as ownership: a trashed file's content is still
+    /// the caller's (restorable until trash-empty), so a re-upload of the
+    /// same content should hit the dedup fast path instead of forcing the
+    /// caller to re-send bytes they already have on the server. Must stay
+    /// in lockstep with [`pin_claimable_chunks`], which actually bumps the
+    /// ref_count using the same entitlement set.
     pub async fn claimable_chunks(
         &self,
         caller_id: uuid::Uuid,
@@ -605,12 +615,12 @@ impl DedupService {
                         SELECT 1
                           FROM storage.files f
                           JOIN storage.chunk_manifests m ON m.file_hash = f.blob_hash
-                         WHERE f.user_id = $2 AND NOT f.is_trashed
+                         WHERE f.user_id = $2
                            AND m.chunk_hashes @> ARRAY[c.h]
                     )
                  OR EXISTS (
                         SELECT 1 FROM storage.files f2
-                         WHERE f2.user_id = $2 AND NOT f2.is_trashed
+                         WHERE f2.user_id = $2
                            AND f2.blob_hash = c.h
                     )",
         )
@@ -628,6 +638,12 @@ impl DedupService {
     /// One statement: entitlement check and bump are atomic per row, so a
     /// concurrent last-reference delete can never be resurrected and a
     /// non-entitled hash is simply not returned.
+    ///
+    /// Entitlement includes files in trash: a trashed file is still owned
+    /// by the user, the content is still theirs to re-reference, and the
+    /// race with trash-empty is handled the same way as `add_reference` —
+    /// if GC has already deleted the blob row, the UPDATE affects 0 rows
+    /// and the hash is simply absent from the returned set.
     ///
     /// Returns the set actually pinned; the caller compares against its
     /// input and reports the difference as `still_missing`.
@@ -648,12 +664,12 @@ impl DedupService {
                              SELECT 1
                                FROM storage.files f
                                JOIN storage.chunk_manifests m ON m.file_hash = f.blob_hash
-                              WHERE f.user_id = $2 AND NOT f.is_trashed
+                              WHERE f.user_id = $2
                                 AND m.chunk_hashes @> ARRAY[b.hash::text]
                          )
                       OR EXISTS (
                              SELECT 1 FROM storage.files f2
-                              WHERE f2.user_id = $2 AND NOT f2.is_trashed
+                              WHERE f2.user_id = $2
                                 AND f2.blob_hash = b.hash
                          ) )
               RETURNING b.hash",
@@ -1034,11 +1050,11 @@ impl DedupService {
             .unwrap_or(false)
     }
 
-    /// Returns `true` if `user_id` owns at least one (non-trashed) file that
+    /// Returns `true` if `user_id` owns at least one (even trashed) file that
     /// references the blob identified by `hash`.
     pub async fn user_owns_blob_reference(&self, hash: &str, user_id: &str) -> bool {
         sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM storage.files WHERE blob_hash = $1 AND user_id = $2::uuid AND NOT is_trashed)",
+            "SELECT EXISTS(SELECT 1 FROM storage.files WHERE blob_hash = $1 AND user_id = $2::uuid)",
         )
         .bind(hash)
         .bind(user_id)

@@ -116,7 +116,31 @@ impl FileHandler {
             .await
         {
             Ok(file) => Self::created_json_response(&file).into_response(),
-            Err(err) => Self::domain_error_response(err).into_response(),
+            Err(err) => {
+                // Anti-enumeration shape: every "caller cannot reach this
+                // hash" outcome collapses into the same 404 with an
+                // `upload_path` hint, regardless of whether the hash exists
+                // globally, is owned by another tenant, or got GC'd in a
+                // race against trash-empty. Hides the cross-tenant content
+                // existence oracle and tells the client where to fall back.
+                //
+                // Three NotFound("Blob", _) paths in the service map here:
+                //   1. user_owns_blob_reference returned false
+                //   2. get_blob_metadata returned None (blob row vanished)
+                //   3. add_reference lost the race with GC (rows_affected==0)
+                use crate::common::errors::ErrorKind;
+                if err.kind == ErrorKind::NotFound && err.entity_type == "Blob" {
+                    return Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            r#"{"error":"blob_not_owned_by_caller","upload_path":"/api/files/upload"}"#,
+                        ))
+                        .unwrap()
+                        .into_response();
+                }
+                Self::domain_error_response(err).into_response()
+            }
         }
     }
 

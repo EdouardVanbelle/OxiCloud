@@ -1,0 +1,1 @@
+hello trashed by-hash test fixture
