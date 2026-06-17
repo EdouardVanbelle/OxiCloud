@@ -35,5 +35,5 @@ fi
 if [ "$(id -u)" -eq 0 ]; then
     exec su-exec oxicloud "$@"
 else
-    oxicloud "$@"
+    "$@"
 fi
