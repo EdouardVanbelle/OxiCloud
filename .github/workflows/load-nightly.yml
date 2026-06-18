@@ -14,6 +14,11 @@ on:
     # 03:00 UTC daily — outside US/EU working hours, low contention.
     - cron: '0 3 * * *'
   workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch / tag / SHA to load-test (leave blank to use the workflow ref). Lets you dispatch from main and run the scenarios against a feature branch — useful when the target branch does not have the workflow file yet.'
+        required: false
+        default: ''
 
 env:
   CARGO_TERM_COLOR: always
@@ -35,6 +40,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # `inputs.ref` is set only for workflow_dispatch with a non-empty
+          # value; for cron and bare dispatch it's empty, in which case the
+          # action falls back to the workflow's own ref (`github.ref`). The
+          # `||` short-circuits on empty strings, so the cron path keeps the
+          # exact behaviour it had before.
+          ref: ${{ inputs.ref || github.ref }}
           # The self-hosted runner bind-mounts target/ as a persistent volume
           # for fast incremental rebuilds. actions/checkout's default cleanup
           # tries to rmdir it and hits EBUSY on the mount point. Git still
@@ -87,6 +98,7 @@ jobs:
             echo "## Load nightly regression"
             echo ""
             echo "Run: \`${{ github.run_id }}\`  ·  Commit: \`${{ github.sha }}\`"
+            echo "Ref tested: \`${{ inputs.ref || github.ref }}\`"
             echo "Runner: \`${{ runner.name }}\` (\`${{ runner.os }}/${{ runner.arch }}\`)"
             echo ""
             echo "Compare exited non-zero — see uploaded artifact \`load-results-${{ github.run_id }}\` for raw summaries."
@@ -104,7 +116,10 @@ jobs:
         if: steps.load.outcome == 'failure' && github.repository == 'AtalayaLabs/OxiCloud'
         uses: peter-evans/create-issue-from-file@v5
         with:
-          title: "Load nightly: regression on ${{ github.sha }}"
+          # `github.sha` resolves to the workflow's ref, not the tested ref,
+          # so when dispatched against a non-default branch we surface the
+          # input explicitly — otherwise the title misleads with main's SHA.
+          title: "Load nightly: regression on ${{ inputs.ref || github.sha }}"
           content-filepath: regression-issue.md
           labels: |
             load-test
