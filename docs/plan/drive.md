@@ -575,7 +575,7 @@ users with one drive auto-select Personal silently, users with
 N drives get a real picker. No POC change needed — it just sees
 real drive rows instead of folder UUIDs.
 
-### 11. Content search index — drive-aware filtering
+### 11. Content search index — cross-drive with anti-enum filtering
 
 v0.7.0 added an embedded Tantivy full-text content index (see
 `infrastructure/services/search_index/tantivy_content_index.rs`
@@ -583,24 +583,60 @@ and migration `20260701000000_content_search_index.sql`). Today
 every indexed document carries the owning user as a filter field
 and queries restrict by that field at query time.
 
-When ownership pivots to `drive_id`, the index has to follow —
-otherwise search leaks content across drives the moment D7 drops
-`user_id`:
+The pivot to drives keeps **one global endpoint, `/api/search`,
+that aggregates across every drive the caller can read**. There
+is no per-drive search route in D0; the URL/picker UI in D1 may
+add an optional `?drive_id=<uuid>` narrowing parameter, but the
+default surface stays cross-drive.
+
+The security primitive that makes cross-drive search safe is the
+**`Occur::Must` clause applied at query time**, not after.
+Tantivy's collector only sees documents that satisfy the Must
+clause — stored fields (`preview`), counts, and pagination
+cursors all reflect the filtered set. This is the same shape the
+existing `user_id` filter uses today; we keep it and swap the
+field.
 
 1. **Schema update**: every indexed document gains a `drive_id`
-   field stamped at ingest time. Existing documents need a
-   one-shot reindex pass during the D0 migration (read each row,
-   look up its new `drive_id`, update the index entry). Cheap on
-   small instances; the migration script should report a progress
-   count for larger ones.
-2. **Query path**: instead of filtering by `user_id = caller`,
-   expand `caller → set of drive_ids the caller can read`
-   (personal + every shared-drive membership) and filter by
-   `drive_id ∈ that set`. Expansion reuses the drive-role check
-   already required by `PgAclEngine`.
-3. **Treat as a blocking step of D0**, not a D4/D5-era polish
-   item — otherwise the index is the silent leak path during the
-   dual-write window.
+   STRING field stamped at ingest time. The existing `user_id`
+   field is kept during the dual-write window for rollback
+   safety and dropped in D7.
+2. **Query path**: replace the `Must user_id = caller` clause
+   with a `Must drive_id ∈ accessible_drives` set-membership
+   clause. `accessible_drives` is computed fresh per query
+   (personal + every shared-drive membership), reusing the
+   `expand_user` cache that `PgAclEngine` already maintains and
+   `AuthzCacheLifecycleHook` already invalidates on membership
+   change.
+3. **Handler-side ReBAC re-verification** (defense in depth):
+   after Tantivy returns hits, the `/api/search` handler
+   re-checks each `file_id` with the engine. Catches two cases
+   the drive_id filter can't:
+   - **Index staleness** — file just moved to a drive the
+     caller can't access; indexer hasn't caught up.
+   - **Per-file grants** — ReBAC can grant access to a single
+     file inside a drive the caller doesn't otherwise have. The
+     filter is drive-only; the re-check restores per-file
+     resolution.
+4. **Token subjects cannot search**. `/api/search` returns 401
+   for token-authenticated callers (anonymous link tokens have
+   access to one resource, not a drive — there is no meaningful
+   "search my drives" surface for them). The 401 is consistent;
+   "empty results" would leak nothing but would be operationally
+   confusing.
+5. **Anti-enumeration response shape**: no "you have N hidden
+   matches" anywhere. The count, the cursor, and the snippet
+   list all reflect the filtered set and nothing else.
+6. **Treat the reindex as a blocking step of D0**, not a D4/D5-
+   era polish item — otherwise the index is the silent leak
+   path during the dual-write window. The reindex re-runs the
+   existing `content_index_worker::drain_once()` loop after
+   `TantivyContentIndex::open_or_rebuild()` detects the schema
+   version bump; no separate CLI command needed (per the audit).
+
+Hurl coverage in D0 includes a concrete anti-enumeration test:
+user A indexes a file in a drive user B can't see, user B searches
+the indexed term, response is empty + no hidden-count leak.
 
 Filtering on a low-cardinality `drive_id` is something Tantivy
 handles natively; this is bookkeeping, not a query-plan risk.
@@ -808,6 +844,72 @@ The async `tree_etag_queue` (v0.7.0) propagates an etag up the
 ancestry but **does NOT** propagate `updated_by` — ETags are
 fingerprints of structure, not authorship. Only the direct
 mutation site updates `updated_by`.
+
+### 15. Global sections — scope mapping
+
+"Global sections" are the user-facing views that aggregate across
+the filesystem rather than browsing a single folder: Photos, Music
+library, Favorites, Recent items, Search, Trash. With drives
+landing, each of these needs an explicit scope decision. The
+table below locks the choices; the rationale is **noise risk by
+file type**, not a uniform rule.
+
+| Section | Scope | Capability flag (per-drive policy) | Why |
+|---|---|---|---|
+| **Photos** (`/api/photos`) | Default Personal Drive only | `policies.include_in_photo_index = true` to opt a non-default drive in | Shared drives often carry images that aren't "photos" (screenshots, scans, charts-as-PNGs). Defaulting cross-drive pollutes the personal timeline. Opt-in for shared drives where the owner explicitly wants them indexed (e.g. "Family Photos" shared drive). |
+| **Music** — library view (future) + playlists | Cross-drive (all accessible drives) | `policies.forbid_music_index = true` to opt a drive out | Audio files in shared drives are almost always intentional content (band collaboration, family music, podcast archive). Defaulting cross-drive matches user intent. Owner opts a drive out for the rare case it shouldn't be indexed. The Music section today is *only* playlists; a `/api/music/tracks` library view added later inherits this scope. |
+| **Music playlists** (`audio.playlists`) | User-scoped, cross-drive curation | n/a | Playlists are a curation tool. `owner_id` stays on `auth.users(id)`; tracks reference files via `playlist_items.file_id` and may live in any drive the user has access to. At list time, `list_playlist_tracks` filters out tracks in drives the caller can no longer reach (see §11's defense-in-depth pattern). |
+| **Favorites** (`/api/favorites/resources`) | Cross-drive (all accessible drives) | n/a | Personal organisation tool. Star a PDF from the work drive AND a photo from Personal — the whole point is cross-drive curation. ReBAC visibility check at list time drops rows the user can no longer reach. |
+| **Recent items** (`/api/recent/*`) | Cross-drive (all accessible drives) | n/a | Personal history. Same shape as Favorites — you touched files across drives; the timeline reflects that. ReBAC visibility check at list time. |
+| **Search** (`/api/search`) | Cross-drive (all accessible drives) | n/a | Discovery tool. See §11 for the Must-clause filter + handler-side ReBAC re-verification + anti-enum response shape. |
+| **Trash** (`/api/trash/resources`) | Per-drive (owner-actioned) | n/a | Already specified in §12 — trash listing filters by drive(s) the caller can read; mutations require the owner role on the drive. |
+
+#### Capability flag mechanism
+
+Both `policies.include_in_photo_index` and
+`policies.forbid_music_index` live under the same JSONB
+`policies` column on `storage.drives` (see §8) — no new schema.
+The default values reflect the table above: omitted = "off" for
+photos (so non-default drives don't show photos unless the owner
+opts in), omitted = "off" for music (so all accessible drives
+*are* indexed unless the owner opts out).
+
+The owner-only UI in the drive settings panel toggles these
+flags. The query layer reads them at request time; flipping
+either flag is instant — no reindex required because the filter
+applies in the query Must-clause, the index itself is unchanged.
+
+#### The Photos/Music asymmetry — defensible, not a smell
+
+Photos defaulting to "default-drive only" while Music defaults to
+"cross-drive" is the one case where two similar surfaces have
+different defaults. The justification is the noise-risk argument
+above: image content in shared drives is heterogeneous (often
+not "photos" in the gallery sense), audio content in shared
+drives is usually intentional. The capability flags let owners
+fix either case, but the defaults match what the typical user
+will want without configuration.
+
+If a uniform rule is ever preferred, the cheapest move is to
+flip Photos to cross-drive with `forbid_photo_index` as the
+opt-out (mirroring Music). That can land later without a schema
+change — just a behaviour change.
+
+#### Verification sketch
+
+The D0 Hurl suite (`tests/api/drives_foundation.hurl`) covers
+the scope decisions concretely:
+
+- Photos: file uploaded in Personal appears in `/api/photos`; same
+  file uploaded into a secondary personal drive does NOT appear
+  unless `include_in_photo_index` is set on that drive.
+- Music: track uploaded in any accessible drive appears in the
+  library / sweeper output; setting `forbid_music_index` on a
+  drive removes its tracks from the next library response.
+- Favorites: star a file in drive A and a file in drive B (both
+  accessible to caller); list returns both. Lose access to drive
+  B → next list omits the B file (no error, just absent).
+- Search: see §11 anti-enum test.
 
 ## Migration strategy
 
