@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { errorMessage } from '$lib/utils/errors';
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import { fetchSharedWithMe, type IncomingGrantItem } from '$lib/api/endpoints/grants';
@@ -38,7 +39,7 @@
 			raw = reset ? page.items : [...raw, ...page.items];
 			cursor = page.next_cursor;
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
+			error = errorMessage(e);
 		} finally {
 			loading = false;
 		}

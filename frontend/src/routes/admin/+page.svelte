@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { errorMessage, errorToast } from '$lib/utils/errors';
 	import {
 		clearPluginLogs,
 		createUser,
@@ -112,7 +113,7 @@
 		try {
 			dashboard = await getDashboard();
 		} catch (e) {
-			dashboardError = e instanceof Error ? e.message : String(e);
+			dashboardError = errorMessage(e);
 		}
 	}
 
@@ -141,7 +142,7 @@
 		try {
 			smtpResult = await sendSmtpTest(smtpTo.trim());
 		} catch (e) {
-			smtpResult = { success: false, message: e instanceof Error ? e.message : String(e) };
+			smtpResult = { success: false, message: errorMessage(e) };
 		} finally {
 			smtpSending = false;
 		}
@@ -157,7 +158,7 @@
 		try {
 			oidc = await getOidcSettings();
 		} catch (e) {
-			oidcMsg = { text: e instanceof Error ? e.message : String(e), ok: false };
+			oidcMsg = { text: errorMessage(e), ok: false };
 		}
 	}
 	async function runOidcTest() {
@@ -185,7 +186,7 @@
 			});
 			oidcMsg = { text: t('admin.settings_saved_ok', 'Settings saved.'), ok: true };
 		} catch (e) {
-			oidcMsg = { text: e instanceof Error ? e.message : String(e), ok: false };
+			oidcMsg = { text: errorMessage(e), ok: false };
 		} finally {
 			oidcSaving = false;
 		}
@@ -246,7 +247,7 @@
 				pathStyle: storage.s3_force_path_style ?? false
 			};
 		} catch (e) {
-			storageMsg = { text: e instanceof Error ? e.message : String(e), ok: false };
+			storageMsg = { text: errorMessage(e), ok: false };
 		}
 	}
 	function applyPreset() {
@@ -275,7 +276,7 @@
 			storageMsg = { text: t('admin.storage_saved', 'Storage settings saved.'), ok: true };
 			await loadStorage();
 		} catch (e) {
-			storageMsg = { text: e instanceof Error ? e.message : String(e), ok: false };
+			storageMsg = { text: errorMessage(e), ok: false };
 		} finally {
 			storageBusy = false;
 		}
@@ -299,7 +300,7 @@
 				};
 			}
 		} catch (e) {
-			storageMsg = { text: e instanceof Error ? e.message : String(e), ok: false };
+			storageMsg = { text: errorMessage(e), ok: false };
 		} finally {
 			storageBusy = false;
 		}
@@ -347,7 +348,7 @@
 		try {
 			verifyResult = await verifyMigration(100);
 		} catch (e) {
-			verifyError = e instanceof Error ? e.message : String(e);
+			verifyError = errorMessage(e);
 		} finally {
 			verifying = false;
 		}
@@ -505,7 +506,7 @@
 			});
 			retentionMsg = t('admin.plugins_retention_saved', 'Retention saved.');
 		} catch (e) {
-			retentionMsg = e instanceof Error ? e.message : String(e);
+			retentionMsg = errorMessage(e);
 		}
 	}
 	async function purgeLogs() {
@@ -541,7 +542,7 @@
 			};
 			await loadPlugins();
 		} catch (err) {
-			installMsg = { ok: false, text: err instanceof Error ? err.message : String(err) };
+			installMsg = { ok: false, text: errorMessage(err) };
 		} finally {
 			installing = false;
 			input.value = '';
@@ -609,7 +610,7 @@
 			users = page.users;
 			total = page.total;
 		} catch (e) {
-			usersError = e instanceof Error ? e.message : String(e);
+			usersError = errorMessage(e);
 		}
 	}
 
@@ -620,12 +621,12 @@
 			pluginsAvailable = res.available;
 			plugins = res.plugins;
 		} catch (e) {
-			pluginsError = e instanceof Error ? e.message : String(e);
+			pluginsError = errorMessage(e);
 		}
 	}
 
 	function reportError(e: unknown) {
-		ui.notify(e instanceof Error ? e.message : String(e), 'error');
+		errorToast(e);
 	}
 
 	async function copyText(text: string) {
@@ -720,7 +721,7 @@
 			resetModal = null;
 			ui.notify(t('admin.password_reset', 'Password reset'), 'success');
 		} catch (err) {
-			resetError = err instanceof Error ? err.message : String(err);
+			resetError = errorMessage(err);
 		} finally {
 			resetting = false;
 		}
@@ -776,7 +777,7 @@
 			};
 			await loadUsers();
 		} catch (err) {
-			createError = err instanceof Error ? err.message : String(err);
+			createError = errorMessage(err);
 		} finally {
 			creating = false;
 		}

@@ -1,4 +1,8 @@
 <script lang="ts">
+	import Button from '$lib/components/Button.svelte';
+	import EmptyState from '$lib/components/EmptyState.svelte';
+	import { useSelection } from '$lib/composables/useSelection.svelte';
+	import { errorMessage, errorToast } from '$lib/utils/errors';
 	import { onMount } from 'svelte';
 	import {
 		batchTrash,
@@ -25,7 +29,7 @@
 	type GroupMode = 'day' | 'month' | 'year';
 	const GROUP_KEY = 'oxicloud-photos-group';
 	let groupMode = $state<GroupMode>('month');
-	let selected = $state<Set<string>>(new Set());
+	const selected = useSelection();
 	let lightbox = $state(-1); // index into `items`, -1 = closed
 
 	/** Client-generated video frame thumbnails (file id → data/URL). */
@@ -98,7 +102,7 @@
 			cursor = page.nextCursor;
 			if (!page.nextCursor) exhausted = true;
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
+			error = errorMessage(e);
 			exhausted = true;
 		} finally {
 			loading = false;
@@ -111,21 +115,14 @@
 		if (typeof localStorage !== 'undefined') localStorage.setItem(GROUP_KEY, m);
 	}
 
-	function toggle(id: string) {
-		const n = new Set(selected);
-		if (n.has(id)) n.delete(id);
-		else n.add(id);
-		selected = n;
-	}
-
 	/** A plain tile click toggles selection once anything is selected, else opens the lightbox. */
 	function onTileClick(p: FileItem) {
-		if (selected.size > 0) toggle(p.id);
+		if (selected.size > 0) selected.toggle(p.id);
 		else openLightbox(p);
 	}
 
 	function downloadSelected() {
-		for (const id of selected) {
+		for (const id of selected.ids) {
 			const a = document.createElement('a');
 			a.href = fileDownloadUrl(id);
 			a.download = '';
@@ -136,7 +133,7 @@
 	}
 
 	async function trashSelected() {
-		const ids = [...selected];
+		const ids = selected.values();
 		const ok = await confirmDialog({
 			title: t('photos.delete', 'Delete photos'),
 			message: t('photos.confirm_delete', { n: ids.length }, 'Move {{n}} photos to trash?'),
@@ -148,9 +145,7 @@
 			const trashed = await batchTrash(ids);
 			if (trashed.size > 0) {
 				items = items.filter((p) => !trashed.has(p.id));
-				const n = new Set(selected);
-				for (const id of trashed) n.delete(id);
-				selected = n;
+				for (const id of trashed) selected.delete(id);
 			}
 			if (trashed.size < ids.length) {
 				ui.notify(
@@ -165,7 +160,7 @@
 				ui.notify(t('photos.trashed', { n: trashed.size }, '{{n}} moved to trash.'), 'success');
 			}
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -345,7 +340,7 @@
 			await addFavorite('file', lbItem.id);
 			lbFavorited = !lbFavorited;
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -369,7 +364,7 @@
 				lightbox = Math.min(at, items.length - 1);
 			}
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -422,13 +417,9 @@
 	<div class="batch-bar">
 		<span>{t('files.selected_count', { n: selected.size }, '{{n}} selected')}</span>
 		<div class="batch-bar__actions">
-			<button class="btn btn-secondary" onclick={downloadSelected}
-				>{t('common.download', 'Download')}</button
-			>
-			<button class="btn btn-secondary" onclick={() => (selected = new Set())}
-				>{t('common.clear', 'Clear')}</button
-			>
-			<button class="btn btn-danger" onclick={trashSelected}>{t('common.delete', 'Delete')}</button>
+			<Button onclick={downloadSelected}>{t('common.download', 'Download')}</Button>
+			<Button onclick={() => selected.clear()}>{t('common.clear', 'Clear')}</Button>
+			<Button variant="danger" onclick={trashSelected}>{t('common.delete', 'Delete')}</Button>
 		</div>
 	</div>
 {/if}
@@ -436,13 +427,11 @@
 {#if error}
 	<p class="status status--error" role="alert">{error}</p>
 {:else if items.length === 0 && exhausted}
-	<div class="empty-state">
-		<Icon name="images" class="empty-state__icon" />
-		<p class="empty-state__title">{t('photos.empty', 'No photos yet.')}</p>
-		<p class="empty-state__hint">
-			{t('photos.empty_hint', 'Photos and videos you upload will appear here, grouped by date.')}
-		</p>
-	</div>
+	<EmptyState
+		icon="images"
+		title={t('photos.empty', 'No photos yet.')}
+		hint={t('photos.empty_hint', 'Photos and videos you upload will appear here, grouped by date.')}
+	/>
 {:else}
 	{#each groups as group (group.key)}
 		<h2 class="photos-group">
@@ -473,7 +462,7 @@
 						class="photos__check"
 						class:on={selected.has(photo.id)}
 						aria-label={t('common.select', 'Select')}
-						onclick={() => toggle(photo.id)}
+						onclick={() => selected.toggle(photo.id)}
 					>
 						<Icon name="check" />
 					</button>
@@ -728,32 +717,6 @@
 
 	.status--error {
 		color: var(--color-danger-text);
-	}
-
-	.empty-state {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: var(--space-2);
-		text-align: center;
-		padding: 4rem 1rem;
-		color: var(--color-text-muted);
-	}
-
-	.empty-state :global(.empty-state__icon) {
-		font-size: 3rem;
-		color: var(--color-text-muted);
-	}
-
-	.empty-state__title {
-		margin: 0;
-		font-size: 1.1rem;
-		color: var(--color-text-heading);
-	}
-
-	.empty-state__hint {
-		margin: 0;
-		max-width: 28rem;
 	}
 
 	.sentinel {

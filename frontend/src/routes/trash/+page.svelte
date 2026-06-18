@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { errorToast } from '$lib/utils/errors';
 	import { onMount } from 'svelte';
 	import {
 		deleteTrashItem,
@@ -110,7 +111,7 @@
 			ui.notify(t('trash.restored', 'Restored'), 'success');
 			await reloadFromTop();
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -126,7 +127,7 @@
 			await deleteTrashItem(entry.id);
 			await reloadFromTop();
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -143,7 +144,7 @@
 			raw = [];
 			cursor = undefined;
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 

@@ -7,6 +7,10 @@
 import type { FolderItem } from '$lib/api/types';
 import { t } from '$lib/i18n/index.svelte';
 
+// Re-exported so the files view's grouping-helper barrel stays a single import
+// site; the implementation lives in the shared time util.
+export { relativeTimeAgo } from '$lib/utils/time';
+
 export type ViewMode = 'grid' | 'list';
 
 // ── Group-by / display helpers ───────────────────────────────────────────────
@@ -39,28 +43,6 @@ export function dateBucket(value: number | null | undefined): string {
 	if (diffDays <= 7) return t('dateBucket.last7days', 'Last 7 days');
 	if (diffDays <= 30) return t('dateBucket.last30days', 'Last 30 days');
 	return String(toDate(value).getFullYear());
-}
-
-/** Locale-aware relative "time ago" for grid-card metadata lines. */
-export function relativeTimeAgo(value: number | null | undefined): string {
-	if (!value) return '';
-	const date = toDate(value);
-	if (Number.isNaN(date.getTime())) return '';
-	const diffSec = Math.round((date.getTime() - Date.now()) / 1000);
-	const abs = Math.abs(diffSec);
-	const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
-	const units: Array<[Intl.RelativeTimeFormatUnit, number]> = [
-		['year', 31536000],
-		['month', 2592000],
-		['week', 604800],
-		['day', 86400],
-		['hour', 3600],
-		['minute', 60]
-	];
-	for (const [unit, secs] of units) {
-		if (abs >= secs) return rtf.format(Math.round(diffSec / secs), unit);
-	}
-	return rtf.format(diffSec, 'second');
 }
 
 /** Localise a file `category` (e.g. "Image") via files.file_types.* keys. */

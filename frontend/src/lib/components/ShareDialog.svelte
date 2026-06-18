@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { errorToast } from '$lib/utils/errors';
 	import {
 		copyShareLink,
 		createShare,
@@ -118,7 +119,7 @@
 			directoryAvailable = isDirectoryAvailable();
 			members = groupGrants(await fetchGrantsForResource(item.kind, item.id));
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		} finally {
 			grantsLoading = false;
 		}
@@ -153,7 +154,7 @@
 			summarizeNotifications(res.notification.outcomes);
 			await loadGrants();
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -168,7 +169,7 @@
 			);
 			await loadGrants();
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -183,7 +184,7 @@
 			);
 			await loadGrants();
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -192,7 +193,7 @@
 			for (const id of m.grantIds) await revokeGrant(id);
 			await loadGrants();
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -202,7 +203,7 @@
 			const set = await notifyGrantRecipient(m.notifyGrantId);
 			summarizeNotifications(set.outcomes);
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -252,7 +253,7 @@
 		try {
 			shares = await listSharesForItem(item.id, item.kind);
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		} finally {
 			linkLoading = false;
 		}
@@ -275,7 +276,7 @@
 			await loadShares();
 			ui.notify(t('share.created', 'Public link created'), 'success');
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		} finally {
 			creating = false;
 		}
@@ -286,7 +287,7 @@
 			await updateShare(share.id, { expiresAt: expiry });
 			await loadShares();
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -301,7 +302,7 @@
 				'success'
 			);
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -310,7 +311,7 @@
 			await deleteShare(share.id);
 			shares = shares.filter((s) => s.id !== share.id);
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 

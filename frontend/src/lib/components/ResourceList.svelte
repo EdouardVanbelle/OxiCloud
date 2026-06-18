@@ -51,6 +51,8 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 	import Icon from '$lib/icons/Icon.svelte';
+	import EmptyState from '$lib/components/EmptyState.svelte';
+	import SkeletonList from '$lib/components/SkeletonList.svelte';
 	import ListToolbar from '$lib/components/ListToolbar.svelte';
 	import { t } from '$lib/i18n/index.svelte';
 	import { files as filesStore } from '$lib/stores/files.svelte';
@@ -396,37 +398,15 @@
 {/if}
 
 {#if error}
-	<div class="empty-state">
-		<Icon name="exclamation-circle" class="empty-state-icon empty-state-icon--error" />
-		<p>{error}</p>
-	</div>
+	<EmptyState icon="exclamation-circle" title={error} error />
 {:else if loading && isEmpty}
-	<div class="files-container">
-		<div
-			class={filesStore.viewMode === 'grid' ? 'files-grid-view files-skeleton' : 'files-skeleton'}
-		>
-			{#each SKELETON as i (i)}
-				{#if filesStore.viewMode === 'grid'}
-					<div class="skeleton-card">
-						<div class="skeleton skeleton-thumb"></div>
-						<div class="skeleton skeleton-line skeleton-line--medium"></div>
-					</div>
-				{:else}
-					<div class="skeleton-row">
-						<div class="skeleton skeleton-icon"></div>
-						<div class="skeleton skeleton-line skeleton-line--medium"></div>
-						<div class="skeleton skeleton-line skeleton-line--short"></div>
-					</div>
-				{/if}
-			{/each}
-		</div>
-	</div>
+	<SkeletonList count={SKELETON.length} />
 {:else if isEmpty}
-	<div class="empty-state">
-		{#if emptyIcon}<Icon name={emptyIcon} class="empty-state-icon" />{/if}
-		<p>{emptyText ?? t('common.empty', 'Nothing here yet.')}</p>
-		{#if emptyHint}<p class="empty-state__hint">{emptyHint}</p>{/if}
-	</div>
+	<EmptyState
+		icon={emptyIcon}
+		title={emptyText ?? t('common.empty', 'Nothing here yet.')}
+		hint={emptyHint}
+	/>
 {:else}
 	<div class="files-container">
 		<div class={viewClass} style="--files-list-columns: {columns}">
@@ -688,22 +668,6 @@
 	}
 
 	.rl-ctx-item--danger {
-		color: var(--color-danger-text);
-	}
-
-	.empty-state__hint {
-		color: var(--color-text-muted);
-		font-size: var(--text-sm);
-	}
-
-	/* Empty/error icon lives inside the <Icon> child component's <svg>. */
-	.empty-state :global(.empty-state-icon) {
-		font-size: var(--text-5xl);
-		color: var(--color-text-faint);
-		margin-bottom: var(--space-2);
-	}
-
-	.empty-state :global(.empty-state-icon--error) {
 		color: var(--color-danger-text);
 	}
 </style>

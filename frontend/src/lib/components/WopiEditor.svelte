@@ -1,8 +1,8 @@
 <script lang="ts">
+	import { errorToast } from '$lib/utils/errors';
 	import { getEditorUrlWithFallback } from '$lib/api/endpoints/wopi';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t } from '$lib/i18n/index.svelte';
-	import { ui } from '$lib/stores/ui.svelte';
 
 	interface Props {
 		open: boolean;
@@ -68,7 +68,7 @@
 				queueMicrotask(() => form?.submit());
 			})
 			.catch((e) => {
-				ui.notify(e instanceof Error ? e.message : String(e), 'error');
+				errorToast(e);
 				close();
 			})
 			.finally(() => (loading = false));

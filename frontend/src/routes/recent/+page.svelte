@@ -1,4 +1,7 @@
 <script lang="ts">
+	import Button from '$lib/components/Button.svelte';
+	import { useOwnerCache } from '$lib/composables/useOwnerCache.svelte';
+	import { errorToast } from '$lib/utils/errors';
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import { clearRecent, fetchRecentPage, type RecentResourceItem } from '$lib/api/endpoints/recent';
@@ -14,7 +17,6 @@
 	import { fileDownloadUrl, renameFile, deleteFile } from '$lib/api/endpoints/files';
 	import { renameFolder, deleteFolder } from '$lib/api/endpoints/folders';
 	import type { FileItem, ItemType } from '$lib/api/types';
-	import Icon from '$lib/icons/Icon.svelte';
 	import FileViewer from '$lib/components/FileViewer.svelte';
 	import MoveDialog from '$lib/components/MoveDialog.svelte';
 	import ShareDialog from '$lib/components/ShareDialog.svelte';
@@ -25,7 +27,6 @@
 	} from '$lib/components/ResourceList.svelte';
 	import { confirmDialog, promptDialog } from '$lib/stores/dialogs.svelte';
 	import { t } from '$lib/i18n/index.svelte';
-	import { ui } from '$lib/stores/ui.svelte';
 
 	let raw = $state<RecentResourceItem[]>([]);
 	let cursor = $state<string | undefined>(undefined);
@@ -33,7 +34,7 @@
 	let error = $state<string | null>(null);
 	let groupBy = $state('');
 	let reversed = $state(false);
-	let ownerNames = $state<Record<string, string>>({});
+	const owners = useOwnerCache(resolveOwnerName);
 	let favoriteIds = $state<Set<string>>(new Set());
 
 	const byId = $derived(new Map(raw.map((it) => [it.resource.id, it])));
@@ -51,7 +52,7 @@
 				size: isFile ? (it.resource as FileItem).size : null,
 				date: it.accessed_at,
 				ownerId,
-				ownerName: ownerId ? (ownerNames[ownerId] ?? null) : null,
+				ownerName: owners.name(ownerId),
 				isFavorite: favoriteIds.has(it.resource.id),
 				category: isFile ? it.resource.category : 'Folder',
 				modifiedAt: it.resource.modified_at
@@ -66,7 +67,7 @@
 			label: t('groupby.owner', 'Owner'),
 			orderBy: 'owner',
 			bucketOf: (e) => e.ownerId ?? null,
-			labelOf: (id) => ownerNames[id] ?? id
+			labelOf: (id) => owners.label(id)
 		},
 		{
 			key: 'type',
@@ -95,19 +96,6 @@
 		}
 	];
 
-	async function resolveOwners(items: RecentResourceItem[]) {
-		const ids = [
-			...new Set(items.map((i) => i.resource.owner_id).filter((id): id is string => !!id))
-		];
-		await Promise.all(
-			ids.map(async (id) => {
-				if (ownerNames[id]) return;
-				const name = await resolveOwnerName(id);
-				ownerNames = { ...ownerNames, [id]: name };
-			})
-		);
-	}
-
 	async function loadFavoriteIds() {
 		try {
 			const favs = await fetchFavoritesPage({ resourceTypes: ['file', 'folder'] });
@@ -130,7 +118,7 @@
 			});
 			raw = reset ? page.items : [...raw, ...page.items];
 			cursor = page.next_cursor;
-			void resolveOwners(page.items);
+			void owners.resolve(page.items.map((i) => i.resource.owner_id));
 		} catch (e) {
 			console.error('recent: load error', e);
 			error = t('errors_loadFailed', 'Failed to load items');
@@ -172,7 +160,7 @@
 			favoriteIds = isFav
 				? new Set([...favoriteIds, entry.id])
 				: new Set([...favoriteIds].filter((id) => id !== entry.id));
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -188,7 +176,7 @@
 			raw = [];
 			cursor = undefined;
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -211,7 +199,7 @@
 			else await renameFolder(entry.id, name);
 			await load(true, orderByForGroup());
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -228,7 +216,7 @@
 			else await deleteFolder(entry.id);
 			raw = raw.filter((i) => i.resource.id !== entry.id);
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -304,7 +292,7 @@
 			raw = raw.filter((i) => !removed.has(i.resource.id));
 			selectedIds = new Set();
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -342,29 +330,22 @@
 >
 	{#snippet toolbar()}
 		{#if entries.length > 0}
-			<button class="btn btn-secondary" onclick={clearAll}>
-				<Icon name="broom" />
-				{t('recent.clear', 'Clear recent')}
-			</button>
+			<Button icon="broom" onclick={clearAll}>{t('recent.clear', 'Clear recent')}</Button>
 		{/if}
 	{/snippet}
 	{#snippet batchToolbar()}
-		<button class="btn btn-secondary" onclick={batchDownload}>
-			<Icon name="download" />
-			{t('common.download', 'Download')}
-		</button>
-		<button
-			class="btn btn-secondary"
+		<Button icon="download" onclick={batchDownload}>{t('common.download', 'Download')}</Button>
+		<Button
+			icon="arrows-alt"
 			onclick={() => {
 				moveTarget = null;
 				moveItems = batchTargets();
 				moveOpen = true;
-			}}><Icon name="arrows-alt" /> {t('files.move', 'Move')}</button
+			}}>{t('files.move', 'Move')}</Button
 		>
-		<button class="btn btn-danger" onclick={batchDelete}>
-			<Icon name="trash" />
-			{t('common.delete', 'Delete')}
-		</button>
+		<Button variant="danger" icon="trash" onclick={batchDelete}
+			>{t('common.delete', 'Delete')}</Button
+		>
 	{/snippet}
 </ResourceList>
 

@@ -1,4 +1,6 @@
 <script lang="ts">
+	import EmptyState from '$lib/components/EmptyState.svelte';
+	import { errorMessage, errorToast } from '$lib/utils/errors';
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import {
@@ -152,7 +154,7 @@
 			raw = reset ? page.items : [...raw, ...page.items];
 			cursor = page.next_cursor;
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
+			error = errorMessage(e);
 		} finally {
 			loading = false;
 		}
@@ -232,7 +234,7 @@
 			g.role = role;
 			raw = [...raw];
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -248,7 +250,7 @@
 			g.expires_at = iso;
 			raw = [...raw];
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -257,7 +259,7 @@
 		try {
 			summarize((await notifyGrantRecipient(g.grant_id)).outcomes);
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -267,7 +269,7 @@
 			await revokeGrant(g.grant_id);
 			dropGrant(g.grant_id);
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -278,7 +280,7 @@
 			if (await copyShareLink(share.url)) ui.notify(t('share.copied', 'Link copied'), 'success');
 			else ui.notify(t('share.copy_failed', 'Could not copy link'), 'error');
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -288,7 +290,7 @@
 			g.expires_at = expiryToIso(date || null);
 			raw = [...raw];
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -311,7 +313,7 @@
 				'success'
 			);
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -321,7 +323,7 @@
 			await deleteShare(g.subject_id);
 			dropGrant(g.grant_id);
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -363,18 +365,13 @@
 </div>
 
 {#if error}
-	<div class="empty-state">
-		<Icon name="exclamation-circle" class="empty-state-icon empty-state-icon--error" />
-		<p>{error}</p>
-	</div>
+	<EmptyState icon="exclamation-circle" title={error} error />
 {:else if isEmpty}
-	<div class="empty-state">
-		<Icon name="share-alt" class="empty-state-icon" />
-		<p>{t('myshares.emptyStateTitle', "You haven't shared anything yet")}</p>
-		<p class="empty-state__hint">
-			{t('myshares.emptyStateDesc', 'Items you share with others will appear here')}
-		</p>
-	</div>
+	<EmptyState
+		icon="share-alt"
+		title={t('myshares.emptyStateTitle', "You haven't shared anything yet")}
+		hint={t('myshares.emptyStateDesc', 'Items you share with others will appear here')}
+	/>
 {:else}
 	<div class="ms-lanes">
 		{#each lanes as lane (lane.key)}
@@ -831,20 +828,5 @@
 
 	.ms-more {
 		margin: var(--space-3) auto 0;
-	}
-
-	.empty-state__hint {
-		color: var(--color-text-muted);
-		font-size: var(--text-sm);
-	}
-
-	.empty-state :global(.empty-state-icon) {
-		font-size: var(--text-5xl);
-		color: var(--color-text-faint);
-		margin-bottom: var(--space-2);
-	}
-
-	.empty-state :global(.empty-state-icon--error) {
-		color: var(--color-danger-text);
 	}
 </style>

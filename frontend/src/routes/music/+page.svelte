@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { useSelection } from '$lib/composables/useSelection.svelte';
+	import { errorMessage, errorToast } from '$lib/utils/errors';
 	import { onMount } from 'svelte';
 	import { fileInlineUrl } from '$lib/api/endpoints/files';
 	import {
@@ -67,7 +69,7 @@
 			playlists = await listPlaylists();
 			if (!current && playlists.length > 0) await select(playlists[0]);
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
+			error = errorMessage(e);
 		} finally {
 			loading = false;
 		}
@@ -79,7 +81,7 @@
 		try {
 			tracks = await listTracks(p.id);
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -95,7 +97,7 @@
 			await select(p);
 			ui.notify(t('music.created', { name: p.name }, 'Created “{{name}}”.'), 'success');
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -112,7 +114,7 @@
 			current.name = name;
 			playlists = playlists.map((p) => (p.id === current!.id ? { ...p, name } : p));
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -131,7 +133,7 @@
 				p.id === current!.id ? { ...p, description: desc || null } : p
 			);
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -152,7 +154,7 @@
 			}
 			ui.notify(t('music.deleted', { name: p.name }, 'Deleted “{{name}}”.'), 'success');
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -163,7 +165,7 @@
 			tracks = tracks.filter((x) => x.id !== track.id);
 			ui.notify(t('music.track_removed', 'Track removed.'), 'success');
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -181,7 +183,7 @@
 				'success'
 			);
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -207,7 +209,7 @@
 			);
 			ui.notify(t('music.reordered', 'Playlist reordered.'), 'success');
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 			await select(current);
 		}
 	}
@@ -380,7 +382,7 @@
 			);
 			ui.notify(t('music.cover_updated', 'Cover updated.'), 'success');
 		} catch (err) {
-			ui.notify(err instanceof Error ? err.message : String(err), 'error');
+			errorToast(err);
 		}
 	}
 
@@ -406,7 +408,7 @@
 		try {
 			shares = await listShares(current.id);
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		} finally {
 			sharesLoading = false;
 		}
@@ -420,7 +422,7 @@
 			await loadShares();
 			ui.notify(t('music.share_added', 'Shared.'), 'success');
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 	async function onRemoveShare(userId: string) {
@@ -429,7 +431,7 @@
 			await removeShare(current.id, userId);
 			await loadShares();
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -438,7 +440,7 @@
 	let addOpen = $state(false);
 	let addQuery = $state('');
 	let addResults = $state<FileItem[]>([]);
-	let addSelected = $state<Set<string>>(new Set());
+	const addSelected = useSelection();
 	let addSearching = $state(false);
 	let addDebounce: ReturnType<typeof setTimeout> | null = null;
 
@@ -457,7 +459,7 @@
 					AUDIO_TYPES.some((e) => f.name.toLowerCase().endsWith(`.${e}`))
 			);
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 			addResults = [];
 		} finally {
 			addSearching = false;
@@ -471,25 +473,19 @@
 		addOpen = true;
 		addQuery = '';
 		addResults = [];
-		addSelected = new Set();
+		addSelected.clear();
 		void runAddSearch(''); // show all audio files immediately
-	}
-	function toggleAdd(id: string) {
-		const n = new Set(addSelected);
-		if (n.has(id)) n.delete(id);
-		else n.add(id);
-		addSelected = n;
 	}
 	async function confirmAdd() {
 		if (!current || addSelected.size === 0) return;
 		const count = addSelected.size;
 		try {
-			await addTracks(current.id, [...addSelected]);
+			await addTracks(current.id, addSelected.values());
 			addOpen = false;
 			tracks = await listTracks(current.id);
 			ui.notify(t('music.tracks_added', { n: count }, 'Added {{n}} track(s).'), 'success');
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -968,7 +964,7 @@
 							<input
 								type="checkbox"
 								checked={addSelected.has(f.id)}
-								onchange={() => toggleAdd(f.id)}
+								onchange={() => addSelected.toggle(f.id)}
 							/>
 							<Icon name="file-audio" />
 							<span class="music-picker-name" title={f.name}>{f.name}</span>

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { errorToast } from '$lib/utils/errors';
 	import { listFolder, moveFolder } from '$lib/api/endpoints/folders';
 	import { moveFile } from '$lib/api/endpoints/files';
 	import { copyFiles, copyFolders } from '$lib/api/endpoints/batch';
@@ -42,7 +43,7 @@
 			currentId = id;
 			folders = (await listFolder(id)).folders;
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		} finally {
 			loading = false;
 		}
@@ -98,7 +99,7 @@
 			open = false;
 			onmoved?.();
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		} finally {
 			working = false;
 		}

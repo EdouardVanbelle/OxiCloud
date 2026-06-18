@@ -1,4 +1,6 @@
 <script lang="ts">
+	import EmptyState from '$lib/components/EmptyState.svelte';
+	import { errorMessage } from '$lib/utils/errors';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { searchFiles } from '$lib/api/endpoints/search';
@@ -142,7 +144,7 @@
 				modifiedAfter: dateBound(dateFilter)
 			});
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
+			error = errorMessage(e);
 		} finally {
 			loading = false;
 		}
@@ -239,16 +241,11 @@
 		</h2>
 	</div>
 {:else if error}
-	<div class="empty-state"><p>{error}</p></div>
+	<EmptyState title={error} error />
 {:else if !query}
-	<div class="empty-state">
-		<p>{t('search.prompt', 'Type a query in the search bar above.')}</p>
-	</div>
+	<EmptyState title={t('search.prompt', 'Type a query in the search bar above.')} />
 {:else if isEmpty}
-	<div class="empty-state search-empty">
-		<Icon name="search" />
-		<p>{t('search.no_results', 'No results found for this search')}</p>
-	</div>
+	<EmptyState icon="search" title={t('search.no_results', 'No results found for this search')} />
 {:else if results}
 	<div class="files-container">
 		<div class="files-list-view" style="--files-list-columns: minmax(200px, 2fr) 1fr 110px 140px">
@@ -382,17 +379,5 @@
 		font-size: var(--text-lg);
 		font-weight: var(--weight-medium);
 		color: var(--color-text);
-	}
-
-	.search-empty {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: var(--space-3);
-	}
-
-	.search-empty :global(.oxi-icon) {
-		font-size: var(--text-3xl);
-		color: var(--color-text-faint);
 	}
 </style>

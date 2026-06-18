@@ -1,4 +1,7 @@
 <script lang="ts">
+	import SkeletonList from '$lib/components/SkeletonList.svelte';
+	import EmptyState from '$lib/components/EmptyState.svelte';
+	import { errorMessage, errorToast } from '$lib/utils/errors';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import Icon from '$lib/icons/Icon.svelte';
@@ -121,7 +124,7 @@
 			if (isFav) await removeFavorite(kind, id);
 			else await addFavorite(kind, id);
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 			await loadBadges();
 		}
 	}
@@ -213,7 +216,7 @@
 			await createFolder(name, currentId);
 			await load();
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -259,7 +262,7 @@
 			ui.finishProgress(nid, done, 'success');
 			await load();
 		} catch (err) {
-			ui.finishProgress(nid, err instanceof Error ? err.message : String(err), 'error');
+			ui.finishProgress(nid, errorMessage(err), 'error');
 		} finally {
 			uploading = false;
 		}
@@ -292,7 +295,7 @@
 			else await renameFolder(id, name);
 			await load();
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -309,7 +312,7 @@
 			else await deleteFolder(id);
 			await load();
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -433,7 +436,7 @@
 			a.remove();
 			URL.revokeObjectURL(url);
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -460,7 +463,7 @@
 			clearSelection();
 			void loadBadges();
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -523,7 +526,7 @@
 				if (folder) await deleteFolder(id);
 				else await deleteFile(id);
 			} catch (e) {
-				ui.notify(e instanceof Error ? e.message : String(e), 'error');
+				errorToast(e);
 			}
 		}
 		clearSelection();
@@ -568,7 +571,7 @@
 			clearSelection();
 			await load();
 		} catch (err) {
-			ui.notify(err instanceof Error ? err.message : String(err), 'error');
+			errorToast(err);
 		}
 	}
 
@@ -644,7 +647,7 @@
 			else window.open(url, '_blank');
 		} catch (e) {
 			win?.close();
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -663,7 +666,7 @@
 		try {
 			playlists = await listPlaylists();
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 			return;
 		}
 		const existing = playlists.map((p) => p.name).join(', ');
@@ -686,7 +689,7 @@
 			await addTracks(playlist.id, [file.id]);
 			ui.notify(t('music.added_to_playlist', 'Added to playlist'), 'success');
 		} catch (e) {
-			ui.notify(e instanceof Error ? e.message : String(e), 'error');
+			errorToast(e);
 		}
 	}
 
@@ -745,7 +748,7 @@
 			ui.notify(t('files.uploaded', 'Upload complete'), 'success');
 			await load();
 		} catch (err) {
-			ui.notify(err instanceof Error ? err.message : String(err), 'error');
+			errorToast(err);
 		} finally {
 			uploading = false;
 			input.value = '';
@@ -1076,36 +1079,14 @@
 	</div>
 
 	{#if error}
-		<div class="empty-state"><p>{error}</p></div>
+		<EmptyState title={error} error />
 	{:else if showSkeleton && isEmpty}
-		<div class="files-container">
-			<div
-				class={viewClass === 'files-grid-view'
-					? 'files-grid-view files-skeleton'
-					: 'files-skeleton'}
-			>
-				{#each SKELETON as i (i)}
-					{#if filesStore.viewMode === 'grid'}
-						<div class="skeleton-card">
-							<div class="skeleton skeleton-thumb"></div>
-							<div class="skeleton skeleton-line skeleton-line--medium"></div>
-							<div class="skeleton skeleton-line skeleton-line--short"></div>
-						</div>
-					{:else}
-						<div class="skeleton-row">
-							<div class="skeleton skeleton-icon"></div>
-							<div class="skeleton skeleton-line skeleton-line--medium"></div>
-							<div class="skeleton skeleton-line skeleton-line--short"></div>
-						</div>
-					{/if}
-				{/each}
-			</div>
-		</div>
+		<SkeletonList count={SKELETON.length} />
 	{:else if isEmpty}
-		<div class="empty-state">
-			<p>{t('files.empty_title', 'This folder is empty')}</p>
-			<p>{t('files.empty_hint', 'Drop files here or use the Upload button to add files.')}</p>
-		</div>
+		<EmptyState
+			title={t('files.empty_title', 'This folder is empty')}
+			hint={t('files.empty_hint', 'Drop files here or use the Upload button to add files.')}
+		/>
 	{:else}
 		<div class="files-container">
 			<div class={viewClass}>

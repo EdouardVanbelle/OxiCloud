@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { errorMessage, errorToast } from '$lib/utils/errors';
 	import { onMount } from 'svelte';
 	import {
 		addGroupMember,
@@ -54,7 +55,7 @@
 			groups = page.items;
 			total = page.total;
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
+			error = errorMessage(e);
 		} finally {
 			loading = false;
 		}
@@ -74,7 +75,7 @@
 	}
 
 	function report(e: unknown) {
-		ui.notify(e instanceof Error ? e.message : String(e), 'error');
+		errorToast(e);
 	}
 
 	/** Localised "(N members)" label. Project i18n has no plural rules, so we

@@ -7,6 +7,8 @@
  * and only closes the dialog if it resolves. A rejection keeps the dialog open
  * and surfaces an inline error, so failed renames/deletes don't silently vanish.
  */
+import { errorMessage } from '$lib/utils/errors';
+
 export interface ConfirmOptions {
 	title: string;
 	message?: string;
@@ -87,7 +89,7 @@ class DialogStore {
 				else await (action as (v: string) => Promise<void> | void)(value as string);
 			} catch (err) {
 				this.busy = false;
-				this.error = err instanceof Error ? err.message : String(err);
+				this.error = errorMessage(err);
 				return; // keep the dialog open
 			}
 		}

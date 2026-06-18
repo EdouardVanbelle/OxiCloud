@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { errorMessage } from '$lib/utils/errors';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import {
@@ -37,7 +38,7 @@
 					return t('device.lookup_failed', 'Failed to verify code. Please try again.');
 			}
 		}
-		return err instanceof Error ? err.message : String(err);
+		return errorMessage(err);
 	}
 
 	async function lookup(e?: SubmitEvent) {
@@ -83,7 +84,7 @@
 			await decideDevice(code, action);
 			step = action === 'approve' ? 'approved' : 'denied';
 		} catch (err) {
-			errorText = err instanceof Error ? err.message : String(err);
+			errorText = errorMessage(err);
 			step = 'error';
 		} finally {
 			busy = false;

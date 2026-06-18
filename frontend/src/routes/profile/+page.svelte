@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { errorToast } from '$lib/utils/errors';
+	import { relativeTimeAgo } from '$lib/utils/time';
 	import { onMount } from 'svelte';
 	import {
 		changePassword,
@@ -78,26 +80,8 @@
 	const autoPasswords = $derived(appPasswords.filter((p) => isAutoAppPassword(p)));
 
 	/** Relative time (e.g. "3 days ago"); "Never" when absent. */
-	function timeAgo(value: string | null | undefined): string {
-		if (!value) return t('profile.never', 'Never');
-		const date = new Date(value);
-		if (Number.isNaN(date.getTime())) return String(value);
-		const diffSec = Math.round((date.getTime() - Date.now()) / 1000);
-		const abs = Math.abs(diffSec);
-		const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
-		const units: Array<[Intl.RelativeTimeFormatUnit, number]> = [
-			['year', 31536000],
-			['month', 2592000],
-			['week', 604800],
-			['day', 86400],
-			['hour', 3600],
-			['minute', 60]
-		];
-		for (const [unit, secs] of units) {
-			if (abs >= secs) return rtf.format(Math.round(diffSec / secs), unit);
-		}
-		return rtf.format(diffSec, 'second');
-	}
+	const timeAgo = (value: string | null | undefined): string =>
+		relativeTimeAgo(value, { empty: t('profile.never', 'Never'), invalidAsString: true });
 
 	function hydrate() {
 		const u = session.user;
@@ -139,7 +123,7 @@
 			if (patch.preferred_locale) await setLocale(patch.preferred_locale as Locale);
 			ui.notify(t('profile.saved', 'Profile saved'), 'success');
 		} catch (err) {
-			ui.notify(err instanceof Error ? err.message : String(err), 'error');
+			errorToast(err);
 		} finally {
 			savingProfile = false;
 		}
@@ -164,7 +148,7 @@
 			currentPw = newPw = confirmPw = '';
 			ui.notify(t('profile.password_updated', 'Password updated'), 'success');
 		} catch (err) {
-			ui.notify(err instanceof Error ? err.message : String(err), 'error');
+			errorToast(err);
 		} finally {
 			savingPassword = false;
 		}
@@ -196,7 +180,7 @@
 		} catch (err) {
 			uploadedDataUrl = null;
 			avatarPreview = null;
-			ui.notify(err instanceof Error ? err.message : String(err), 'error');
+			errorToast(err);
 		} finally {
 			input.value = '';
 		}
@@ -210,7 +194,7 @@
 			avatarImgFailed = false;
 			closeAvatarEdit();
 		} catch (err) {
-			ui.notify(err instanceof Error ? err.message : String(err), 'error');
+			errorToast(err);
 		} finally {
 			avatarBusy = false;
 		}
@@ -251,7 +235,7 @@
 			newLabel = '';
 			await loadAppPasswords();
 		} catch (err) {
-			ui.notify(err instanceof Error ? err.message : String(err), 'error');
+			errorToast(err);
 		} finally {
 			creatingPw = false;
 		}
@@ -270,7 +254,7 @@
 			generated = null;
 			await loadAppPasswords();
 		} catch (err) {
-			ui.notify(err instanceof Error ? err.message : String(err), 'error');
+			errorToast(err);
 		}
 	}
 
