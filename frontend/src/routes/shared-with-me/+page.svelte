@@ -4,7 +4,7 @@
 	import { onMount } from 'svelte';
 	import { fetchSharedWithMe, type IncomingGrantItem } from '$lib/api/endpoints/grants';
 	import type { FileItem } from '$lib/api/types';
-	import FileViewer from '$lib/components/FileViewer.svelte';
+	import { lazyComponent } from '$lib/composables/lazyComponent.svelte';
 	import ResourceList, { type ResourceEntry } from '$lib/components/ResourceList.svelte';
 	import { t } from '$lib/i18n/index.svelte';
 
@@ -48,6 +48,13 @@
 	let viewerOpen = $state(false);
 	let viewerFile = $state<FileItem | null>(null);
 
+	// The file preview is loaded the first time a file is opened, keeping its
+	// module out of this route's initial chunk.
+	const fileViewer = lazyComponent(() => import('$lib/components/FileViewer.svelte'));
+	$effect(() => {
+		if (viewerOpen) void fileViewer.load();
+	});
+
 	function open(entry: ResourceEntry) {
 		if (entry.kind === 'folder') {
 			goto(`/files/${entry.id}`);
@@ -76,4 +83,7 @@
 	onopen={open}
 />
 
-<FileViewer bind:open={viewerOpen} file={viewerFile} />
+{#if fileViewer.component}
+	{@const FileViewer = fileViewer.component}
+	<FileViewer bind:open={viewerOpen} file={viewerFile} />
+{/if}

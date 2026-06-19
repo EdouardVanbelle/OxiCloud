@@ -6,7 +6,7 @@
 	import { searchFiles } from '$lib/api/endpoints/search';
 	import { fileInlineUrl } from '$lib/api/endpoints/files';
 	import type { FileItem, FolderItem } from '$lib/api/types';
-	import CommandPalette from '$lib/components/CommandPalette.svelte';
+	import { lazyComponent } from '$lib/composables/lazyComponent.svelte';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { iconNameFromClass } from '$lib/utils/display';
 	import { userInitials, avatarColorIndex } from '$lib/utils/avatar';
@@ -18,6 +18,10 @@
 	import { formatBytes } from '$lib/utils/format';
 
 	let { children }: { children: Snippet } = $props();
+
+	// The command palette is loaded on its first Cmd/Ctrl+K and mounted open.
+	// Until then its ~400-line module stays out of the initial bundle.
+	const palette = lazyComponent(() => import('$lib/components/CommandPalette.svelte'));
 
 	interface NavLink {
 		href: string;
@@ -224,6 +228,13 @@
 <svelte:window
 	onclick={closeMenus}
 	onkeydown={(e) => {
+		// First Cmd/Ctrl+K loads the palette and mounts it open; once mounted,
+		// the palette's own handler takes over toggling/closing.
+		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k' && !palette.component) {
+			e.preventDefault();
+			void palette.load();
+			return;
+		}
 		if (e.key !== 'Escape') return;
 		if (aboutOpen) aboutOpen = false;
 		else if (searchActive) closeMobileSearch();
@@ -683,7 +694,10 @@
 	</div>
 {/if}
 
-<CommandPalette />
+{#if palette.component}
+	{@const CommandPalette = palette.component}
+	<CommandPalette autoOpen />
+{/if}
 
 <style>
 	/* Body becomes the sidebar+main flex row only while the shell is mounted. */

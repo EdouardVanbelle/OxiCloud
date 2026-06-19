@@ -17,7 +17,7 @@
 	import { renameFile, deleteFile } from '$lib/api/endpoints/files';
 	import { renameFolder, deleteFolder } from '$lib/api/endpoints/folders';
 	import type { FileItem } from '$lib/api/types';
-	import FileViewer from '$lib/components/FileViewer.svelte';
+	import { lazyComponent } from '$lib/composables/lazyComponent.svelte';
 	import MoveDialog from '$lib/components/MoveDialog.svelte';
 	import ShareDialog from '$lib/components/ShareDialog.svelte';
 	import ResourceList, {
@@ -122,6 +122,13 @@
 
 	let viewerOpen = $state(false);
 	let viewerFile = $state<FileItem | null>(null);
+
+	// The file preview is loaded the first time a file is opened, keeping its
+	// module out of this route's initial chunk.
+	const fileViewer = lazyComponent(() => import('$lib/components/FileViewer.svelte'));
+	$effect(() => {
+		if (viewerOpen) void fileViewer.load();
+	});
 
 	function open(entry: ResourceEntry) {
 		if (entry.kind === 'folder') {
@@ -305,7 +312,10 @@
 	{/snippet}
 </ResourceList>
 
-<FileViewer bind:open={viewerOpen} file={viewerFile} />
+{#if fileViewer.component}
+	{@const FileViewer = fileViewer.component}
+	<FileViewer bind:open={viewerOpen} file={viewerFile} />
+{/if}
 <MoveDialog
 	bind:open={moveOpen}
 	item={moveTarget}

@@ -17,6 +17,10 @@
 		run: () => void;
 	}
 
+	// `autoOpen` lets a lazy host (AppShell) mount us already-open on the first
+	// Cmd/Ctrl+K, since our own key listener only exists once we're mounted.
+	let { autoOpen = false }: { autoOpen?: boolean } = $props();
+
 	let open = $state(false);
 	// Drives the enter animation: flipped on after mount so the overlay/panel
 	// transition from their initial (faded/offset) state.
@@ -29,6 +33,18 @@
 	let searchTimer: ReturnType<typeof setTimeout> | null = null;
 	// Element focused before the palette opened, restored on close.
 	let prevFocus: HTMLElement | null = null;
+
+	// When mounted already-open (autoOpen), run the same enter sequence the
+	// keyboard path uses. Guarded so it fires once, not on every reopen.
+	let didAutoOpen = false;
+	$effect(() => {
+		if (didAutoOpen || !autoOpen) return;
+		didAutoOpen = true;
+		open = true;
+		prevFocus = document.activeElement as HTMLElement | null;
+		requestAnimationFrame(() => (entered = true));
+		queueMicrotask(() => input?.focus());
+	});
 
 	function close() {
 		open = false;

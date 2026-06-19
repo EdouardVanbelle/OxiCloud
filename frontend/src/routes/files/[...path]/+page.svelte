@@ -37,12 +37,11 @@
 	import { apiFetch } from '$lib/api/client';
 	import { getCsrfHeaders } from '$lib/api/csrf';
 	import type { FileItem, FolderItem, ItemType } from '$lib/api/types';
-	import FileViewer from '$lib/components/FileViewer.svelte';
 	import ListToolbar from '$lib/components/ListToolbar.svelte';
 	import VirtualList from '$lib/components/VirtualList.svelte';
 	import MoveDialog from '$lib/components/MoveDialog.svelte';
 	import ShareDialog from '$lib/components/ShareDialog.svelte';
-	import WopiEditor from '$lib/components/WopiEditor.svelte';
+	import { lazyComponent } from '$lib/composables/lazyComponent.svelte';
 	import { t } from '$lib/i18n/index.svelte';
 	import { confirmDialog, promptDialog } from '$lib/stores/dialogs.svelte';
 	import { files as filesStore } from '$lib/stores/files.svelte';
@@ -58,6 +57,12 @@
 	import { formatBytes } from '$lib/utils/format';
 	import { formatDate, iconNameFromClass } from '$lib/utils/display';
 	import { gridColumns } from '$lib/utils/grid';
+
+	// File preview and the WOPI editor are heavy and only appear on demand, so
+	// their modules load the first time the user opens one (see the effects that
+	// call `.load()` when `viewerOpen` / `wopiOpen` flip true).
+	const fileViewer = lazyComponent(() => import('$lib/components/FileViewer.svelte'));
+	const wopiEditor = lazyComponent(() => import('$lib/components/WopiEditor.svelte'));
 
 	// The URL rest param is the trail of folder ids from home's children down.
 	// /files → home root; /files/a/b → folder b inside a inside home.
@@ -806,6 +811,13 @@
 	let wopiOpen = $state(false);
 	let wopiAction = $state<'edit' | 'view'>('edit');
 	let wopiFile = $state<{ id: string; name: string } | null>(null);
+
+	// Pull in the on-demand modules the moment they're first needed; after that
+	// the chunk is cached and the component stays mounted (controlled by `open`).
+	$effect(() => {
+		if (viewerOpen) void fileViewer.load();
+		if (wopiOpen) void wopiEditor.load();
+	});
 	// Editability of the current context-menu target file, resolved async.
 	let ctxCanEditWopi = $state(false);
 
@@ -1636,13 +1648,19 @@
 	item={actionTarget}
 	onshared={(id) => (sharedIds = new Set(sharedIds).add(id))}
 />
-<FileViewer bind:open={viewerOpen} file={viewerFile} />
-<WopiEditor
-	bind:open={wopiOpen}
-	fileId={wopiFile?.id ?? null}
-	fileName={wopiFile?.name ?? ''}
-	action={wopiAction}
-/>
+{#if fileViewer.component}
+	{@const FileViewer = fileViewer.component}
+	<FileViewer bind:open={viewerOpen} file={viewerFile} />
+{/if}
+{#if wopiEditor.component}
+	{@const WopiEditor = wopiEditor.component}
+	<WopiEditor
+		bind:open={wopiOpen}
+		fileId={wopiFile?.id ?? null}
+		fileName={wopiFile?.name ?? ''}
+		action={wopiAction}
+	/>
+{/if}
 
 {#if ctxOpen && ctxTarget}
 	<div

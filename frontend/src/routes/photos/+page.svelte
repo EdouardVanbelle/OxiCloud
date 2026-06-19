@@ -1,10 +1,8 @@
 <script lang="ts">
 	import Button from '$lib/components/Button.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
-	import PeopleView from '$lib/components/PeopleView.svelte';
-	import PhotoLightbox from '$lib/components/PhotoLightbox.svelte';
-	import PlacesMap from '$lib/components/PlacesMap.svelte';
 	import VirtualRows from '$lib/components/VirtualRows.svelte';
+	import { lazyComponent } from '$lib/composables/lazyComponent.svelte';
 	import { useSelection } from '$lib/composables/useSelection.svelte';
 	import { errorToast } from '$lib/utils/errors';
 	import { onMount } from 'svelte';
@@ -24,6 +22,13 @@
 
 	type Tab = 'moments' | 'places' | 'people';
 	let tab = $state<Tab>('moments');
+
+	// The lightbox, the (maplibre-backed) places map and the people view are all
+	// heavy and off the initial path, so each loads on first use: the lightbox
+	// when a photo is opened, the map/people views when their tab is selected.
+	const photoLightbox = lazyComponent(() => import('$lib/components/PhotoLightbox.svelte'));
+	const placesMap = lazyComponent(() => import('$lib/components/PlacesMap.svelte'));
+	const peopleView = lazyComponent(() => import('$lib/components/PeopleView.svelte'));
 	let peopleAvailable = $state(false);
 
 	let items = $state<PhotoItem[]>([]);
@@ -43,6 +48,12 @@
 	let layoutMode = $state<LayoutMode>('square');
 	const selected = useSelection();
 	let lightbox = $state(-1); // index into `items`, -1 = closed
+
+	$effect(() => {
+		if (lightbox >= 0) void photoLightbox.load();
+		if (tab === 'places') void placesMap.load();
+		else if (tab === 'people') void peopleView.load();
+	});
 
 	/** Client-generated video frame thumbnails (file id → data/URL). */
 	let videoThumbs = $state<Record<string, string>>({});
@@ -487,11 +498,20 @@
 	<div bind:this={sentinel} class="sentinel" aria-hidden="true"></div>
 	{#if loading}<p class="status">{t('common.loading', 'Loading…')}</p>{/if}
 
-	<PhotoLightbox {items} bind:index={lightbox} onDelete={onDeletePhoto} />
+	{#if photoLightbox.component}
+		{@const PhotoLightbox = photoLightbox.component}
+		<PhotoLightbox {items} bind:index={lightbox} onDelete={onDeletePhoto} />
+	{/if}
 {:else if tab === 'places'}
-	<PlacesMap />
+	{#if placesMap.component}
+		{@const PlacesMap = placesMap.component}
+		<PlacesMap />
+	{/if}
 {:else if tab === 'people'}
-	<PeopleView />
+	{#if peopleView.component}
+		{@const PeopleView = peopleView.component}
+		<PeopleView />
+	{/if}
 {/if}
 
 {#snippet tile(photo: PhotoItem, sizeStyle?: string)}
