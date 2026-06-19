@@ -50,7 +50,44 @@ migrations, and a **vanilla-JS / vanilla-CSS** frontend (design tokens from
 - **Deviations from the original plan:** 1.5 serves the basemap as a *static file* (ServeDir Range) instead of the `pmtiles` Rust crate; 1.8 uses MapLibre HTML markers instead of a deck.gl `IconLayer`. Both keep the footprint minimal and need zero new backend code.
 - **Pending:** browser smoke-test, and an operator-supplied `static/basemaps/basemap.pmtiles` for the street backdrop (works without it).
 
-**Phase 2 — People: not started.**
+**Phase 2 — People: backend + frontend landed; real face model pending.**
+- **Migration** (`…_faces.sql`): `faces` schema with `faces.persons` + `faces.faces`.
+  **Deviation from 2.2:** embeddings stored as **`BYTEA`** (512×`f32` little-endian), **no
+  `pgvector`** — cosine similarity runs in Rust. This keeps the extension footprint at
+  today's `pg_trgm`/`ltree`/`citext` and is fine at personal-library scale; the HNSW/ANN
+  path is the documented growth step if it's ever needed.
+- **Config:** `OXICLOUD_ENABLE_FACES` (`FeaturesConfig::enable_faces`, **default off** —
+  biometric/opt-in). Everything below is inert when off.
+- **Domain/ports:** `Face`, `Person`, `BoundingBox`, `DetectedFace` (`domain/entities/face.rs`);
+  `FaceAnalyzerPort` (single `analyze(&[u8]) -> Vec<DetectedFace>` + `is_ready()`) and
+  `FaceRepository` (`face_ports.rs`). **Deviation from 2.3:** detector+embedder collapsed
+  into one `FaceAnalyzerPort` (the analyzer owns detect→align→embed) instead of split
+  `FaceDetectorPort`/`FaceEmbedderPort` — simpler seam for a single ONNX session.
+- **Repository:** `FacePgRepository` (`infrastructure/repositories/pg/`) — bytea
+  encode/decode, person CRUD, `faces_for_*`, `assign_person`, `delete_all_for_user`.
+- **Service:** `PeopleService` (`application/services/people_service.rs`) — `recluster()`
+  via **union-find connected-components** (cosine ≥ 0.5, `min_faces` 3, immich-style),
+  plus list/photos/rename/hide/merge/delete. "List my own people" needs no `authz.require`
+  (user-scoped, like `RecentService`/`PlacesService`).
+- **Indexing:** `FaceIndexingService` implements `FileLifecycleHook` — background
+  detect+embed on image create/copy/update, **dedup by blob hash**. Driven by the
+  analyzer port; with the no-op analyzer it does nothing.
+- **Analyzer (placeholder):** `NoopFaceAnalyzer` (`is_ready()=false`, returns no faces) so
+  the whole stack compiles and runs **without any ML model**. The real ONNX analyzer is
+  the one remaining backend piece (see below).
+- **HTTP:** `people_handler.rs` + routes (gated on `people_service.is_some()`):
+  `GET /api/people`, `/api/people/{id}/photos`, `PATCH /api/people/{id}`,
+  `POST /api/people/merge`, `/api/people/recluster`, `GET /api/people/data`,
+  `GET /api/people/faces/{file_id}`, `POST /api/people/{id}/hide`.
+- **Frontend (`6314fa6`):** `people.js` + `people.css` — person grid (circular cover,
+  name, count), drill into a person's photos via the existing lightbox, rename via
+  `Modal.prompt` + `PATCH`. Wired into the Photos sub-nav as a third **People** tab that a
+  capability probe (`GET /api/people`) reveals only when faces are on; otherwise hidden.
+  i18n keys in `en.json` (others fall back to English).
+- **Pending:** **2.4 real ONNX analyzer** — add `ort` (load-dynamic) + an operator-supplied
+  SCRFD/RetinaFace detector and ArcFace/EdgeFace embedder, implementing `FaceAnalyzerPort`.
+  Adds the `ort` crate and can't be exercised in this environment (no models). Per-user
+  opt-in consent gate (2.1) and lightbox face-box tagging (2.8) also still open.
 
 ---
 
