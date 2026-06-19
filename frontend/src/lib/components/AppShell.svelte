@@ -9,6 +9,7 @@
 	import CommandPalette from '$lib/components/CommandPalette.svelte';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { iconNameFromClass } from '$lib/utils/display';
+	import { userInitials, avatarColorIndex } from '$lib/utils/avatar';
 	import { i18n, LANGUAGES, setLocale, t, type Locale } from '$lib/i18n/index.svelte';
 	import { apiFetch } from '$lib/api/client';
 	import { session } from '$lib/stores/session.svelte';
@@ -171,28 +172,13 @@
 			: 0
 	);
 
-	const initials = $derived.by(() => {
-		const u = session.user;
-		if (!u) return '?';
-		const base = u.username || u.email || '?';
-		const parts = base.trim().split(/\s+/);
-		if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-		return base.slice(0, 2).toUpperCase();
-	});
+	const initials = $derived(userInitials(session.user?.username || session.user?.email));
 
 	/** Uploaded avatar photo URL, if any. */
 	const avatarPhoto = $derived(session.user?.image ?? null);
 
-	/**
-	 * Deterministic colour bucket 0–4 from the user id (matches the original
-	 * userVignette `_colorIndex`) so the same user always gets the same colour.
-	 */
-	const avatarColor = $derived.by(() => {
-		const id = session.user?.id ?? '';
-		let hash = 0;
-		for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) | 0;
-		return Math.abs(hash) % 5;
-	});
+	/** Deterministic colour bucket 0–4 from the user id (shared with UserVignette). */
+	const avatarColor = $derived(avatarColorIndex(session.user?.id));
 
 	function closeMenus() {
 		notifOpen = false;

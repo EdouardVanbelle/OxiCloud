@@ -31,6 +31,7 @@
 	import type { ItemType, ShareItem } from '$lib/api/types';
 	import Icon from '$lib/icons/Icon.svelte';
 	import Modal from '$lib/components/Modal.svelte';
+	import UserVignette from '$lib/components/UserVignette.svelte';
 	import { t } from '$lib/i18n/index.svelte';
 	import { ui } from '$lib/stores/ui.svelte';
 
@@ -74,7 +75,6 @@
 		/** Representative grant id for notify (any grant on this subject). */
 		notifyGrantId?: string;
 		expiry: string | null; // YYYY-MM-DD or null
-		isExternal: boolean;
 	}
 	let members = $state<Member[]>([]);
 	let grantsLoading = $state(false);
@@ -115,8 +115,7 @@
 			role: e.role,
 			grantIds: e.ids,
 			notifyGrantId: e.ids[0],
-			expiry: e.expiry,
-			isExternal: false
+			expiry: e.expiry
 		}));
 	}
 
@@ -452,12 +451,20 @@
 								class="member"
 								class:member--expired={m.expiry && new Date(m.expiry) < new Date()}
 							>
-								<Icon name={m.subject.type === 'group' ? 'user-group' : 'user'} />
-								<span class="member__label">
-									{m.recipient.label}
-									{#if m.recipient.sublabel}<span class="member__sub">{m.recipient.sublabel}</span
-										>{/if}
-								</span>
+								{#if m.subject.type === 'user'}
+									<UserVignette
+										userId={m.subject.id}
+										fallbackLabel={m.recipient.label}
+										fallbackSublabel={m.recipient.sublabel}
+									/>
+								{:else}
+									<Icon name="user-group" />
+									<span class="member__label">
+										{m.recipient.label}
+										{#if m.recipient.sublabel}<span class="member__sub">{m.recipient.sublabel}</span
+											>{/if}
+									</span>
+								{/if}
 								{@render expiryChip(m.expiry, (v) => changeMemberExpiry(m, v))}
 								<select
 									class="role-select"
