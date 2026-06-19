@@ -171,6 +171,7 @@ mod tests {
             &calendars,
             &request,
             "/caldav/",
+            "user-001",
         );
 
         assert!(
@@ -210,6 +211,7 @@ mod tests {
             &request,
             "/caldav/cal-001",
             "0",
+            "user-001",
         );
 
         assert!(
@@ -240,6 +242,7 @@ mod tests {
             &request,
             "/caldav/cal-001",
             "1",
+            "user-001",
         );
 
         assert!(
@@ -255,6 +258,54 @@ mod tests {
         assert!(
             xml_str.contains("evt-001"),
             "Depth 1 should include event resources"
+        );
+    }
+
+    #[test]
+    fn test_owner_gets_write_privilege_but_non_owner_is_read_only() {
+        // Regression for #480: the privilege gate previously compared owner_id
+        // against the literal "current_user_id", so <D:write/> was never emitted
+        // and every CalDAV client mounted calendars read-only.
+        let calendar = sample_calendar(); // owner_id = "user-001"
+        let request = PropFindRequest {
+            prop_find_type: PropFindType::AllProp,
+        };
+
+        // Owner → read + write.
+        let mut owner_out = Vec::new();
+        CalDavAdapter::generate_calendar_collection_propfind(
+            &mut owner_out,
+            &calendar,
+            &[],
+            &request,
+            "/caldav/cal-001/",
+            "0",
+            "user-001",
+        )
+        .expect("owner propfind");
+        let owner_xml = String::from_utf8(owner_out).expect("utf8");
+        assert!(
+            owner_xml.contains("D:write"),
+            "Owner must be granted <D:write/>, got: {owner_xml}"
+        );
+
+        // A different caller (e.g. a read-only share) → read only, never write.
+        let mut other_out = Vec::new();
+        CalDavAdapter::generate_calendar_collection_propfind(
+            &mut other_out,
+            &calendar,
+            &[],
+            &request,
+            "/caldav/cal-001/",
+            "0",
+            "a-different-user",
+        )
+        .expect("non-owner propfind");
+        let other_xml = String::from_utf8(other_out).expect("utf8");
+        assert!(other_xml.contains("D:read"), "Non-owner keeps <D:read/>");
+        assert!(
+            !other_xml.contains("D:write"),
+            "Non-owner must NOT get <D:write/>, got: {other_xml}"
         );
     }
 
@@ -434,6 +485,7 @@ mod tests {
             &request,
             "/caldav/",
             "testuser",
+            "user-001",
         );
         assert!(
             result.is_ok(),
@@ -483,6 +535,7 @@ mod tests {
             &request,
             "/caldav/",
             "testuser",
+            "user-001",
         );
         assert!(result.is_ok());
 
@@ -565,6 +618,7 @@ mod tests {
             &request,
             "/caldav/cal-001/",
             "0",
+            "user-001",
         );
         assert!(result.is_ok(), "Failed: {:?}", result.err());
 

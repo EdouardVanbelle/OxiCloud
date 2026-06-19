@@ -308,6 +308,97 @@ mod tests {
     }
 
     #[test]
+    fn test_root_propfind_advertises_principal_and_home_set() {
+        // Regression for #480: without these discovery properties DAVx5 / Apple
+        // Contacts never locate the user's address books.
+        let books = vec![sample_address_book()];
+        let request = PropFindRequest {
+            prop_find_type: PropFindType::AllProp,
+        };
+
+        let mut output = Vec::new();
+        CardDavAdapter::generate_root_propfind_response(
+            &mut output,
+            &books,
+            &request,
+            "/carddav/",
+            "testuser",
+        )
+        .expect("root propfind");
+
+        let xml = String::from_utf8(output).expect("utf8");
+        assert!(
+            xml.contains("/carddav/principals/testuser/"),
+            "Root must expose current-user-principal href, got: {xml}"
+        );
+        assert!(
+            xml.contains("/carddav/testuser/"),
+            "Root must expose addressbook-home-set href, got: {xml}"
+        );
+        // Depth 1 also enumerates the books.
+        assert!(xml.contains("ab-001"), "Should list address book");
+    }
+
+    #[test]
+    fn test_root_propfind_prop_request_returns_populated_discovery() {
+        // A DAVx5-style targeted request for the two discovery properties.
+        let request = PropFindRequest {
+            prop_find_type: PropFindType::Prop(vec![
+                QualifiedName {
+                    namespace: "DAV:".to_string(),
+                    name: "current-user-principal".to_string(),
+                },
+                QualifiedName {
+                    namespace: "urn:ietf:params:xml:ns:carddav".to_string(),
+                    name: "addressbook-home-set".to_string(),
+                },
+            ]),
+        };
+
+        let mut output = Vec::new();
+        CardDavAdapter::generate_root_propfind_response(
+            &mut output,
+            &[],
+            &request,
+            "/carddav/",
+            "testuser",
+        )
+        .expect("root propfind");
+
+        let xml = String::from_utf8(output).expect("utf8");
+        assert!(xml.contains("/carddav/principals/testuser/"));
+        assert!(xml.contains("/carddav/testuser/"));
+        // Properties must be populated, not empty self-closing placeholders.
+        assert!(!xml.contains("<D:current-user-principal/>"));
+        assert!(!xml.contains("<CR:addressbook-home-set/>"));
+    }
+
+    #[test]
+    fn test_principal_propfind_returns_home_set() {
+        let request = PropFindRequest {
+            prop_find_type: PropFindType::AllProp,
+        };
+
+        let mut output = Vec::new();
+        CardDavAdapter::generate_principal_propfind_response(&mut output, &request, "testuser")
+            .expect("principal propfind");
+
+        let xml = String::from_utf8(output).expect("utf8");
+        assert!(
+            xml.contains("/carddav/principals/testuser/"),
+            "Principal href should be present"
+        );
+        assert!(
+            xml.contains("/carddav/testuser/"),
+            "addressbook-home-set should be present"
+        );
+        assert!(
+            xml.contains("D:principal"),
+            "resourcetype should include principal"
+        );
+    }
+
+    #[test]
     fn test_generate_addressbook_collection_propfind_depth_0() {
         let addressbook = sample_address_book();
         let contacts = vec![sample_contact()];

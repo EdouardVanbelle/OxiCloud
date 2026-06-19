@@ -58,6 +58,24 @@ pub fn carddav_routes() -> Router<Arc<AppState>> {
         .route("/carddav", axum::routing::any(handle_carddav_methods_root))
 }
 
+/// Creates the RFC 6764 well-known discovery route for CardDAV.
+/// Public (no auth) — simply redirects to the CardDAV root so clients that
+/// bootstrap from `/.well-known/carddav` can locate the service.
+pub fn well_known_routes() -> Router<Arc<AppState>> {
+    Router::new().route(
+        "/.well-known/carddav",
+        axum::routing::any(handle_well_known_carddav),
+    )
+}
+
+async fn handle_well_known_carddav() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::MOVED_PERMANENTLY)
+        .header(header::LOCATION, "/carddav/")
+        .body(Body::empty())
+        .unwrap()
+}
+
 async fn handle_carddav_methods_root(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     req: Request<Body>,
@@ -226,10 +244,66 @@ async fn handle_propfind(
         .map_err(|e| AppError::bad_request(format!("Failed to parse PROPFIND: {}", e)))?
     };
 
+    // Discovery: the true root `/carddav/` advertises current-user-principal and
+    // addressbook-home-set so clients (DAVx5, Apple Contacts) can locate the
+    // address books. Depth 0 → only the root entry; Depth 1+ → also the books.
+    if path.is_empty() {
+        let address_books = if depth == "0" {
+            vec![]
+        } else {
+            addressbook_service
+                .list_user_address_books(user.id)
+                .await
+                .map_err(|e| {
+                    AppError::internal_error(format!("Failed to list address books: {}", e))
+                })?
+        };
+
+        let mut response_body = Vec::new();
+        CardDavAdapter::generate_root_propfind_response(
+            &mut response_body,
+            &address_books,
+            &propfind_request,
+            "/carddav/",
+            &user.username,
+        )
+        .map_err(|e| AppError::internal_error(format!("Failed to generate XML: {}", e)))?;
+
+        return Ok(Response::builder()
+            .status(StatusCode::MULTI_STATUS)
+            .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
+            .body(Body::from(response_body))
+            .unwrap());
+    }
+
+    // Discovery: principal resource `/carddav/principals/{username}/` returns the
+    // addressbook-home-set the client should enumerate next.
+    if path == "principals" || path.starts_with("principals/") {
+        let username = path
+            .strip_prefix("principals/")
+            .map(|s| s.trim_end_matches('/'))
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&user.username);
+
+        let mut response_body = Vec::new();
+        CardDavAdapter::generate_principal_propfind_response(
+            &mut response_body,
+            &propfind_request,
+            username,
+        )
+        .map_err(|e| AppError::internal_error(format!("Failed to generate XML: {}", e)))?;
+
+        return Ok(Response::builder()
+            .status(StatusCode::MULTI_STATUS)
+            .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
+            .body(Body::from(response_body))
+            .unwrap());
+    }
+
     let effective_path = strip_username_prefix(path);
 
     if effective_path.is_empty() {
-        // Root CardDAV path or user home — list user's address books
+        // User address-book home `/carddav/{username}/` — list the user's books.
         let address_books = addressbook_service
             .list_user_address_books(user.id)
             .await
@@ -237,12 +311,8 @@ async fn handle_propfind(
                 AppError::internal_error(format!("Failed to list address books: {}", e))
             })?;
 
-        let base_href = if path.is_empty() {
-            "/carddav/".to_string()
-        } else {
-            let user_part = path.split('/').next().unwrap_or(path);
-            format!("/carddav/{}/", user_part)
-        };
+        let user_part = path.split('/').next().unwrap_or(path);
+        let base_href = format!("/carddav/{}/", user_part);
         let mut response_body = Vec::new();
         CardDavAdapter::generate_addressbooks_propfind_response(
             &mut response_body,

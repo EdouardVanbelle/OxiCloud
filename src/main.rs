@@ -311,7 +311,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use oxicloud::interfaces::api::handlers::carddav_handler;
     use oxicloud::interfaces::api::handlers::webdav_handler;
     let caldav_router = caldav_handler::caldav_routes();
-    let well_known_router = caldav_handler::well_known_routes();
+    // RFC 6764 discovery for both CalDAV and CardDAV (public redirects).
+    let well_known_router =
+        caldav_handler::well_known_routes().merge(carddav_handler::well_known_routes());
     let carddav_router = carddav_handler::carddav_routes();
     let webdav_router = webdav_handler::webdav_routes();
 

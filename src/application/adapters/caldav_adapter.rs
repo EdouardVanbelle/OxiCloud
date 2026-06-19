@@ -17,6 +17,19 @@ use crate::application::adapters::webdav_adapter::{
 };
 use crate::application::dtos::calendar_dto::{CalendarDto, CalendarEventDto};
 
+/// Returns whether `caller_id` owns `calendar`.
+///
+/// CalDAV clients (DAVx5, Apple Calendar, Thunderbird) only mount a collection
+/// read-write when its `current-user-privilege-set` advertises `<D:write/>`, so
+/// this gate decides read-only vs read-write for the caller. `caller_id` and
+/// [`CalendarDto::owner_id`] are both the user's UUID rendered via
+/// `Uuid::to_string()`, so a direct comparison is exact. Calendars merely shared
+/// with the caller (non-owner access) stay read-only for now — this never
+/// over-grants write.
+fn caller_owns_calendar(calendar: &CalendarDto, caller_id: &str) -> bool {
+    !caller_id.is_empty() && calendar.owner_id == caller_id
+}
+
 /// CalDAV report type
 #[derive(Debug, PartialEq)]
 pub enum CalDavReportType {
@@ -205,6 +218,7 @@ impl CalDavAdapter {
         request: &PropFindRequest,
         base_href: &str,
         username: &str,
+        caller_id: &str,
     ) -> Result<()> {
         let mut xml_writer = Writer::new(writer);
 
@@ -227,6 +241,7 @@ impl CalDavAdapter {
                 calendar,
                 request,
                 &format!("{}{}/", base_href, calendar.id),
+                caller_id,
             )?;
         }
 
@@ -242,6 +257,7 @@ impl CalDavAdapter {
         calendars: &[CalendarDto],
         request: &PropFindRequest,
         base_href: &str,
+        caller_id: &str,
     ) -> Result<()> {
         let mut xml_writer = Writer::new(writer);
 
@@ -261,6 +277,7 @@ impl CalDavAdapter {
                 calendar,
                 request,
                 &format!("{}{}/", base_href, calendar.id),
+                caller_id,
             )?;
         }
 
@@ -557,6 +574,7 @@ impl CalDavAdapter {
         calendar: &CalendarDto,
         request: &PropFindRequest,
         href: &str,
+        caller_id: &str,
     ) -> Result<()> {
         // Start response element
         xml_writer.write_event(Event::Start(BytesStart::new("D:response")))?;
@@ -576,7 +594,7 @@ impl CalDavAdapter {
         match &request.prop_find_type {
             PropFindType::AllProp => {
                 // Write all standard properties for a calendar
-                Self::write_calendar_standard_props(xml_writer, calendar)?;
+                Self::write_calendar_standard_props(xml_writer, calendar, caller_id)?;
             }
             PropFindType::PropName => {
                 // Write only property names (empty elements)
@@ -584,7 +602,7 @@ impl CalDavAdapter {
             }
             PropFindType::Prop(props) => {
                 // Write requested properties
-                Self::write_calendar_requested_props(xml_writer, calendar, props)?;
+                Self::write_calendar_requested_props(xml_writer, calendar, props, caller_id)?;
             }
         }
 
@@ -609,6 +627,7 @@ impl CalDavAdapter {
     fn write_calendar_standard_props<W: Write>(
         xml_writer: &mut Writer<W>,
         calendar: &CalendarDto,
+        caller_id: &str,
     ) -> Result<()> {
         // Common WebDAV properties
 
@@ -676,9 +695,10 @@ impl CalDavAdapter {
         xml_writer.write_event(Event::Empty(BytesStart::new("D:read")))?;
         xml_writer.write_event(Event::End(BytesEnd::new("D:privilege")))?;
 
-        // Only add write privilege if user owns the calendar or has write access
-        if calendar.owner_id == "current_user_id" {
-            // This should be replaced with actual user check
+        // Advertise write only when the caller owns the calendar. Clients
+        // (DAVx5, Apple Calendar, Thunderbird) mount the collection read-only
+        // unless this privilege is present.
+        if caller_owns_calendar(calendar, caller_id) {
             xml_writer.write_event(Event::Start(BytesStart::new("D:privilege")))?;
             xml_writer.write_event(Event::Empty(BytesStart::new("D:write")))?;
             xml_writer.write_event(Event::End(BytesEnd::new("D:privilege")))?;
@@ -735,6 +755,7 @@ impl CalDavAdapter {
         xml_writer: &mut Writer<W>,
         calendar: &CalendarDto,
         props: &[QualifiedName],
+        caller_id: &str,
     ) -> Result<()> {
         for prop in props {
             match (prop.namespace.as_str(), prop.name.as_str()) {
@@ -780,9 +801,8 @@ impl CalDavAdapter {
                     xml_writer.write_event(Event::Empty(BytesStart::new("D:read")))?;
                     xml_writer.write_event(Event::End(BytesEnd::new("D:privilege")))?;
 
-                    // Only add write privilege if user owns the calendar or has write access
-                    if calendar.owner_id == "current_user_id" {
-                        // This should be replaced with actual user check
+                    // Advertise write only when the caller owns the calendar.
+                    if caller_owns_calendar(calendar, caller_id) {
                         xml_writer.write_event(Event::Start(BytesStart::new("D:privilege")))?;
                         xml_writer.write_event(Event::Empty(BytesStart::new("D:write")))?;
                         xml_writer.write_event(Event::End(BytesEnd::new("D:privilege")))?;
@@ -882,6 +902,7 @@ impl CalDavAdapter {
         request: &PropFindRequest,
         base_href: &str,
         depth: &str,
+        caller_id: &str,
     ) -> Result<()> {
         let mut xml_writer = Writer::new(writer);
 
@@ -894,7 +915,7 @@ impl CalDavAdapter {
         ))?;
 
         // Write the calendar collection itself
-        Self::write_calendar_response(&mut xml_writer, calendar, request, base_href)?;
+        Self::write_calendar_response(&mut xml_writer, calendar, request, base_href, caller_id)?;
 
         // If depth > 0, include event resources
         if depth != "0" {

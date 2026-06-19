@@ -240,17 +240,12 @@ pub async fn auth_middleware(
                         }
                         Err(e) => {
                             tracing::warn!("App password verification failed: {}", e);
-                            // For WebDAV: include WWW-Authenticate so the client
-                            // knows to re-prompt rather than silently failing.
-                            if request.uri().path().starts_with("/webdav") {
-                                return Ok(Response::builder()
-                                    .status(StatusCode::UNAUTHORIZED)
-                                    .header(header::WWW_AUTHENTICATE, r#"Basic realm="OxiCloud""#)
-                                    .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-                                    .body(axum::body::Body::from(
-                                        "Invalid username or app password",
-                                    ))
-                                    .unwrap());
+                            // For DAV clients: include WWW-Authenticate so the client
+                            // re-prompts for credentials rather than failing silently.
+                            if is_dav_path(request.uri().path()) {
+                                return Ok(dav_basic_auth_challenge(
+                                    "Invalid username or app password",
+                                ));
                             }
                             return Err(AuthError::InvalidToken(
                                 "Invalid username or app password".to_string(),
@@ -312,21 +307,39 @@ pub async fn auth_middleware(
         return Err(AuthError::AuthServiceUnavailable);
     }
 
-    // For WebDAV requests with no credentials at all: return 401 with
-    // WWW-Authenticate so that spec-compliant clients (Nautilus, Cyberduck,
-    // Windows Explorer, macOS Finder) know to prompt for a username/password.
-    // Non-WebDAV routes return the standard AuthError which renders without
-    // this header — keeping browser sessions redirecting to /login as before.
-    if request.uri().path().starts_with("/webdav") {
-        return Ok(Response::builder()
-            .status(StatusCode::UNAUTHORIZED)
-            .header(header::WWW_AUTHENTICATE, r#"Basic realm="OxiCloud""#)
-            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-            .body(axum::body::Body::from("Authentication required"))
-            .unwrap());
+    // For DAV requests with no credentials at all: return 401 with
+    // WWW-Authenticate so that spec-compliant clients (Thunderbird, DAVx5,
+    // Apple Calendar/Contacts, Nautilus, Cyberduck, Windows Explorer, macOS
+    // Finder) know to prompt for credentials and retry. Unlike `curl -u`, these
+    // clients do NOT send Basic credentials preemptively — without the
+    // challenge they never authenticate and fail with "discovery failed" / 401.
+    // Non-DAV routes return the standard AuthError which renders without this
+    // header — keeping browser sessions redirecting to /login as before.
+    if is_dav_path(request.uri().path()) {
+        return Ok(dav_basic_auth_challenge("Authentication required"));
     }
 
     Err(AuthError::TokenNotProvided)
+}
+
+/// DAV protocol surfaces (WebDAV, CalDAV, CardDAV) authenticate over HTTP Basic.
+/// Spec-compliant clients (Thunderbird, DAVx5, Apple Calendar/Contacts, file
+/// managers) only send credentials after receiving a `401` carrying a
+/// `WWW-Authenticate: Basic` challenge, so these paths must emit it. Browser and
+/// JSON-API routes deliberately do not, so they keep redirecting to `/login`.
+fn is_dav_path(path: &str) -> bool {
+    path.starts_with("/webdav") || path.starts_with("/caldav") || path.starts_with("/carddav")
+}
+
+/// Build the `401 Unauthorized` Basic-auth challenge shared by every DAV
+/// surface, so clients re-prompt for credentials instead of failing silently.
+fn dav_basic_auth_challenge(message: &'static str) -> Response {
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header(header::WWW_AUTHENTICATE, r#"Basic realm="OxiCloud""#)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(axum::body::Body::from(message))
+        .unwrap()
 }
 
 /// Middleware to verify that the authenticated user has an admin role.
@@ -352,4 +365,54 @@ pub async fn require_admin(request: Request, next: Next) -> Response {
     // Access denied
     let error = AuthError::AccessDenied("Admin role required".to_string());
     error.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dav_paths_receive_basic_auth_challenge() {
+        // Regression for #480: CalDAV/CardDAV clients (Thunderbird, DAVx5) only
+        // send credentials after a 401 carrying WWW-Authenticate. All three DAV
+        // surfaces must qualify so the challenge is emitted.
+        for path in [
+            "/webdav/",
+            "/webdav/admin/file.txt",
+            "/caldav/",
+            "/caldav/admin/cal/",
+            "/carddav/",
+            "/carddav/principals/admin/",
+        ] {
+            assert!(is_dav_path(path), "{path} should be treated as a DAV path");
+        }
+    }
+
+    #[test]
+    fn non_dav_paths_do_not_receive_basic_auth_challenge() {
+        for path in [
+            "/",
+            "/api/files",
+            "/login",
+            "/index.html",
+            "/.well-known/caldav",
+        ] {
+            assert!(
+                !is_dav_path(path),
+                "{path} must not get a Basic-auth challenge (browser/API surface)"
+            );
+        }
+    }
+
+    #[test]
+    fn challenge_sets_www_authenticate_header() {
+        let resp = dav_basic_auth_challenge("Authentication required");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers()
+                .get(header::WWW_AUTHENTICATE)
+                .and_then(|v| v.to_str().ok()),
+            Some(r#"Basic realm="OxiCloud""#),
+        );
+    }
 }

@@ -17,6 +17,20 @@ use crate::application::adapters::webdav_adapter::{
 use crate::application::dtos::address_book_dto::AddressBookDto;
 use crate::application::dtos::contact_dto::ContactDto;
 
+/// Render a requested property as a namespaced response element name, mapping
+/// the known namespaces to their response prefixes (`D:` for DAV, `CR:` for
+/// CardDAV). Used for the catch-all arms of the requested-property writers so
+/// the prefix mapping lives in exactly one place.
+fn carddav_prop_name(prop: &QualifiedName) -> String {
+    if prop.namespace == "urn:ietf:params:xml:ns:carddav" {
+        format!("CR:{}", prop.name)
+    } else if prop.namespace == "DAV:" {
+        format!("D:{}", prop.name)
+    } else {
+        prop.name.clone()
+    }
+}
+
 /// CardDAV report type
 #[derive(Debug, PartialEq)]
 pub enum CardDavReportType {
@@ -160,6 +174,96 @@ impl CardDavAdapter {
         }
 
         xml_writer.write_event(Event::End(BytesEnd::new("D:multistatus")))?;
+        Ok(())
+    }
+
+    /// Generate a PROPFIND response for the CardDAV root `/carddav/`.
+    ///
+    /// Mirrors the CalDAV root: emits a discovery entry for `/carddav/` itself
+    /// advertising `current-user-principal` and `addressbook-home-set` (the
+    /// properties DAVx5 / Apple Contacts read to locate address books), then —
+    /// at Depth > 0 — one entry per address book. Without these discovery
+    /// properties clients never find the address books at all.
+    pub fn generate_root_propfind_response<W: Write>(
+        writer: W,
+        address_books: &[AddressBookDto],
+        request: &PropFindRequest,
+        base_href: &str,
+        username: &str,
+    ) -> Result<()> {
+        let mut xml_writer = Writer::new(writer);
+
+        xml_writer.write_event(Event::Start(
+            BytesStart::new("D:multistatus").with_attributes([
+                ("xmlns:D", "DAV:"),
+                ("xmlns:CR", "urn:ietf:params:xml:ns:carddav"),
+                ("xmlns:CS", "http://calendarserver.org/ns/"),
+            ]),
+        ))?;
+
+        Self::write_carddav_root_response(&mut xml_writer, request, base_href, username)?;
+
+        for book in address_books {
+            Self::write_addressbook_response(
+                &mut xml_writer,
+                book,
+                request,
+                &format!("{}{}/", base_href, book.id),
+            )?;
+        }
+
+        xml_writer.write_event(Event::End(BytesEnd::new("D:multistatus")))?;
+        Ok(())
+    }
+
+    /// Generate a PROPFIND response for a CardDAV user principal resource at
+    /// `/carddav/principals/{username}/`.
+    ///
+    /// Returns `addressbook-home-set` so clients can resolve the collection
+    /// holding the user's address books, plus a self-referential
+    /// `current-user-principal`.
+    pub fn generate_principal_propfind_response<W: Write>(
+        writer: W,
+        request: &PropFindRequest,
+        username: &str,
+    ) -> Result<()> {
+        let mut xml_writer = Writer::new(writer);
+
+        xml_writer.write_event(Event::Start(
+            BytesStart::new("D:multistatus").with_attributes([
+                ("xmlns:D", "DAV:"),
+                ("xmlns:CR", "urn:ietf:params:xml:ns:carddav"),
+                ("xmlns:CS", "http://calendarserver.org/ns/"),
+            ]),
+        ))?;
+
+        xml_writer.write_event(Event::Start(BytesStart::new("D:response")))?;
+
+        let href = format!("/carddav/principals/{}/", username);
+        xml_writer.write_event(Event::Start(BytesStart::new("D:href")))?;
+        xml_writer.write_event(Event::Text(BytesText::new(&href)))?;
+        xml_writer.write_event(Event::End(BytesEnd::new("D:href")))?;
+
+        xml_writer.write_event(Event::Start(BytesStart::new("D:propstat")))?;
+        xml_writer.write_event(Event::Start(BytesStart::new("D:prop")))?;
+
+        match &request.prop_find_type {
+            PropFindType::AllProp | PropFindType::PropName => {
+                Self::write_carddav_principal_props(&mut xml_writer, username)?;
+            }
+            PropFindType::Prop(props) => {
+                Self::write_carddav_principal_requested_props(&mut xml_writer, username, props)?;
+            }
+        }
+
+        xml_writer.write_event(Event::End(BytesEnd::new("D:prop")))?;
+        xml_writer.write_event(Event::Start(BytesStart::new("D:status")))?;
+        xml_writer.write_event(Event::Text(BytesText::new("HTTP/1.1 200 OK")))?;
+        xml_writer.write_event(Event::End(BytesEnd::new("D:status")))?;
+        xml_writer.write_event(Event::End(BytesEnd::new("D:propstat")))?;
+        xml_writer.write_event(Event::End(BytesEnd::new("D:response")))?;
+        xml_writer.write_event(Event::End(BytesEnd::new("D:multistatus")))?;
+
         Ok(())
     }
 
@@ -384,14 +488,159 @@ impl CardDavAdapter {
                         .write_event(Event::End(BytesEnd::new("D:current-user-privilege-set")))?;
                 }
                 _ => {
-                    let prop_name = if prop.namespace == "urn:ietf:params:xml:ns:carddav" {
-                        format!("CR:{}", prop.name)
-                    } else if prop.namespace == "DAV:" {
-                        format!("D:{}", prop.name)
-                    } else {
-                        prop.name.clone()
-                    };
-                    xml_writer.write_event(Event::Empty(BytesStart::new(&prop_name)))?;
+                    xml_writer
+                        .write_event(Event::Empty(BytesStart::new(carddav_prop_name(prop))))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Write a populated `current-user-principal` element pointing at the user's
+    /// CardDAV principal. Shared by the root and principal discovery responses.
+    fn write_current_user_principal<W: Write>(
+        xml_writer: &mut Writer<W>,
+        username: &str,
+    ) -> Result<()> {
+        xml_writer.write_event(Event::Start(BytesStart::new("D:current-user-principal")))?;
+        xml_writer.write_event(Event::Start(BytesStart::new("D:href")))?;
+        xml_writer.write_event(Event::Text(BytesText::new(&format!(
+            "/carddav/principals/{}/",
+            username
+        ))))?;
+        xml_writer.write_event(Event::End(BytesEnd::new("D:href")))?;
+        xml_writer.write_event(Event::End(BytesEnd::new("D:current-user-principal")))?;
+        Ok(())
+    }
+
+    /// Write a populated `addressbook-home-set` element pointing at the user's
+    /// address-book home collection. Shared by the root and principal responses.
+    fn write_addressbook_home_set<W: Write>(
+        xml_writer: &mut Writer<W>,
+        username: &str,
+    ) -> Result<()> {
+        xml_writer.write_event(Event::Start(BytesStart::new("CR:addressbook-home-set")))?;
+        xml_writer.write_event(Event::Start(BytesStart::new("D:href")))?;
+        xml_writer.write_event(Event::Text(BytesText::new(&format!(
+            "/carddav/{}/",
+            username
+        ))))?;
+        xml_writer.write_event(Event::End(BytesEnd::new("D:href")))?;
+        xml_writer.write_event(Event::End(BytesEnd::new("CR:addressbook-home-set")))?;
+        Ok(())
+    }
+
+    /// Write the root `/carddav/` discovery entry.
+    fn write_carddav_root_response<W: Write>(
+        xml_writer: &mut Writer<W>,
+        request: &PropFindRequest,
+        href: &str,
+        username: &str,
+    ) -> Result<()> {
+        xml_writer.write_event(Event::Start(BytesStart::new("D:response")))?;
+        xml_writer.write_event(Event::Start(BytesStart::new("D:href")))?;
+        xml_writer.write_event(Event::Text(BytesText::new(href)))?;
+        xml_writer.write_event(Event::End(BytesEnd::new("D:href")))?;
+
+        xml_writer.write_event(Event::Start(BytesStart::new("D:propstat")))?;
+        xml_writer.write_event(Event::Start(BytesStart::new("D:prop")))?;
+
+        match &request.prop_find_type {
+            PropFindType::AllProp => {
+                xml_writer.write_event(Event::Start(BytesStart::new("D:resourcetype")))?;
+                xml_writer.write_event(Event::Empty(BytesStart::new("D:collection")))?;
+                xml_writer.write_event(Event::End(BytesEnd::new("D:resourcetype")))?;
+                Self::write_current_user_principal(xml_writer, username)?;
+                Self::write_addressbook_home_set(xml_writer, username)?;
+            }
+            PropFindType::PropName => {
+                xml_writer.write_event(Event::Empty(BytesStart::new("D:resourcetype")))?;
+                xml_writer
+                    .write_event(Event::Empty(BytesStart::new("D:current-user-principal")))?;
+                xml_writer.write_event(Event::Empty(BytesStart::new("CR:addressbook-home-set")))?;
+            }
+            PropFindType::Prop(props) => {
+                for prop in props {
+                    match (prop.namespace.as_str(), prop.name.as_str()) {
+                        ("DAV:", "resourcetype") => {
+                            xml_writer
+                                .write_event(Event::Start(BytesStart::new("D:resourcetype")))?;
+                            xml_writer
+                                .write_event(Event::Empty(BytesStart::new("D:collection")))?;
+                            xml_writer.write_event(Event::End(BytesEnd::new("D:resourcetype")))?;
+                        }
+                        ("DAV:", "current-user-principal") => {
+                            Self::write_current_user_principal(xml_writer, username)?;
+                        }
+                        ("urn:ietf:params:xml:ns:carddav", "addressbook-home-set") => {
+                            Self::write_addressbook_home_set(xml_writer, username)?;
+                        }
+                        _ => {
+                            xml_writer.write_event(Event::Empty(BytesStart::new(
+                                carddav_prop_name(prop),
+                            )))?;
+                        }
+                    }
+                }
+            }
+        }
+
+        xml_writer.write_event(Event::End(BytesEnd::new("D:prop")))?;
+        xml_writer.write_event(Event::Start(BytesStart::new("D:status")))?;
+        xml_writer.write_event(Event::Text(BytesText::new("HTTP/1.1 200 OK")))?;
+        xml_writer.write_event(Event::End(BytesEnd::new("D:status")))?;
+        xml_writer.write_event(Event::End(BytesEnd::new("D:propstat")))?;
+        xml_writer.write_event(Event::End(BytesEnd::new("D:response")))?;
+        Ok(())
+    }
+
+    /// Write the standard properties for a CardDAV principal resource.
+    fn write_carddav_principal_props<W: Write>(
+        xml_writer: &mut Writer<W>,
+        username: &str,
+    ) -> Result<()> {
+        xml_writer.write_event(Event::Start(BytesStart::new("D:resourcetype")))?;
+        xml_writer.write_event(Event::Empty(BytesStart::new("D:collection")))?;
+        xml_writer.write_event(Event::Empty(BytesStart::new("D:principal")))?;
+        xml_writer.write_event(Event::End(BytesEnd::new("D:resourcetype")))?;
+
+        xml_writer.write_event(Event::Start(BytesStart::new("D:displayname")))?;
+        xml_writer.write_event(Event::Text(BytesText::new(username)))?;
+        xml_writer.write_event(Event::End(BytesEnd::new("D:displayname")))?;
+
+        Self::write_addressbook_home_set(xml_writer, username)?;
+        Self::write_current_user_principal(xml_writer, username)?;
+        Ok(())
+    }
+
+    /// Write the requested properties for a CardDAV principal resource.
+    fn write_carddav_principal_requested_props<W: Write>(
+        xml_writer: &mut Writer<W>,
+        username: &str,
+        props: &[QualifiedName],
+    ) -> Result<()> {
+        for prop in props {
+            match (prop.namespace.as_str(), prop.name.as_str()) {
+                ("DAV:", "resourcetype") => {
+                    xml_writer.write_event(Event::Start(BytesStart::new("D:resourcetype")))?;
+                    xml_writer.write_event(Event::Empty(BytesStart::new("D:collection")))?;
+                    xml_writer.write_event(Event::Empty(BytesStart::new("D:principal")))?;
+                    xml_writer.write_event(Event::End(BytesEnd::new("D:resourcetype")))?;
+                }
+                ("DAV:", "displayname") => {
+                    xml_writer.write_event(Event::Start(BytesStart::new("D:displayname")))?;
+                    xml_writer.write_event(Event::Text(BytesText::new(username)))?;
+                    xml_writer.write_event(Event::End(BytesEnd::new("D:displayname")))?;
+                }
+                ("DAV:", "current-user-principal") => {
+                    Self::write_current_user_principal(xml_writer, username)?;
+                }
+                ("urn:ietf:params:xml:ns:carddav", "addressbook-home-set") => {
+                    Self::write_addressbook_home_set(xml_writer, username)?;
+                }
+                _ => {
+                    xml_writer
+                        .write_event(Event::Empty(BytesStart::new(carddav_prop_name(prop))))?;
                 }
             }
         }

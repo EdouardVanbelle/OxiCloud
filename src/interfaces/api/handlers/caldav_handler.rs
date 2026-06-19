@@ -218,6 +218,9 @@ async fn handle_propfind(
         .to_string();
 
     let user = extract_user(&req)?;
+    // Caller UUID (string form) — gates the `<D:write/>` privilege on calendars
+    // the caller owns, so clients mount their own calendars read-write.
+    let caller_id = user.id.to_string();
     let calendar_service = get_calendar_service(&state)?;
 
     let body_bytes = body::to_bytes(req.into_body(), MAX_CALDAV_BODY)
@@ -256,6 +259,7 @@ async fn handle_propfind(
             &propfind_request,
             base_href,
             &user.username,
+            &caller_id,
         )
         .map_err(|e| AppError::internal_error(format!("Failed to generate XML: {}", e)))?;
 
@@ -333,6 +337,7 @@ async fn handle_propfind(
                     &propfind_request,
                     base_href,
                     &depth,
+                    &caller_id,
                 )
                 .map_err(|e| AppError::internal_error(format!("Failed to generate XML: {}", e)))?;
 
@@ -359,6 +364,7 @@ async fn handle_propfind(
                     &calendars,
                     &propfind_request,
                     base_href,
+                    &caller_id,
                 )
                 .map_err(|e| AppError::internal_error(format!("Failed to generate XML: {}", e)))?;
 
@@ -407,6 +413,7 @@ async fn handle_propfind(
                         &propfind_request,
                         base_href,
                         &depth,
+                        &caller_id,
                     )
                     .map_err(|e| {
                         AppError::internal_error(format!("Failed to generate XML: {}", e))
