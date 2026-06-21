@@ -886,8 +886,8 @@ pub async fn oidc_authorize(
 /// Handle the OIDC provider callback.
 ///
 /// Validates the `state` / PKCE / nonce, exchanges the code for tokens, then
-/// redirects the browser to the frontend with a short-lived exchange code
-/// (`/?oidc_code=…`).
+/// redirects the browser to the frontend login route with a short-lived
+/// exchange code (`/login?oidc_code=…`), which the SPA swaps for a session.
 #[utoipa::path(
     get,
     path = "/api/auth/oidc/callback",
@@ -937,7 +937,7 @@ pub async fn oidc_callback(
             // Regular web login, redirect to frontend with exchange code
             let config = auth_app.oidc_config().unwrap();
             let frontend_url = config.frontend_url.trim_end_matches('/');
-            let redirect_url = format!("{}/?oidc_code={}", frontend_url, exchange_code);
+            let redirect_url = format!("{}/login?oidc_code={}", frontend_url, exchange_code);
             tracing::info!("OIDC login successful, redirecting with exchange code");
             Ok(Redirect::temporary(&redirect_url))
         }
