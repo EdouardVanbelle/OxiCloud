@@ -5,11 +5,13 @@
 //! throughput). Gated behind the `bench` feature so it never touches normal
 //! builds.
 //!
-//! The corpus is **generated deterministically** (a low-frequency gradient plus
-//! seeded high-frequency xorshift noise) so it is reproducible, license-free and
-//! gives the decoder/resizer realistic work without committing large binaries to
-//! git. Files are written to `benches/corpus/` (git-ignored) on first run and
-//! reused afterwards.
+//! The corpus is **generated deterministically** as photo-realistic images
+//! (per-channel sums of low-frequency 2D sinusoids — smooth, gradually-varying
+//! color fields like an in-focus scene — plus mild grain), so it is
+//! reproducible, license-free, and compresses the way real photos do. This
+//! matters for the codec comparison: pure white noise is a high-frequency
+//! pathology that wildly distorts JPEG-vs-WebP byte ratios. Files are written to
+//! `benches/corpus/` (git-ignored) on first run and reused afterwards.
 //!
 //! Files already present on disk are **always preferred** over generation — so
 //! you can drop your own real photos into `benches/corpus/` using the documented
@@ -240,22 +242,58 @@ fn generate(spec: &Spec) -> Result<Vec<u8>, String> {
     }
 }
 
-/// Build a photo-like RGB image: a smooth diagonal gradient (low frequency)
-/// plus seeded ±32 white noise (high frequency). Deterministic for a given
-/// seed, so corpus bytes are byte-stable across runs and machines.
+/// One smooth low-frequency 2D sinusoid component (a "color field").
+struct Wave {
+    fx: f32,
+    fy: f32,
+    phase: f32,
+    amp: f32,
+}
+
+/// Build a **photo-realistic** RGB image: per channel, a sum of low-frequency
+/// 2D sinusoids (smooth, gradually-varying color fields, like an in-focus scene)
+/// plus mild ±6 grain. Unlike pure white noise, this compresses the way real
+/// photos do (smooth regions JPEG/WebP handle efficiently), so the codec
+/// comparison is representative rather than a high-frequency pathology.
+/// Deterministic for a given seed (byte-stable corpus). Drop real photos into
+/// `benches/corpus/` with the documented filenames to benchmark on real data.
 fn synthesize(width: u32, height: u32, seed: u64) -> RgbImage {
     let mut img = RgbImage::new(width, height);
     let mut state = seed | 1; // xorshift requires a non-zero state
-    let (w, h) = (width.max(1), height.max(1));
+
+    let mk_waves = |state: &mut u64| -> [Wave; 4] {
+        std::array::from_fn(|_| Wave {
+            fx: 0.5 + (xorshift(state) % 7) as f32 * 0.5, // 0.5..3.5 cycles across the image
+            fy: 0.5 + (xorshift(state) % 7) as f32 * 0.5,
+            phase: (xorshift(state) % 628) as f32 / 100.0, // 0..2π
+            amp: 18.0 + (xorshift(state) % 42) as f32,     // 18..60
+        })
+    };
+    let channels = [
+        mk_waves(&mut state),
+        mk_waves(&mut state),
+        mk_waves(&mut state),
+    ];
+    let bases = [112.0f32, 124.0, 136.0]; // mid-tone per channel
+
+    let (w, h) = (width.max(1) as f32, height.max(1) as f32);
+    let eval = |waves: &[Wave; 4], base: f32, u: f32, v: f32| -> f32 {
+        let mut acc = base;
+        for wv in waves {
+            acc += wv.amp * (std::f32::consts::TAU * (wv.fx * u + wv.fy * v) + wv.phase).sin();
+        }
+        acc
+    };
+
     for y in 0..height {
-        let gy = (y as i32 * 255 / h as i32).clamp(0, 255);
+        let v = y as f32 / h;
         for x in 0..width {
-            let gx = (x as i32 * 255 / w as i32).clamp(0, 255);
-            let noise = (xorshift(&mut state) & 0x3F) as i32 - 32; // -32..=31
-            let r = (gx + noise).clamp(0, 255) as u8;
-            let g = (gy + noise).clamp(0, 255) as u8;
-            let b = (((gx + gy) / 2) + noise).clamp(0, 255) as u8;
-            img.put_pixel(x, y, Rgb([r, g, b]));
+            let u = x as f32 / w;
+            let grain = (xorshift(&mut state) & 0x0F) as f32 - 8.0; // ±8 fine texture
+            let px = std::array::from_fn(|c| {
+                (eval(&channels[c], bases[c], u, v) + grain).clamp(0.0, 255.0) as u8
+            });
+            img.put_pixel(x, y, Rgb(px));
         }
     }
     img

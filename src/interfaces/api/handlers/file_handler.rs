@@ -339,7 +339,7 @@ impl FileHandler {
         headers: HeaderMap,
         Path((id, size)): Path<(String, String)>,
     ) -> impl IntoResponse {
-        use crate::application::ports::thumbnail_ports::ThumbnailSize;
+        use crate::application::ports::thumbnail_ports::{ThumbnailFormat, ThumbnailSize};
 
         // check first that user can access this resource
         if let Err(err) = state
@@ -368,11 +368,18 @@ impl FileHandler {
             }
         };
 
+        // Content negotiation: WebP for clients that advertise it (~97%), JPEG
+        // otherwise. `Vary: Accept` keeps shared/browser caches from handing a
+        // WebP body to a JPEG-only client (or vice-versa).
+        let format =
+            ThumbnailFormat::from_accept(headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()));
+
         // ── ETag short-circuit (Solution C) ──────────────────────────
         // Thumbnails are immutable — the ETag never changes for a given
-        // (file_id, size) pair.  If the browser already has it, return 304
-        // with zero I/O or DB work.
-        let etag = format!("\"thumb-{}-{:?}\"", id, thumb_size);
+        // (file_id, size, format) triple.  If the browser already has it, return
+        // 304 with zero I/O or DB work. Format is in the ETag so a client that
+        // switched codecs doesn't get a stale 304.
+        let etag = format!("\"thumb-{}-{:?}-{:?}\"", id, thumb_size, format);
         if let Some(if_none_match) = headers.get(header::IF_NONE_MATCH)
             && let Ok(val) = if_none_match.to_str()
             && (val == etag || val == "*")
@@ -380,6 +387,7 @@ impl FileHandler {
             return Response::builder()
                 .status(StatusCode::NOT_MODIFIED)
                 .header(header::ETAG, &etag)
+                .header(header::VARY, header::ACCEPT.as_str())
                 .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
                 .body(Body::empty())
                 .unwrap()
@@ -390,7 +398,7 @@ impl FileHandler {
         // Try moka (RAM) → disk before touching the database.
         // If the thumbnail exists it was authorized at creation time.
         if let Some(data) = thumbnail_service
-            .get_cached_thumbnail(&id, None, thumb_size.into())
+            .get_cached_thumbnail(&id, None, thumb_size.into(), format)
             .await
         {
             return Response::builder()
@@ -402,6 +410,7 @@ impl FileHandler {
                 .header(header::CONTENT_LENGTH, data.len())
                 .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
                 .header(header::ETAG, &etag)
+                .header(header::VARY, header::ACCEPT.as_str())
                 .body(Body::from(data))
                 .unwrap()
                 .into_response();
@@ -443,7 +452,7 @@ impl FileHandler {
             }
         };
         if let Some(data) = thumbnail_service
-            .get_cached_thumbnail(&id, Some(&blob_hash), thumb_size.into())
+            .get_cached_thumbnail(&id, Some(&blob_hash), thumb_size.into(), format)
             .await
         {
             return Response::builder()
@@ -455,6 +464,7 @@ impl FileHandler {
                 .header(header::CONTENT_LENGTH, data.len())
                 .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
                 .header(header::ETAG, &etag)
+                .header(header::VARY, header::ACCEPT.as_str())
                 .body(Body::from(data))
                 .unwrap()
                 .into_response();
@@ -465,6 +475,7 @@ impl FileHandler {
                 &id,
                 &blob_hash,
                 thumb_size.into(),
+                format,
                 state.core.dedup_service.clone(),
             )
             .await
@@ -478,6 +489,7 @@ impl FileHandler {
                 .header(header::CONTENT_LENGTH, data.len())
                 .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
                 .header(header::ETAG, &etag)
+                .header(header::VARY, header::ACCEPT.as_str())
                 .body(Body::from(data))
                 .unwrap()
                 .into_response(),

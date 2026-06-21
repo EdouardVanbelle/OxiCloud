@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crate::application::ports::file_ports::FileRetrievalUseCase;
 use crate::application::ports::storage_ports::FileReadPort;
-use crate::application::ports::thumbnail_ports::{ThumbnailPort, ThumbnailSize};
+use crate::application::ports::thumbnail_ports::{ThumbnailFormat, ThumbnailPort, ThumbnailSize};
 use crate::common::di::AppState;
 use crate::interfaces::middleware::auth::AuthUser;
 
@@ -143,7 +143,14 @@ pub async fn handle_preview(
     if let Some(data) = state
         .core
         .thumbnail_service
-        .get_cached_thumbnail(&object_id, Some(&blob_hash), thumb_size.into())
+        // NextCloud clients don't advertise WebP and expect JPEG — pin to JPEG
+        // (served from the shared lazy `.jpg` fallback).
+        .get_cached_thumbnail(
+            &object_id,
+            Some(&blob_hash),
+            thumb_size.into(),
+            ThumbnailFormat::Jpeg,
+        )
         .await
     {
         let etag = format!("\"thumb-{}-{:?}\"", object_id, thumb_size);
@@ -167,6 +174,7 @@ pub async fn handle_preview(
             &object_id,
             &blob_hash,
             thumb_size.into(),
+            ThumbnailFormat::Jpeg,
             state.core.dedup_service.clone(),
         )
         .await

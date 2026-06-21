@@ -46,6 +46,10 @@ jpeg-decoder = "0.3"
 # SIMD (AVX2/SSE4.1/NEON) image resizing for thumbnails — far faster than the
 # `image` crate's scalar resampler, and it speeds every format (incl. PNG/WebP).
 fast_image_resize = "5"
+# Lossy WebP encoding for thumbnails. The `image` crate's webp feature is
+# lossless-only; this binds libwebp (vendored + built via `cc`, no system dep)
+# for quality-controlled lossy output (~25-30% smaller than JPEG at equal SSIM).
+webp = "0.3"
 id3 = "1.17"
 mp3-duration = "0.1"
 kamadak-exif = "0.6.1"

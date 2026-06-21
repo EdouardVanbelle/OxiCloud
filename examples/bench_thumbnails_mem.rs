@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use oxicloud::application::ports::thumbnail_ports::ThumbnailFormat;
 use oxicloud::bench_support::{self, CorpusCase};
 use oxicloud::infrastructure::services::thumbnail_service::{ThumbnailService, ThumbnailSize};
 
@@ -328,6 +329,160 @@ fn main() {
         }
     }
 
+    // --- Table E1: WebP quality sweep vs JPEG q80 (find the equal-SSIM q) ---
+    println!(
+        "\n== E1. WebP quality sweep vs JPEG q80 — Preview/400px, SSIM vs uncompressed source =="
+    );
+    println!(
+        "   (the equal-quality bandwidth win = save% at the lowest WebP q whose ssim ≥ JPEG's)"
+    );
+    let sweep_q = [78.0_f32, 82.0, 86.0, 90.0];
+    for case in corpus
+        .iter()
+        .filter(|c| matches!(c.name, "jpeg_12mp" | "jpeg_24mp" | "jpeg_48mp"))
+    {
+        let jpeg = ThumbnailService::bench_render_thumbnail_fmt(
+            &case.bytes,
+            ThumbnailSize::Preview,
+            ThumbnailFormat::Jpeg,
+        )
+        .expect("jpeg");
+        let (lj, wj, hj) = decode_to_luma(&jpeg);
+        let refl = reference_luma_at(&case.bytes, wj, hj);
+        let jpeg_ssim = block_ssim(&lj, &refl, wj, hj);
+        println!(
+            "  {:<10} JPEG q80: {:>6} B   ssim {:.4}",
+            case.name,
+            jpeg.len(),
+            jpeg_ssim
+        );
+        for &q in &sweep_q {
+            let webp =
+                ThumbnailService::bench_render_webp_at(&case.bytes, ThumbnailSize::Preview, q)
+                    .expect("webp");
+            let (lw, ww, hw) = decode_to_luma(&webp);
+            let ssim_w = if (ww, hw) == (wj, hj) {
+                block_ssim(&lw, &refl, wj, hj)
+            } else {
+                f64::NAN
+            };
+            let save = 100.0 * (1.0 - webp.len() as f64 / jpeg.len() as f64);
+            let flag = if ssim_w >= jpeg_ssim {
+                "  ← ≥ JPEG"
+            } else {
+                ""
+            };
+            println!(
+                "       webp q{:>3.0}: {:>6} B   ssim {:.4}   {:>5.1}% smaller{}",
+                q,
+                webp.len(),
+                ssim_w,
+                save,
+                flag
+            );
+        }
+    }
+
+    // --- Table E2: codec comparison at the production WEBP_QUALITY const ---
+    println!(
+        "\n== E2. Production codec (WEBP_QUALITY const): JPEG vs WebP bytes + SSIM vs source =="
+    );
+    println!(
+        "| {:<13} | {:<8} | {:>8} | {:>8} | {:>6} | {:>9} | {:>9} |",
+        "case", "size", "jpeg B", "webp B", "save%", "ssim jpg", "ssim webp"
+    );
+    println!(
+        "|{:-<15}|{:-<10}|{:-<10}|{:-<10}|{:-<8}|{:-<11}|{:-<11}|",
+        "", "", "", "", "", "", ""
+    );
+    let mut jpeg_total = 0u64;
+    let mut webp_total = 0u64;
+    for case in corpus
+        .iter()
+        .filter(|c| matches!(c.name, "jpeg_12mp" | "jpeg_24mp" | "jpeg_48mp"))
+    {
+        for &size in &[
+            ThumbnailSize::Icon,
+            ThumbnailSize::Preview,
+            ThumbnailSize::Large,
+        ] {
+            let jpeg = ThumbnailService::bench_render_thumbnail_fmt(
+                &case.bytes,
+                size,
+                ThumbnailFormat::Jpeg,
+            )
+            .expect("jpeg encode");
+            let webp = ThumbnailService::bench_render_thumbnail_fmt(
+                &case.bytes,
+                size,
+                ThumbnailFormat::Webp,
+            )
+            .expect("webp encode");
+            jpeg_total += jpeg.len() as u64;
+            webp_total += webp.len() as u64;
+            let save = 100.0 * (1.0 - webp.len() as f64 / jpeg.len() as f64);
+
+            // SSIM of each codec vs the uncompressed full-decode source at the
+            // thumbnail's exact dims — proves WebP is equal/better quality.
+            let (lj, wj, hj) = decode_to_luma(&jpeg);
+            let (lw, ww, hw) = decode_to_luma(&webp);
+            let (ssim_j, ssim_w) = if (wj, hj) == (ww, hw) {
+                let refl = reference_luma_at(&case.bytes, wj, hj);
+                (
+                    block_ssim(&lj, &refl, wj, hj),
+                    block_ssim(&lw, &refl, wj, hj),
+                )
+            } else {
+                (f64::NAN, f64::NAN)
+            };
+            println!(
+                "| {:<13} | {:<8} | {:>8} | {:>8} | {:>5.1}% | {:>9.4} | {:>9.4} |",
+                case.name,
+                format!("{size:?}"),
+                jpeg.len(),
+                webp.len(),
+                save,
+                ssim_j,
+                ssim_w
+            );
+        }
+    }
+    let total_save = 100.0 * (1.0 - webp_total as f64 / jpeg_total as f64);
+    println!(
+        "  ── all 3 sizes × 3 photos: JPEG {} B → WebP {} B = {:.1}% smaller ──",
+        jpeg_total, webp_total, total_save
+    );
+
+    // Encode time, full pipeline (decode+resize+encode), Preview/12MP, best of N.
+    if let Some(c) = corpus.iter().find(|c| c.name == "jpeg_12mp") {
+        let n = 50u32;
+        let mut tj = f64::INFINITY;
+        let mut tw = f64::INFINITY;
+        for _ in 0..3 {
+            let t = Instant::now();
+            for _ in 0..n {
+                let _ = ThumbnailService::bench_render_thumbnail_fmt(
+                    &c.bytes,
+                    ThumbnailSize::Preview,
+                    ThumbnailFormat::Jpeg,
+                );
+            }
+            tj = tj.min(t.elapsed().as_secs_f64() * 1000.0 / n as f64);
+            let t = Instant::now();
+            for _ in 0..n {
+                let _ = ThumbnailService::bench_render_thumbnail_fmt(
+                    &c.bytes,
+                    ThumbnailSize::Preview,
+                    ThumbnailFormat::Webp,
+                );
+            }
+            tw = tw.min(t.elapsed().as_secs_f64() * 1000.0 / n as f64);
+        }
+        println!(
+            "  encode (Preview/12MP, full pipeline incl. shared decode): JPEG {tj:.2} ms vs WebP {tw:.2} ms"
+        );
+    }
+
     write_json(threads, &peak_rows, &tp_rows);
 
     println!(
@@ -489,6 +644,17 @@ fn decode_to_luma(jpeg: &[u8]) -> (Vec<u8>, u32, u32) {
     let luma = img.to_luma8();
     let (w, h) = (luma.width(), luma.height());
     (luma.into_raw(), w, h)
+}
+
+/// Uncompressed ground truth: full-decode the source and resize to the exact
+/// thumbnail dims (CatmullRom), returning luma. Comparing each codec's decoded
+/// thumbnail against this isolates codec quality (no second lossy step).
+fn reference_luma_at(bytes: &[u8], w: u32, h: u32) -> Vec<u8> {
+    image::load_from_memory(bytes)
+        .expect("ref decode")
+        .resize_exact(w, h, image::imageops::FilterType::CatmullRom)
+        .to_luma8()
+        .into_raw()
 }
 
 /// Mean SSIM over non-overlapping 8×8 blocks (luma). 1.0 = identical.

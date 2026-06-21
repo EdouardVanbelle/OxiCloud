@@ -49,6 +49,41 @@ impl ThumbnailSize {
     }
 }
 
+/// Output encoding of a generated thumbnail.
+///
+/// WebP (lossy) is the primary format — ~25-30% smaller than JPEG at equal
+/// quality — generated eagerly on upload and served to the ~97% of clients that
+/// advertise `Accept: image/webp`. JPEG is the fallback for older clients and
+/// NextCloud, generated lazily on first request and then cached like WebP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ThumbnailFormat {
+    /// Lossy WebP — primary, eager.
+    Webp,
+    /// Baseline JPEG — fallback for non-WebP clients, lazy.
+    Jpeg,
+}
+
+impl ThumbnailFormat {
+    /// On-disk file extension for this format (no dot).
+    pub fn ext(self) -> &'static str {
+        match self {
+            ThumbnailFormat::Webp => "webp",
+            ThumbnailFormat::Jpeg => "jpg",
+        }
+    }
+
+    /// Pick the output format from a request `Accept` header: WebP when the
+    /// client advertises `image/webp`, JPEG otherwise. A plain substring check
+    /// is sufficient — no client sends `image/webp;q=0`, and every WebP-capable
+    /// browser lists it explicitly.
+    pub fn from_accept(accept: Option<&str>) -> Self {
+        match accept {
+            Some(a) if a.contains("image/webp") => ThumbnailFormat::Webp,
+            _ => ThumbnailFormat::Jpeg,
+        }
+    }
+}
+
 /// Statistics about the thumbnail cache.
 #[derive(Debug, Clone)]
 pub struct ThumbnailStatsDto {
@@ -107,7 +142,8 @@ pub trait ThumbnailPort: Send + Sync + 'static {
 
     /// Store an externally-generated thumbnail (e.g. client-side video frame).
     ///
-    /// Validates the image, re-encodes to WebP, and persists to cache.
+    /// Validates the image and persists it as JPEG (external/video thumbnails
+    /// are kept JPEG-only — a tiny, non-dedup-able slice not worth a second codec).
     async fn store_external_thumbnail(
         &self,
         file_id: &str,

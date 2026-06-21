@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
+use crate::application::ports::thumbnail_ports::ThumbnailFormat;
+
 use super::thumbnail_service::{ThumbnailService, ThumbnailSize};
 
 /// Minimal valid 1x1 red PNG (68 bytes).
@@ -46,6 +48,7 @@ async fn generate_thumbnail_from_blob_path() {
             "test-file-id",
             "ab1234567890",
             ThumbnailSize::Icon,
+            ThumbnailFormat::Jpeg,
             &blob_path,
         )
         .await;
@@ -78,6 +81,7 @@ async fn generate_thumbnail_nonexistent_path_returns_error() {
             "missing-id",
             "nonexistent-hash",
             ThumbnailSize::Icon,
+            ThumbnailFormat::Jpeg,
             &bad_path,
         )
         .await;
@@ -105,6 +109,7 @@ async fn generate_thumbnail_from_blob_bytes() {
             "bytes-file-id",
             "bytes-hash-123",
             ThumbnailSize::Preview,
+            ThumbnailFormat::Jpeg,
             Bytes::from(tiny_png()),
         )
         .await;

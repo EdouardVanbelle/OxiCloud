@@ -23,7 +23,7 @@ use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
 use crate::application::ports::thumbnail_ports::{
-    ThumbnailPort, ThumbnailSize as PortThumbnailSize, ThumbnailStatsDto,
+    ThumbnailFormat, ThumbnailPort, ThumbnailSize as PortThumbnailSize, ThumbnailStatsDto,
 };
 use crate::domain::errors::{DomainError, ErrorKind};
 use crate::infrastructure::services::dedup_service::DedupService;
@@ -68,16 +68,28 @@ impl ThumbnailSize {
     }
 }
 
-/// Cache key for thumbnails
+/// Cache key for thumbnails. Includes `format` so WebP and the JPEG fallback for
+/// the same (file_id, size) are distinct entries (no cross-format collision).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ThumbnailCacheKey {
     file_id: String,
     size: ThumbnailSize,
+    format: ThumbnailFormat,
 }
 
 /// Maximum pixel count before rejecting decode (50 megapixels → ~200 MB RGBA).
 /// Images above this are silently skipped — protects against single-image OOM.
 const MAX_DECODE_PIXELS: u64 = 50_000_000;
+
+/// JPEG quality for the fallback codec.
+const JPEG_QUALITY: u8 = 80;
+/// Lossy WebP quality for the primary codec. q82 lands within ~0.005 SSIM of
+/// JPEG q80 (imperceptible at thumbnail scale) while encoding markedly smaller:
+/// ~60% on the smooth photo-realistic bench corpus, and a more modest but still
+/// substantial win (~25-40%) expected on real photos with edges/text/foliage.
+/// Raise for more fidelity, lower for more bandwidth savings — see the E1 sweep
+/// in `examples/bench_thumbnails_mem`.
+const WEBP_QUALITY: f32 = 82.0;
 
 /// Environment override for the decode-concurrency cap (ops tuning).
 const DECODE_CONCURRENCY_ENV: &str = "OXICLOUD_THUMBNAIL_DECODE_CONCURRENCY";
@@ -184,11 +196,18 @@ impl ThumbnailService {
         )
     }
 
-    /// Get the path where a thumbnail would be stored (keyed by blob hash for dedup).
-    fn get_thumbnail_path(&self, blob_hash: &str, size: ThumbnailSize) -> PathBuf {
+    /// Get the path where a thumbnail would be stored (keyed by blob hash for
+    /// dedup; the extension encodes the format: `.webp` primary, `.jpg` fallback).
+    /// This is the single source of truth for blob-hash thumbnail paths.
+    fn get_thumbnail_path(
+        &self,
+        blob_hash: &str,
+        size: ThumbnailSize,
+        format: ThumbnailFormat,
+    ) -> PathBuf {
         self.thumbnails_root
             .join(size.dir_name())
-            .join(format!("{}.jpg", blob_hash))
+            .join(format!("{}.{}", blob_hash, format.ext()))
     }
 
     /// Get a thumbnail, generating it if needed.
@@ -206,14 +225,16 @@ impl ThumbnailService {
         file_id: &str,
         blob_hash: &str,
         size: ThumbnailSize,
+        format: ThumbnailFormat,
         original_path: &Path,
     ) -> Result<Bytes, ThumbnailError> {
         let cache_key = ThumbnailCacheKey {
             file_id: file_id.to_string(),
             size,
+            format,
         };
 
-        let thumb_path = self.get_thumbnail_path(blob_hash, size);
+        let thumb_path = self.get_thumbnail_path(blob_hash, size, format);
         let original_owned = original_path.to_path_buf();
         let file_id_owned = file_id.to_string();
 
@@ -236,7 +257,7 @@ impl ThumbnailService {
 
                 // 2. Generate thumbnail (CPU-bound, runs in spawn_blocking)
                 tracing::info!("🎨 Generating thumbnail: {} {:?}", file_id_owned, size);
-                match self.generate_thumbnail(&original_owned, size).await {
+                match self.generate_thumbnail(&original_owned, size, format).await {
                     Ok(bytes) => {
                         // Save to disk (best-effort — don't fail the request)
                         if let Some(parent) = thumb_path.parent() {
@@ -282,14 +303,16 @@ impl ThumbnailService {
         file_id: &str,
         blob_hash: &str,
         size: ThumbnailSize,
+        format: ThumbnailFormat,
         original_data: Bytes,
     ) -> Result<Bytes, ThumbnailError> {
         let cache_key = ThumbnailCacheKey {
             file_id: file_id.to_string(),
             size,
+            format,
         };
 
-        let thumb_path = self.get_thumbnail_path(blob_hash, size);
+        let thumb_path = self.get_thumbnail_path(blob_hash, size, format);
         let file_id_owned = file_id.to_string();
 
         let entry = self
@@ -309,7 +332,7 @@ impl ThumbnailService {
                     tracing::warn!("Decode semaphore closed, skipping {}", file_id_owned);
                     return Bytes::new();
                 };
-                self.generate_and_persist(&file_id_owned, &thumb_path, size, original_data)
+                self.generate_and_persist(&file_id_owned, &thumb_path, size, format, original_data)
                     .await
             })
             .await;
@@ -337,14 +360,16 @@ impl ThumbnailService {
         file_id: &str,
         blob_hash: &str,
         size: ThumbnailSize,
+        format: ThumbnailFormat,
         dedup: Arc<DedupService>,
     ) -> Result<Bytes, ThumbnailError> {
         let cache_key = ThumbnailCacheKey {
             file_id: file_id.to_string(),
             size,
+            format,
         };
 
-        let thumb_path = self.get_thumbnail_path(blob_hash, size);
+        let thumb_path = self.get_thumbnail_path(blob_hash, size, format);
         let file_id_owned = file_id.to_string();
         let blob_hash_owned = blob_hash.to_string();
 
@@ -376,7 +401,7 @@ impl ThumbnailService {
                         return Bytes::new();
                     }
                 };
-                self.generate_and_persist(&file_id_owned, &thumb_path, size, original_data)
+                self.generate_and_persist(&file_id_owned, &thumb_path, size, format, original_data)
                     .await
             })
             .await;
@@ -402,10 +427,17 @@ impl ThumbnailService {
         file_id: &str,
         thumb_path: &Path,
         size: ThumbnailSize,
+        format: ThumbnailFormat,
         original_data: Bytes,
     ) -> Bytes {
         tracing::info!("🎨 Generating thumbnail: {} {:?}", file_id, size);
-        match Self::generate_thumbnail_from_data(original_data, size, self.generation_timeout).await
+        match Self::generate_thumbnail_from_data(
+            original_data,
+            size,
+            format,
+            self.generation_timeout,
+        )
+        .await
         {
             Ok(bytes) => {
                 if let Some(parent) = thumb_path.parent() {
@@ -439,11 +471,13 @@ impl ThumbnailService {
         file_id: &str,
         blob_hash: Option<&str>,
         size: ThumbnailSize,
+        format: ThumbnailFormat,
     ) -> Option<Bytes> {
         // 1. Check in-memory cache
         let cache_key = ThumbnailCacheKey {
             file_id: file_id.to_string(),
             size,
+            format,
         };
         if let Some(bytes) = self.cache.get(&cache_key).await
             && !bytes.is_empty()
@@ -452,20 +486,30 @@ impl ThumbnailService {
         }
 
         // 2. Check disk for external (video-frame) thumbnails stored by file_id.
-        //    These don't require blob_hash since they use ext-{file_id}.jpg paths.
+        //    These are JPEG-only (ext-{file_id}.jpg) regardless of requested
+        //    format; the byte-sniffing Content-Type makes serving correct.
         let ext_path = self
             .thumbnails_root
             .join(size.dir_name())
             .join(format!("ext-{}.jpg", file_id));
         if let Ok(data) = fs::read(&ext_path).await {
             let bytes = Bytes::from(data);
-            self.cache.insert(cache_key.clone(), bytes.clone()).await;
+            // Cache under a Jpeg-pinned key: these bytes are always JPEG, so the
+            // key's format must describe them. Inserting under `cache_key` (whose
+            // format is the *requested* format, possibly Webp) would store JPEG
+            // bytes behind a Webp key — a latent cross-format invariant violation.
+            let ext_key = ThumbnailCacheKey {
+                file_id: file_id.to_string(),
+                size,
+                format: ThumbnailFormat::Jpeg,
+            };
+            self.cache.insert(ext_key, bytes.clone()).await;
             return Some(bytes);
         }
 
         // 3. Check disk for blob-hash thumbnails (needs blob_hash to locate)
         let hash = blob_hash?;
-        let thumb_path = self.get_thumbnail_path(hash, size);
+        let thumb_path = self.get_thumbnail_path(hash, size, format);
         if let Ok(data) = fs::read(&thumb_path).await {
             let bytes = Bytes::from(data);
             // Populate in-memory cache for next hit
@@ -555,10 +599,11 @@ impl ThumbnailService {
             .await
             .map_err(|e| ThumbnailError::IoError(e.to_string()))?;
 
-        // Populate in-memory cache
+        // Populate in-memory cache (external thumbnails are JPEG)
         let cache_key = ThumbnailCacheKey {
             file_id: file_id.to_string(),
             size,
+            format: ThumbnailFormat::Jpeg,
         };
         self.cache.insert(cache_key, bytes.clone()).await;
 
@@ -696,6 +741,7 @@ impl ThumbnailService {
         dst_w: u32,
         dst_h: u32,
         filter: fast_image_resize::FilterType,
+        format: ThumbnailFormat,
     ) -> Result<Vec<u8>, ThumbnailError> {
         use fast_image_resize::images::{Image, ImageRef};
         use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
@@ -717,28 +763,43 @@ impl ThumbnailService {
             .resize(&src, &mut dst, &opts)
             .map_err(|e| ThumbnailError::ImageError(e.to_string()))?;
 
-        let rgb = image::RgbImage::from_raw(dst_w, dst_h, dst.into_vec())
-            .ok_or_else(|| ThumbnailError::ImageError("resize buffer size mismatch".into()))?;
-        let mut buffer = Vec::new();
-        let encoder = JpegEncoder::new_with_quality(&mut buffer, 80);
-        rgb.write_with_encoder(encoder)
-            .map_err(|e| ThumbnailError::ImageError(e.to_string()))?;
-        Ok(buffer)
+        // The resized RGB8 plane feeds either codec from one buffer.
+        let resized = dst.into_vec();
+        match format {
+            ThumbnailFormat::Jpeg => {
+                let rgb = image::RgbImage::from_raw(dst_w, dst_h, resized).ok_or_else(|| {
+                    ThumbnailError::ImageError("resize buffer size mismatch".into())
+                })?;
+                let mut buffer = Vec::new();
+                let encoder = JpegEncoder::new_with_quality(&mut buffer, JPEG_QUALITY);
+                rgb.write_with_encoder(encoder)
+                    .map_err(|e| ThumbnailError::ImageError(e.to_string()))?;
+                Ok(buffer)
+            }
+            ThumbnailFormat::Webp => {
+                // libwebp lossy — ~25-30% smaller than JPEG q80 at equal SSIM.
+                Ok(webp::Encoder::from_rgb(&resized, dst_w, dst_h)
+                    .encode(WEBP_QUALITY)
+                    .to_vec())
+            }
+        }
     }
 
     fn render_thumbnail_from_data(
         data: &[u8],
         size: ThumbnailSize,
+        format: ThumbnailFormat,
     ) -> Result<Vec<u8>, ThumbnailError> {
         let max_dim = size.max_dimension();
         let rgb = Self::decode_oriented(data, max_dim)?.into_rgb8();
         let (sw, sh) = (rgb.width(), rgb.height());
         let (nw, nh) = Self::fit_dims(sw, sh, max_dim);
-        Self::encode_thumbnail(rgb.as_raw(), sw, sh, nw, nh, Self::filter_for(size))
+        Self::encode_thumbnail(rgb.as_raw(), sw, sh, nw, nh, Self::filter_for(size), format)
     }
 
     fn render_all_thumbnails_from_data(
         data: &[u8],
+        format: ThumbnailFormat,
     ) -> Result<Vec<(ThumbnailSize, Bytes)>, ThumbnailError> {
         // Decode once, shrunk-on-load for the largest size (800 px), and convert
         // to RGB8 once; all three sizes are then SIMD-resampled from this single
@@ -751,7 +812,8 @@ impl ThumbnailService {
             .par_iter()
             .map(|&size| {
                 let (nw, nh) = Self::fit_dims(sw, sh, size.max_dimension());
-                let buf = Self::encode_thumbnail(src, sw, sh, nw, nh, Self::filter_for(size))?;
+                let buf =
+                    Self::encode_thumbnail(src, sw, sh, nw, nh, Self::filter_for(size), format)?;
                 Ok((size, Bytes::from(buf)))
             })
             .collect::<Result<Vec<_>, ThumbnailError>>()
@@ -760,10 +822,11 @@ impl ThumbnailService {
     async fn generate_thumbnail_from_data(
         original_data: Bytes,
         size: ThumbnailSize,
+        format: ThumbnailFormat,
         timeout_duration: Duration,
     ) -> Result<Bytes, ThumbnailError> {
         let spawn_result = tokio::task::spawn_blocking(move || {
-            Self::render_thumbnail_from_data(original_data.as_ref(), size)
+            Self::render_thumbnail_from_data(original_data.as_ref(), size, format)
         });
 
         let result = timeout(timeout_duration, spawn_result)
@@ -791,6 +854,7 @@ impl ThumbnailService {
         &self,
         original_path: &Path,
         size: ThumbnailSize,
+        format: ThumbnailFormat,
     ) -> Result<Bytes, ThumbnailError> {
         let path = original_path.to_path_buf();
         let timeout_duration = self.generation_timeout;
@@ -807,7 +871,7 @@ impl ThumbnailService {
             tokio::task::spawn_blocking(move || -> Result<Vec<u8>, ThumbnailError> {
                 let data =
                     std::fs::read(&path).map_err(|e| ThumbnailError::ImageError(e.to_string()))?;
-                Self::render_thumbnail_from_data(&data, size)
+                Self::render_thumbnail_from_data(&data, size, format)
             });
 
         // Apply timeout to prevent hanging on large images
@@ -853,7 +917,8 @@ impl ThumbnailService {
             let all_exist = {
                 let mut ok = true;
                 for size in ThumbnailSize::all() {
-                    let thumb_path = self.get_thumbnail_path(&blob_hash, *size);
+                    let thumb_path =
+                        self.get_thumbnail_path(&blob_hash, *size, ThumbnailFormat::Webp);
                     if fs::metadata(&thumb_path).await.is_err() {
                         ok = false;
                         break;
@@ -863,11 +928,13 @@ impl ThumbnailService {
             };
             if all_exist {
                 for size in ThumbnailSize::all() {
-                    let thumb_path = self.get_thumbnail_path(&blob_hash, *size);
+                    let thumb_path =
+                        self.get_thumbnail_path(&blob_hash, *size, ThumbnailFormat::Webp);
                     if let Ok(data) = fs::read(&thumb_path).await {
                         let cache_key = ThumbnailCacheKey {
                             file_id: file_id.clone(),
                             size: *size,
+                            format: ThumbnailFormat::Webp,
                         };
                         self.cache.insert(cache_key, Bytes::from(data)).await;
                     }
@@ -901,7 +968,7 @@ impl ThumbnailService {
             let results = tokio::task::spawn_blocking(move || {
                 let data =
                     std::fs::read(&path).map_err(|e| ThumbnailError::ImageError(e.to_string()))?;
-                Self::render_all_thumbnails_from_data(&data)
+                Self::render_all_thumbnails_from_data(&data, ThumbnailFormat::Webp)
             })
             .await;
 
@@ -921,7 +988,7 @@ impl ThumbnailService {
             // Save each size to disk (keyed by blob_hash for dedup)
             // AND populate moka (keyed by file_id for fast serving).
             for (size, bytes) in thumbnails {
-                let thumb_path = self.get_thumbnail_path(&blob_hash, size);
+                let thumb_path = self.get_thumbnail_path(&blob_hash, size, ThumbnailFormat::Webp);
                 if let Some(parent) = thumb_path.parent() {
                     let _ = fs::create_dir_all(parent).await;
                 }
@@ -932,6 +999,7 @@ impl ThumbnailService {
                     let cache_key = ThumbnailCacheKey {
                         file_id: file_id.clone(),
                         size,
+                        format: ThumbnailFormat::Webp,
                     };
                     self.cache.insert(cache_key, bytes).await;
                     tracing::debug!("✅ Generated thumbnail: {} {:?}", file_id, size);
@@ -971,7 +1039,8 @@ impl ThumbnailService {
             let all_exist = {
                 let mut ok = true;
                 for size in ThumbnailSize::all() {
-                    let thumb_path = self.get_thumbnail_path(&blob_hash, *size);
+                    let thumb_path =
+                        self.get_thumbnail_path(&blob_hash, *size, ThumbnailFormat::Webp);
                     if fs::metadata(&thumb_path).await.is_err() {
                         ok = false;
                         break;
@@ -981,11 +1050,13 @@ impl ThumbnailService {
             };
             if all_exist {
                 for size in ThumbnailSize::all() {
-                    let thumb_path = self.get_thumbnail_path(&blob_hash, *size);
+                    let thumb_path =
+                        self.get_thumbnail_path(&blob_hash, *size, ThumbnailFormat::Webp);
                     if let Ok(data) = fs::read(&thumb_path).await {
                         let cache_key = ThumbnailCacheKey {
                             file_id: file_id.clone(),
                             size: *size,
+                            format: ThumbnailFormat::Webp,
                         };
                         self.cache.insert(cache_key, Bytes::from(data)).await;
                     }
@@ -1024,7 +1095,7 @@ impl ThumbnailService {
             };
 
             let results = tokio::task::spawn_blocking(move || {
-                Self::render_all_thumbnails_from_data(original_data.as_ref())
+                Self::render_all_thumbnails_from_data(original_data.as_ref(), ThumbnailFormat::Webp)
             })
             .await;
 
@@ -1041,7 +1112,7 @@ impl ThumbnailService {
             };
 
             for (size, bytes) in thumbnails {
-                let thumb_path = self.get_thumbnail_path(&blob_hash, size);
+                let thumb_path = self.get_thumbnail_path(&blob_hash, size, ThumbnailFormat::Webp);
                 if let Some(parent) = thumb_path.parent() {
                     let _ = fs::create_dir_all(parent).await;
                 }
@@ -1051,6 +1122,7 @@ impl ThumbnailService {
                     let cache_key = ThumbnailCacheKey {
                         file_id: file_id.clone(),
                         size,
+                        format: ThumbnailFormat::Webp,
                     };
                     self.cache.insert(cache_key, bytes).await;
                     tracing::debug!("✅ Generated thumbnail: {} {:?}", file_id, size);
@@ -1070,14 +1142,17 @@ impl ThumbnailService {
     /// Also removes any external (video-frame) thumbnails stored by file_id.
     pub async fn delete_thumbnails(&self, file_id: &str) -> Result<(), ThumbnailError> {
         for size in ThumbnailSize::all() {
-            // Remove from moka cache (lock-free invalidation)
-            let cache_key = ThumbnailCacheKey {
-                file_id: file_id.to_string(),
-                size: *size,
-            };
-            self.cache.invalidate(&cache_key).await;
+            // Remove from moka cache (lock-free invalidation) — both codecs.
+            for format in [ThumbnailFormat::Webp, ThumbnailFormat::Jpeg] {
+                let cache_key = ThumbnailCacheKey {
+                    file_id: file_id.to_string(),
+                    size: *size,
+                    format,
+                };
+                self.cache.invalidate(&cache_key).await;
+            }
 
-            // Remove external (video-frame) thumbnails stored by file_id
+            // Remove external (video-frame) thumbnails stored by file_id (JPEG-only)
             let ext_path = self
                 .thumbnails_root
                 .join(size.dir_name())
@@ -1097,9 +1172,12 @@ impl ThumbnailService {
     /// being deleted and the corresponding thumbnails are removed from disk.
     pub async fn delete_blob_thumbnails(&self, blob_hash: &str) {
         for size in ThumbnailSize::all() {
-            let path = self.get_thumbnail_path(blob_hash, *size);
-            if fs::metadata(&path).await.is_ok() {
-                let _ = fs::remove_file(&path).await;
+            // Delete both the primary WebP and any lazily-materialized JPEG.
+            for format in [ThumbnailFormat::Webp, ThumbnailFormat::Jpeg] {
+                let path = self.get_thumbnail_path(blob_hash, *size, format);
+                if fs::metadata(&path).await.is_ok() {
+                    let _ = fs::remove_file(&path).await;
+                }
             }
         }
         tracing::debug!(
@@ -1214,11 +1292,14 @@ impl crate::application::ports::blob_lifecycle::BlobLifecycleHook for ThumbnailS
         let blob_hash = blob_hash.to_string();
         tokio::spawn(async move {
             for size in ThumbnailSize::all() {
-                let path = root
-                    .join(size.dir_name())
-                    .join(format!("{}.jpg", &blob_hash));
-                if tokio::fs::metadata(&path).await.is_ok() {
-                    let _ = tokio::fs::remove_file(&path).await;
+                // Delete both the primary WebP and any lazy JPEG fallback.
+                for format in [ThumbnailFormat::Webp, ThumbnailFormat::Jpeg] {
+                    let path =
+                        root.join(size.dir_name())
+                            .join(format!("{}.{}", &blob_hash, format.ext()));
+                    if tokio::fs::metadata(&path).await.is_ok() {
+                        let _ = tokio::fs::remove_file(&path).await;
+                    }
                 }
             }
             tracing::debug!(
@@ -1254,9 +1335,17 @@ impl ThumbnailPort for ThumbnailService {
         size: PortThumbnailSize,
         original_path: &Path,
     ) -> Result<Bytes, DomainError> {
-        self.get_thumbnail(file_id, blob_hash, size.into(), original_path)
-            .await
-            .map_err(|e| DomainError::new(ErrorKind::InternalError, "Thumbnail", e.to_string()))
+        // Abstract port lookup defaults to the primary (WebP) format. The REST
+        // handler uses the concrete service with Accept-derived format instead.
+        self.get_thumbnail(
+            file_id,
+            blob_hash,
+            size.into(),
+            ThumbnailFormat::Webp,
+            original_path,
+        )
+        .await
+        .map_err(|e| DomainError::new(ErrorKind::InternalError, "Thumbnail", e.to_string()))
     }
 
     fn generate_all_sizes_background(
@@ -1280,7 +1369,7 @@ impl ThumbnailPort for ThumbnailService {
         blob_hash: Option<&str>,
         size: PortThumbnailSize,
     ) -> Option<Bytes> {
-        self.get_cached_thumbnail(file_id, blob_hash, size.into())
+        self.get_cached_thumbnail(file_id, blob_hash, size.into(), ThumbnailFormat::Webp)
             .await
     }
 
@@ -1316,17 +1405,68 @@ impl ThumbnailPort for ThumbnailService {
 /// `ThumbnailError` into the public API.
 #[cfg(feature = "bench")]
 impl ThumbnailService {
-    /// Render a single thumbnail size, returning the encoded JPEG bytes.
+    /// Render a single thumbnail size as JPEG (back-compat shim for existing benches).
     pub fn bench_render_thumbnail(data: &[u8], size: ThumbnailSize) -> Result<Vec<u8>, String> {
-        Self::render_thumbnail_from_data(data, size).map_err(|e| e.to_string())
+        Self::bench_render_thumbnail_fmt(data, size, ThumbnailFormat::Jpeg)
     }
 
-    /// Render all sizes in one decode (the upload-time path), returning each
-    /// size paired with its encoded byte length (output-size baseline).
+    /// Render all sizes in one decode as JPEG, returning each size's byte length.
     pub fn bench_render_all(data: &[u8]) -> Result<Vec<(ThumbnailSize, usize)>, String> {
-        Self::render_all_thumbnails_from_data(data)
+        Self::bench_render_all_fmt(data, ThumbnailFormat::Jpeg)
+    }
+
+    /// Render a single thumbnail size in `format`, returning the encoded bytes
+    /// (for the codec comparison: JPEG vs WebP bytes + SSIM-vs-source).
+    pub fn bench_render_thumbnail_fmt(
+        data: &[u8],
+        size: ThumbnailSize,
+        format: ThumbnailFormat,
+    ) -> Result<Vec<u8>, String> {
+        Self::render_thumbnail_from_data(data, size, format).map_err(|e| e.to_string())
+    }
+
+    /// Render all sizes in one decode in `format`, returning each size's byte length.
+    pub fn bench_render_all_fmt(
+        data: &[u8],
+        format: ThumbnailFormat,
+    ) -> Result<Vec<(ThumbnailSize, usize)>, String> {
+        Self::render_all_thumbnails_from_data(data, format)
             .map(|v| v.into_iter().map(|(s, b)| (s, b.len())).collect())
             .map_err(|e| e.to_string())
+    }
+
+    /// Render a thumbnail to WebP at an explicit quality — used by the codec
+    /// benchmark to sweep WebP quality and find the one matching JPEG q80 SSIM.
+    pub fn bench_render_webp_at(
+        data: &[u8],
+        size: ThumbnailSize,
+        quality: f32,
+    ) -> Result<Vec<u8>, String> {
+        use fast_image_resize::images::{Image, ImageRef};
+        use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
+        let rgb = Self::decode_oriented(data, size.max_dimension())
+            .map_err(|e| e.to_string())?
+            .into_rgb8();
+        let (sw, sh) = (rgb.width(), rgb.height());
+        let (dw, dh) = Self::fit_dims(sw, sh, size.max_dimension());
+        let filter = if dw > sw || dh > sh {
+            FilterType::CatmullRom
+        } else {
+            Self::filter_for(size)
+        };
+        let src =
+            ImageRef::new(sw, sh, rgb.as_raw(), PixelType::U8x3).map_err(|e| e.to_string())?;
+        let mut dst = Image::new(dw, dh, PixelType::U8x3);
+        Resizer::new()
+            .resize(
+                &src,
+                &mut dst,
+                &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(filter)),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(webp::Encoder::from_rgb(&dst.into_vec(), dw, dh)
+            .encode(quality)
+            .to_vec())
     }
 }
 
