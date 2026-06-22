@@ -31,7 +31,7 @@ export default defineConfig({
   globalTeardown: require.resolve('./global-teardown'),
 
   use: {
-    baseURL: 'http://localhost:8088',
+    baseURL: 'http://127.0.0.1:8088',
     trace: 'on-first-retry',
     headless: true,
     screenshot: 'only-on-failure',
@@ -50,7 +50,7 @@ export default defineConfig({
     command: process.env.BUILD_TARGET
       ? `bash "${startScript}" "${workspace}/target/${process.env.BUILD_TARGET}/oxicloud"`
       : `bash "${startScript}" cargo run --features plugins`,
-    url: 'http://localhost:8088',
+    url: 'http://127.0.0.1:8088/ready',
     timeout: 600_000,
     reuseExistingServer: false,
     cwd: '../..',

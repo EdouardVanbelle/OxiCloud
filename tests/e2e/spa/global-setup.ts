@@ -12,5 +12,5 @@ export default async function globalSetup() {
   fs.rmSync(nycDir, { recursive: true, force: true });
   fs.mkdirSync(nycDir, { recursive: true });
 
-  await seedAdmin('http://localhost:8088');
+  await seedAdmin('http://127.0.0.1:8088');
 }

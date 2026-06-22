@@ -202,9 +202,11 @@ test('breadcrumb navigates back to home', async ({ page }) => {
   const folderName = uniq('Crumb');
   const folder = await apiCreateFolder(page, folderName);
   await page.goto(`/files/${folder.id}`);
-  // Breadcrumb home link returns to the root listing.
+  // Breadcrumb home link leaves the subfolder for the root listing. Bare /files
+  // canonicalizes to the user's drive root, where the just-created folder lives.
   await page.getByTestId('files-breadcrumb-home-link').click();
-  await expect(page).toHaveURL(/\/files\/?$/);
+  await expect(page).not.toHaveURL(new RegExp(folder.id));
+  await expect(page.getByTestId(folderName)).toBeVisible({ timeout: 15_000 });
 });
 
 test('open an image in the viewer and use the zoom controls', async ({ page }) => {

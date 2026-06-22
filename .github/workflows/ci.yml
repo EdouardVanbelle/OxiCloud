@@ -246,7 +246,10 @@ jobs:
       - name: Build SPA (Vite -> static-dist/)
         working-directory: frontend
         run: npm ci && npm run build
-      - run: cargo build --release
+      # --features plugins so the e2e Playwright job (which sets
+      # OXICLOUD_ENABLE_PLUGINS) can exercise the admin Plugins tab. The api/webdav
+      # and unit jobs reuse this binary but leave plugins disabled at runtime.
+      - run: cargo build --release --features plugins
       - uses: actions/upload-artifact@v4
         with:
           name: oxicloud-release
@@ -331,20 +334,23 @@ jobs:
         run: npm ci
 
       # The release binary serves the SPA from ./static-dist on disk (not
-      # embedded), and the Build job builds it WITHOUT VITE_E2E so it lacks the
-      # `data-testid` hooks the specs target. Build it here with VITE_E2E=1 so
-      # the server actually serves the e2e SPA the scenarios drive.
-      - name: Build SPA for e2e (VITE_E2E keeps data-testid hooks)
+      # embedded). Build the instrumented SPA here with COVERAGE=1 (Istanbul, for
+      # the coverage report) and VITE_E2E=1 (keeps the `data-testid` hooks the
+      # specs target). start-server-spa.sh points OXICLOUD_STATIC_PATH here.
+      - name: Build instrumented SPA for e2e (COVERAGE + VITE_E2E)
         working-directory: frontend
-        run: npm ci && VITE_E2E=1 npm run build
+        run: npm ci && COVERAGE=1 VITE_E2E=1 npm run build
 
       - name: Install Playwright browsers
         working-directory: tests/e2e
         run: npx playwright install --with-deps
 
-      - name: Run Playwright tests (spawns DB via pretest hook)
+      # Drives this PR's SvelteKit SPA specs (tests/e2e/spa) via the coverage
+      # config + start-server-spa.sh. (The legacy `npm test` scenarios targeted
+      # the removed vanilla `static/` frontend and are no longer exercised.)
+      - name: Run SPA e2e coverage suite
         working-directory: tests/e2e
-        run: npm test
+        run: npm run test:coverage
         env:
           BUILD_TARGET: release
 

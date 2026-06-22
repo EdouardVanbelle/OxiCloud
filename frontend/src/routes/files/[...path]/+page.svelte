@@ -699,17 +699,26 @@
 		});
 	});
 
-	// viewer → URL: when closed from within (X / Esc / backdrop), drop the param
-	// (replaceState, so closing doesn't add a history entry).
+	// viewer → URL: when the user closes the viewer (X / Esc / backdrop), drop the
+	// `?file=` param (replaceState, so closing doesn't add a history entry). Only
+	// act on a genuine open→closed transition: on a cold deep link the viewer
+	// starts closed *with* the param while the listing is still loading, and
+	// stripping it there would race the URL→viewer effect above and the preview
+	// would never open.
+	let viewerWasOpen = false;
 	$effect(() => {
+		const open = viewerOpen;
 		const hasParam = page.url.searchParams.get('file') !== null;
-		if (!viewerOpen && hasParam) {
-			const url = new URL(page.url);
-			url.searchParams.delete('file');
-			// Same-origin URL object (see note above); resolve() can't type it.
-			// eslint-disable-next-line svelte/no-navigation-without-resolve
-			void goto(url, { keepFocus: true, noScroll: true, replaceState: true });
-		}
+		untrack(() => {
+			if (viewerWasOpen && !open && hasParam) {
+				const url = new URL(page.url);
+				url.searchParams.delete('file');
+				// Same-origin URL object (see note above); resolve() can't type it.
+				// eslint-disable-next-line svelte/no-navigation-without-resolve
+				void goto(url, { keepFocus: true, noScroll: true, replaceState: true });
+			}
+			viewerWasOpen = open;
+		});
 	});
 
 	/**
@@ -1607,26 +1616,31 @@
 		</ListToolbar>
 
 		<nav class="breadcrumb" aria-label="Breadcrumb">
+			<!-- Persistent home link → the root listing (bare /files canonicalizes to
+			     the user's drive root). `buildCrumbs` returns only the path folders,
+			     so this is the single always-present "go home" affordance. -->
+			<a
+				href={resolve('/files')}
+				class="breadcrumb-item breadcrumb-home breadcrumb-link"
+				title={t('breadcrumb.home', 'Home')}
+				data-testid="files-breadcrumb-home-link"
+				ondragover={(e) => e.dataTransfer?.types.includes(DRAG_TYPE) && e.preventDefault()}
+				ondrop={(e) => session.homeFolderId && onCrumbDrop(e, session.homeFolderId)}
+			>
+				<Icon name={rootIcon} />
+			</a>
 			{#each crumbs as c, i (c.id)}
-				{#if i > 0}
-					<span class="breadcrumb-separator">&gt;</span>
-				{/if}
+				<span class="breadcrumb-separator">&gt;</span>
 				{#if i === crumbs.length - 1}
-					<span class="breadcrumb-item breadcrumb-current" class:breadcrumb-home={i === 0}>
-						{#if i === 0}<Icon name={rootIcon} />{/if}
-						{c.name}
-					</span>
+					<span class="breadcrumb-item breadcrumb-current">{c.name}</span>
 				{:else}
 					<a
 						href={resolve(`/files/${pathSegments.slice(0, i + 1).join('/')}`)}
 						class="breadcrumb-item breadcrumb-link"
-						class:breadcrumb-home={i === 0}
-						title={i === 0 ? t('breadcrumb.home', 'Home') : undefined}
-						data-testid={i === 0 ? 'files-breadcrumb-home-link' : `files-breadcrumb-${c.id}`}
+						data-testid={`files-breadcrumb-${c.id}`}
 						ondragover={(e) => e.dataTransfer?.types.includes(DRAG_TYPE) && e.preventDefault()}
 						ondrop={(e) => onCrumbDrop(e, c.id)}
 					>
-						{#if i === 0}<Icon name={rootIcon} />{/if}
 						{c.name}
 					</a>
 				{/if}
