@@ -26,8 +26,8 @@ const CACHE_THRESHOLD: u64 = 10 * 1024 * 1024;
 /// Implements a multi-tier download strategy:
 /// - Tier 0: Write-behind cache (just-uploaded files still in RAM)
 /// - Tier 1: Hot cache + optional WebP transcoding (<10 MB)
-/// - Tier 2: Memory-mapped I/O (10–100 MB)
-/// - Tier 3: Streaming (≥100 MB)
+/// - Tier 2: Streaming for everything ≥10 MB — CDC chunk reassembly with the
+///   backend's read-ahead (`read_prefetch`); no whole-file buffering.
 pub struct FileRetrievalService {
     file_read: Arc<FileBlobReadRepository>,
     content_cache: Option<Arc<FileContentCache>>,

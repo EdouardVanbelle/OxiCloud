@@ -93,7 +93,7 @@ pub trait FileUploadUseCase: Send + Sync + 'static {
 /// Optimized file content returned by the retrieval service.
 ///
 /// The handler only needs to map each variant to the appropriate HTTP
-/// response; all caching / transcoding / mmap decisions happen in the
+/// response; all caching / transcoding decisions happen in the
 /// application layer.
 pub enum OptimizedFileContent {
     /// Small-file content (possibly transcoded / compressed) already in RAM.
@@ -102,9 +102,7 @@ pub enum OptimizedFileContent {
         mime_type: Arc<str>,
         was_transcoded: bool,
     },
-    /// Memory-mapped file (10–100 MB).
-    Mmap(Bytes),
-    /// Streaming download for very large files (≥100 MB).
+    /// Streaming download for everything above the in-RAM cache threshold.
     Stream(Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>),
 }
 

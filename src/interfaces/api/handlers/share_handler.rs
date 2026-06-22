@@ -501,21 +501,6 @@ async fn serve_share_file(
                 .body(Body::from(data))
                 .unwrap()
                 .into_response(),
-            OptimizedFileContent::Mmap(mmap_data) => Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, &*mime)
-                .header(header::CONTENT_DISPOSITION, &disposition)
-                .header(header::CONTENT_LENGTH, mmap_data.len())
-                .header(header::ACCEPT_RANGES, "bytes")
-                .header(header::ETAG, &etag)
-                .header(
-                    header::CACHE_CONTROL,
-                    "private, max-age=3600, must-revalidate",
-                )
-                .header(header::VARY, "Cookie, Range")
-                .body(Body::from(mmap_data))
-                .unwrap()
-                .into_response(),
             OptimizedFileContent::Stream(stream) => Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, &*mime)
