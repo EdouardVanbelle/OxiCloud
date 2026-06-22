@@ -47,13 +47,20 @@ use oxicloud::application::ports::blob_storage_ports::BlobStorageBackend;
 use oxicloud::infrastructure::services::local_blob_backend::LocalBlobBackend;
 
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
-    env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn env_list_usize(key: &str, default: &[usize]) -> Vec<usize> {
     env::var(key)
         .ok()
-        .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect::<Vec<_>>())
+        .map(|s| {
+            s.split(',')
+                .filter_map(|x| x.trim().parse().ok())
+                .collect::<Vec<_>>()
+        })
         .filter(|v: &Vec<usize>| !v.is_empty())
         .unwrap_or_else(|| default.to_vec())
 }
@@ -130,7 +137,11 @@ async fn run_once(
     // Coarse token-bucket: only sleep once the accumulated owed time clears a
     // 2 ms floor, so the throttle models a rate-limited socket without drowning
     // the measurement in sub-ms timer noise.
-    let per_byte_secs = if throttle_bps > 0.0 { 1.0 / throttle_bps } else { 0.0 };
+    let per_byte_secs = if throttle_bps > 0.0 {
+        1.0 / throttle_bps
+    } else {
+        0.0
+    };
     let mut owed = Duration::ZERO;
 
     while let Some(item) = byte_stream.next().await {
@@ -196,15 +207,18 @@ async fn main() {
         "# production LocalBlobBackend.read_prefetch() = {}",
         backend.read_prefetch()
     );
-    println!("# reps/cell: {reps} (median MB/s reported)  cold-cache: {}", {
-        if !COLD_SUPPORTED {
-            "unsupported (non-Linux) → warm only"
-        } else if want_cold {
-            "yes (posix_fadvise DONTNEED, best-effort)"
-        } else {
-            "disabled (BENCH_COLD=0)"
+    println!(
+        "# reps/cell: {reps} (median MB/s reported)  cold-cache: {}",
+        {
+            if !COLD_SUPPORTED {
+                "unsupported (non-Linux) → warm only"
+            } else if want_cold {
+                "yes (posix_fadvise DONTNEED, best-effort)"
+            } else {
+                "disabled (BENCH_COLD=0)"
+            }
         }
-    });
+    );
     println!("# N=1 is current production ('antes'); higher N is the candidate ('después')");
     println!("############################################################\n");
     println!(

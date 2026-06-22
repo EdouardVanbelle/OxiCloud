@@ -29,7 +29,10 @@ use oxicloud::infrastructure::services::thumbnail_service::ThumbnailService;
 use tokio::sync::Semaphore;
 
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 #[cfg(target_os = "linux")]
@@ -181,7 +184,9 @@ fn main() {
     );
     println!(
         "# available_parallelism = {}   effective_parallelism = {}  (= the 'after' permit count)",
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(0),
         eff
     );
     println!("# run under `taskset -c 0,1` to model a 2-core quota");
@@ -190,7 +195,10 @@ fn main() {
         "| {:>8} | {:>9} | {:>10} | {:>9} | {:>9} |",
         "permits", "renders", "renders/s", "p50 ms", "p99 ms"
     );
-    println!("|{:-<10}|{:-<11}|{:-<12}|{:-<11}|{:-<11}|", "", "", "", "", "");
+    println!(
+        "|{:-<10}|{:-<11}|{:-<12}|{:-<11}|{:-<11}|",
+        "", "", "", "", ""
+    );
 
     // Warm up (also triggers corpus generation / codec init).
     let _ = bench_k(&rt, img.clone(), 2, producers, 1);
@@ -206,7 +214,10 @@ fn main() {
 
     // ── Part B: peak RSS for K concurrent decodes (the real over-permit cost) ──
     println!("\n[B] Peak RSS with K concurrent decodes (one wave)\n");
-    println!("| {:>8} | {:>14} | {:>12} |", "permits", "peak RSS MiB", "vs effective");
+    println!(
+        "| {:>8} | {:>14} | {:>12} |",
+        "permits", "peak RSS MiB", "vs effective"
+    );
     println!("|{:-<10}|{:-<16}|{:-<14}|", "", "", "");
     let mut eff_rss: Option<u64> = None;
     for &k in &k_list {

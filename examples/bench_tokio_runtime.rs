@@ -35,7 +35,10 @@ use std::time::{Duration, Instant};
 use oxicloud::common::runtime::{cgroup_cpu_quota, effective_parallelism, runtime_pool_sizes};
 
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
-    env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 #[cfg(target_os = "linux")]
@@ -204,9 +207,7 @@ fn main() {
 
     // ── Part A ──────────────────────────────────────────────────────────────
     println!("\n[A] Worker over-subscription under CPU contention");
-    println!(
-        "    workload: {concurrency} concurrent requests, {burn_kb} KiB BLAKE3 each, {secs}s"
-    );
+    println!("    workload: {concurrency} concurrent requests, {burn_kb} KiB BLAKE3 each, {secs}s");
     println!("    (run under `taskset -c 0,1` to model a 2-core quota)\n");
     println!(
         "| {:<26} | {:>8} | {:>10} | {:>8} | {:>8} |",
@@ -227,7 +228,13 @@ fn main() {
         before.2,
         before.3
     );
-    let after = bench_workers(workers_after, def_max_blocking, concurrency, secs, burn_bytes);
+    let after = bench_workers(
+        workers_after,
+        def_max_blocking,
+        concurrency,
+        secs,
+        burn_bytes,
+    );
     println!(
         "| {:<26} | {:>8.0} | {:>10} | {:>8} | {:>8} |",
         format!("after: {workers_after} workers"),
@@ -259,7 +266,8 @@ fn main() {
         "| {:<26} | {:>12} | {:>12} |",
         "before: 512 (tokio default)", peak_def, "—"
     );
-    let (peak_cap, _base_cap) = bench_blocking_rss(max_blocking_after, blocking_tasks, alloc_mb, hold_ms);
+    let (peak_cap, _base_cap) =
+        bench_blocking_rss(max_blocking_after, blocking_tasks, alloc_mb, hold_ms);
     let saved = peak_def as i64 - peak_cap as i64;
     println!(
         "| {:<26} | {:>12} | {:>12} |",
