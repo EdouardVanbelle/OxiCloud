@@ -52,8 +52,11 @@ async function systemContacts(includeSelf = false): Promise<Contact[]> {
 	const cached = includeSelf ? contactCacheWithSelf : contactCache;
 	if (cached) return cached;
 	try {
+		// `?include_self=true` (not `=1`) — Axum's `Query` extractor uses
+		// `serde_urlencoded`, which only deserialises `"true"`/`"false"`
+		// for `bool`. Sending `=1` would 400 before the handler runs.
 		const url = includeSelf
-			? '/api/address-books/system/contacts?include_self=1'
+			? '/api/address-books/system/contacts?include_self=true'
 			: '/api/address-books/system/contacts';
 		const res = await apiFetch(url, { credentials: 'same-origin' });
 		if (!res.ok) {

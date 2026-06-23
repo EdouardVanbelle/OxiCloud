@@ -19,7 +19,8 @@
 	import { copyShareLink, deleteShare, getShareById, updateShare } from '$lib/api/endpoints/shares';
 	import { ensureResolvers, resolveLabel } from '$lib/api/endpoints/recipients';
 	import { fileInlineUrl } from '$lib/api/endpoints/files';
-	import type { FileItem, FolderItem, ItemType } from '$lib/api/types';
+	import type { FileItem, FolderItem } from '$lib/api/types';
+	import type { GrantResourceType } from '$lib/api/endpoints/grants';
 	import Icon from '$lib/icons/Icon.svelte';
 	import ListToolbar from '$lib/components/ListToolbar.svelte';
 	import { lazyComponent } from '$lib/composables/lazyComponent.svelte';
@@ -53,7 +54,7 @@
 
 	// Edit-sharing dialog
 	let dialogOpen = $state(false);
-	let dialogItem = $state<{ id: string; name: string; kind: ItemType } | null>(null);
+	let dialogItem = $state<{ id: string; name: string; kind: GrantResourceType } | null>(null);
 
 	// ShareDialog is heavy and only opens on demand — keep it out of this route's
 	// initial chunk and load it the first time the dialog is opened.
@@ -189,6 +190,13 @@
 	}
 
 	function openResource(item: OutgoingGrantItem) {
+		// Drives don't have a Files-page deep-link the same way folders do
+		// (their id is the drive UUID, not a folder UUID); route to the
+		// per-drive settings page so the user lands somewhere meaningful.
+		if (item.resource_type === 'drive') {
+			goto(resolve(`/config/drive/${item.resource.id}`));
+			return;
+		}
 		if (item.resource_type === 'folder') goto(resolve(`/files/${item.resource.id}`));
 		else window.open(fileInlineUrl(item.resource.id), '_blank', 'noopener');
 	}
@@ -351,6 +359,11 @@
 	}
 
 	function resourceIcon(item: OutgoingGrantItem): string {
+		// Drives use the `hdd` glyph (shared with DrivePicker / breadcrumb)
+		// so a shared drive reads as a distinct kind at a glance — folder
+		// and drive both grant access to a tree, but the scope is very
+		// different.
+		if (item.resource_type === 'drive') return 'hdd';
 		return item.resource_type === 'folder'
 			? 'folder'
 			: iconNameFromClass((item.resource as FileItem | FolderItem).icon_class);
@@ -629,7 +642,10 @@
 
 {#if shareDialog.component}
 	{@const ShareDialog = shareDialog.component}
-	<ShareDialog bind:open={dialogOpen} item={dialogItem} />
+	<!-- Drives don't support shareable URLs — hide the Public-link tab
+	     when the dialog is opened for a drive resource. File/folder
+	     resources keep the default tab set. -->
+	<ShareDialog bind:open={dialogOpen} item={dialogItem} allowLinks={dialogItem?.kind !== 'drive'} />
 {/if}
 
 <style>

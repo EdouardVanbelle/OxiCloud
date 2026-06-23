@@ -28,7 +28,8 @@
 		searchRecipients,
 		type Recipient
 	} from '$lib/api/endpoints/recipients';
-	import type { ItemType, ShareItem } from '$lib/api/types';
+	import type { ShareItem } from '$lib/api/types';
+	import type { GrantResourceType } from '$lib/api/endpoints/grants';
 	import Icon from '$lib/icons/Icon.svelte';
 	import Modal from '$lib/components/Modal.svelte';
 	import UserVignette from '$lib/components/UserVignette.svelte';
@@ -38,7 +39,7 @@
 	interface Target {
 		id: string;
 		name: string;
-		kind: ItemType;
+		kind: GrantResourceType;
 	}
 
 	interface Props {
@@ -46,11 +47,32 @@
 		item: Target | null;
 		/** Fired with the item id when an outgoing share (grant or link) is created. */
 		onshared?: (id: string) => void;
+		/**
+		 * Fired with the item id on **any** membership mutation — create,
+		 * role change, expiry change, removal, or public-link creation.
+		 * Distinct from `onshared` because some callers (file/folder list
+		 * views that toggle a "shared" badge) only care about creation;
+		 * the drive-config view needs to refresh on every change.
+		 */
+		onchange?: (id: string) => void;
+		/**
+		 * Whether the "Public link" (token-grant) tab is exposed. Defaults to
+		 * `true` for file/folder sharing. Drives set this to `false`: a drive
+		 * grant is per-member only, never via a shareable URL — exposing the
+		 * tab would suggest a capability that doesn't exist.
+		 */
+		allowLinks?: boolean;
 	}
 
-	let { open = $bindable(false), item, onshared }: Props = $props();
+	let { open = $bindable(false), item, onshared, onchange, allowLinks = true }: Props = $props();
 
+	// When the public-link tab is hidden, force the People view — otherwise a
+	// caller toggling `allowLinks` between renders could land on the now-hidden
+	// tab with no UI.
 	let tab = $state<'people' | 'link'>('people');
+	$effect(() => {
+		if (!allowLinks) tab = 'people';
+	});
 	let directoryAvailable = $state(true);
 
 	const ROLES: { v: ShareRole; l: string; icon: string }[] = [
@@ -163,6 +185,7 @@
 			results = [];
 			summarizeNotifications(res.notification.outcomes);
 			onshared?.(item.id);
+			onchange?.(item.id);
 			await loadGrants();
 		} catch (e) {
 			errorToast(e);
@@ -178,6 +201,7 @@
 				role,
 				expiryToIso(m.expiry)
 			);
+			onchange?.(item.id);
 			await loadGrants();
 		} catch (e) {
 			errorToast(e);
@@ -193,6 +217,7 @@
 				m.role,
 				expiryToIso(expiry)
 			);
+			onchange?.(item.id);
 			await loadGrants();
 		} catch (e) {
 			errorToast(e);
@@ -202,6 +227,7 @@
 	async function removeMember(m: Member) {
 		try {
 			for (const id of m.grantIds) await revokeGrant(id);
+			if (item) onchange?.(item.id);
 			await loadGrants();
 		} catch (e) {
 			errorToast(e);
@@ -259,7 +285,11 @@
 	let expiresAt = $state<string | null>(null);
 
 	async function loadShares() {
-		if (!item) return;
+		// The share-link API only supports file/folder items; the Link tab
+		// is hidden for drives (`allowLinks=false`) so this path is
+		// unreachable, but narrow the type here so TypeScript doesn't
+		// surface the widened `GrantResourceType` from `item.kind`.
+		if (!item || item.kind === 'drive') return;
 		linkLoading = true;
 		try {
 			shares = await listSharesForItem(item.id, item.kind);
@@ -271,7 +301,7 @@
 	}
 
 	async function createLink() {
-		if (!item) return;
+		if (!item || item.kind === 'drive') return;
 		creating = true;
 		try {
 			await createShare({
@@ -285,6 +315,7 @@
 			password = '';
 			expiresAt = null;
 			onshared?.(item.id);
+			onchange?.(item.id);
 			await loadShares();
 			ui.notify(t('share.created', 'Public link created'), 'success');
 		} catch (e) {
@@ -297,6 +328,7 @@
 	async function editLinkExpiry(share: ShareItem, expiry: string | null) {
 		try {
 			await updateShare(share.id, { expiresAt: expiry });
+			if (item) onchange?.(item.id);
 			await loadShares();
 		} catch (e) {
 			errorToast(e);
@@ -306,6 +338,7 @@
 	async function editLinkPassword(share: ShareItem, pw: string | null) {
 		try {
 			await updateShare(share.id, { password: pw });
+			if (item) onchange?.(item.id);
 			await loadShares();
 			ui.notify(
 				pw
@@ -321,6 +354,7 @@
 	async function removeLink(share: ShareItem) {
 		try {
 			await deleteShare(share.id);
+			if (item) onchange?.(item.id);
 			shares = shares.filter((s) => s.id !== share.id);
 		} catch (e) {
 			errorToast(e);
@@ -378,24 +412,29 @@
 
 <Modal bind:open title={t('share.dialog_title', { name: item?.name ?? '' }, 'Share “{{name}}”')}>
 	<div data-testid="share-dialog">
-		<div class="tabs" role="tablist">
-			<button
-				role="tab"
-				data-testid="share-dialog-people-tab"
-				aria-selected={tab === 'people'}
-				onclick={() => (tab = 'people')}
-			>
-				{t('share.people', 'People')}
-			</button>
-			<button
-				role="tab"
-				data-testid="share-dialog-link-tab"
-				aria-selected={tab === 'link'}
-				onclick={() => (tab = 'link')}
-			>
-				{t('share.public_link', 'Public link')}
-			</button>
-		</div>
+		<!-- People/Link tab switcher. Hidden entirely when `allowLinks=false`
+		     (the drive-members surface) — with only one tab visible the
+		     switcher would be visual noise. -->
+		{#if allowLinks}
+			<div class="tabs" role="tablist">
+				<button
+					role="tab"
+					data-testid="share-dialog-people-tab"
+					aria-selected={tab === 'people'}
+					onclick={() => (tab = 'people')}
+				>
+					{t('share.people', 'People')}
+				</button>
+				<button
+					role="tab"
+					data-testid="share-dialog-link-tab"
+					aria-selected={tab === 'link'}
+					onclick={() => (tab = 'link')}
+				>
+					{t('share.public_link', 'Public link')}
+				</button>
+			</div>
+		{/if}
 
 		{#if tab === 'people'}
 			{#if !directoryAvailable && !grantsLoading}

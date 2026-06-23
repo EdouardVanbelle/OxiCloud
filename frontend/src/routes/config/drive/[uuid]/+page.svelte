@@ -3,17 +3,13 @@
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 
-	import {
-		listDriveMembers,
-		removeDriveMember,
-		updateDriveMember
-	} from '$lib/api/endpoints/drives';
+	import { listDriveMembers } from '$lib/api/endpoints/drives';
 	import type { Drive, DriveMember, DriveRole } from '$lib/api/types';
+	import ShareDialog from '$lib/components/ShareDialog.svelte';
 	import UserVignette from '$lib/components/UserVignette.svelte';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t } from '$lib/i18n/index.svelte';
 	import { drives as drivesStore, driveIcon } from '$lib/stores/drives.svelte';
-	import { errorToast } from '$lib/utils/errors';
 	import { formatDate } from '$lib/utils/display';
 	import { formatBytes } from '$lib/utils/format';
 
@@ -30,10 +26,6 @@
 	// honest UX. Shared drives + Owner role → full controls.
 	const canManageMembers = $derived(drive?.kind === 'shared' && drive?.caller_role === 'owner');
 
-	// Roles offered in the dropdown. Owner sets the bundle; other roles
-	// match the backend `Role` enum order (owner → viewer = strongest → weakest).
-	const ASSIGNABLE_ROLES: DriveRole[] = ['owner', 'editor', 'viewer'];
-
 	function roleLabel(role: DriveRole): string {
 		switch (role) {
 			case 'owner':
@@ -48,6 +40,19 @@
 				return t('drive.role.viewer', 'Viewer');
 		}
 	}
+
+	// `shareDialogOpen` drives the ShareDialog modal — the same dialog
+	// used for file/folder sharing, parameterised with `kind: 'drive'`
+	// + `allowLinks: false`. Add/change-role/remove flow through the
+	// dialog's existing grants plumbing (server-side those routes
+	// dispatch to `DriveManagementService`).
+	let shareDialogOpen = $state(false);
+
+	// `dialogItem` is recomputed from the drive so the dialog title
+	// reflects renames.
+	const dialogItem = $derived(
+		drive ? { id: drive.id, name: drive.name, kind: 'drive' as const } : null
+	);
 
 	async function loadMembers() {
 		if (!uuid) return;
@@ -64,27 +69,12 @@
 		}
 	}
 
-	async function changeRole(member: DriveMember, role: DriveRole) {
-		if (member.role === role) return;
-		try {
-			const updated = await updateDriveMember(uuid, member.subject, role);
-			members = members.map((m) => (m.id === member.id ? updated : m));
-		} catch (e) {
-			errorToast(e);
-			// Re-fetch so the dropdown reflects the server-side state, not the
-			// optimistic-but-rejected change.
-			await loadMembers();
-		}
-	}
-
-	async function removeMember(member: DriveMember) {
-		try {
-			await removeDriveMember(uuid, member.subject);
-			members = members.filter((m) => m.id !== member.id);
-		} catch (e) {
-			errorToast(e);
-			await loadMembers();
-		}
+	// Refresh the on-page member list on every dialog mutation (add,
+	// role change, remove). ShareDialog fires `onchange` for the full
+	// set of grant mutations — `onshared` only covers creation, which
+	// would leave role-change and removal stale here.
+	function onShareDialogChange() {
+		void loadMembers();
 	}
 
 	const kindLabel = $derived.by(() => {
@@ -133,7 +123,21 @@
 
 	onMount(() => {
 		void drivesStore.load();
-		void loadMembers();
+	});
+
+	// SvelteKit reuses this component when navigating between
+	// `/config/drive/<A>` and `/config/drive/<B>` (same route, different
+	// dynamic param), so `onMount` only fires once. Re-run the members
+	// fetch whenever `uuid` changes — without this, the previous drive's
+	// rows linger until a hard refresh. Resetting `members` + the loaded
+	// flag first prevents the brief flash of stale data before the new
+	// fetch returns.
+	$effect(() => {
+		const id = uuid;
+		members = [];
+		membersLoaded = false;
+		membersError = null;
+		if (id) void loadMembers();
 	});
 </script>
 
@@ -210,7 +214,21 @@
 		</div>
 
 		<div class="card">
-			<h2><Icon name="users" /> {t('drive.members', 'Members')}</h2>
+			<div class="members__header">
+				<h2><Icon name="users" /> {t('drive.members', 'Members')}</h2>
+				{#if canManageMembers}
+					<button
+						type="button"
+						class="btn btn-primary"
+						data-testid="drive-manage-members-btn"
+						onclick={() => (shareDialogOpen = true)}
+					>
+						<Icon name="user-plus" />
+						{t('drive.manage_members', 'Manage members')}
+					</button>
+				{/if}
+			</div>
+
 			{#if !membersLoaded}
 				<p class="muted">{t('common.loading', 'Loading…')}</p>
 			{:else if members.length === 0}
@@ -218,6 +236,10 @@
 					{membersError ?? t('drive.members_empty', 'No members.')}
 				</p>
 			{:else}
+				<!-- Read-only summary. Add/change/remove happens inside the
+				     ShareDialog modal opened by the button above; the inline
+				     row controls used to live here have moved into the dialog
+				     so the same flow handles file/folder + drive grants. -->
 				<ul class="members">
 					{#each members as m (m.id)}
 						<li class="members__row">
@@ -234,33 +256,9 @@
 									<span class="mono">{m.subject.id}</span>
 								</span>
 							{/if}
-
-							{#if canManageMembers}
-								<select
-									class="members__role-select"
-									value={m.role}
-									onchange={(e) =>
-										void changeRole(m, (e.currentTarget as HTMLSelectElement).value as DriveRole)}
-									aria-label={t('drive.member.change_role_aria', 'Change role')}
-								>
-									{#each ASSIGNABLE_ROLES as r (r)}
-										<option value={r}>{roleLabel(r)}</option>
-									{/each}
-								</select>
-								<button
-									type="button"
-									class="members__remove"
-									title={t('drive.member.remove', 'Remove member')}
-									aria-label={t('drive.member.remove', 'Remove member')}
-									onclick={() => void removeMember(m)}
-								>
-									<Icon name="times" />
-								</button>
-							{:else}
-								<span class="members__role members__role--{m.role}">
-									{roleLabel(m.role)}
-								</span>
-							{/if}
+							<span class="members__role members__role--{m.role}">
+								{roleLabel(m.role)}
+							</span>
 						</li>
 					{/each}
 				</ul>
@@ -289,6 +287,19 @@
 		{/if}
 	{/if}
 </div>
+
+<!-- Drive members modal — reuses the same ShareDialog as file/folder
+     sharing. `allowLinks={false}` hides the public-link tab because
+     drives don't support shareable URLs (the backend service refuses
+     token subjects on drive resources). -->
+{#if dialogItem}
+	<ShareDialog
+		bind:open={shareDialogOpen}
+		item={dialogItem}
+		allowLinks={false}
+		onchange={onShareDialogChange}
+	/>
+{/if}
 
 <style>
 	.config-drive {
@@ -389,6 +400,20 @@
 
 	.link:hover {
 		text-decoration: underline;
+	}
+
+	/* Members card header: title on the left, "Manage members" button on
+	   the right when the caller can mutate membership. */
+	.members__header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-3, 0.75rem);
+		margin-bottom: var(--space-3, 0.75rem);
+	}
+
+	.members__header h2 {
+		margin: 0;
 	}
 
 	/* Members list */
