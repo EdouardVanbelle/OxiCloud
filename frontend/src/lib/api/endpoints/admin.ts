@@ -5,7 +5,7 @@
  */
 import { apiFetch, apiJson } from '$lib/api/client';
 import { getCsrfHeaders } from '$lib/api/csrf';
-import type { User } from '$lib/api/types';
+import type { Drive, DriveMember, DriveMemberSubject, DriveRole, User } from '$lib/api/types';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
@@ -67,6 +67,94 @@ export interface GeneratedKey {
 /** Generate a random AES-256 key for at-rest blob encryption. */
 export function generateEncryptionKey(): Promise<GeneratedKey> {
 	return postJson<GeneratedKey>('/api/admin/settings/storage/generate-key');
+}
+
+// ── Drives ──────────────────────────────────────────────────────────────
+
+/**
+ * `GET /api/admin/drives` — every drive on the system, admin-only.
+ *
+ * Distinct from `listDrives()` in `$lib/api/endpoints/drives`, which is
+ * the caller's own listing (filtered through `role_grants`). An admin
+ * who creates a shared drive for someone else has no role on it, so
+ * the user-facing listing would skip it — this endpoint returns
+ * everything for the admin panel's "Drives" tab.
+ */
+export function listAllDrives(): Promise<Drive[]> {
+	return apiJson<Drive[]>('/api/admin/drives', { credentials: 'same-origin' });
+}
+
+/**
+ * `GET /api/admin/drives/{id}/members` — every role grant on a drive,
+ * admin-only. The user-facing `/api/drives/{id}/members` requires
+ * `Permission::Read` on the drive; an admin who created the drive
+ * for someone else has no role on it and would hit a 404 there. This
+ * endpoint reuses `list_grants_on_resource` with the admin guard at
+ * the route edge, so the same `DriveMember` shape comes back.
+ */
+export function listDriveMembersAdmin(driveId: string): Promise<DriveMember[]> {
+	return apiJson<DriveMember[]>(`/api/admin/drives/${encodeURIComponent(driveId)}/members`, {
+		credentials: 'same-origin'
+	});
+}
+
+/**
+ * `POST /api/admin/drives/{id}/members` — add (or refresh) a member as
+ * an admin, bypassing the per-drive `Manage` check. Personal-drive
+ * guard + last-owner protection still apply. Throws on non-2xx.
+ */
+export async function addDriveMemberAdmin(
+	driveId: string,
+	subject: DriveMemberSubject,
+	role: DriveRole,
+	expiresAt?: string | null
+): Promise<DriveMember> {
+	const res = await apiFetch(`/api/admin/drives/${encodeURIComponent(driveId)}/members`, {
+		method: 'POST',
+		credentials: 'same-origin',
+		headers: { ...JSON_HEADERS, ...getCsrfHeaders() },
+		body: JSON.stringify({ subject, role, expires_at: expiresAt ?? null })
+	});
+	if (!res.ok) {
+		let detail = '';
+		try {
+			const parsed = (await res.json()) as { error?: string; message?: string };
+			detail = parsed.error ?? parsed.message ?? '';
+		} catch {
+			/* response body wasn't JSON */
+		}
+		throw new Error(detail || `add member failed: ${res.status}`);
+	}
+	return (await res.json()) as DriveMember;
+}
+
+/**
+ * `DELETE /api/admin/drives/{id}/members/{kind}/{sid}` — remove a
+ * member as an admin. Idempotent (removing a non-member returns 204).
+ * Last-owner protection still applies (400 with `reason='last_owner'`).
+ */
+export async function removeDriveMemberAdmin(
+	driveId: string,
+	subject: DriveMemberSubject
+): Promise<void> {
+	const url =
+		`/api/admin/drives/${encodeURIComponent(driveId)}/members/` +
+		`${encodeURIComponent(subject.type)}/${encodeURIComponent(subject.id)}`;
+	const res = await apiFetch(url, {
+		method: 'DELETE',
+		credentials: 'same-origin',
+		headers: getCsrfHeaders()
+	});
+	if (!res.ok) {
+		let detail = '';
+		try {
+			const parsed = (await res.json()) as { error?: string; message?: string };
+			detail = parsed.error ?? parsed.message ?? '';
+		} catch {
+			/* response body wasn't JSON */
+		}
+		throw new Error(detail || `remove member failed: ${res.status}`);
+	}
 }
 
 // ── Users ───────────────────────────────────────────────────────────────

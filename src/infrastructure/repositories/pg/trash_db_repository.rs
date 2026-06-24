@@ -147,18 +147,22 @@ impl TrashRepository for TrashDbRepository {
             .collect())
     }
 
-    async fn get_trash_item(&self, id: &Uuid, user_id: &Uuid) -> Result<Option<TrashedItem>> {
+    async fn get_trash_item(&self, id: &Uuid) -> Result<Option<TrashedItem>> {
+        // D2b stage 3: lookup by id only — the `user_id` filter that used to
+        // gate this query is replaced by an explicit `authz.require(Delete,
+        // …)` in the service callers (`restore_item`, `delete_permanently`).
+        // The drive precheck in `pg_acl_engine` then resolves Owner-on-drive
+        // → Delete-permission for items in shared drives.
         let row = sqlx::query_as::<_, (Uuid, String, String, Uuid, Option<DateTime<Utc>>, String)>(
             r#"
             SELECT t.id, t.name, t.item_type, t.user_id, t.trashed_at,
                    COALESCE(p.path || '/' || t.name, t.name) AS original_path
               FROM storage.trash_items t
               LEFT JOIN storage.folders p ON p.id = t.original_parent_id
-             WHERE t.id = $1 AND t.user_id = $2
+             WHERE t.id = $1
             "#,
         )
         .bind(id)
-        .bind(user_id)
         .fetch_optional(self.pool.as_ref())
         .await
         .map_err(|e| DomainError::internal_error("TrashDb", format!("get: {e}")))?;
@@ -182,17 +186,22 @@ impl TrashRepository for TrashDbRepository {
         Ok(())
     }
 
-    async fn clear_trash(&self, user_id: &Uuid) -> Result<()> {
-        // Delete all trashed files for this user
-        sqlx::query("DELETE FROM storage.files WHERE user_id = $1 AND is_trashed = TRUE")
-            .bind(user_id)
+    async fn clear_trash(&self, drive_ids: &[Uuid]) -> Result<()> {
+        if drive_ids.is_empty() {
+            return Ok(());
+        }
+        // Delete all trashed files in the given drives.
+        sqlx::query("DELETE FROM storage.files WHERE drive_id = ANY($1) AND is_trashed = TRUE")
+            .bind(drive_ids)
             .execute(self.pool.as_ref())
             .await
             .map_err(|e| DomainError::internal_error("TrashDb", format!("clear files: {e}")))?;
 
-        // Delete all trashed folders for this user
-        sqlx::query("DELETE FROM storage.folders WHERE user_id = $1 AND is_trashed = TRUE")
-            .bind(user_id)
+        // Delete all trashed folders in the given drives. FK ON DELETE CASCADE
+        // sweeps descendant rows; the `trg_files_decrement_blob_ref` trigger
+        // handles blob refcount drops automatically.
+        sqlx::query("DELETE FROM storage.folders WHERE drive_id = ANY($1) AND is_trashed = TRUE")
+            .bind(drive_ids)
             .execute(self.pool.as_ref())
             .await
             .map_err(|e| DomainError::internal_error("TrashDb", format!("clear folders: {e}")))?;
@@ -200,11 +209,14 @@ impl TrashRepository for TrashDbRepository {
         Ok(())
     }
 
-    async fn get_all_trashed_file_ids(&self, user_id: &Uuid) -> Result<Vec<String>> {
+    async fn get_all_trashed_file_ids(&self, drive_ids: &[Uuid]) -> Result<Vec<String>> {
+        if drive_ids.is_empty() {
+            return Ok(Vec::new());
+        }
         let rows = sqlx::query_scalar::<_, String>(
-            "SELECT id::text FROM storage.files WHERE user_id = $1 AND is_trashed = TRUE",
+            "SELECT id::text FROM storage.files WHERE drive_id = ANY($1) AND is_trashed = TRUE",
         )
-        .bind(user_id)
+        .bind(drive_ids)
         .fetch_all(self.pool.as_ref())
         .await
         .map_err(|e| DomainError::internal_error("TrashDb", format!("all_trashed_files: {e}")))?;
@@ -253,23 +265,34 @@ impl TrashRepository for TrashDbRepository {
 // Cursor-paginated trash listing  (used by GET /api/trash/resources)
 // ════════════════════════════════════════════════════════════════════════════
 impl TrashDbRepository {
-    /// Cursor-paginated list of the user's trashed resources.
+    /// Cursor-paginated list of trashed resources the caller can read.
+    ///
+    /// D2b: scope is drive-membership-based — pass the set of drive UUIDs
+    /// the caller can read (resolved upstream by `DriveRepository::list_for_subjects`
+    /// or equivalent). Items in drives outside this set drop out at the
+    /// WHERE clause. The legacy `WHERE user_id = $1::uuid` filter is gone;
+    /// for single-drive users this returns exactly the same items as before
+    /// because the caller's own personal drive is always in `drive_ids`.
     ///
     /// Mirrors the favorites/grants pattern: a UNION-ALL CTE over folder and
     /// file branches (each pre-computing sort columns), then a per-dimension
     /// keyset WHERE + ORDER BY.
     ///
     /// Returns rows in caller-requested sort order. The caller is expected to
-    /// fetch `limit + 1` to detect end-of-results.
+    /// fetch `limit + 1` to detect end-of-results. Empty `drive_ids` returns
+    /// an empty page without hitting PG.
     pub async fn list_resources_paged(
         &self,
-        user_id: Uuid,
+        drive_ids: &[Uuid],
         limit: usize,
         cursor: Option<&TrashCursor>,
         order_by: &str,
         kinds: Option<&[ResourceKind]>,
         reverse: bool,
     ) -> Result<Vec<TrashResourceRow>> {
+        if drive_ids.is_empty() {
+            return Ok(Vec::new());
+        }
         let include_folders =
             kinds.is_none_or(|k| k.iter().any(|r| matches!(r, ResourceKind::Folder)));
         let include_files = kinds.is_none_or(|k| k.iter().any(|r| matches!(r, ResourceKind::File)));
@@ -291,6 +314,7 @@ impl TrashDbRepository {
         fld.created_at                                       AS resource_created_at,
         fld.updated_at                                       AS modified_at,
         fld.user_id                                          AS owner_id,
+        fld.drive_id                                         AS drive_id,
         NULL::text                                           AS blob_hash,
         fld.trashed_at                                       AS trashed_at,
         (fld.trashed_at + ($7::int * INTERVAL '1 day'))      AS deletion_date,
@@ -299,7 +323,7 @@ impl TrashDbRepository {
         0::bigint                                            AS type_order,
         0::int                                               AS folder_first
     FROM storage.folders fld
-    WHERE fld.user_id = $1::uuid
+    WHERE fld.drive_id = ANY($1)
       AND fld.is_trashed = TRUE
       AND (fld.parent_id IS NULL
            OR NOT EXISTS (
@@ -317,6 +341,7 @@ impl TrashDbRepository {
         f.created_at                                         AS resource_created_at,
         f.updated_at                                         AS modified_at,
         f.user_id                                            AS owner_id,
+        f.drive_id                                           AS drive_id,
         f.blob_hash,
         f.trashed_at                                         AS trashed_at,
         (f.trashed_at + ($7::int * INTERVAL '1 day'))        AS deletion_date,
@@ -327,7 +352,7 @@ impl TrashDbRepository {
     FROM storage.files f
     LEFT JOIN storage.folders pfld
            ON pfld.id = f.folder_id
-    WHERE f.user_id = $1::uuid
+    WHERE f.drive_id = ANY($1)
       AND f.is_trashed = TRUE
       AND (f.folder_id IS NULL
            OR NOT EXISTS (
@@ -447,7 +472,7 @@ impl TrashDbRepository {
 SELECT
     r.resource_type, r.resource_id, r.name, r.parent_id,
     r.mime_type, r.size, r.resource_created_at, r.modified_at,
-    r.owner_id, r.trashed_at, r.deletion_date, r.resource_path,
+    r.owner_id, r.drive_id, r.trashed_at, r.deletion_date, r.resource_path,
     r.sort_str, r.type_order, r.folder_first
 FROM resources r
 {keyset}
@@ -456,7 +481,7 @@ LIMIT $6"
         );
 
         let rows = sqlx::query(&sql)
-            .bind(user_id) // $1
+            .bind(drive_ids) // $1 (was user_id pre-D2b)
             .bind(cur_str) // $2
             .bind(cur_int) // $3
             .bind(cur_ts) // $4
@@ -505,6 +530,7 @@ LIMIT $6"
                     resource_created_at: row.get("resource_created_at"),
                     modified_at: row.get("modified_at"),
                     owner_id: row.get("owner_id"),
+                    drive_id: row.get("drive_id"),
                     blob_hash: row.try_get("blob_hash").ok(),
                     trashed_at,
                     deletion_date,

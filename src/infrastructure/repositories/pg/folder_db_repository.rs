@@ -1335,6 +1335,19 @@ impl FolderDbRepository {
             .ok_or_else(|| DomainError::not_found("Folder", folder_id))
     }
 
+    /// Returns `drive_id` for a given folder. Drives the new permission-floor
+    /// short-circuit in `PgAclEngine::check_inner` (a caller with any role
+    /// on the folder's drive automatically passes the check — drive
+    /// membership is the baseline floor per `drive.md §5`).
+    pub async fn get_folder_drive_id(&self, folder_id: &str) -> Result<Uuid, DomainError> {
+        sqlx::query_scalar::<_, Uuid>("SELECT drive_id FROM storage.folders WHERE id = $1::uuid")
+            .bind(folder_id)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(|e| DomainError::internal_error("FolderDb", format!("drive_id lookup: {e}")))?
+            .ok_or_else(|| DomainError::not_found("Folder", folder_id))
+    }
+
     /// Verifies that `folder_id` is owned by `owner_id`.
     ///
     /// Returns `DomainError::not_found(...)` for both "folder missing" and

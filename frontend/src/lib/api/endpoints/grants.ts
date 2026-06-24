@@ -4,6 +4,15 @@ import { getCsrfHeaders } from '$lib/api/csrf';
 import type { ItemType } from '$lib/api/types';
 import type { ResourceBody, ResourcePage } from './resources';
 
+/**
+ * Resource kinds the `/api/grants` family addresses. File/folder grants flow
+ * through the cascade engine; drive grants flow through
+ * `DriveManagementService` server-side, which layers personal-drive guard +
+ * last-owner protection on top of the same role-grant write. Either way the
+ * wire shape is identical, so the FE helpers below accept all three.
+ */
+export type GrantResourceType = ItemType | 'drive';
+
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
 export type SubjectType = 'user' | 'group' | 'email' | 'token';
@@ -38,7 +47,7 @@ export interface Grant {
 	granted_by?: string;
 	subject: GrantSubject;
 	role: string;
-	resource: { type: ItemType; id: string };
+	resource: { type: GrantResourceType; id: string };
 	expires_at?: string | null;
 }
 
@@ -80,14 +89,14 @@ export function expiryToIso(date: string | null | undefined): string | null {
 	return date ? new Date(`${date}T00:00:00Z`).toISOString() : null;
 }
 
-export function fetchGrantsForResource(type: ItemType, id: string): Promise<Grant[]> {
+export function fetchGrantsForResource(type: GrantResourceType, id: string): Promise<Grant[]> {
 	const params = new URLSearchParams({ resource_type: type, resource_id: id });
 	return apiJson<Grant[]>(`/api/grants?${params}`, { credentials: 'same-origin' });
 }
 
 export async function createGrant(
 	subject: GrantSubjectInput,
-	resource: { type: ItemType; id: string },
+	resource: { type: GrantResourceType; id: string },
 	role: ShareRole,
 	expiresAt?: string | null
 ): Promise<CreateGrantResponse> {
@@ -106,7 +115,7 @@ export async function createGrant(
 
 export async function updateGrantRole(
 	subject: GrantSubject,
-	resource: { type: ItemType; id: string },
+	resource: { type: GrantResourceType; id: string },
 	role: ShareRole,
 	expiresAt?: string | null
 ): Promise<void> {
@@ -148,7 +157,7 @@ export async function notifyGrantRecipient(grantId: string): Promise<NotifyOutco
 }
 
 export interface IncomingGrantItem {
-	resource_type: ItemType;
+	resource_type: GrantResourceType;
 	resource: ResourceBody;
 	granted_by?: string;
 	granted_at?: string;
@@ -169,7 +178,7 @@ export interface OutgoingResourceGrant {
 }
 
 export interface OutgoingGrantItem {
-	resource_type: ItemType;
+	resource_type: GrantResourceType;
 	resource: ResourceBody;
 	first_shared_at?: string;
 	/** One entry per (subject, permissions) pair. */

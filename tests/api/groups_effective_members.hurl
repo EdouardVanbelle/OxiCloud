@@ -141,18 +141,16 @@ body contains "{{dora_id}}"
 
 
 # ─────────────────────────────────────────────────────────────
-# 8 — Teardown. Order matters: remove the nested group-member
-#     before deleting Group_B, so the FK cascade doesn't get
-#     ahead of us; remove dora's direct membership similarly.
+# 8 — Teardown.
+#     The D3a self-defense in `subject_group_service::remove_member`
+#     refuses any individual membership removal that would empty a
+#     seeded group's transitive user set — which BOTH of these
+#     would (removing Group_B from A leaves A with no users;
+#     removing dora from B leaves B with no users). So we skip the
+#     manual member-by-member unwind and just DELETE the groups
+#     directly. `delete_group` cascades through `subject_group_members`
+#     via FK and isn't subject to the per-remove guard.
 # ─────────────────────────────────────────────────────────────
-DELETE {{base_url}}/api/groups/{{group_a_id}}/members/group/{{group_b_id}}
-Authorization: Bearer {{admin_token}}
-HTTP 204
-
-DELETE {{base_url}}/api/groups/{{group_b_id}}/members/user/{{dora_id}}
-Authorization: Bearer {{admin_token}}
-HTTP 204
-
 DELETE {{base_url}}/api/groups/{{group_a_id}}
 Authorization: Bearer {{admin_token}}
 HTTP 204

@@ -637,13 +637,39 @@ accommodates them without schema migration)
 
 | URL | Resolves to |
 |---|---|
-| `/webdav/<path>` | Caller's personal drive root + `<path>` (back-compat with today's behaviour) |
-| `/webdav/drives/<drive-uuid>/<path>` | Specific drive root + `<path>` |
+| `/webdav/<path>` | Caller's default personal drive root + `<path>` (back-compat with today's behaviour) |
+| `/webdav/@drive/<drive-uuid>/<path>` | Specific drive root + `<path>` |
 
 Today's `/webdav/<path>` handler implicitly looks up the caller's
 home folder and prepends it. Post-drives, the same handler looks up
 the caller's personal drive and resolves paths inside it. **Zero
 breakage** for existing native WebDAV clients.
+
+**Why the `@drive` sigil and NOT `/webdav/drives/<uuid>/...`**
+(earlier draft) or top-level `/drives/<uuid>/...` (also
+considered): `@` is the established structural-routing sigil
+(GitHub `@user/repo`, npm `@scope/pkg`, LDAP `@domain`) — it
+reads as "this is not user content, this is a routing token."
+Realistic collision risk drops to near-zero: nobody creates a
+top-level folder named exactly `@drive` by accident, and the
+defensive layer collapses to a single one-liner in MKCOL / PUT /
+REST create paths that refuses that literal name at any drive
+root. Compared to top-level `/drives/<uuid>/...`, the `@drive`
+shape keeps **one URL root for everything WebDAV** — single
+`<Location>` block in reverse-proxy configs, single mental model
+for sysadmins, single dispatcher in `webdav_routes()`.
+
+**Implementation notes:**
+- Route parser accepts both `/webdav/@drive/<uuid>/...` and the
+  URL-encoded form `/webdav/%40drive/<uuid>/...` — WebDAV clients
+  percent-encode `@` inconsistently.
+- One-liner guard in upload paths refuses creation of a folder
+  literally named `@drive` at any drive root (case-sensitive).
+- `webdav_href()` (today at `webdav_handler.rs:94`) becomes
+  drive-context-aware: responses for a request under
+  `/webdav/@drive/<uuid>/...` must reference back to
+  `/webdav/@drive/<uuid>/...`, otherwise the client follows the
+  `<D:href>` and lands on the back-compat surface (wrong drive).
 
 The `drives` path segment is **reserved**: a folder literally named
 `drives` cannot exist at the top level of any drive. Migration
@@ -1359,9 +1385,13 @@ Pre-flight checks the migration script runs before any writes:
   operator can sanity-check ("Ed has 4 root folders, expected
   ≤1; verify those are real and intended before promoting them
   to drives").
-- Refuse if any sibling root folder is literally named `drives`
-  (would collide with the reserved URL segment on the native
-  `/webdav/drives/<uuid>/...` surface). Operator renames first.
+- (Obsolete with the `/drives/<uuid>/...` top-level URL — kept
+  here for historical context.) Originally the migration was
+  going to refuse any sibling root folder literally named
+  `drives` because the URL surface was `/webdav/drives/<uuid>/...`.
+  D1 moved the explicit-drive selector to a separate top-level
+  `/drives/<uuid>/...` prefix (see §9 "Native WebDAV"), so the
+  collision no longer exists and the pre-check is unnecessary.
 - Refuse if any user has `storage_used_bytes > storage_quota_bytes`
   by an amount that wouldn't fit the destination drive's quota
   semantics (sanity check).
@@ -1382,7 +1412,7 @@ us a real rollback window while the new model bakes in production.
 |---|---|---|
 | **D-Prep — role_grants refactor** | `access_grants → role_grants` schema migration with role-bundle semantics. `Manage` Permission added to the enum + role bundle. Engine reads role_grants only; `access_grants` removed (after one dual-write release if compat is needed). API gains `role` parameter on grant endpoints; audit log emits one `role_grant.*` event per role assignment instead of N permission events. **No Drive concept yet.** Sets the foundation that all subsequent PRs build on. **Data shape confirmed**: empirical audit shows >99% of existing `access_grants` rows already cluster into the standard bundles (viewer/editor/owner) — the migration is mechanical for the vast majority of data; the <1% edge cases get absorbed by shipping `commenter` and `contributor` roles on day one or get an explicit per-row migration decision logged. | **Medium** — touches the load-bearing authorisation table, but the data shape removes the main migration risk |
 | **D0 — foundation** | `storage.drives` schema (no `drive_members` — uses `role_grants` from D-Prep); `Drive` domain entity; migration creating personal drives + backfilling `drive_id` on every resource; read-only `GET /api/drives` listing the caller's drives (single query: `SELECT … FROM role_grants WHERE subject_id=$caller AND resource_type='drive'`). Dual-write `user_id` alongside `drive_id` for safety. **No new UI.** **Every upload path stamps `drive_id` at insert**: classic multipart (`file_handler::upload`), chunked NC (`uploads_handler`), streaming CDC (`upload_ingest`), delta upload (`delta_upload_service`), instant upload by hash. Tantivy reindex (see §11) is part of this PR. **Provenance columns added** (see §14): `created_by` and `updated_by` on both `storage.folders` and `storage.files`, FK to `auth.users` with `ON DELETE SET NULL`; backfilled from `user_id` so pre-Drive content has provenance from day one; every mutation path that touches `updated_at` also sets `updated_by`. | **High** — every storage query touches, all upload paths touched |
-| **D1 — UI switcher + URL routing** | Sidebar drive picker, `/files/<folder-id>` reused for cross-drive navigation (existing route — drive context recovered server-side from `folders.drive_id`), `/config/drive/<drive-uuid>` new route for drive admin. `/` redirects to `/files/<root-folder-id>` of the caller's default personal drive (internal users) or `/shared-with-me` (external users with no personal drive). WebDAV path dispatcher recognising `drives/<uuid>` as the drive-explicit prefix on `/webdav/` (NC keeps the credential-side scheme — see §9). `/drive/<...>` reserved for future use. | Medium |
+| **D1 — UI switcher + URL routing** | Sidebar drive picker, `/files/<folder-id>` reused for cross-drive navigation (existing route — drive context recovered server-side from `folders.drive_id`), `/config/drive/<drive-uuid>` new route for drive admin. `/` redirects to `/files/<root-folder-id>` of the caller's default personal drive (internal users) or `/shared-with-me` (external users with no personal drive). Native WebDAV gets a new `/webdav/@drive/<uuid>/...` route alongside the existing `/webdav/<path>` (which keeps mapping to the caller's default drive — zero back-compat breakage); the `@drive` sigil keeps everything WebDAV under one URL root with near-zero collision risk. NC keeps the credential-side scheme — see §9. `/drive/<...>` (singular, on the SPA) reserved for future use. | Medium |
 | **D2 — drive membership API + per-drive trash auth** | `POST /api/drives/{id}/members`, `DELETE`, `PUT` for role changes — thin handlers that translate to `role_grants` INSERT/DELETE/UPDATE with `resource_type='drive'`. `Resource::Drive(Uuid)` (added in D-Prep at the enum level) gets its specialised handler surface here. Shared-drive last-owner protection. Group-as-subject support reuses the existing `subject_groups` machinery. **Personal-drive guards** (`add_member`, `remove_member`, `delete_drive` refuse on `kind='personal'` — see §2). **Per-drive trash authorisation** (§12): trash listing filters by drive(s) the caller can read; trash mutations (send/restore/permanent-delete) require `role='owner'` on the drive; `storage.trash_items` VIEW updated to surface `drive_id`; orphan/aborted-upload sweep becomes per-drive. | Medium |
 | **D3 — group-owned shared drives** | "Create shared drive" flow — admin or group owner triggers, drive created with `kind='shared'`, initial owner row is the group. Group-deletion guard refuses if the group is the last owner of any drive. Drive-rename, drive-delete. | Low |
 | **D4 — per-drive quota** | Move storage accounting off `auth.users.storage_used_bytes` onto `storage.drives.used_bytes`. **Re-point the existing per-user incremental CTE** (introduced in v0.7.0 — see `b5b80549`, `d6987329`) at drive rows; don't reinvent the counting logic. Upload paths check `drive.quota_bytes` instead of (or in addition to) the user's quota for the dual-write window. **Per-chunk incremental quota check on the NC chunked path** (see §13): MKCOL refuses when the drive is already over quota; each PUT chunk runs an O(1) `used + session_so_far + chunk_size > quota` test and refuses with 507 within one chunk of wasted upload. Closes a pre-existing wart where NC clients could upload GB before learning they were over quota. Reconciliation job runs once per day to fix drift. | Medium |
@@ -1656,8 +1686,14 @@ test`), **(c)** `cargo fmt && cargo clippy --all-features
 
 ### D1
 - **Routing**: `cargo build` clean; WebDAV dispatcher routes
-  `/webdav/drives/<uuid>/...` correctly; `/webdav/<path>` still
-  resolves to the caller's default drive (back-compat).
+  `/webdav/@drive/<uuid>/...` correctly (also accepts the
+  URL-encoded `/webdav/%40drive/<uuid>/...` form);
+  `/webdav/<path>` still resolves to the caller's default drive
+  (back-compat).
+- **Collision guard**: MKCOL / PUT / REST refuse creation of a
+  folder literally named `@drive` at any drive root (case-sensitive,
+  exact match — sub-folders named `@drive` deeper in the tree are
+  allowed, the guard is only at root depth).
 - **NC client back-compat**: a real NC sync client pointed at
   `/remote.php/dav/files/admin/` continues syncing the user's default
   personal drive without reconfiguration. The chroot POC's `~`

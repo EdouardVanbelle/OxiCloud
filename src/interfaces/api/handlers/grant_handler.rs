@@ -19,6 +19,7 @@ use utoipa::IntoParams;
 use uuid::Uuid;
 
 use crate::application::dtos::cursor::PageCursor;
+use crate::application::dtos::drive_dto::DriveDto;
 use crate::application::dtos::grant_dto::{
     CreateGrantDto, CreateGrantResponseDto, GrantDto, MySharesDto, NotifyOutcomeSetDto,
     OutgoingResourceGrantDto, OutgoingResourceItemDto, ResourceContentDto, ResourceDto,
@@ -30,6 +31,7 @@ use crate::application::services::recipient_notification_service::NotifyTrigger;
 use crate::common::di::AppState;
 #[allow(unused_imports)]
 use crate::common::errors::DomainError;
+use crate::domain::repositories::drive_repository::DriveRepository;
 use crate::domain::services::authorization::{
     GrantCursor, IncomingGrantSummary, OutgoingResourceSummary, Permission, Resource, ResourceKind,
     Role, Subject,
@@ -43,6 +45,28 @@ type AppStateRef = Arc<AppState>;
 // POST /api/grants
 // ════════════════════════════════════════════════════════════════════════════
 
+/// Share a resource with someone — kicks off the **social flow** (invite +
+/// notification + lazy external-user provisioning if subject is an email).
+///
+/// **Use this when:** the recipient may not exist yet, hasn't been told,
+/// or this is the initial grant. The handler:
+/// - resolves `subject` (User / Group / Token / Email — email lazily creates
+///   an external user via `MagicLinkInviteService::resolve_or_create_recipient`),
+/// - writes one role-grant row via `authz.set_role` (`ON CONFLICT UPDATE`),
+/// - sends a share-notification email (magic-link arm for externals, plain
+///   notification for internal users — both honour `notify_on_share` opt-out
+///   and per-recipient rate limits).
+///
+/// **Compare with `PUT /api/grants/role`:** that endpoint is the *silent*
+/// admin-style role change for an already-known subject; it skips the
+/// invitation and notification side-effects entirely. Both write through
+/// the same idempotent UPSERT, so the only operational difference is the
+/// social flow attached here.
+///
+/// **Drive resources** (`resource.type == "drive"`) are routed through
+/// `DriveManagementService.set_member_role` internally — the
+/// personal-drive guard and shared-drive last-owner protection apply
+/// no matter which endpoint creates the grant.
 #[utoipa::path(
     post,
     path = "/api/grants",
@@ -51,6 +75,7 @@ type AppStateRef = Arc<AppState>;
         (status = 201, description = "Grant(s) created", body = CreateGrantResponseDto),
         (status = 400, description = "Invalid input (both/neither of permissions+role provided)"),
         (status = 404, description = "Resource not found OR caller lacks Share permission"),
+        (status = 405, description = "Drive resource: personal drives have immutable membership"),
     ),
     security(("bearerAuth" = [])),
     tag = "grants"
@@ -131,14 +156,30 @@ pub async fn create_grant(
     // Single role row in `storage.role_grants`. `ON CONFLICT UPDATE` in
     // the engine makes repeated POSTs with the same (subject, resource)
     // a role refresh, matching the PATCH-style semantics callers expect.
-    let grant = match authz
-        .set_role(caller_id, subject, role, resource, expires_at)
-        .await
-    {
-        Ok(g) => g,
-        Err(err) => {
-            error!("set_role write failed: {err}");
-            return AppError::from(err).into_response();
+    //
+    // Drive resources are routed through `DriveManagementService` so the
+    // personal-drive guard and shared-drive last-owner protection apply
+    // — the same guards that gate `/api/drives/{id}/members`. Defense in
+    // depth: a caller can't bypass them by hitting `/api/grants` directly.
+    let grant = if let Resource::Drive(drive_id) = resource {
+        match state
+            .drive_management_service
+            .set_member_role(caller_id, false, drive_id, subject, role, expires_at)
+            .await
+        {
+            Ok(g) => g,
+            Err(err) => return AppError::from(err).into_response(),
+        }
+    } else {
+        match authz
+            .set_role(caller_id, subject, role, resource, expires_at)
+            .await
+        {
+            Ok(g) => g,
+            Err(err) => {
+                error!("set_role write failed: {err}");
+                return AppError::from(err).into_response();
+            }
         }
     };
     let grants = vec![GrantDto::from(grant)];
@@ -267,33 +308,54 @@ pub async fn revoke_grant(
         Err(e) => return AppError::from(e).into_response(),
     };
 
-    // Caller is authorized if they are the granter OR have Share on the resource.
-    if granter != caller_id
-        && let Err(e) = authz
-            .require(Subject::User(caller_id), Permission::Share, resource)
+    // Drive resources are routed through `DriveManagementService` so the
+    // personal-drive guard and shared-drive last-owner protection apply.
+    // Note: the "granter can always revoke" shortcut DOES NOT apply for
+    // drive grants — drive membership mutations always require current
+    // Manage on the drive, even if you granted the row originally and
+    // were later demoted.
+    if let Resource::Drive(drive_id) = resource {
+        // Also revoke the legacy access_grants row for the dual-write
+        // window — `remove_member` handles the role_grants side.
+        if let Err(e) = authz.revoke(grant_id).await {
+            return AppError::from(e).into_response();
+        }
+        if let Err(e) = state
+            .drive_management_service
+            .remove_member(caller_id, false, drive_id, subject)
             .await
-    {
-        return AppError::from(e).into_response();
-    }
+        {
+            return AppError::from(e).into_response();
+        }
+    } else {
+        // Caller is authorized if they are the granter OR have Share on the resource.
+        if granter != caller_id
+            && let Err(e) = authz
+                .require(Subject::User(caller_id), Permission::Share, resource)
+                .await
+        {
+            return AppError::from(e).into_response();
+        }
 
-    if let Err(e) = authz.revoke(grant_id).await {
-        return AppError::from(e).into_response();
-    }
+        if let Err(e) = authz.revoke(grant_id).await {
+            return AppError::from(e).into_response();
+        }
 
-    // D-Prep dual-write: clear the role_grants row for this (subject,
-    // resource). Idempotent — succeeds whether or not the row existed.
-    //
-    // Today's API revokes one access_grants row by id; the role_grants
-    // row models the WHOLE (subject, resource) cluster. Calling clear_role
-    // here effectively revokes the WHOLE role assignment in role_grants,
-    // even if other per-permission access_grants rows remain. This is the
-    // correct semantics for the eventual cleanup-PR model (role_grants is
-    // role-keyed; once access_grants goes away, "revoke" means "drop the
-    // role"). During the dual-write window the two tables can drift
-    // briefly if a caller revokes only some permissions of a role, but
-    // the engine still reads access_grants so behaviour is unchanged.
-    if let Err(e) = authz.clear_role(subject, resource).await {
-        return AppError::from(e).into_response();
+        // D-Prep dual-write: clear the role_grants row for this (subject,
+        // resource). Idempotent — succeeds whether or not the row existed.
+        //
+        // Today's API revokes one access_grants row by id; the role_grants
+        // row models the WHOLE (subject, resource) cluster. Calling clear_role
+        // here effectively revokes the WHOLE role assignment in role_grants,
+        // even if other per-permission access_grants rows remain. This is the
+        // correct semantics for the eventual cleanup-PR model (role_grants is
+        // role-keyed; once access_grants goes away, "revoke" means "drop the
+        // role"). During the dual-write window the two tables can drift
+        // briefly if a caller revokes only some permissions of a role, but
+        // the engine still reads access_grants so behaviour is unchanged.
+        if let Err(e) = authz.clear_role(subject, resource).await {
+            return AppError::from(e).into_response();
+        }
     }
 
     tracing::info!(
@@ -481,13 +543,38 @@ pub async fn notify_grant_recipient(
 // PUT /api/grants/role
 // ════════════════════════════════════════════════════════════════════════════
 
+/// Change an existing member's role on a resource — **silent**, no
+/// invitation, no notification.
+///
+/// **Use this when:** the subject is already known (user/group/token has
+/// an existing grant or you've already informed them out-of-band) and you
+/// just want to bump their role. Typical use is the management UI's
+/// "Viewer → Editor" dropdown — you don't want a fresh share email
+/// firing on every dropdown change.
+///
+/// **Compare with `POST /api/grants`:** that endpoint kicks off the
+/// invitation + share-notification social flow and accepts an email-shaped
+/// subject for lazy external-user provisioning. This endpoint is the
+/// admin-style update — concrete subjects only, no side effects beyond
+/// the role row itself.
+///
+/// Both endpoints write through the same idempotent UPSERT
+/// (`authz.set_role`, unique on `(subject, resource)`), so they are
+/// indistinguishable in their effect on the role-grants table — the
+/// difference is purely the social side-effects attached to `POST`.
+///
+/// **Drive resources** (`resource.type == "drive"`) are routed through
+/// `DriveManagementService.set_member_role` internally — the
+/// personal-drive guard and shared-drive last-owner protection apply.
 #[utoipa::path(
     put,
     path = "/api/grants/role",
     request_body = UpdateRoleDto,
     responses(
         (status = 200, description = "Role applied; returns the new full grant set", body = Vec<GrantDto>),
+        (status = 400, description = "Drive resource: shared-drive last-owner demotion refused"),
         (status = 404, description = "Resource not found or caller lacks Share"),
+        (status = 405, description = "Drive resource: personal drives have immutable membership"),
     ),
     security(("bearerAuth" = [])),
     tag = "grants"
@@ -515,12 +602,27 @@ pub async fn set_role(
     // Atomic role refresh. UNIQUE on (subject, resource) + ON CONFLICT
     // UPDATE in `set_role` turns this into a single UPSERT — no diff,
     // no race window. Returns the resulting role row.
-    let grant = match authz
-        .set_role(caller_id, subject, role, resource, expires_at)
-        .await
-    {
-        Ok(g) => g,
-        Err(e) => return AppError::from(e).into_response(),
+    //
+    // Drive resources are routed through `DriveManagementService` so the
+    // personal-drive guard and shared-drive last-owner protection apply.
+    // See `create_grant` for the same delegation rationale.
+    let grant = if let Resource::Drive(drive_id) = resource {
+        match state
+            .drive_management_service
+            .set_member_role(caller_id, false, drive_id, subject, role, expires_at)
+            .await
+        {
+            Ok(g) => g,
+            Err(e) => return AppError::from(e).into_response(),
+        }
+    } else {
+        match authz
+            .set_role(caller_id, subject, role, resource, expires_at)
+            .await
+        {
+            Ok(g) => g,
+            Err(e) => return AppError::from(e).into_response(),
+        }
     };
 
     tracing::info!(
@@ -647,6 +749,10 @@ pub async fn list_shared_with_me(
         .iter()
         .filter(|s| matches!(s.resource_type, ResourceKind::Folder))
         .collect();
+    let drive_summaries: Vec<&IncomingGrantSummary> = summaries
+        .iter()
+        .filter(|s| matches!(s.resource_type, ResourceKind::Drive))
+        .collect();
 
     let file_service = &state.applications.file_retrieval_service;
     let folder_service = &state.applications.folder_service_concrete;
@@ -660,14 +766,16 @@ pub async fn list_shared_with_me(
         .iter()
         .map(|s| s.resource_id.to_string())
         .collect();
+    let drive_ids: Vec<Uuid> = drive_summaries.iter().map(|s| s.resource_id).collect();
 
-    // Resolve resource details in two batch queries (was one per id via
+    // Resolve resource details in three batch queries (was one per id via
     // join_all, which could fan out to ~limit concurrent pooled connections
     // and starve the primary pool). Missing ids — stale grants whose resource
     // was deleted before the cascade trigger fired — drop out of the maps.
-    let (file_list, folder_list) = tokio::join!(
+    let (file_list, folder_list, drive_list) = tokio::join!(
         file_service.get_files_by_ids(&file_ids),
-        folder_service.get_folders_by_ids(&folder_ids)
+        folder_service.get_folders_by_ids(&folder_ids),
+        state.drive_repo.get_by_ids(&drive_ids)
     );
     let file_map: HashMap<String, _> = match file_list {
         Ok(files) => files.into_iter().map(|f| (f.id.clone(), f)).collect(),
@@ -676,6 +784,16 @@ pub async fn list_shared_with_me(
     let folder_map: HashMap<String, _> = match folder_list {
         Ok(folders) => folders.into_iter().map(|f| (f.id.clone(), f)).collect(),
         Err(e) => return AppError::from(e).into_response(),
+    };
+    let drive_map: HashMap<Uuid, DriveDto> = match drive_list {
+        Ok(drives) => drives
+            .into_iter()
+            .map(|d| (d.drive.id, DriveDto::from(d)))
+            .collect(),
+        Err(e) => {
+            return AppError::internal_error(format!("Failed to batch-resolve drives: {e:?}"))
+                .into_response();
+        }
     };
 
     // Build the unified item list in original grant order (newest first),
@@ -719,13 +837,21 @@ pub async fn list_shared_with_me(
                     summary.resource_id
                 ),
             },
-            // Drive grants don't appear in the file/folder "Shared with me"
-            // listing — they're surfaced through `GET /api/drives` (D0).
-            // Silently skipping here is the right behaviour: a drive grant
-            // discovered by `list_incoming_resources_paged` is not a stale
-            // grant, just a different resource type with a different
-            // listing surface.
-            ResourceKind::Drive => continue,
+            ResourceKind::Drive => match drive_map.get(&summary.resource_id) {
+                Some(drive_dto) => {
+                    items.push(SharedWithMeItemDto {
+                        resource_type: ResourceTypeDto::Drive,
+                        permissions: summary.permissions.iter().map(|p| (*p).into()).collect(),
+                        granted_at: summary.granted_at,
+                        granted_by: summary.granted_by,
+                        resource: ResourceContentDto::Drive(drive_dto.clone()),
+                    });
+                }
+                None => warn!(
+                    "Skipping stale drive grant for resource_id={}: not found",
+                    summary.resource_id
+                ),
+            },
         }
     }
 
@@ -884,6 +1010,10 @@ pub async fn list_my_shares(
         .iter()
         .filter(|s| matches!(s.resource_type, ResourceKind::Folder))
         .collect();
+    let drive_summaries: Vec<&OutgoingResourceSummary> = summaries
+        .iter()
+        .filter(|s| matches!(s.resource_type, ResourceKind::Drive))
+        .collect();
 
     let file_ids: Vec<String> = file_summaries
         .iter()
@@ -893,11 +1023,13 @@ pub async fn list_my_shares(
         .iter()
         .map(|s| s.resource_id.to_string())
         .collect();
+    let drive_ids: Vec<Uuid> = drive_summaries.iter().map(|s| s.resource_id).collect();
 
-    // Two batch queries instead of one get_* per id (see list_shared_with_me).
-    let (file_list, folder_list) = tokio::join!(
+    // Three batch queries instead of one get_* per id (see list_shared_with_me).
+    let (file_list, folder_list, drive_list) = tokio::join!(
         file_service.get_files_by_ids(&file_ids),
-        folder_service.get_folders_by_ids(&folder_ids)
+        folder_service.get_folders_by_ids(&folder_ids),
+        state.drive_repo.get_by_ids(&drive_ids)
     );
     let file_map: HashMap<String, _> = match file_list {
         Ok(files) => files.into_iter().map(|f| (f.id.clone(), f)).collect(),
@@ -906,6 +1038,16 @@ pub async fn list_my_shares(
     let folder_map: HashMap<String, _> = match folder_list {
         Ok(folders) => folders.into_iter().map(|f| (f.id.clone(), f)).collect(),
         Err(e) => return AppError::from(e).into_response(),
+    };
+    let drive_map: HashMap<Uuid, DriveDto> = match drive_list {
+        Ok(drives) => drives
+            .into_iter()
+            .map(|d| (d.drive.id, DriveDto::from(d)))
+            .collect(),
+        Err(e) => {
+            return AppError::internal_error(format!("Failed to batch-resolve drives: {e:?}"))
+                .into_response();
+        }
     };
 
     let mut items: Vec<OutgoingResourceItemDto> = Vec::with_capacity(summaries.len());
@@ -960,10 +1102,20 @@ pub async fn list_my_shares(
                     summary.resource_id
                 ),
             },
-            // Drive grants are surfaced via `GET /api/drives` (D0), not
-            // through the My Shares outgoing-resources surface. Silently
-            // skip — symmetric with the `list_shared_with_me` arm above.
-            ResourceKind::Drive => continue,
+            ResourceKind::Drive => match drive_map.get(&summary.resource_id) {
+                Some(drive_dto) => {
+                    items.push(OutgoingResourceItemDto {
+                        resource_type: ResourceTypeDto::Drive,
+                        first_shared_at: summary.first_shared_at,
+                        resource: ResourceContentDto::Drive(drive_dto.clone()),
+                        grants,
+                    });
+                }
+                None => warn!(
+                    "Skipping stale outgoing drive grant for resource_id={}: not found",
+                    summary.resource_id
+                ),
+            },
         }
     }
 

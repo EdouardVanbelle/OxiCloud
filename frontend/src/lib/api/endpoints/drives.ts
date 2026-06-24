@@ -1,15 +1,125 @@
 /**
- * Drives endpoints. D0 ships read-only listing; mutations (create / rename /
- * member changes) land in D2/D3 and will be added here under the same shape.
+ * Drives endpoints. D0 ships read-only listing; D2 adds the membership API;
+ * D3a adds the create-shared-drive flow.
  *
  * Consumers usually go through the `drives` store (`$lib/stores/drives.svelte`)
  * which dedupes the request and caches the list — touch this module directly
  * only when bypassing the cache is intentional (e.g. an explicit refresh).
  */
-import { apiJson } from '$lib/api/client';
-import type { Drive } from '$lib/api/types';
+import { apiFetch, apiJson } from '$lib/api/client';
+import { getCsrfHeaders } from '$lib/api/csrf';
+import type {
+	CreateDriveBody,
+	Drive,
+	DriveMember,
+	DriveMemberSubject,
+	DriveRole
+} from '$lib/api/types';
+
+const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
 /** `GET /api/drives` — every drive the caller can read, default first by convention. */
 export function listDrives(): Promise<Drive[]> {
 	return apiJson<Drive[]>('/api/drives', { credentials: 'same-origin' });
+}
+
+/**
+ * `POST /api/drives` — create a drive (D3a). Today only `kind: 'shared'` is
+ * implemented; `kind: 'personal'` is accepted on the wire but returns 501.
+ * Admin-only at the server; callers should already have gated the UI on
+ * `session.user?.role === 'admin'`. Throws on non-2xx with the server's
+ * error body parsed where possible.
+ */
+export async function createDrive(body: CreateDriveBody): Promise<Drive> {
+	const res = await apiFetch('/api/drives', {
+		method: 'POST',
+		headers: { ...JSON_HEADERS, ...getCsrfHeaders() },
+		credentials: 'same-origin',
+		body: JSON.stringify(body)
+	});
+	if (!res.ok) {
+		let detail = '';
+		try {
+			const parsed = (await res.json()) as { error?: string; message?: string };
+			detail = parsed.error ?? parsed.message ?? '';
+		} catch {
+			/* response body wasn't JSON */
+		}
+		throw new Error(detail || `create drive failed: ${res.status}`);
+	}
+	return (await res.json()) as Drive;
+}
+
+/** `GET /api/drives/{id}/members` — every role grant on the drive. */
+export function listDriveMembers(driveId: string): Promise<DriveMember[]> {
+	return apiJson<DriveMember[]>(`/api/drives/${encodeURIComponent(driveId)}/members`, {
+		credentials: 'same-origin'
+	});
+}
+
+/**
+ * `POST /api/drives/{id}/members` — add a member (or refresh an existing
+ * subject's role; the underlying `set_role` is idempotent via UNIQUE
+ * `(subject, resource)`).
+ *
+ * Refused with 405 on personal drives (immutable membership) and 400 if a
+ * last-owner demotion would orphan a shared drive.
+ */
+export async function addDriveMember(
+	driveId: string,
+	subject: DriveMemberSubject,
+	role: DriveRole,
+	expiresAt?: string | null
+): Promise<DriveMember> {
+	const res = await apiFetch(`/api/drives/${encodeURIComponent(driveId)}/members`, {
+		method: 'POST',
+		headers: { ...JSON_HEADERS, ...getCsrfHeaders() },
+		credentials: 'same-origin',
+		body: JSON.stringify({ subject, role, expires_at: expiresAt ?? null })
+	});
+	if (!res.ok) throw new Error(`add member failed: ${res.status}`);
+	return (await res.json()) as DriveMember;
+}
+
+/**
+ * `PATCH /api/drives/{id}/members/{kind}/{sid}` — change a member's role.
+ * Same guards as `addDriveMember` apply.
+ */
+export async function updateDriveMember(
+	driveId: string,
+	subject: DriveMemberSubject,
+	role: DriveRole,
+	expiresAt?: string | null
+): Promise<DriveMember> {
+	const url =
+		`/api/drives/${encodeURIComponent(driveId)}/members/` +
+		`${encodeURIComponent(subject.type)}/${encodeURIComponent(subject.id)}`;
+	const res = await apiFetch(url, {
+		method: 'PATCH',
+		headers: { ...JSON_HEADERS, ...getCsrfHeaders() },
+		credentials: 'same-origin',
+		body: JSON.stringify({ role, expires_at: expiresAt ?? null })
+	});
+	if (!res.ok) throw new Error(`update member failed: ${res.status}`);
+	return (await res.json()) as DriveMember;
+}
+
+/**
+ * `DELETE /api/drives/{id}/members/{kind}/{sid}` — remove a member.
+ * Idempotent (removing a non-member returns 204). Refused with 400 if it
+ * would leave a shared drive without an owner.
+ */
+export async function removeDriveMember(
+	driveId: string,
+	subject: DriveMemberSubject
+): Promise<void> {
+	const url =
+		`/api/drives/${encodeURIComponent(driveId)}/members/` +
+		`${encodeURIComponent(subject.type)}/${encodeURIComponent(subject.id)}`;
+	const res = await apiFetch(url, {
+		method: 'DELETE',
+		headers: getCsrfHeaders(),
+		credentials: 'same-origin'
+	});
+	if (!res.ok) throw new Error(`remove member failed: ${res.status}`);
 }

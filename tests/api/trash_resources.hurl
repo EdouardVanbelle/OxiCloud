@@ -153,6 +153,10 @@ HTTP 200
 
 # ─────────────────────────────────────────────────────────────
 # Step 7 – Default listing: 4 items, all carry trashed_at + deletion_date
+#          + drive_id (D2b — enables per-drive grouping in the UI).
+#          The listing is also drive-membership scoped (D2b stage 2): the
+#          admin sees their own personal drive's trashed items, just as
+#          before, because a personal drive Owner has all roles needed.
 # ─────────────────────────────────────────────────────────────
 GET {{base_url}}/api/trash/resources
 Authorization: Bearer {{token}}
@@ -162,6 +166,11 @@ HTTP 200
 jsonpath "$.items" count == 4
 jsonpath "$.items[0].trashed_at" isString
 jsonpath "$.items[0].deletion_date" isString
+# D2b: drive_id is non-null on every trashed item.
+jsonpath "$.items[0].drive_id" isString
+jsonpath "$.items[1].drive_id" isString
+jsonpath "$.items[2].drive_id" isString
+jsonpath "$.items[3].drive_id" isString
 jsonpath "$.items[0].resource_type" matches "^(file|folder)$"
 jsonpath "$.items[*].resource.id" contains {{folder_a_id}}
 jsonpath "$.items[*].resource.id" contains {{folder_b_id}}

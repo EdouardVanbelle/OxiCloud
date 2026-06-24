@@ -9,6 +9,7 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::application::dtos::cursor::{CursorListResponse, CursorQuery, PageCursor};
+use crate::application::dtos::drive_dto::DriveDto;
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
 use crate::domain::services::authorization::{Grant, Permission, Resource, Role, Subject};
@@ -418,6 +419,7 @@ impl SharedWithMeQuery {
 pub enum ResourceContentDto {
     File(FileDto),
     Folder(FolderDto),
+    Drive(DriveDto),
 }
 
 /// One item in the shared-with-me list.

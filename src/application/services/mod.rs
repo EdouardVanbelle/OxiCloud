@@ -7,6 +7,7 @@ pub mod calendar_service;
 pub mod contact_service;
 pub mod delta_upload_service;
 pub mod device_auth_service;
+pub mod drive_management_service;
 pub mod external_identity_service;
 pub mod favorites_service;
 pub mod file_lifecycle_service;

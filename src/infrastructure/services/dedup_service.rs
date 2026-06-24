@@ -291,7 +291,13 @@ impl DedupService {
     }
 
     /// Creates a stub instance for testing — never hits PG or the filesystem.
-    #[cfg(any(test, feature = "integration_tests"))]
+    ///
+    /// Gated for both build modes integration tests are reachable from:
+    /// the raw `cfg(integration_tests)` flag used by CI / justfile
+    /// (`RUSTFLAGS='--cfg integration_tests'`) and the
+    /// `feature = "integration_tests"` form for callers that flip the
+    /// cargo feature instead. Standard `cfg(test)` keeps unit-test use.
+    #[cfg(any(test, integration_tests, feature = "integration_tests"))]
     pub fn new_stub() -> Self {
         use crate::infrastructure::services::local_blob_backend::LocalBlobBackend;
         let stub_pool = Arc::new(

@@ -416,13 +416,24 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     }
 
     // Drives — every drive the caller can read. D0 ships the read-only
-    // listing; D2 adds the membership API + shared-drive endpoints under
-    // `/api/drives/{id}/members`.
+    // listing; D2 adds the membership API; D3 the create-shared-drive flow.
     {
         use crate::interfaces::api::handlers::drive_handler;
 
         let drives_router = Router::new()
-            .route("/", get(drive_handler::list_drives))
+            .route(
+                "/",
+                get(drive_handler::list_drives).post(drive_handler::create_drive),
+            )
+            .route(
+                "/{id}/members",
+                get(drive_handler::list_drive_members).post(drive_handler::add_drive_member),
+            )
+            .route(
+                "/{id}/members/{kind}/{sid}",
+                patch(drive_handler::update_drive_member)
+                    .delete(drive_handler::remove_drive_member),
+            )
             .with_state(app_state.clone());
 
         router = router.nest("/drives", drives_router);

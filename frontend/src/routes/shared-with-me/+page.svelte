@@ -26,26 +26,33 @@
 	const byId = $derived(new Map(raw.map((it) => [it.resource.id, it])));
 
 	const entries = $derived(
-		raw.map((it): ResourceEntry => {
-			const isFile = it.resource_type === 'file';
-			return {
-				id: it.resource.id,
-				name: it.resource.name,
-				kind: it.resource_type,
-				iconClass: it.resource.icon_class,
-				// The sharer becomes the "owner" surface — ResourceList renders
-				// `<UserVignette userId>` (avatar / name / external badge),
-				// resolved lazily via `/api/users/{id}`. `path` keeps the
-				// resource's real location so the row still shows where it
-				// lives, not a translated string.
-				ownerId: it.granted_by ?? null,
-				ownerName: sharers.name(it.granted_by),
-				path: it.resource.path,
-				size: isFile ? (it.resource as FileItem).size : null,
-				date: it.granted_at,
-				category: isFile ? it.resource.category : 'Folder'
-			};
-		})
+		// Drive resources also surface in `/api/grants/incoming/resources`
+		// since the role_grants rewrite, but they don't belong in the
+		// file/folder ResourceList — they're reached through the drive
+		// picker / breadcrumb. Filter them out here so the row UI keeps
+		// its file|folder type contract.
+		raw
+			.filter((it) => it.resource_type !== 'drive')
+			.map((it): ResourceEntry => {
+				const isFile = it.resource_type === 'file';
+				return {
+					id: it.resource.id,
+					name: it.resource.name,
+					kind: it.resource_type as 'file' | 'folder',
+					iconClass: it.resource.icon_class,
+					// The sharer becomes the "owner" surface — ResourceList renders
+					// `<UserVignette userId>` (avatar / name / external badge),
+					// resolved lazily via `/api/users/{id}`. `path` keeps the
+					// resource's real location so the row still shows where it
+					// lives, not a translated string.
+					ownerId: it.granted_by ?? null,
+					ownerName: sharers.name(it.granted_by),
+					path: it.resource.path,
+					size: isFile ? (it.resource as FileItem).size : null,
+					date: it.granted_at,
+					category: isFile ? it.resource.category : 'Folder'
+				};
+			})
 	);
 
 	// Server-supported sort_by values (see grant_handler.rs:615):

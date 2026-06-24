@@ -446,10 +446,32 @@ impl FolderUseCase for FolderService {
             )));
         }
 
+        // Drive roots double as the drive's display name (per drive.md §3,
+        // `drives.name` is sourced from `storage.folders.name` of the row
+        // pointed at by `root_folder_id`). Per drive.md §6 the rename is
+        // Owner-only — but with `Permission::Update` that's leaky because
+        // every Editor of the drive has Update on every folder in the
+        // drive, including the root. So we promote the requirement to
+        // `Manage` for root folders. A root is identified by
+        // `parent_id IS NULL`; that's the same property the drive seeder
+        // and the drive-of-resource resolver rely on, so no schema-level
+        // assumption shifts here.
+        let folder = self.folder_storage.get_folder(id).await.map_err(|e| {
+            DomainError::internal_error(
+                "FolderStorage",
+                format!("Failed to look up folder before rename: {id}: {e}"),
+            )
+        })?;
+        let required_perm = if folder.parent_id().is_none() {
+            Permission::Manage
+        } else {
+            Permission::Update
+        };
+
         self.authz
             .require(
                 Subject::User(caller_id),
-                Permission::Update,
+                required_perm,
                 Self::folder_resource(id)?,
             )
             .await?;

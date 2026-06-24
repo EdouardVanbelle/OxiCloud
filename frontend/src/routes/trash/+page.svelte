@@ -10,7 +10,7 @@
 		restoreTrashItem
 	} from '$lib/api/endpoints/trash';
 	import { dateBucket, sizeBucket, typeLabel } from '$lib/api/endpoints/favorites';
-	import type { FileItem, TrashResourceItem } from '$lib/api/types';
+	import type { Drive, FileItem, TrashResourceItem } from '$lib/api/types';
 	import Icon from '$lib/icons/Icon.svelte';
 	import ResourceList, {
 		type GroupByDef,
@@ -18,6 +18,7 @@
 	} from '$lib/components/ResourceList.svelte';
 	import { confirmDialog } from '$lib/stores/dialogs.svelte';
 	import { t } from '$lib/i18n/index.svelte';
+	import { drives as drivesStore } from '$lib/stores/drives.svelte';
 	import { ui } from '$lib/stores/ui.svelte';
 
 	let raw = $state<TrashResourceItem[]>([]);
@@ -41,13 +42,48 @@
 				// `date` carries the deletion date — rendered as an expiry chip.
 				date: it.deletion_date,
 				category: isFile ? it.resource.category : 'Folder',
-				modifiedAt: it.trashed_at
+				modifiedAt: it.trashed_at,
+				// D2b: surface drive_id so the Drive group-by can bucket by it.
+				// Reuses the existing `ownerId` slot on ResourceEntry — both
+				// represent a UUID the listing pivots on; no new field needed.
+				ownerId: it.drive_id
 			};
 		})
 	);
 
+	// "Drive" group rank: default-personal first, then secondary personal, then
+	// shared — matches `DrivePicker.svelte::sortedDrives` so the sidebar and
+	// trash sections agree on ordering. Used as the bucket sort key.
+	function driveRank(d: Drive | null): number {
+		if (!d) return 99;
+		if (d.default_for_user) return 0;
+		return d.kind === 'personal' ? 1 : 2;
+	}
+	function driveLabel(driveId: string): string {
+		const d = drivesStore.findById(driveId);
+		return d?.name ?? driveId;
+	}
+	function driveBucketKey(driveId: string): string {
+		// Bucket key has to be a string but we want ordering; prefix with
+		// rank so the natural lexical sort puts buckets in the picker's order.
+		const d = drivesStore.findById(driveId);
+		const rank = driveRank(d).toString().padStart(2, '0');
+		return `${rank}:${driveId}`;
+	}
+	function driveBucketLabel(key: string): string {
+		const driveId = key.split(':')[1] ?? key;
+		return driveLabel(driveId);
+	}
+
 	const groupBys: GroupByDef[] = [
-		{ key: '', label: t('files.name', 'Name'), orderBy: 'name' },
+		{ key: '', label: t('files.name', 'Name'), orderBy: 'name', icon: 'arrow-up-a-z' },
+		{
+			key: 'drive',
+			label: t('trash.groupby.drive', 'Drive'),
+			orderBy: 'name',
+			bucketOf: (e) => (e.ownerId ? driveBucketKey(e.ownerId) : null),
+			labelOf: driveBucketLabel
+		},
 		{
 			key: 'remainingDays',
 			label: t('trash.groupby.remaining_days', 'Remaining days'),
@@ -148,7 +184,12 @@
 		}
 	}
 
-	onMount(() => load(true));
+	onMount(() => {
+		// Drive names for the "Drive" group-by labels — `drivesStore.load()` is
+		// idempotent (cached on the singleton) so this is essentially free.
+		void drivesStore.load();
+		void load(true);
+	});
 </script>
 
 <svelte:head><title>{t('nav.trash', 'Trash')} · OxiCloud</title></svelte:head>

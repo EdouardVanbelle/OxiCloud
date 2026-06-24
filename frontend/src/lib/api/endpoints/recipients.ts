@@ -40,28 +40,48 @@ function looksLikeEmail(q: string): boolean {
 }
 
 // The system book lists all users; we filter client-side (matches the original).
+// Two caches because the backend response differs (default excludes the caller,
+// `?include_self=1` returns them). Keying by flag avoids one variant overwriting
+// the other.
 let contactCache: Contact[] | null = null;
+let contactCacheWithSelf: Contact[] | null = null;
 /** `false` once we confirm the system address book is unavailable. */
 let directoryAvailable: boolean | null = null;
 
-async function systemContacts(): Promise<Contact[]> {
-	if (contactCache) return contactCache;
+async function systemContacts(includeSelf = false): Promise<Contact[]> {
+	const cached = includeSelf ? contactCacheWithSelf : contactCache;
+	if (cached) return cached;
 	try {
-		const res = await apiFetch('/api/address-books/system/contacts', {
-			credentials: 'same-origin'
-		});
+		// `?include_self=true` (not `=1`) — Axum's `Query` extractor uses
+		// `serde_urlencoded`, which only deserialises `"true"`/`"false"`
+		// for `bool`. Sending `=1` would 400 before the handler runs.
+		const url = includeSelf
+			? '/api/address-books/system/contacts?include_self=true'
+			: '/api/address-books/system/contacts';
+		const res = await apiFetch(url, { credentials: 'same-origin' });
 		if (!res.ok) {
 			directoryAvailable = false;
+			if (includeSelf) {
+				contactCacheWithSelf = [];
+				return contactCacheWithSelf;
+			}
 			contactCache = [];
 			return contactCache;
 		}
 		directoryAvailable = true;
-		contactCache = (await res.json()) as Contact[];
+		const list = (await res.json()) as Contact[];
+		if (includeSelf) contactCacheWithSelf = list;
+		else contactCache = list;
+		return list;
 	} catch {
 		directoryAvailable = false;
+		if (includeSelf) {
+			contactCacheWithSelf = [];
+			return contactCacheWithSelf;
+		}
 		contactCache = [];
+		return contactCache;
 	}
-	return contactCache;
 }
 
 /**
@@ -135,16 +155,23 @@ export function resolveRecipient(type: 'user' | 'group', id: string): Recipient 
 /**
  * Combined user + group results matching the query (case-insensitive), plus a
  * synthetic invite-by-email suggestion when the query is an email that no
- * contact already owns. The current logged-in user is excluded — you can't
- * share with yourself. Capped at 8 combined (groups, then users, then email).
+ * contact already owns. Capped at 8 combined (groups, then users, then email).
+ *
+ * `includeSelf` defaults to `false` — the share modal excludes the current
+ * caller from the picker because "you can't share with yourself". The admin
+ * drive-owners surface flips it on: an admin legitimately needs to add
+ * themselves (or anyone) as Owner without that personal-share restriction.
  */
-export async function searchRecipients(query: string): Promise<Recipient[]> {
+export async function searchRecipients(
+	query: string,
+	{ includeSelf = false }: { includeSelf?: boolean } = {}
+): Promise<Recipient[]> {
 	const q = query.toLowerCase().trim();
 	if (!q) return [];
 	const currentUserId = session.user?.id ?? null;
-	const [contacts, groups] = await Promise.all([systemContacts(), searchGroups(q)]);
+	const [contacts, groups] = await Promise.all([systemContacts(includeSelf), searchGroups(q)]);
 	const matched = contacts
-		.filter((c) => c.id !== currentUserId)
+		.filter((c) => includeSelf || c.id !== currentUserId)
 		.map((c) => ({ c, ...contactLabel(c) }))
 		.filter(
 			({ label, email }) => label.toLowerCase().includes(q) || email.toLowerCase().includes(q)

@@ -42,16 +42,30 @@
 		type PluginLogEntry,
 		type PluginRetention,
 		type ReextractResult,
+		addDriveMemberAdmin,
+		listAllDrives,
+		listDriveMembersAdmin,
+		removeDriveMemberAdmin,
 		type SmtpInfo,
 		type SmtpTestResult,
 		type StorageSettings,
 		type StorageTestResult
 	} from '$lib/api/endpoints/admin';
-	import type { User } from '$lib/api/types';
+	import { createDrive } from '$lib/api/endpoints/drives';
+	import {
+		ensureResolvers,
+		resolveRecipient,
+		searchRecipients,
+		type Recipient
+	} from '$lib/api/endpoints/recipients';
+	import type { Drive, DriveMember, User } from '$lib/api/types';
 	import Icon from '$lib/icons/Icon.svelte';
 	import Modal from '$lib/components/Modal.svelte';
+	import OwnerAvatarStack from '$lib/components/OwnerAvatarStack.svelte';
+	import UserVignette from '$lib/components/UserVignette.svelte';
 	import { t } from '$lib/i18n/index.svelte';
 	import { session } from '$lib/stores/session.svelte';
+	import { drives as drivesStore } from '$lib/stores/drives.svelte';
 	import { ui } from '$lib/stores/ui.svelte';
 	import { formatBytes } from '$lib/utils/format';
 
@@ -100,7 +114,7 @@
 		confirmState = null;
 	}
 
-	type Tab = 'dashboard' | 'users' | 'plugins' | 'oidc' | 'storage' | 'smtp';
+	type Tab = 'dashboard' | 'users' | 'drives' | 'plugins' | 'oidc' | 'storage' | 'smtp';
 	let tab = $state<Tab>('dashboard');
 
 	// Dashboard
@@ -833,6 +847,259 @@
 		}
 	}
 
+	// ── Drives (D3a admin create-shared-drive) ───────────────────────────────
+	let drivesList = $state<Drive[]>([]);
+	let drivesError = $state<string | null>(null);
+	let driveCreateOpen = $state(false);
+	let driveCreating = $state(false);
+	let driveCreateError = $state<string | null>(null);
+	let driveForm = $state({
+		name: '',
+		ownerQuery: '',
+		ownerPick: null as Recipient | null,
+		quotaValue: 0,
+		quotaUnit: (1024 ** 3) as number
+	});
+	let ownerSuggestions = $state<Recipient[]>([]);
+	let ownerSearching = $state(false);
+	let ownerSearchToken = 0;
+
+	// Members keyed by drive id. The admin Drives table renders an Owner
+	// avatar stack per row; we lazily fetch members for each drive in
+	// parallel after the drives listing comes back. Missing entries mean
+	// "still loading" — the stack treats undefined as no-owners-yet.
+	let driveMembers = $state<Record<string, DriveMember[]>>({});
+
+	async function loadDrivesTab() {
+		drivesError = null;
+		try {
+			// `/api/admin/drives` — system-wide view; an admin who creates
+			// a drive for another user has no `role_grants` row on it and
+			// wouldn't see it via the user-facing `/api/drives` listing.
+			drivesList = await listAllDrives();
+		} catch (e) {
+			drivesError = errorMessage(e);
+			return;
+		}
+		// Seed the contact + group caches so the avatar stack renders real
+		// labels (and stable initials/colours) instead of bare UUIDs.
+		void ensureResolvers();
+		// Fan out one members fetch per drive in parallel. A swallowed
+		// error per drive degrades gracefully — that row's stack shows
+		// "No owners" rather than blocking the whole page.
+		const nextMembers: Record<string, DriveMember[]> = {};
+		await Promise.all(
+			drivesList.map(async (d) => {
+				try {
+					nextMembers[d.id] = await listDriveMembersAdmin(d.id);
+				} catch {
+					nextMembers[d.id] = [];
+				}
+			})
+		);
+		driveMembers = nextMembers;
+	}
+
+	function driveKindLabel(d: Drive): string {
+		if (d.kind === 'shared') return t('admin.drive_kind_shared', 'Shared');
+		return d.default_for_user
+			? t('admin.drive_kind_personal_default', 'Personal (default)')
+			: t('admin.drive_kind_personal', 'Personal');
+	}
+
+	function openDriveCreate() {
+		driveForm = { name: '', ownerQuery: '', ownerPick: null, quotaValue: 0, quotaUnit: 1024 ** 3 };
+		ownerSuggestions = [];
+		driveCreateError = null;
+		driveCreateOpen = true;
+	}
+
+	// Search runs in the background; a monotonically-incrementing `token`
+	// guards against out-of-order results overwriting a newer query — the
+	// network races by query length and keystroke timing.
+	async function searchOwnerCandidates(q: string) {
+		driveForm.ownerPick = null;
+		const trimmed = q.trim();
+		if (!trimmed) {
+			ownerSuggestions = [];
+			return;
+		}
+		const token = ++ownerSearchToken;
+		ownerSearching = true;
+		try {
+			// `includeSelf` — admin creating a drive may legitimately want to
+			// own it themselves; the default share-modal "no self" rule
+			// doesn't apply in the admin context.
+			const results = await searchRecipients(trimmed, { includeSelf: true });
+			if (token !== ownerSearchToken) return; // a newer query is in flight
+			// Filter out the synthetic invite-by-email row — POST /api/drives
+			// refuses email subjects (drive Owner must be a real user or group).
+			ownerSuggestions = results.filter((r) => r.type === 'user' || r.type === 'group');
+		} finally {
+			if (token === ownerSearchToken) ownerSearching = false;
+		}
+	}
+
+	function pickOwner(r: Recipient) {
+		driveForm.ownerPick = r;
+		driveForm.ownerQuery = r.label;
+		ownerSuggestions = [];
+	}
+
+	// ── Manage-owners modal (D3a admin bypass) ──────────────────────────────
+	// State is null when closed; carries the drive being edited otherwise.
+	let manageOwnersDrive = $state<Drive | null>(null);
+	let manageOwnersError = $state<string | null>(null);
+	let manageOwnersBusy = $state(false);
+	// Independent owner-search state so the "manage owners" autocomplete
+	// doesn't fight with the create-drive form's autocomplete.
+	let manageOwnersQuery = $state('');
+	let manageOwnersSuggestions = $state<Recipient[]>([]);
+	let manageOwnersSearchToken = 0;
+	let manageOwnersSearching = $state(false);
+
+	function openManageOwners(d: Drive) {
+		manageOwnersDrive = d;
+		manageOwnersError = null;
+		manageOwnersQuery = '';
+		manageOwnersSuggestions = [];
+		// Members were already fetched on tab load; nothing else to do.
+	}
+
+	function closeManageOwners() {
+		manageOwnersDrive = null;
+		manageOwnersError = null;
+		manageOwnersQuery = '';
+		manageOwnersSuggestions = [];
+	}
+
+	async function searchManageOwnersCandidates(q: string) {
+		const trimmed = q.trim();
+		if (!trimmed) {
+			manageOwnersSuggestions = [];
+			return;
+		}
+		const token = ++manageOwnersSearchToken;
+		manageOwnersSearching = true;
+		try {
+			// Admin adding owners — allow self (the share-modal "no
+			// self" guard doesn't apply to drive-owner management).
+			const results = await searchRecipients(trimmed, { includeSelf: true });
+			if (token !== manageOwnersSearchToken) return;
+			// Filter out emails (POST admin/members refuses them) and any
+			// subject already an Owner of this drive (no point re-adding).
+			const currentOwnerIds = new Set(
+				(driveMembers[manageOwnersDrive?.id ?? ''] ?? [])
+					.filter((m) => m.role === 'owner')
+					.map((m) => `${m.subject.type}-${m.subject.id}`)
+			);
+			manageOwnersSuggestions = results.filter(
+				(r) =>
+					(r.type === 'user' || r.type === 'group') && !currentOwnerIds.has(`${r.type}-${r.id}`)
+			);
+		} finally {
+			if (token === manageOwnersSearchToken) manageOwnersSearching = false;
+		}
+	}
+
+	// Pessimistic refetch after every mutation — the membership list is
+	// small (a handful of owners) and the alternative (mutating local
+	// state) duplicates the server's role-resolution + last-owner logic.
+	async function reloadDriveMembers(driveId: string) {
+		try {
+			driveMembers = {
+				...driveMembers,
+				[driveId]: await listDriveMembersAdmin(driveId)
+			};
+		} catch (e) {
+			manageOwnersError = errorMessage(e);
+		}
+	}
+
+	async function addOwner(r: Recipient) {
+		if (!manageOwnersDrive || (r.type !== 'user' && r.type !== 'group')) return;
+		manageOwnersBusy = true;
+		manageOwnersError = null;
+		try {
+			await addDriveMemberAdmin(manageOwnersDrive.id, { type: r.type, id: r.id }, 'owner');
+			manageOwnersQuery = '';
+			manageOwnersSuggestions = [];
+			await reloadDriveMembers(manageOwnersDrive.id);
+		} catch (e) {
+			manageOwnersError = errorMessage(e);
+		} finally {
+			manageOwnersBusy = false;
+		}
+	}
+
+	async function removeOwner(m: DriveMember) {
+		if (!manageOwnersDrive) return;
+		const confirmMsg = t('admin.drive_owner_remove_confirm', 'Remove this owner from the drive?');
+		if (!(await showConfirm(confirmMsg))) return;
+		manageOwnersBusy = true;
+		manageOwnersError = null;
+		try {
+			await removeDriveMemberAdmin(manageOwnersDrive.id, {
+				type: m.subject.type,
+				id: m.subject.id
+			});
+			await reloadDriveMembers(manageOwnersDrive.id);
+		} catch (e) {
+			manageOwnersError = errorMessage(e);
+		} finally {
+			manageOwnersBusy = false;
+		}
+	}
+
+	// Re-derive the current owners list inside the modal so it reacts to
+	// `driveMembers` changes after add/remove.
+	const manageOwnersList = $derived(
+		manageOwnersDrive
+			? (driveMembers[manageOwnersDrive.id] ?? []).filter(
+					(m) => m.role === 'owner' && (m.subject.type === 'user' || m.subject.type === 'group')
+				)
+			: []
+	);
+
+	async function submitDriveCreate(e: SubmitEvent) {
+		e.preventDefault();
+		const name = driveForm.name.trim();
+		if (name.length === 0) {
+			driveCreateError = t('admin.drive_error_name_required', 'Drive name is required.');
+			return;
+		}
+		const owner = driveForm.ownerPick;
+		if (!owner || (owner.type !== 'user' && owner.type !== 'group')) {
+			driveCreateError = t(
+				'admin.drive_error_owner_required',
+				'Pick a user or group as the drive owner.'
+			);
+			return;
+		}
+		driveCreating = true;
+		driveCreateError = null;
+		try {
+			await createDrive({
+				kind: 'shared',
+				name,
+				owner: { type: owner.type, id: owner.id },
+				quota_bytes:
+					driveForm.quotaValue > 0 ? Math.round(driveForm.quotaValue * driveForm.quotaUnit) : null
+			});
+			driveCreateOpen = false;
+			await loadDrivesTab();
+			// The global drives store backs the sidebar picker; drop its cache
+			// so the new drive shows up for every consumer (picker, breadcrumb,
+			// session bootstrap) without a page reload.
+			drivesStore.invalidate();
+			ui.notify(t('admin.drive_created', 'Drive created.'), 'success');
+		} catch (err) {
+			driveCreateError = errorMessage(err);
+		} finally {
+			driveCreating = false;
+		}
+	}
+
 	async function togglePlugin(p: PluginInfo) {
 		try {
 			await setPluginEnabled(p.id, !p.enabled);
@@ -868,6 +1135,7 @@
 	let loaded = $state<Record<Tab, boolean>>({
 		dashboard: false,
 		users: false,
+		drives: false,
 		plugins: false,
 		oidc: false,
 		storage: false,
@@ -879,6 +1147,7 @@
 		loaded[tab] = true;
 		if (tab === 'dashboard') void loadDashboard();
 		else if (tab === 'users') void loadUsers();
+		else if (tab === 'drives') void loadDrivesTab();
 		else if (tab === 'plugins') void loadPlugins();
 		else if (tab === 'oidc') void loadOidc();
 		else if (tab === 'storage') {
@@ -931,6 +1200,15 @@
 		>
 			<Icon name="users" />
 			{t('admin.users', 'Users')}
+		</button>
+		<button
+			role="tab"
+			data-testid="admin-drives-tab"
+			aria-selected={tab === 'drives'}
+			onclick={() => (tab = 'drives')}
+		>
+			<Icon name="folder" />
+			{t('admin.drives', 'Drives')}
 		</button>
 		<button
 			role="tab"
@@ -1825,6 +2103,102 @@
 				>
 			</div>
 		{/if}
+	{:else if tab === 'drives'}
+		<div class="bar">
+			<button
+				class="btn btn--primary"
+				data-testid="admin-drives-create-btn"
+				onclick={openDriveCreate}
+			>
+				<Icon name="plus" />
+				{t('admin.create_drive', 'Create shared drive')}
+			</button>
+		</div>
+		{#if drivesError}
+			<p class="status status--error">{drivesError}</p>
+		{:else if drivesList.length === 0}
+			<p class="status">{t('admin.no_drives', 'No drives yet.')}</p>
+		{:else}
+			<table class="table">
+				<thead>
+					<tr>
+						<th>{t('admin.drive_name', 'Name')}</th>
+						<th>{t('admin.drive_kind', 'Kind')}</th>
+						<th>{t('admin.drive_owners', 'Owners')}</th>
+						<th>{t('admin.drive_usage', 'Usage')}</th>
+						<th>{t('admin.drive_created_at', 'Created')}</th>
+						<th></th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each drivesList as d (d.id)}
+						{@const pct =
+							d.quota_bytes && d.quota_bytes > 0
+								? Math.min(100, (d.used_bytes / d.quota_bytes) * 100)
+								: null}
+						<tr>
+							<td>
+								<div class="user-cell">
+									<strong>{d.name}</strong>
+									<span class="muted"><code>{d.id}</code></span>
+								</div>
+							</td>
+							<td>
+								<span class="badge badge--{d.kind === 'shared' ? 'admin' : 'user'}">
+									{driveKindLabel(d)}
+								</span>
+							</td>
+							<td>
+								{#if driveMembers[d.id]}
+									<OwnerAvatarStack members={driveMembers[d.id]} />
+								{:else}
+									<span class="muted">{t('common.loading', 'Loading…')}</span>
+								{/if}
+							</td>
+							<td>
+								<div class="quota-cell">
+									{#if pct !== null}
+										<div class="quota-bar">
+											<div
+												class="quota-fill"
+												class:quota-fill--warn={pct > 70}
+												class:quota-fill--danger={pct > 90}
+												style:width="{pct}%"
+											></div>
+										</div>
+									{/if}
+									<span class="muted">
+										{formatBytes(d.used_bytes)} / {d.quota_bytes && d.quota_bytes > 0
+											? formatBytes(d.quota_bytes)
+											: '∞'}
+									</span>
+								</div>
+							</td>
+							<td class="muted">{timeAgo(d.created_at)}</td>
+							<td>
+								<!-- Wrapper div carries the `actions` flex layout; the
+								     <td> stays a plain table cell so its baseline +
+								     bottom-border align with the rest of the row even on
+								     personal-drive rows where the wrapper is empty. -->
+								<div class="actions">
+									{#if d.kind === 'shared'}
+										<button
+											class="icon-btn"
+											data-testid={`admin-drive-manage-owners-${d.id}`}
+											title={t('admin.drive_manage_owners', 'Manage owners')}
+											aria-label={t('admin.drive_manage_owners', 'Manage owners')}
+											onclick={() => openManageOwners(d)}
+										>
+											<Icon name="users-cog" />
+										</button>
+									{/if}
+								</div>
+							</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		{/if}
 	{:else if !pluginsAvailable}
 		<p class="status">{t('admin.plugins_disabled', 'The plugin subsystem is disabled.')}</p>
 	{:else if pluginsError}
@@ -2009,6 +2383,221 @@
 			disabled={creating}
 		>
 			{creating ? t('admin.creating', 'Creating…') : t('common.create', 'Create')}
+		</button>
+	{/snippet}
+</Modal>
+
+<!-- Create-drive modal (D3a). Personal-drive creation is omitted because
+     the backend returns 501 for kind=personal today; see DrivePicker for
+     UI flow and drive_handler::create_drive for the wire contract. -->
+<Modal
+	open={driveCreateOpen}
+	title={t('admin.create_drive', 'Create shared drive')}
+	onclose={() => (driveCreateOpen = false)}
+>
+	<form
+		id="create-drive-form"
+		class="form"
+		data-testid="admin-create-drive-form"
+		onsubmit={submitDriveCreate}
+	>
+		<label>
+			<span>{t('admin.drive_name', 'Name')}</span>
+			<input
+				bind:value={driveForm.name}
+				data-testid="admin-create-drive-name-input"
+				required
+				placeholder={t('admin.drive_name_placeholder', 'e.g. Engineering')}
+			/>
+		</label>
+		<label class="drive-owner">
+			<span>{t('admin.drive_owner', 'Owner')}</span>
+			<input
+				type="text"
+				data-testid="admin-create-drive-owner-input"
+				bind:value={driveForm.ownerQuery}
+				oninput={(e) => searchOwnerCandidates(e.currentTarget.value)}
+				placeholder={t('admin.drive_owner_placeholder', 'Search a user or group…')}
+				autocomplete="off"
+				required
+			/>
+			{#if ownerSearching}
+				<span class="muted">{t('common.loading', 'Loading…')}</span>
+			{:else if ownerSuggestions.length > 0}
+				<ul class="owner-suggest" role="listbox">
+					{#each ownerSuggestions as r (`${r.type}-${r.id}`)}
+						<li>
+							<button
+								type="button"
+								class="owner-suggest__row"
+								data-testid={`admin-drive-owner-pick-${r.type}-${r.id}`}
+								onclick={() => pickOwner(r)}
+							>
+								<Icon name={r.type === 'group' ? 'users' : 'user'} />
+								<span class="owner-suggest__label">{r.label}</span>
+								{#if r.sublabel}
+									<span class="muted">{r.sublabel}</span>
+								{/if}
+							</button>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+			{#if driveForm.ownerPick}
+				<span class="muted owner-pick">
+					<Icon name={driveForm.ownerPick.type === 'group' ? 'users' : 'user'} />
+					{t('admin.drive_owner_picked', { name: driveForm.ownerPick.label }, 'Owner: {{name}}')}
+				</span>
+			{/if}
+			<span class="muted">
+				{t(
+					'admin.drive_owner_hint',
+					'Pick a user (sole Owner) or a group (every member becomes Owner via subject expansion).'
+				)}
+			</span>
+		</label>
+		<label>
+			<span>{t('admin.quota', 'Quota')}</span>
+			<div class="quota-input">
+				<input
+					type="number"
+					data-testid="admin-create-drive-quota-input"
+					min="0"
+					step="0.1"
+					bind:value={driveForm.quotaValue}
+				/>
+				<select bind:value={driveForm.quotaUnit} data-testid="admin-create-drive-quota-unit-select">
+					{#each QUOTA_UNITS as unit (unit.label)}
+						<option value={unit.value}>{unit.label}</option>
+					{/each}
+				</select>
+			</div>
+			<span class="muted">{t('admin.quota_unlimited_hint', '0 = unlimited')}</span>
+		</label>
+		{#if driveCreateError}<p class="status--error">{driveCreateError}</p>{/if}
+	</form>
+	{#snippet footer()}
+		<button
+			class="btn"
+			data-testid="admin-create-drive-cancel-btn"
+			onclick={() => (driveCreateOpen = false)}
+		>
+			{t('common.cancel', 'Cancel')}
+		</button>
+		<button
+			class="btn btn--primary"
+			type="submit"
+			form="create-drive-form"
+			data-testid="admin-create-drive-submit-btn"
+			disabled={driveCreating}
+		>
+			{driveCreating ? t('admin.creating', 'Creating…') : t('common.create', 'Create')}
+		</button>
+	{/snippet}
+</Modal>
+
+<!-- Manage-owners modal (D3a admin bypass — calls
+     /api/admin/drives/{id}/members POST/DELETE which skip the per-drive
+     `Manage` check). Last-owner protection still applies server-side. -->
+<Modal
+	open={manageOwnersDrive !== null}
+	title={manageOwnersDrive
+		? t(
+				'admin.drive_manage_owners_for',
+				{ name: manageOwnersDrive.name },
+				'Manage owners — {{name}}'
+			)
+		: t('admin.drive_manage_owners', 'Manage owners')}
+	onclose={closeManageOwners}
+>
+	{#if manageOwnersDrive}
+		<div class="form">
+			<div>
+				<label for="manage-owners-search">
+					<span>{t('admin.drive_add_owner', 'Add owner')}</span>
+				</label>
+				<input
+					id="manage-owners-search"
+					type="text"
+					data-testid="admin-manage-owners-search-input"
+					bind:value={manageOwnersQuery}
+					oninput={(e) => searchManageOwnersCandidates(e.currentTarget.value)}
+					placeholder={t('admin.drive_owner_placeholder', 'Search a user or group…')}
+					autocomplete="off"
+					disabled={manageOwnersBusy}
+				/>
+				{#if manageOwnersSearching}
+					<span class="muted">{t('common.loading', 'Loading…')}</span>
+				{:else if manageOwnersSuggestions.length > 0}
+					<ul class="owner-suggest" role="listbox">
+						{#each manageOwnersSuggestions as r (`${r.type}-${r.id}`)}
+							<li>
+								<button
+									type="button"
+									class="owner-suggest__row"
+									data-testid={`admin-manage-owners-pick-${r.type}-${r.id}`}
+									onclick={() => addOwner(r)}
+									disabled={manageOwnersBusy}
+								>
+									<Icon name={r.type === 'group' ? 'users' : 'user'} />
+									<span class="owner-suggest__label">{r.label}</span>
+									{#if r.sublabel}<span class="muted">{r.sublabel}</span>{/if}
+								</button>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+			</div>
+
+			<div>
+				<h3 class="owners-list__title">
+					{t('admin.drive_current_owners', 'Current owners')}
+					<span class="muted">({manageOwnersList.length})</span>
+				</h3>
+				{#if manageOwnersList.length === 0}
+					<p class="muted">{t('admin.drive_no_owners', 'No owners')}</p>
+				{:else}
+					<ul class="owners-list">
+						{#each manageOwnersList as m (`${m.subject.type}-${m.subject.id}`)}
+							<li class="owners-list__row">
+								{#if m.subject.type === 'user'}
+									<UserVignette userId={m.subject.id} />
+								{:else}
+									<!-- Groups don't resolve via /api/users/{id}; render an
+									     inline equivalent using the cached recipient label
+									     from the share-search resolver. -->
+									<span class="owners-list__group">
+										<span class="owners-list__group-icon"><Icon name="users" /></span>
+										<span class="owners-list__group-name">
+											{resolveRecipient('group', m.subject.id).label}
+										</span>
+									</span>
+								{/if}
+								<button
+									type="button"
+									class="icon-btn icon-btn--danger"
+									data-testid={`admin-manage-owners-remove-${m.subject.type}-${m.subject.id}`}
+									title={t('common.remove', 'Remove')}
+									aria-label={t('common.remove', 'Remove')}
+									onclick={() => removeOwner(m)}
+									disabled={manageOwnersBusy}
+								>
+									<Icon name="trash-alt" />
+								</button>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+			</div>
+
+			{#if manageOwnersError}
+				<p class="status--error">{manageOwnersError}</p>
+			{/if}
+		</div>
+	{/if}
+	{#snippet footer()}
+		<button class="btn" data-testid="admin-manage-owners-close-btn" onclick={closeManageOwners}>
+			{t('common.close', 'Close')}
 		</button>
 	{/snippet}
 </Modal>
@@ -2890,5 +3479,112 @@
 
 	.link-btn--danger {
 		color: var(--color-error-text);
+	}
+
+	/* Drive-owner autocomplete dropdown inside the create-drive modal. */
+	.drive-owner {
+		position: relative;
+	}
+
+	.owner-suggest {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+		background: var(--color-bg-surface);
+		max-height: 14rem;
+		overflow-y: auto;
+	}
+
+	.owner-suggest__row {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		width: 100%;
+		padding: var(--space-2) var(--space-3);
+		border: none;
+		background: none;
+		text-align: left;
+		font: inherit;
+		color: var(--color-text);
+		cursor: pointer;
+	}
+
+	.owner-suggest__row:hover {
+		background: var(--color-bg-muted);
+	}
+
+	.owner-suggest__label {
+		flex: 1;
+	}
+
+	.owner-pick {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-1);
+	}
+
+	/* Manage-owners modal — current-owners list with a remove affordance. */
+	.owners-list__title {
+		margin: var(--space-3) 0 var(--space-2);
+		font-size: 0.95rem;
+	}
+
+	.owners-list {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-1);
+	}
+
+	.owners-list__row {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		padding: var(--space-2);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+	}
+
+	.owners-list__id {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: 0.8125rem;
+	}
+
+	/* Inline group representation in the owners list — mirrors
+	   UserVignette's avatar+text shape so the rows line up visually
+	   even though the data sources differ. */
+	.owners-list__group {
+		display: flex;
+		flex: 1;
+		min-width: 0;
+		align-items: center;
+		gap: var(--space-2);
+	}
+
+	.owners-list__group-icon {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 32px;
+		height: 32px;
+		border-radius: 50%;
+		background: var(--color-bg-muted);
+		color: var(--color-text);
+		flex-shrink: 0;
+	}
+
+	.owners-list__group-name {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 </style>

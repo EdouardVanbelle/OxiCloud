@@ -19,6 +19,7 @@ use crate::application::ports::trash_ports::TrashUseCase;
 use crate::common::errors::{DomainError, ErrorKind, Result};
 use crate::domain::entities::file::File;
 use crate::domain::entities::trashed_item::{TrashedItem, TrashedItemType};
+use crate::domain::repositories::drive_repository::DriveRepository;
 use crate::domain::repositories::folder_repository::FolderRepository;
 use crate::domain::repositories::trash_repository::TrashRepository;
 use crate::domain::services::authorization::ResourceKind;
@@ -70,6 +71,11 @@ pub struct TrashService {
     /// Authz engine
     authz: Arc<PgAclEngine>,
 
+    /// Drive repository — D2b uses it to resolve "drives the caller can read"
+    /// so trash listings filter by drive membership instead of the legacy
+    /// per-user scope.
+    drive_repo: Arc<crate::infrastructure::repositories::pg::DrivePgRepository>,
+
     /// Number of days items should be kept in trash before automatic cleanup
     retention_days: u32,
 }
@@ -85,6 +91,7 @@ impl TrashService {
         dedup_service: Arc<DedupService>,
         content_cache: Option<Arc<FileContentCache>>,
         authz: Arc<PgAclEngine>,
+        drive_repo: Arc<crate::infrastructure::repositories::pg::DrivePgRepository>,
     ) -> Self {
         Self {
             trash_repository,
@@ -95,6 +102,7 @@ impl TrashService {
             file_deleted_hook: None,
             content_cache,
             authz,
+            drive_repo,
             retention_days,
         }
     }
@@ -366,10 +374,7 @@ impl TrashUseCase for TrashService {
 
         // Get the trash item
         info!("Retrieving trash item from repository: ID={}", trash_id);
-        let item_result = self
-            .trash_repository
-            .get_trash_item(&trash_uuid, &user_uuid)
-            .await;
+        let item_result = self.trash_repository.get_trash_item(&trash_uuid).await;
 
         match item_result {
             Ok(Some(item)) => {
@@ -379,6 +384,21 @@ impl TrashUseCase for TrashService {
                     item.item_type(),
                     item.original_id()
                 );
+
+                // D2b stage 3: gate the restore on Delete permission against
+                // the item's original resource. The drive precheck in
+                // `pg_acl_engine` resolves Owner-on-drive → Delete-permission,
+                // so a drive Owner can restore items they didn't originally
+                // trash (per `drive.md §12`). 404-on-deny via `authz.require`
+                // matches the lookup-NotFound shape.
+                let original = item.original_id();
+                let resource = match item.item_type() {
+                    TrashedItemType::File => Resource::File(original),
+                    TrashedItemType::Folder => Resource::Folder(original),
+                };
+                self.authz
+                    .require(Subject::User(user_id), Permission::Delete, resource)
+                    .await?;
 
                 // Restore based on type
                 match item.item_type() {
@@ -540,10 +560,7 @@ impl TrashUseCase for TrashService {
 
         // Get the trash item
         info!("Retrieving trash item from repository: ID={}", trash_id);
-        let item_result = self
-            .trash_repository
-            .get_trash_item(&trash_uuid, &user_uuid)
-            .await;
+        let item_result = self.trash_repository.get_trash_item(&trash_uuid).await;
 
         match item_result {
             Ok(Some(item)) => {
@@ -553,6 +570,19 @@ impl TrashUseCase for TrashService {
                     item.item_type(),
                     item.original_id()
                 );
+
+                // D2b stage 3: gate the permanent-delete on Delete permission
+                // against the item's original resource (mirrors `restore_item`
+                // above). Drive Owners can hard-delete shared-drive items
+                // they didn't trash.
+                let original = item.original_id();
+                let resource = match item.item_type() {
+                    TrashedItemType::File => Resource::File(original),
+                    TrashedItemType::Folder => Resource::Folder(original),
+                };
+                self.authz
+                    .require(Subject::User(user_id), Permission::Delete, resource)
+                    .await?;
 
                 // Permanently delete based on type
                 match item.item_type() {
@@ -688,6 +718,41 @@ impl TrashUseCase for TrashService {
     async fn empty_trash(&self, user_id: Uuid) -> Result<()> {
         info!("Emptying trash for user {}", user_id);
 
+        // D2b stage 3: resolve the set of drives the caller can permanently
+        // delete content in. "Empty trash" means "drop every trashed item
+        // I have Delete on" — Owner role's bundle includes Delete; Editor /
+        // Viewer / Contributor / Commenter do not. So this filter picks out
+        // the drives where the caller is effectively Owner (direct or via a
+        // group). Single-drive users: this resolves to just their personal
+        // drive, identical to the legacy `WHERE user_id = $1` scope.
+        let (subject_types, subject_ids) = self
+            .authz
+            .expand_subject_for_listing(Subject::User(user_id))
+            .await?;
+        let drives = self
+            .drive_repo
+            .list_for_subjects(&subject_types, &subject_ids)
+            .await
+            .map_err(|e| {
+                DomainError::internal_error(
+                    "Trash",
+                    format!("Failed to resolve accessible drives: {e:?}"),
+                )
+            })?;
+        let drive_ids: Vec<Uuid> = drives
+            .iter()
+            .filter(|d| {
+                d.caller_role
+                    .is_some_and(|r| r.expand().contains(&Permission::Delete))
+            })
+            .map(|d| d.drive.id)
+            .collect();
+
+        if drive_ids.is_empty() {
+            info!("empty_trash: caller has Delete on no drive — nothing to do");
+            return Ok(());
+        }
+
         // Collect ALL trashed file IDs BEFORE bulk-deleting so hooks (thumbnail
         // cleanup, etc.) can run afterward.  We use get_all_trashed_file_ids (not
         // get_trash_items) because the trash_items view excludes files inside a
@@ -696,7 +761,7 @@ impl TrashUseCase for TrashService {
         let trashed_file_ids: Vec<String> = if self.file_deleted_hook.is_some() {
             match self
                 .trash_repository
-                .get_all_trashed_file_ids(&user_id)
+                .get_all_trashed_file_ids(&drive_ids)
                 .await
             {
                 Ok(ids) => ids,
@@ -709,16 +774,14 @@ impl TrashUseCase for TrashService {
             Vec::new()
         };
 
-        // clear_trash() performs bulk SQL DELETEs in 2 queries:
-        //   1. DELETE FROM storage.files  WHERE user_id = $1 AND is_trashed = TRUE
-        //   2. DELETE FROM storage.folders WHERE user_id = $1 AND is_trashed = TRUE
+        // clear_trash() performs bulk SQL DELETEs in 2 queries (post D2b stage 3):
+        //   1. DELETE FROM storage.files  WHERE drive_id = ANY($1) AND is_trashed = TRUE
+        //   2. DELETE FROM storage.folders WHERE drive_id = ANY($1) AND is_trashed = TRUE
         //
         // Folder deletion cascades (FK ON DELETE CASCADE) to child folders and
         // their files. The PG trigger `trg_files_decrement_blob_ref` automatically
         // decrements blob ref_counts for every deleted file row.
-        //
-        // Finally it clears the trash_items index for the user.
-        self.trash_repository.clear_trash(&user_id).await?;
+        self.trash_repository.clear_trash(&drive_ids).await?;
 
         // The PG trigger decremented ref_counts but cannot delete disk files or
         // thumbnails.  Run garbage_collect() to remove any blobs whose ref_count
@@ -766,11 +829,32 @@ impl TrashService {
         kinds: Option<&[ResourceKind]>,
         reverse: bool,
     ) -> Result<(Vec<TrashResourceItemDto>, Option<String>)> {
+        // D2b: scope by drives the caller can read (resolved through
+        // role_grants on resource_type='drive', including group-mediated
+        // grants). Empty set → empty page without a SQL round-trip.
+        let (subject_types, subject_ids) = self
+            .authz
+            .expand_subject_for_listing(Subject::User(user_id))
+            .await?;
+        let drive_ids: Vec<Uuid> = match self
+            .drive_repo
+            .list_for_subjects(&subject_types, &subject_ids)
+            .await
+        {
+            Ok(drives) => drives.into_iter().map(|d| d.drive.id).collect(),
+            Err(e) => {
+                return Err(DomainError::internal_error(
+                    "Trash",
+                    format!("Failed to resolve accessible drives: {e:?}"),
+                ));
+            }
+        };
+
         // Fetch one extra row to detect whether a next page exists.
         let mut rows = self
             .trash_repository
             .list_resources_paged(
-                user_id,
+                &drive_ids,
                 limit + 1,
                 cursor.as_ref(),
                 order_by,
@@ -823,10 +907,10 @@ fn row_to_item_dto(row: TrashResourceRow) -> TrashResourceItemDto {
             path,
             parent_id: row.parent_id.map(|u| u.to_string()),
             owner_id: Some(row.owner_id.to_string()),
-            // Trash listing — drive_id is informational and the trash
-            // row doesn't currently SELECT it. Path-based lookups
-            // never enter this code path.
-            drive_id: uuid::Uuid::nil(),
+            // D2b: the trash listing query now SELECTs `drive_id` (the
+            // unified view exposes it). Surfaced so per-drive grouping
+            // in the `/trash` UI doesn't need an extra lookup per row.
+            drive_id: row.drive_id,
             created_at: row.resource_created_at.timestamp() as u64,
             modified_at: row.modified_at.timestamp() as u64,
             is_root: false,
@@ -841,6 +925,7 @@ fn row_to_item_dto(row: TrashResourceRow) -> TrashResourceItemDto {
             resource_type: ResourceTypeDto::Folder,
             trashed_at: row.trashed_at,
             deletion_date: row.deletion_date,
+            drive_id: row.drive_id,
             resource: ResourceContentDto::Folder(dto),
         }
     } else {
@@ -884,6 +969,7 @@ fn row_to_item_dto(row: TrashResourceRow) -> TrashResourceItemDto {
             resource_type: ResourceTypeDto::File,
             trashed_at: row.trashed_at,
             deletion_date: row.deletion_date,
+            drive_id: row.drive_id,
             resource: ResourceContentDto::File(dto),
         }
     }

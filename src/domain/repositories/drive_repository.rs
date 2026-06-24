@@ -51,6 +51,17 @@ pub struct DriveWithRootName {
     /// The drive's display name. Sourced from `storage.folders.name`
     /// of the root folder via JOIN at read time.
     pub root_folder_name: String,
+    /// Highest role the calling user holds on this drive (direct OR
+    /// group-mediated). Populated by `list_for_subjects` (which already
+    /// JOINs `role_grants` for accessibility, so the role is in scope at
+    /// query time). `None` for repo methods called without a caller
+    /// context (`get_by_id`, `get_by_ids`, `find_default_for_user`,
+    /// `create_personal_drive_atomic`) — the DTO layer omits the field
+    /// via `#[serde(skip_serializing_if = "Option::is_none")]`.
+    ///
+    /// See [[project-caller-role-on-file-folder-dto]] for the pattern
+    /// extension to FileDto/FolderDto with a perf warning.
+    pub caller_role: Option<crate::domain::services::authorization::Role>,
 }
 
 #[async_trait::async_trait]
@@ -74,9 +85,49 @@ pub trait DriveRepository: Send + Sync + 'static {
         quota_bytes: Option<i64>,
     ) -> Result<DriveWithRootName, DriveRepositoryError>;
 
+    /// Atomically create a **shared** drive together with its root folder
+    /// and the initial Owner-role grant. Mirrors
+    /// `create_personal_drive_atomic` but with three differences:
+    ///   - `kind='shared'`, `default_for_user=NULL`
+    ///   - root folder name is caller-supplied (validated upstream)
+    ///   - Owner role_grant subject is caller-supplied — either a
+    ///     single `User` (becomes the sole drive Owner) or a `Group`
+    ///     (the group's transitive user members all gain the Owner
+    ///     role via subject expansion). Token subjects are refused at
+    ///     the service edge.
+    ///
+    /// `granted_by` is recorded on the role_grant row + on the root
+    /// folder's `created_by` / `updated_by` columns for audit
+    /// traceability — the OxiCloud admin who provisioned the drive.
+    ///
+    /// **AuthZ contract**: this method performs no authorization. The
+    /// service layer MUST verify the caller has the OxiCloud `admin`
+    /// system role (D3a). If `owner_subject` is `Group`, the service
+    /// MUST also have verified the group has ≥1 user member —
+    /// otherwise the drive is created with no effective Owner-user
+    /// and would breach the "drive must always have ≥1 effective
+    /// Owner" invariant from day one.
+    async fn create_shared_drive_atomic(
+        &self,
+        name: &str,
+        owner_subject: crate::domain::services::authorization::Subject,
+        quota_bytes: Option<i64>,
+        granted_by: Uuid,
+    ) -> Result<DriveWithRootName, DriveRepositoryError>;
+
     /// Fetch a drive by id together with its display name. `NotFound`
     /// when no row matches.
     async fn get_by_id(&self, id: Uuid) -> Result<DriveWithRootName, DriveRepositoryError>;
+
+    /// Batch fetch — returns one row per existing id. Missing ids are
+    /// silently dropped (matches the `get_files_by_ids` / `get_folders_by_ids`
+    /// shape used by `list_shared_with_me`). Caller-side `HashMap<Uuid, _>`
+    /// lookup gives `Option<Drive>` semantics for stale grants whose drive
+    /// was deleted between listing and resolution.
+    async fn get_by_ids(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<Vec<DriveWithRootName>, DriveRepositoryError>;
 
     /// Return the caller's default personal drive paired with its
     /// display name, or `NotFound` if they don't have one (e.g.
@@ -125,6 +176,21 @@ pub trait DriveRepository: Send + Sync + 'static {
         subject_types: &[&str],
         subject_ids: &[Uuid],
     ) -> Result<Vec<DriveWithRootName>, DriveRepositoryError>;
+
+    /// List every drive on the system, regardless of caller membership.
+    ///
+    /// Used by the admin panel's `GET /api/admin/drives`. Distinct from
+    /// `list_for_subjects` (which filters by `role_grants`) because an
+    /// admin who creates a shared drive for someone else has no grant
+    /// on it — but still needs to see, audit, and manage it. The HTTP
+    /// gate (admin-only middleware) is what makes the unrestricted
+    /// listing safe; no role-based filtering happens here.
+    ///
+    /// Returns rows ordered by display name. `caller_role` is left
+    /// unset on the returned `DriveWithRootName` — the admin is not
+    /// necessarily a member, so the per-drive role would be misleading
+    /// here.
+    async fn list_all(&self) -> Result<Vec<DriveWithRootName>, DriveRepositoryError>;
 }
 
 /// Convenience: convert the canonical kind discriminator from its SQL

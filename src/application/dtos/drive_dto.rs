@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::application::dtos::grant_dto::RoleDto;
 use crate::domain::entities::drive::DriveKind;
 use crate::domain::repositories::drive_repository::DriveWithRootName;
 
@@ -62,6 +63,24 @@ pub struct DriveDto {
     pub policies: serde_json::Value,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+
+    /// Highest role the **calling** user holds on this drive (direct OR
+    /// group-mediated). Populated by `GET /api/drives` and the drive
+    /// grants in `/api/grants/incoming/resources`. Omitted (`None`) in
+    /// contexts where the caller isn't naturally a member — e.g. the
+    /// outgoing-grants listing where the caller is the granter and may
+    /// not have a current role on the drive themselves.
+    ///
+    /// **UI gating**:
+    /// - `Some(Owner)` → mutation controls (add/edit/remove members, change policies, delete drive)
+    /// - `Some(Editor/Contributor/Commenter)` → mutate drive contents, no membership UI
+    /// - `Some(Viewer)` → read-only
+    /// - `None` → show neither member list nor mutation controls
+    ///
+    /// See `project_caller_role_on_file_folder_dto` memory for the
+    /// pattern extension to FileDto / FolderDto (deferred, perf-sensitive).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller_role: Option<RoleDto>,
 }
 
 impl From<DriveWithRootName> for DriveDto {
@@ -77,6 +96,7 @@ impl From<DriveWithRootName> for DriveDto {
             policies: d.drive.policies,
             created_at: d.drive.created_at,
             updated_at: d.drive.updated_at,
+            caller_role: d.caller_role.map(RoleDto::from),
         }
     }
 }

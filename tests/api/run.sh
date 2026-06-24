@@ -152,6 +152,7 @@ hurl --variables-file "$API_DIR/test.env" --file-root "$REPO_ROOT/tests" --test 
   "$API_DIR/groups_effective_members.hurl" \
   "$API_DIR/grants_nested_groups.hurl" \
   "$API_DIR/drives_foundation.hurl" \
+  "$API_DIR/drives_membership.hurl" \
   "$API_DIR/external_users.hurl" \
   "$API_DIR/search_basic.hurl" \
   "$API_DIR/nc_second_user_setup.hurl" \

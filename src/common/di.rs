@@ -768,6 +768,7 @@ impl AppServiceFactory {
         repos: &RepositoryServices,
         core: &CoreServices,
         authz: &Arc<PgAclEngine>,
+        drive_repo: &Arc<crate::infrastructure::repositories::pg::DrivePgRepository>,
     ) -> Option<Arc<TrashService>> {
         if !self.config.features.enable_trash {
             tracing::info!("Trash service is disabled in configuration");
@@ -787,6 +788,7 @@ impl AppServiceFactory {
                 core.dedup_service.clone(),
                 Some(core.file_content_cache.clone()),
                 authz.clone(),
+                drive_repo.clone(),
             )
             .with_file_deleted_hook(core.file_lifecycle.clone()),
         );
@@ -1137,7 +1139,7 @@ impl AppServiceFactory {
 
         // 3b. Trash service (needed before application services)
         let trash_service = self
-            .create_trash_service(&repos, &core, &authorization)
+            .create_trash_service(&repos, &core, &authorization, &drive_repo)
             .await;
 
         // 3c. Storage usage / quota service (needed by the instant-upload
@@ -1467,8 +1469,15 @@ impl AppServiceFactory {
             path_resolver: None,
             webdav_lock_store:
                 crate::infrastructure::services::webdav_lock_service::create_webdav_lock_store(),
-            authorization,
+            authorization: authorization.clone(),
             drive_repo: drive_repo.clone(),
+            drive_management_service: Arc::new(
+                crate::application::services::drive_management_service::DriveManagementService::new(
+                    drive_repo.clone(),
+                    authorization.clone(),
+                    subject_group_repo.clone(),
+                ),
+            ),
             subject_group_service: Some(Arc::new(
                 crate::application::services::subject_group_service::SubjectGroupService::new(
                     subject_group_repo.clone(),
@@ -1478,6 +1487,7 @@ impl AppServiceFactory {
                             pool.clone(),
                         ),
                     ),
+                    authorization.clone(),
                 ),
             )),
             email_sender: None,                   // populated below
@@ -1935,6 +1945,13 @@ pub struct AppState {
     /// resolved through `role_grants` not a separate `drive_members`
     /// table (see `docs/plan/drive.md` §3).
     pub drive_repo: Arc<crate::infrastructure::repositories::pg::DrivePgRepository>,
+    /// D2 — drive membership management service. Translates the membership
+    /// API (`POST/PATCH/DELETE /api/drives/{id}/members`) into role-grant
+    /// writes on `resource_type='drive'`, with the personal-drive guard
+    /// and shared-drive last-owner protection layered in.
+    pub drive_management_service: Arc<
+        crate::application::services::drive_management_service::DriveManagementService,
+    >,
     /// ReBAC subject-group management (CRUD + membership). `None` when the
     /// auth subsystem is not configured.
     pub subject_group_service:

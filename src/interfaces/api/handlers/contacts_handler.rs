@@ -127,6 +127,13 @@ pub struct AddMemberRequest {
 pub struct ListQuery {
     limit: Option<i64>,
     offset: Option<i64>,
+    /// System address book only — when `true`, includes the calling user
+    /// in the returned contacts. Default `false` matches the share-modal
+    /// "you can't share with yourself" semantics; the admin drive-owner
+    /// surface flips it on so an admin can add themselves as Owner.
+    /// Ignored for non-system books.
+    #[serde(default)]
+    include_self: bool,
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -491,9 +498,10 @@ pub async fn list_contacts(
             .await
         {
             Ok(users) => {
+                let include_self = params.include_self;
                 let contacts: Vec<ContactDto> = users
                     .into_iter()
-                    .filter(|u| u.id != caller_id)
+                    .filter(|u| include_self || u.id != caller_id)
                     .map(user_to_contact)
                     .collect();
                 (StatusCode::OK, Json(contacts)).into_response()

@@ -203,10 +203,7 @@ where
         let trash_uuid = Uuid::parse_str(trash_id)
             .map_err(|e| DomainError::validation_error(format!("Invalid trash ID: {}", e)))?;
 
-        let item = self
-            .trash_repository
-            .get_trash_item(&trash_uuid, &user_id)
-            .await?;
+        let item = self.trash_repository.get_trash_item(&trash_uuid).await?;
         match item {
             Some(item) => {
                 match item.item_type() {
@@ -265,10 +262,7 @@ where
         let trash_uuid = Uuid::parse_str(trash_id)
             .map_err(|e| DomainError::validation_error(format!("Invalid trash ID: {}", e)))?;
 
-        let item = self
-            .trash_repository
-            .get_trash_item(&trash_uuid, &user_id)
-            .await?;
+        let item = self.trash_repository.get_trash_item(&trash_uuid).await?;
         match item {
             Some(item) => {
                 match item.item_type() {
@@ -319,7 +313,11 @@ where
     }
 
     async fn empty_trash(&self, user_id: Uuid) -> Result<()> {
-        self.trash_repository.clear_trash(&user_id).await
+        // Test mock — treats `user_id` as a stand-in for the single accessible
+        // drive (the mock storage is single-user / single-drive). The
+        // production `TrashService::empty_trash` resolves the real drive set
+        // via `drive_repo.list_for_subjects` + role-bundle filter.
+        self.trash_repository.clear_trash(&[user_id]).await
     }
 }
 
@@ -364,13 +362,11 @@ impl TrashRepository for MockTrashRepository {
         Ok(user_items)
     }
 
-    async fn get_trash_item(&self, id: &Uuid, user_id: &Uuid) -> Result<Option<TrashedItem>> {
+    async fn get_trash_item(&self, id: &Uuid) -> Result<Option<TrashedItem>> {
+        // Mock mirrors the production repo's no-filter lookup — the
+        // user-scoped check has moved into the service's `authz.require`.
         let items = self.trash_items.lock().unwrap();
-        let item = items
-            .get(id)
-            .filter(|item| item.user_id() == *user_id)
-            .cloned();
-        Ok(item)
+        Ok(items.get(id).cloned())
     }
 
     async fn restore_from_trash(&self, id: &Uuid, user_id: &Uuid) -> Result<()> {
@@ -393,16 +389,19 @@ impl TrashRepository for MockTrashRepository {
         Ok(())
     }
 
-    async fn clear_trash(&self, user_id: &Uuid) -> Result<()> {
+    async fn clear_trash(&self, drive_ids: &[Uuid]) -> Result<()> {
+        // Test mock: the single-user/single-drive mock uses `user_id` as
+        // the drive proxy (see `empty_trash` in the service mock). Filter
+        // trash items whose owner is in the passed-in set.
         let mut items = self.trash_items.lock().unwrap();
-        items.retain(|_, item| item.user_id() != *user_id);
+        items.retain(|_, item| !drive_ids.contains(&item.user_id()));
         // Simulate PG CASCADE: clear trashed file/folder storage too
         self.trashed_files.lock().unwrap().clear();
         self.trashed_folders.lock().unwrap().clear();
         Ok(())
     }
 
-    async fn get_all_trashed_file_ids(&self, _user_id: &Uuid) -> Result<Vec<String>> {
+    async fn get_all_trashed_file_ids(&self, _drive_ids: &[Uuid]) -> Result<Vec<String>> {
         let files = self.trashed_files.lock().unwrap();
         Ok(files.keys().cloned().collect())
     }

@@ -37,6 +37,13 @@ pub struct SubjectGroupService {
     /// make it not dyn-compatible (matches the convention used by other
     /// services in this layer).
     user_storage: Arc<UserPgRepository>,
+    /// Used by `add_member` / `remove_member` to drop stale
+    /// `user_groups_cache` entries for affected users so newly-added
+    /// (or newly-removed) group memberships surface in the next
+    /// `expand_subject_for_listing` call instead of waiting out the
+    /// 30 s TTL. Without this, fresh group-mediated drive grants
+    /// don't appear in `/api/drives` for up to 30 s after `add_member`.
+    engine: Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine>,
 }
 
 impl SubjectGroupService {
@@ -44,11 +51,29 @@ impl SubjectGroupService {
         repo: Arc<SubjectGroupPgRepository>,
         pool: Arc<PgPool>,
         user_storage: Arc<UserPgRepository>,
+        engine: Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine>,
     ) -> Self {
         Self {
             repo,
             pool,
             user_storage,
+            engine,
+        }
+    }
+
+    /// Returns the user IDs whose `user_groups_cache` entries need to
+    /// drop after a membership change on `member`. For `User` members
+    /// it's just that user; for nested `Group` members, every
+    /// transitive user under that child group inherits/loses the
+    /// parent-group ancestor, so all of them need invalidation.
+    async fn invalidation_targets(&self, member: GroupMember) -> Result<Vec<Uuid>, DomainError> {
+        match member {
+            GroupMember::User(uid) => Ok(vec![uid]),
+            GroupMember::Group(child_id) => self
+                .repo
+                .list_transitive_users(child_id)
+                .await
+                .map_err(map_repo_err),
         }
     }
 
@@ -331,6 +356,15 @@ impl SubjectGroupService {
                 map_repo_err(e)
             })?;
 
+        // Drop stale cached subject expansions for every user who just
+        // inherited the new group as a transitive ancestor — otherwise
+        // group-mediated grants (e.g. shared-drive Owner via this
+        // group) wouldn't surface in the next `expand_subject_for_listing`
+        // call for up to 30 s.
+        for uid in self.invalidation_targets(member).await? {
+            self.engine.invalidate_user_groups_cache(uid).await;
+        }
+
         tracing::info!(
             target: "audit",
             event = "group.member_added",
@@ -356,10 +390,79 @@ impl SubjectGroupService {
             ));
         }
 
+        // Self-defense (D3a follow-up): a group can never drop to 0
+        // transitive users once seeded. Without this, an admin could
+        // empty a group that's the Owner of a shared drive, leaving the
+        // drive with no effective Owner (orphan-owned). Per Ed's
+        // conservative-by-default stance: enforce the invariant
+        // globally — not just for drive-owning groups — so anything
+        // else that grants groups semantic power (delegated permissions,
+        // mention targets, ...) is automatically protected.
+        //
+        // Pre-check is conservative: it computes the transitive user
+        // set BEFORE the remove and refuses when the removal would
+        // collapse it to 0. The edge case "user reachable via a nested
+        // group" is handled by `list_transitive_users` itself — if the
+        // user is still reachable via another path after this remove,
+        // they stay in the set on the post-state, so the check would
+        // pass on the next remove instead.
+        let users_before = self
+            .repo
+            .list_transitive_users(group_id)
+            .await
+            .map_err(map_repo_err)?;
+        if !users_before.is_empty() {
+            let would_be_empty = match member {
+                GroupMember::User(uid) => users_before.len() == 1 && users_before.contains(&uid),
+                GroupMember::Group(child_id) => {
+                    // For child-group removal: would this drop the
+                    // parent's transitive user set to 0? Look up the
+                    // child's transitive users — if every user in the
+                    // parent's set comes through the child, removing the
+                    // child empties the parent.
+                    let child_users = self
+                        .repo
+                        .list_transitive_users(child_id)
+                        .await
+                        .map_err(map_repo_err)?;
+                    !child_users.is_empty() && users_before.iter().all(|u| child_users.contains(u))
+                }
+            };
+            if would_be_empty {
+                tracing::info!(
+                    target: "audit",
+                    event = "group.member_removed_rejected",
+                    reason = "would_empty_seeded_group",
+                    group_id = %group_id,
+                    member = ?member,
+                    by = %caller_id,
+                    "👮🏻‍♂️ refused last-user removal from group {group_id} \
+                     (groups must never drop to 0 transitive users once seeded — \
+                     a drive-owning group going empty would orphan the drive)",
+                );
+                return Err(DomainError::new(
+                    ErrorKind::InvalidInput,
+                    "SubjectGroup",
+                    "A group cannot have less than 1 user once seeded. \
+                     Add another user before removing this one."
+                        .to_string(),
+                ));
+            }
+        }
+
         self.repo
             .remove_member(group_id, member)
             .await
             .map_err(map_repo_err)?;
+
+        // Symmetric to add_member: drop the cache for users whose
+        // expanded subject set just lost the parent group as an
+        // ancestor. Without this, a removed-from-group user keeps
+        // appearing as a transitive member in `expand_subject_for_listing`
+        // for up to 30 s, surfacing grants they no longer have.
+        for uid in self.invalidation_targets(member).await? {
+            self.engine.invalidate_user_groups_cache(uid).await;
+        }
 
         tracing::info!(
             target: "audit",
@@ -460,7 +563,15 @@ mod integration_tests {
         let pool = Arc::new(pool);
         let repo = Arc::new(SubjectGroupPgRepository::new(pool.clone()));
         let user_storage = Arc::new(UserPgRepository::new(pool.clone()));
-        SubjectGroupService::new(repo, pool, user_storage)
+        // The engine is wired so `add_member` / `remove_member` can invalidate
+        // their stale `user_groups_cache` entries (the production path).
+        // A stub engine is enough — these tests never trigger an authz SQL
+        // round-trip, only the in-memory cache invalidation calls. The stub's
+        // lazy invalid pool would panic if reached, surfacing any drift if a
+        // future test starts exercising real authz lookups.
+        let engine =
+            Arc::new(crate::infrastructure::services::pg_acl_engine::PgAclEngine::new_stub());
+        SubjectGroupService::new(repo, pool, user_storage, engine)
     }
 
     async fn first_admin(pool: &sqlx::PgPool) -> Uuid {

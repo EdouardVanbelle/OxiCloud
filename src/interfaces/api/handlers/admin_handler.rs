@@ -9,6 +9,8 @@ use axum::{
     routing::{delete, get, post, put},
 };
 
+use crate::application::dtos::drive_dto::DriveDto;
+use crate::application::dtos::grant_dto::{GrantDto, RoleDto, SubjectDto, SubjectTypeDto};
 use crate::application::dtos::plugin_dto::{
     PluginInfoDto, PluginLogEntryDto, PluginLogPageDto, PluginLogQueryDto, PluginRetentionDto,
     SetEnabledDto,
@@ -19,8 +21,11 @@ use crate::application::dtos::settings_dto::{
     SmtpTestResultDto, StartMigrationDto, TestOidcConnectionDto, TestStorageConnectionDto,
     UpdateUserActiveDto, UpdateUserQuotaDto, UpdateUserRoleDto, VerifyMigrationDto,
 };
+use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::plugin_ports::{LogQuery, PluginManagementPort, PluginMgmtError};
 use crate::common::di::AppState;
+use crate::domain::repositories::drive_repository::DriveRepository;
+use crate::domain::services::authorization::{Resource, Subject};
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::admin::require_admin;
 use std::sync::Arc;
@@ -90,6 +95,17 @@ pub fn admin_routes() -> Router<Arc<AppState>> {
         // when `OXICLOUD_SMTP_MOCK` is off, so production deployments
         // can route the path freely without leaking inboxes.
         .route("/smtp/test/captured", get(get_captured_email))
+        // Drives — admin-wide view (distinct from `/api/drives` which
+        // is filtered to the caller's role grants).
+        .route("/drives", get(list_all_drives))
+        .route(
+            "/drives/{id}/members",
+            get(list_drive_members_admin).post(add_drive_member_admin),
+        )
+        .route(
+            "/drives/{id}/members/{kind}/{sid}",
+            axum::routing::patch(update_drive_member_admin).delete(remove_drive_member_admin),
+        )
 }
 
 /// Validate JWT and require admin role. Returns (user_id, role).
@@ -1705,4 +1721,239 @@ pub async fn set_plugin_retention(
     );
 
     Ok((StatusCode::OK, Json(dto)))
+}
+
+/// GET /api/admin/drives — list every drive on the system, admin-only.
+///
+/// Distinct from `GET /api/drives`, which is the caller's own listing
+/// filtered through `role_grants`. An admin who creates a shared drive
+/// for someone else has no grant on it — but the admin panel still
+/// needs to see the drive (to audit, to manage, to delete). The admin
+/// guard at the handler edge is the access control; no role filtering
+/// happens in the repo (see `drive_repository::list_all`).
+///
+/// Returns rows ordered by display name. `caller_role` is omitted —
+/// the admin is not necessarily a drive member, so the field would be
+/// misleading here.
+#[utoipa::path(
+    get,
+    path = "/api/admin/drives",
+    responses(
+        (status = 200, description = "Every drive on the system", body = Vec<DriveDto>),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin required"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin"
+)]
+pub async fn list_all_drives(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AppError> {
+    admin_guard(&state, &headers).await?;
+    let drives = state
+        .drive_repo
+        .list_all()
+        .await
+        .map_err(|e| AppError::internal_error(format!("Failed to list drives: {e}")))?;
+    let dtos: Vec<DriveDto> = drives.into_iter().map(DriveDto::from).collect();
+    Ok((StatusCode::OK, Json(dtos)))
+}
+
+/// GET /api/admin/drives/{id}/members — list every role grant on a drive,
+/// admin-only.
+///
+/// Distinct from `GET /api/drives/{id}/members` which goes through
+/// `DriveManagementService::list_members` and requires `Permission::Read`
+/// on the drive. The admin who created the drive for someone else has
+/// no role on it, so the user-facing endpoint would 404 for them.
+///
+/// This endpoint reuses the engine's `list_grants_on_resource` directly
+/// — same query, same shape, just gated by the admin middleware instead
+/// of by `authz.require`. Returns the same `Vec<GrantDto>` so the
+/// frontend renders it through the existing grant types.
+#[utoipa::path(
+    get,
+    path = "/api/admin/drives/{id}/members",
+    params(("id" = Uuid, Path, description = "Drive UUID")),
+    responses(
+        (status = 200, description = "Role grants on the drive", body = Vec<GrantDto>),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin required"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin"
+)]
+pub async fn list_drive_members_admin(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(drive_id): axum::extract::Path<Uuid>,
+) -> Result<impl IntoResponse, AppError> {
+    admin_guard(&state, &headers).await?;
+    let grants = state
+        .authorization
+        .list_grants_on_resource(Resource::Drive(drive_id))
+        .await
+        .map_err(AppError::from)?;
+    let dtos: Vec<GrantDto> = grants.into_iter().map(GrantDto::from).collect();
+    Ok((StatusCode::OK, Json(dtos)))
+}
+
+/// Body for `POST /api/admin/drives/{id}/members` and
+/// `PATCH /api/admin/drives/{id}/members/{kind}/{sid}` — same wire shape
+/// as the user-facing endpoints, kept here so this handler doesn't pull
+/// in the regular drive-handler module's DTOs (which would create a
+/// circular feel between admin and user-facing surfaces).
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct AdminAddDriveMemberDto {
+    pub subject: SubjectDto,
+    pub role: RoleDto,
+    #[serde(default)]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct AdminUpdateDriveMemberDto {
+    pub role: RoleDto,
+    #[serde(default)]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+fn admin_parse_subject(kind: SubjectTypeDto, id: Uuid) -> Subject {
+    match kind {
+        SubjectTypeDto::User => Subject::User(id),
+        SubjectTypeDto::Group => Subject::Group(id),
+        SubjectTypeDto::Token => Subject::Token(id),
+    }
+}
+
+/// POST /api/admin/drives/{id}/members — add or refresh a member's role
+/// without holding `Manage` on the drive. Admin-only; bypasses the
+/// per-drive authz check via the `caller_is_admin = true` argument on
+/// `DriveManagementService::set_member_role`. Personal-drive guard and
+/// last-owner protection still apply.
+#[utoipa::path(
+    post,
+    path = "/api/admin/drives/{id}/members",
+    params(("id" = Uuid, Path, description = "Drive UUID")),
+    request_body = AdminAddDriveMemberDto,
+    responses(
+        (status = 201, description = "Member added", body = GrantDto),
+        (status = 400, description = "Validation error (e.g. last-owner constraint)"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin required"),
+        (status = 405, description = "Personal drive — membership is immutable"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin"
+)]
+pub async fn add_drive_member_admin(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(drive_id): axum::extract::Path<Uuid>,
+    Json(dto): Json<AdminAddDriveMemberDto>,
+) -> Result<impl IntoResponse, AppError> {
+    let (admin_id, _) = admin_guard(&state, &headers).await?;
+    let subject = admin_parse_subject(dto.subject.kind, dto.subject.id);
+    let grant = state
+        .drive_management_service
+        .set_member_role(
+            admin_id,
+            true,
+            drive_id,
+            subject,
+            dto.role.into(),
+            dto.expires_at,
+        )
+        .await
+        .map_err(AppError::from)?;
+    Ok((StatusCode::CREATED, Json(GrantDto::from(grant))))
+}
+
+/// PATCH /api/admin/drives/{id}/members/{kind}/{sid} — change a member's
+/// role / expiry as an admin. Same admin-bypass shape as
+/// `add_drive_member_admin`.
+#[utoipa::path(
+    patch,
+    path = "/api/admin/drives/{id}/members/{kind}/{sid}",
+    params(
+        ("id" = Uuid, Path, description = "Drive UUID"),
+        ("kind" = String, Path, description = "Subject kind: user|group|token"),
+        ("sid" = Uuid, Path, description = "Subject UUID"),
+    ),
+    request_body = AdminUpdateDriveMemberDto,
+    responses(
+        (status = 200, description = "Member role updated", body = GrantDto),
+        (status = 400, description = "Validation error (e.g. last-owner demotion)"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin required"),
+        (status = 405, description = "Personal drive — membership is immutable"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin"
+)]
+pub async fn update_drive_member_admin(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path((drive_id, kind, subject_id)): axum::extract::Path<(
+        Uuid,
+        SubjectTypeDto,
+        Uuid,
+    )>,
+    Json(dto): Json<AdminUpdateDriveMemberDto>,
+) -> Result<impl IntoResponse, AppError> {
+    let (admin_id, _) = admin_guard(&state, &headers).await?;
+    let subject = admin_parse_subject(kind, subject_id);
+    let grant = state
+        .drive_management_service
+        .set_member_role(
+            admin_id,
+            true,
+            drive_id,
+            subject,
+            dto.role.into(),
+            dto.expires_at,
+        )
+        .await
+        .map_err(AppError::from)?;
+    Ok((StatusCode::OK, Json(GrantDto::from(grant))))
+}
+
+/// DELETE /api/admin/drives/{id}/members/{kind}/{sid} — remove a
+/// member as an admin. Bypasses `Manage`; keeps last-owner protection.
+#[utoipa::path(
+    delete,
+    path = "/api/admin/drives/{id}/members/{kind}/{sid}",
+    params(
+        ("id" = Uuid, Path, description = "Drive UUID"),
+        ("kind" = String, Path, description = "Subject kind: user|group|token"),
+        ("sid" = Uuid, Path, description = "Subject UUID"),
+    ),
+    responses(
+        (status = 204, description = "Member removed (or wasn't a member — idempotent)"),
+        (status = 400, description = "Last-owner protection — promote another member first"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin required"),
+        (status = 405, description = "Personal drive — membership is immutable"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin"
+)]
+pub async fn remove_drive_member_admin(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path((drive_id, kind, subject_id)): axum::extract::Path<(
+        Uuid,
+        SubjectTypeDto,
+        Uuid,
+    )>,
+) -> Result<impl IntoResponse, AppError> {
+    let (admin_id, _) = admin_guard(&state, &headers).await?;
+    let subject = admin_parse_subject(kind, subject_id);
+    state
+        .drive_management_service
+        .remove_member(admin_id, true, drive_id, subject)
+        .await
+        .map_err(AppError::from)?;
+    Ok(StatusCode::NO_CONTENT)
 }

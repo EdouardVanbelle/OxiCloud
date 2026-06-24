@@ -81,6 +81,16 @@ const OWNER_CACHE_CAPACITY: u64 = 100_000;
 /// (see `owner_cache` field doc), hence a generous TTL for a high hit rate.
 const OWNER_CACHE_TTL: Duration = Duration::from_secs(300);
 
+/// `drive_role_cache` bound: entries are `((Subject, Uuid), Option<Role>)` —
+/// a few tens of bytes each. 100k accommodates ~5–10 drives per active user
+/// with comfortable headroom.
+const DRIVE_ROLE_CACHE_CAPACITY: u64 = 100_000;
+/// `drive_role_cache` TTL. Membership mutations on a drive explicitly invalidate
+/// affected entries (see `invalidate_drive_role_cache_for_drive`), so the TTL
+/// is mainly a safety net for paths that skip explicit invalidation. Short
+/// enough that any oversight self-heals in <1 minute.
+const DRIVE_ROLE_CACHE_TTL: Duration = Duration::from_secs(30);
+
 pub struct PgAclEngine {
     pool: Arc<PgPool>,
     folder_repo: Arc<FolderDbRepository>,
@@ -98,7 +108,30 @@ pub struct PgAclEngine {
     /// access (a different caller's `owner == uid` test fails against the cached
     /// *real* owner), and a hard-deleted resource that briefly short-circuits as
     /// owned simply fails later at execution with NotFound.
+    ///
+    /// Post-D0 this caches `resource → drive_id` instead (the legacy `owner_*`
+    /// rename was avoided to minimise field-name churn in the dual-write
+    /// window). The drive precheck queries this for every File / Folder check.
     owner_cache: Cache<Resource, Uuid>,
+
+    /// Memoise `(subject, drive_id) → Option<Role>`, the strongest role the
+    /// subject holds on a drive (direct + group-mediated, collapsed). Drives
+    /// the permission-floor precheck in `check_inner` — on a cache hit the
+    /// entire drive-grant lookup resolves in-memory, returning the steady
+    /// state to "0 SQL queries per authz check for callers touching their
+    /// own drive content" (matching the legacy owner short-circuit).
+    ///
+    /// **Invalidation**: explicit on every membership mutation
+    /// (`set_role` / `clear_role` with `Resource::Drive`) — drops every
+    /// entry whose drive_id matches. Group-membership changes are caught by
+    /// the short TTL rather than a deep invalidation tree.
+    ///
+    /// **Safety**: cache only widens authorization between mutations; the
+    /// 30 s TTL bounds how long a revoked grant can still appear effective
+    /// for a non-explicit invalidation path. Explicit paths (D2's
+    /// `DriveManagementService`, the grant handler's revoke path) hit the
+    /// invalidator inline.
+    drive_role_cache: Cache<(Subject, Uuid), Option<Role>>,
 }
 
 impl PgAclEngine {
@@ -120,6 +153,17 @@ impl PgAclEngine {
             owner_cache: Cache::builder()
                 .max_capacity(OWNER_CACHE_CAPACITY)
                 .time_to_live(OWNER_CACHE_TTL)
+                .build(),
+            drive_role_cache: Cache::builder()
+                // `invalidate_entries_if` is the cleanup hook used by
+                // `invalidate_drive_role_cache_for_drive`. moka returns
+                // `Err(InvalidationClosuresDisabled)` from that call unless
+                // this opt-in is set on the builder, so without it the
+                // bulk invalidation silently no-ops and a freshly-promoted
+                // member keeps their stale role for the full TTL.
+                .support_invalidation_closures()
+                .max_capacity(DRIVE_ROLE_CACHE_CAPACITY)
+                .time_to_live(DRIVE_ROLE_CACHE_TTL)
                 .build(),
         }
     }
@@ -157,7 +201,13 @@ impl PgAclEngine {
     /// without a real PostgreSQL pool. Connecting to the lazy pool will
     /// fail at runtime — only safe in tests that exercise types, not actual
     /// authz queries.
-    #[cfg(test)]
+    ///
+    /// Visible under both `cfg(test)` (the standard unit-test build) and
+    /// `cfg(integration_tests)` (the gated-by-RUSTFLAGS integration
+    /// build). The `SubjectGroupService` integration tests construct the
+    /// service with a stub engine, since they only exercise the engine's
+    /// in-memory cache invalidation calls — never its SQL paths.
+    #[cfg(any(test, integration_tests))]
     pub fn new_stub() -> Self {
         let pool = sqlx::pool::PoolOptions::<sqlx::Postgres>::new()
             .max_connections(1)
@@ -176,6 +226,11 @@ impl PgAclEngine {
                 .max_capacity(1)
                 .time_to_live(Duration::from_secs(1))
                 .build(),
+            drive_role_cache: Cache::builder()
+                .support_invalidation_closures()
+                .max_capacity(1)
+                .time_to_live(Duration::from_secs(1))
+                .build(),
         }
     }
 
@@ -188,6 +243,44 @@ impl PgAclEngine {
     /// window. Cheap — moka's `invalidate` is a single concurrent-map op.
     pub async fn invalidate_user_groups_cache(&self, user_id: Uuid) {
         self.user_groups_cache.invalidate(&user_id).await;
+    }
+
+    /// Drop every `drive_role_cache` entry whose key targets `drive_id`.
+    /// Called after every membership mutation on the drive (set_role /
+    /// clear_role / revoke when the resource is a Drive) so the next authz
+    /// check sees the fresh role rather than a TTL-bounded stale view.
+    ///
+    /// Uses moka's predicate-based eviction — entries are marked for
+    /// removal asynchronously by the maintenance task; subsequent `get`
+    /// calls observe the eviction. Requires
+    /// `support_invalidation_closures()` on the cache builder (see the
+    /// `drive_role_cache` initialiser above), otherwise moka returns
+    /// `InvalidationClosuresDisabled` and the mutation silently leaves
+    /// stale role rows in cache for the full TTL.
+    pub async fn invalidate_drive_role_cache_for_drive(&self, drive_id: Uuid) {
+        // `invalidate_entries_if` rejects predicates returning errors —
+        // simple Fn(K, V) -> bool. We capture `drive_id` by value (Copy)
+        // and match against the second tuple component.
+        //
+        // The result is `Err` only when the cache was built without
+        // `support_invalidation_closures()` — a wiring bug, not a runtime
+        // condition the caller can recover from. We log+continue rather
+        // than panic because the consequence is a 30 s staleness window
+        // on cached role entries, not a correctness bug at write time.
+        if let Err(err) = self
+            .drive_role_cache
+            .invalidate_entries_if(move |key, _v| key.1 == drive_id)
+        {
+            tracing::error!(
+                target: "oxicloud::authz",
+                event = "authz.cache_invalidation_failed",
+                cache = "drive_role_cache",
+                drive_id = %drive_id,
+                error = %err,
+                "drive_role_cache cannot be bulk-invalidated — \
+                 cache builder is missing support_invalidation_closures()",
+            );
+        }
     }
 
     /// Expand a user subject into the set of subject UUIDs that should match
@@ -296,34 +389,39 @@ impl PgAclEngine {
         self.subject_match_set(subject, &counters).await
     }
 
-    /// Owner lookup with memoisation. Hits the DB only on a cache miss; the
-    /// result is cached because a resource's owner never changes. `NotFound`
-    /// (a hard-deleted / nonexistent resource) is propagated, not cached.
-    async fn owner_of_cached(
+    /// Drive lookup with memoisation. Hits the DB only on a cache miss; the
+    /// result is cached because a resource's `drive_id` is immutable in the
+    /// current model (cross-drive moves arrive in D6 and will need cache
+    /// invalidation at that point). `NotFound` is propagated, not cached.
+    ///
+    /// **Why this replaces the legacy `owner_of_cached`**: the old short-
+    /// circuit was `caller_id == resource.user_id`. Post-D0 ownership is
+    /// modelled through `role_grants` on the resource's drive — a caller
+    /// with any qualifying role on the drive automatically satisfies the
+    /// check (per `drive.md §5`, drive role is the baseline floor for
+    /// every resource in the drive). The lookup shape is identical
+    /// (Resource → Uuid), so we keep the same cache infrastructure.
+    async fn drive_of_cached(
         &self,
         resource: Resource,
         counters: &QueryCounters,
     ) -> Result<Uuid, DomainError> {
-        if let Some(owner) = self.owner_cache.get(&resource).await {
-            return Ok(owner);
+        if let Some(drive_id) = self.owner_cache.get(&resource).await {
+            return Ok(drive_id);
         }
         counters.sql_queries.fetch_add(1, Ordering::Relaxed);
-        let owner = self.owner_of(resource).await?;
-        self.owner_cache.insert(resource, owner).await;
-        Ok(owner)
+        let drive_id = self.drive_of(resource).await?;
+        self.owner_cache.insert(resource, drive_id).await;
+        Ok(drive_id)
     }
 
-    /// Returns the owner UUID for any resource type.
-    async fn owner_of(&self, resource: Resource) -> Result<Uuid, DomainError> {
+    /// Returns the `drive_id` for a File / Folder. Drives don't have a parent
+    /// drive — this returns `NotFound` for `Resource::Drive` and the caller
+    /// must not invoke it on Drive resources.
+    async fn drive_of(&self, resource: Resource) -> Result<Uuid, DomainError> {
         match resource {
-            Resource::Folder(id) => self.folder_repo.get_folder_user_id(&id.to_string()).await,
-            Resource::File(id) => self.file_repo.get_file_user_id(&id.to_string()).await,
-            // Drive owner resolution wires up in D0-6 once `DriveRepository`
-            // lands (D0-5). Drive entity carries `default_for_user` for
-            // `kind='personal'`; shared drives resolve through role_grants
-            // (Owner role). Returning NotFound here means a permission
-            // check that reached owner_of on a Drive falls through to the
-            // grant-lookup path — safe default during D0-1.
+            Resource::Folder(id) => self.folder_repo.get_folder_drive_id(&id.to_string()).await,
+            Resource::File(id) => self.file_repo.get_file_drive_id(&id.to_string()).await,
             Resource::Drive(_) => Err(DomainError::not_found("Drive", resource.id().to_string())),
         }
     }
@@ -450,41 +548,51 @@ impl PgAclEngine {
         Ok(exists.is_some())
     }
 
-    /// Direct grant lookup for a drive — no ltree cascade (drives have
-    /// no ancestors). Mirrors the cascade helpers above but with a
-    /// straight `resource_type='drive' AND resource_id=$4` filter.
-    async fn drive_grant_exists(
+    /// Cached resolution of `(subject, drive_id) → Option<Role>` — the
+    /// strongest role the subject holds on the drive (direct + transitive
+    /// group grants collapsed). `None` means no qualifying grant; cached
+    /// negatively to avoid re-querying on repeated denials within the TTL.
+    ///
+    /// This is the cache-aware backbone of the permission-floor precheck.
+    /// `Role::expand()` translates the returned role into its permission
+    /// bundle; callers ask `role.expand().contains(&permission)` to decide.
+    async fn caller_role_on_drive_cached(
         &self,
-        subject_types: &[&str],
-        subject_ids: &[Uuid],
-        permission: Permission,
+        subject: Subject,
         drive_id: Uuid,
         counters: &QueryCounters,
-    ) -> Result<bool, DomainError> {
+    ) -> Result<Option<Role>, DomainError> {
+        if let Some(cached) = self.drive_role_cache.get(&(subject, drive_id)).await {
+            return Ok(cached);
+        }
+        // Expand subject for the role lookup. `subject_match_set` is itself
+        // cached (30 s TTL); the steady state on `drive_role_cache` miss is
+        // one in-memory expansion + one indexed SQL query.
+        let (subject_types, subject_ids) = self.subject_match_set(subject, counters).await?;
         counters.sql_queries.fetch_add(1, Ordering::Relaxed);
-        let roles = Self::roles_implying_strings(permission);
-        let exists: Option<i32> = sqlx::query_scalar(
+        let role_str: Option<String> = sqlx::query_scalar(
             r#"
-            SELECT 1
+            SELECT MIN(g.role)::text
               FROM storage.role_grants g
              WHERE g.subject_type  = ANY($1)
                AND g.subject_id    = ANY($2)
-               AND g.role          = ANY($3::storage.grant_role[])
                AND g.resource_type = 'drive'
-               AND g.resource_id   = $4
+               AND g.resource_id   = $3
                AND (g.expires_at IS NULL OR g.expires_at > NOW())
-             LIMIT 1
             "#,
         )
         .bind(subject_types)
         .bind(subject_ids)
-        .bind(&roles)
         .bind(drive_id)
-        .fetch_optional(self.pool.as_ref())
+        .fetch_one(self.pool.as_ref())
         .await
-        .map_err(|e| DomainError::internal_error("PgAcl", format!("drive grant: {e}")))?;
+        .map_err(|e| DomainError::internal_error("PgAcl", format!("drive role lookup: {e}")))?;
 
-        Ok(exists.is_some())
+        let role = role_str.as_deref().and_then(Role::parse);
+        self.drive_role_cache
+            .insert((subject, drive_id), role)
+            .await;
+        Ok(role)
     }
 
     /// Look up a single role grant by id, returning the actors a revoke /
@@ -584,34 +692,42 @@ impl PgAclEngine {
         resource: Resource,
         counters: &QueryCounters,
     ) -> Result<bool, DomainError> {
-        // Owner short-circuit (only for User subjects — groups/tokens/external
-        // are never owners of resources).
-        // Owner short-circuit applies to Folder/File only — they carry a
-        // single-owner `user_id` column in their respective tables. Drives
-        // model ownership through the `Owner` role in `role_grants`, so
-        // there's no analogous fast path: the grant lookup below resolves
-        // a drive owner via the same query that resolves any drive role.
-        if let (Subject::User(uid), Resource::Folder(_) | Resource::File(_)) = (subject, resource) {
-            match self.owner_of_cached(resource, counters).await {
-                Ok(owner) if owner == uid => return Ok(true),
-                Ok(_) => { /* not owner — fall through to grants */ }
+        // Drive-membership precheck for File/Folder. A role on the resource's
+        // drive is the baseline floor (`drive.md §5`): the caller passes any
+        // permission check the role bundle covers. Replaces the legacy
+        // `caller_id == resource.user_id` owner short-circuit — for a user's
+        // own personal drive the lifecycle hook seeds an Owner row, so the
+        // common case (touching your own files) is **0 SQL queries** after
+        // the first hit on `drive_role_cache` (cached `(subject, drive) →
+        // Role`, 30 s TTL with explicit invalidation on membership writes).
+        if matches!(resource, Resource::Folder(_) | Resource::File(_)) {
+            let drive_id = match self.drive_of_cached(resource, counters).await {
+                Ok(d) => d,
                 Err(e) if e.kind == crate::common::errors::ErrorKind::NotFound => {
-                    // Resource doesn't exist — no permission. Return false
-                    // rather than propagating NotFound; the caller (`require`)
-                    // converts a false back to NotFound on its own.
+                    // Resource doesn't exist — no permission. `require`
+                    // converts the `false` back to NotFound at its layer.
                     return Ok(false);
                 }
                 Err(e) => return Err(e),
+            };
+            if let Some(role) = self
+                .caller_role_on_drive_cached(subject, drive_id, counters)
+                .await?
+                && role.expand().contains(&permission)
+            {
+                return Ok(true);
             }
+            // Drive precheck didn't match — fall through to per-resource
+            // grant + folder-ancestor cascade (existing behaviour, untouched).
         }
 
-        // Expand the subject so group-mediated grants apply when the caller
-        // is a User. See `subject_match_set` for the shared shape used by
-        // both the cascade check and the "shared with me" listing queries.
-        let (subject_types, subject_ids) = self.subject_match_set(subject, counters).await?;
-
         match resource {
+            // File/Folder dispatch falls through to the cascade query —
+            // expand the subject set lazily here (it's cached) so the
+            // Drive branch below never pays for an expansion it doesn't need.
             Resource::Folder(id) => {
+                let (subject_types, subject_ids) =
+                    self.subject_match_set(subject, counters).await?;
                 self.folder_cascade_grant_exists(
                     &subject_types,
                     &subject_ids,
@@ -622,6 +738,8 @@ impl PgAclEngine {
                 .await
             }
             Resource::File(id) => {
+                let (subject_types, subject_ids) =
+                    self.subject_match_set(subject, counters).await?;
                 self.file_cascade_grant_exists(
                     &subject_types,
                     &subject_ids,
@@ -632,8 +750,13 @@ impl PgAclEngine {
                 .await
             }
             Resource::Drive(id) => {
-                self.drive_grant_exists(&subject_types, &subject_ids, permission, id, counters)
-                    .await
+                // Same cache-aware path the precheck uses — keeps the
+                // single-source-of-truth for drive role resolution and
+                // benefits identically from `drive_role_cache`.
+                Ok(self
+                    .caller_role_on_drive_cached(subject, id, counters)
+                    .await?
+                    .is_some_and(|r| r.expand().contains(&permission)))
             }
         }
     }
@@ -1873,6 +1996,13 @@ impl AuthorizationEngine for PgAclEngine {
         .await
         .map_err(|e| DomainError::internal_error("PgAcl", format!("set_role: {e}")))?;
 
+        // Membership write on a drive — drop every cached
+        // `(subject, drive_id)` entry pointing at this drive so the next
+        // authz check resolves against the fresh role.
+        if let Resource::Drive(drive_id) = resource {
+            self.invalidate_drive_role_cache_for_drive(drive_id).await;
+        }
+
         Self::row_to_grant(row)
     }
 
@@ -1889,6 +2019,13 @@ impl AuthorizationEngine for PgAclEngine {
         .execute(self.pool.as_ref())
         .await
         .map_err(|e| DomainError::internal_error("PgAcl", format!("clear_role: {e}")))?;
+
+        // Symmetric with `set_role` — drop cached drive-role entries on
+        // membership revocation so a viewer who just got removed doesn't
+        // keep passing the precheck for up to 30 s.
+        if let Resource::Drive(drive_id) = resource {
+            self.invalidate_drive_role_cache_for_drive(drive_id).await;
+        }
 
         Ok(())
     }

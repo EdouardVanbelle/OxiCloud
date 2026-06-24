@@ -234,16 +234,64 @@ HTTP 200
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 8 — Remove grace from engineering, then re-check access (after cache TTL).
-# Note: the authz cache has a 30s TTL — Hurl tests run within seconds so
-# grace may still see the folder during the cache window. We assert the
-# membership removal succeeded; the post-TTL denial is exercised by the
-# Rust integration tests, not here (test runtime cost).
+# Step 8 — Self-defense on group remove_member.
+#          A group must not drop to 0 transitive users once seeded —
+#          without this guard, an admin could empty a group that owns
+#          a shared drive (D3a), leaving the drive with no effective
+#          Owner. Conservative-by-default: the rule applies to every
+#          group, not just drive-owning ones.
+#
+#          So the first attempt to remove grace (the sole member) is
+#          refused with 400. We then seed the group with a second user,
+#          re-attempt the removal, and assert it now succeeds — the
+#          authz cascade tests below depend on grace being out of the
+#          group.
+#
+#          Note: the authz cache has a 30s TTL — Hurl tests run within
+#          seconds so grace may still see the folder during the cache
+#          window. We assert the membership removal succeeded; the
+#          post-TTL denial is exercised by the Rust integration tests,
+#          not here (test runtime cost).
 # ─────────────────────────────────────────────────────────────
+# 8a — First removal refused: grace is the sole transitive user.
+DELETE {{base_url}}/api/groups/{{engineers_id}}/members/user/{{grace_user_id}}
+Authorization: Bearer {{alice_token}}
+
+HTTP 400
+
+
+# 8b — Seed engineering with a second user so the removal can succeed.
+POST {{base_url}}/api/admin/users
+Authorization: Bearer {{alice_token}}
+Content-Type: application/json
+{ "username": "grp_helper", "password": "GrpHelperPwd1!", "email": "grp_helper@example.com", "role": "user" }
+
+HTTP 201
+[Captures]
+helper_user_id: jsonpath "$.id"
+
+
+POST {{base_url}}/api/groups/{{engineers_id}}/members
+Authorization: Bearer {{alice_token}}
+Content-Type: application/json
+{ "user_id": "{{helper_user_id}}" }
+
+HTTP 201
+
+
+# 8c — Grace removal now succeeds: engineering still has grp_helper.
 DELETE {{base_url}}/api/groups/{{engineers_id}}/members/user/{{grace_user_id}}
 Authorization: Bearer {{alice_token}}
 
 HTTP 204
+
+
+# 8d — Confirming the invariant still holds: removing the last user
+#      (grp_helper) is again refused.
+DELETE {{base_url}}/api/groups/{{engineers_id}}/members/user/{{helper_user_id}}
+Authorization: Bearer {{alice_token}}
+
+HTTP 400
 
 
 # ─────────────────────────────────────────────────────────────

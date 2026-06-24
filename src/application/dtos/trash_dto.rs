@@ -61,6 +61,11 @@ pub struct TrashResourceRow {
     pub resource_created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
     pub owner_id: Uuid,
+    /// Drive the trashed item belongs to. Surfaced verbatim on the wire
+    /// (`TrashResourceItemDto.drive_id`) so the `/trash` UI can group by
+    /// drive without an extra lookup per row. D2b: filtering by drive is
+    /// done in SQL via `WHERE drive_id = ANY($accessible_drive_ids)`.
+    pub drive_id: Uuid,
     /// Raw BLAKE3 content hash. `Some(_)` for file rows, `None` for
     /// folder rows. Feeds `File::compute_etag` so the trash listing's
     /// `etag` matches what GET/HEAD/PROPFIND would return for the
@@ -162,6 +167,12 @@ pub struct TrashResourceItemDto {
     pub trashed_at: DateTime<Utc>,
     /// When the item will be permanently deleted by the retention sweeper.
     pub deletion_date: DateTime<Utc>,
+    /// The drive the trashed item belongs to. Enables client-side
+    /// group-by-drive in the `/trash` UI (D2b spec — see
+    /// `project_trash_groupbys_d2b` memory). The drive's display name
+    /// resolves through the `/api/drives` listing the client already
+    /// holds in `drives.svelte` — no extra round-trip needed.
+    pub drive_id: Uuid,
     /// Full resource details — shape determined by `resource_type`.
     pub resource: ResourceContentDto,
 }

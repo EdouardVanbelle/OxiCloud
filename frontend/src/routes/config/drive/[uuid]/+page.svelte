@@ -3,7 +3,12 @@
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 
-	import type { Drive } from '$lib/api/types';
+	import { listDriveMembers } from '$lib/api/endpoints/drives';
+	import { renameFolder } from '$lib/api/endpoints/folders';
+	import { errorToast } from '$lib/utils/errors';
+	import type { Drive, DriveMember, DriveRole } from '$lib/api/types';
+	import ShareDialog from '$lib/components/ShareDialog.svelte';
+	import UserVignette from '$lib/components/UserVignette.svelte';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t } from '$lib/i18n/index.svelte';
 	import { drives as drivesStore, driveIcon } from '$lib/stores/drives.svelte';
@@ -12,6 +17,116 @@
 
 	const uuid = $derived(page.params.uuid ?? '');
 	const drive = $derived<Drive | null>(drivesStore.findById(uuid));
+
+	let members = $state<DriveMember[]>([]);
+	let membersLoaded = $state(false);
+	let membersError = $state<string | null>(null);
+
+	// Mutation controls are gated by *both* caller_role AND drive kind:
+	// even an Owner of a personal drive can't change membership (the
+	// backend guard refuses), so the UI hides the controls upfront for
+	// honest UX. Shared drives + Owner role → full controls.
+	const canManageMembers = $derived(drive?.kind === 'shared' && drive?.caller_role === 'owner');
+
+	// Rename is allowed for any Owner (both shared and personal), since
+	// the backend requires `Permission::Manage` on the drive's root
+	// folder which only the Owner bundle carries. Personal-drive Owners
+	// are the user themselves (seeded by the lifecycle hook).
+	const canRename = $derived(drive?.caller_role === 'owner');
+
+	// Inline rename state. `renameDraft` shadows `drive.name` while the
+	// input is open; we don't write back to the store until the server
+	// accepts the change. `renameBusy` disables the save/cancel buttons
+	// during the round-trip.
+	let renaming = $state(false);
+	let renameDraft = $state('');
+	let renameBusy = $state(false);
+
+	function startRename() {
+		if (!drive) return;
+		renameDraft = drive.name;
+		renaming = true;
+	}
+
+	function cancelRename() {
+		renaming = false;
+		renameDraft = '';
+	}
+
+	async function saveRename() {
+		if (!drive) return;
+		const next = renameDraft.trim();
+		if (next.length === 0 || next === drive.name) {
+			cancelRename();
+			return;
+		}
+		renameBusy = true;
+		try {
+			// Drive name = root folder name (drive.md §3); rename via the
+			// folder endpoint. Backend promotes the perm to Manage for
+			// parent_id IS NULL, so a non-Owner caller would 404 here
+			// (but the UI also hid this button for non-Owners).
+			await renameFolder(drive.root_folder_id, next);
+			drivesStore.invalidate();
+			await drivesStore.load();
+			renaming = false;
+		} catch (e) {
+			errorToast(e);
+		} finally {
+			renameBusy = false;
+		}
+	}
+
+	function roleLabel(role: DriveRole): string {
+		switch (role) {
+			case 'owner':
+				return t('drive.role.owner', 'Owner');
+			case 'editor':
+				return t('drive.role.editor', 'Editor');
+			case 'contributor':
+				return t('drive.role.contributor', 'Contributor');
+			case 'commenter':
+				return t('drive.role.commenter', 'Commenter');
+			case 'viewer':
+				return t('drive.role.viewer', 'Viewer');
+		}
+	}
+
+	// `shareDialogOpen` drives the ShareDialog modal — the same dialog
+	// used for file/folder sharing, parameterised with `kind: 'drive'`
+	// + `allowLinks: false`. Add/change-role/remove flow through the
+	// dialog's existing grants plumbing (server-side those routes
+	// dispatch to `DriveManagementService`).
+	let shareDialogOpen = $state(false);
+
+	// `dialogItem` is recomputed from the drive so the dialog title
+	// reflects renames.
+	const dialogItem = $derived(
+		drive ? { id: drive.id, name: drive.name, kind: 'drive' as const } : null
+	);
+
+	async function loadMembers() {
+		if (!uuid) return;
+		try {
+			members = await listDriveMembers(uuid);
+		} catch (e) {
+			// 404 here means the caller lacks Read on the drive — which is
+			// also what the parent "Drive not found" card already conveys.
+			// Keep the listing area empty rather than surfacing a noisy toast.
+			membersError = e instanceof Error ? e.message : String(e);
+			members = [];
+		} finally {
+			membersLoaded = true;
+		}
+	}
+
+	// Refresh the on-page member list on every dialog mutation (add,
+	// role change, remove). ShareDialog fires `onchange` for the full
+	// set of grant mutations — `onshared` only covers creation, which
+	// would leave role-change and removal stale here.
+	function onShareDialogChange() {
+		void loadMembers();
+	}
 
 	const kindLabel = $derived.by(() => {
 		if (!drive) return '';
@@ -60,6 +175,21 @@
 	onMount(() => {
 		void drivesStore.load();
 	});
+
+	// SvelteKit reuses this component when navigating between
+	// `/config/drive/<A>` and `/config/drive/<B>` (same route, different
+	// dynamic param), so `onMount` only fires once. Re-run the members
+	// fetch whenever `uuid` changes — without this, the previous drive's
+	// rows linger until a hard refresh. Resetting `members` + the loaded
+	// flag first prevents the brief flash of stale data before the new
+	// fetch returns.
+	$effect(() => {
+		const id = uuid;
+		members = [];
+		membersLoaded = false;
+		membersError = null;
+		if (id) void loadMembers();
+	});
 </script>
 
 <div class="config-drive">
@@ -74,10 +204,59 @@
 			<a class="link" href={resolve('/files')}>{t('drive.back_to_files', 'Back to Files')}</a>
 		</div>
 	{:else}
-		<h1>
+		<div class="drive-title">
 			<Icon name={driveIcon(drive)} />
-			{drive.name}
-		</h1>
+			{#if renaming}
+				<input
+					class="drive-title__input"
+					type="text"
+					data-testid="drive-rename-input"
+					bind:value={renameDraft}
+					maxlength="200"
+					disabled={renameBusy}
+					onkeydown={(e) => {
+						if (e.key === 'Enter') void saveRename();
+						else if (e.key === 'Escape') cancelRename();
+					}}
+				/>
+				<button
+					type="button"
+					class="icon-btn"
+					data-testid="drive-rename-save-btn"
+					title={t('common.save', 'Save')}
+					aria-label={t('common.save', 'Save')}
+					onclick={() => void saveRename()}
+					disabled={renameBusy}
+				>
+					<Icon name="check" />
+				</button>
+				<button
+					type="button"
+					class="icon-btn"
+					data-testid="drive-rename-cancel-btn"
+					title={t('common.cancel', 'Cancel')}
+					aria-label={t('common.cancel', 'Cancel')}
+					onclick={cancelRename}
+					disabled={renameBusy}
+				>
+					<Icon name="times" />
+				</button>
+			{:else}
+				<h1 class="drive-title__name">{drive.name}</h1>
+				{#if canRename}
+					<button
+						type="button"
+						class="icon-btn"
+						data-testid="drive-rename-edit-btn"
+						title={t('drive.rename', 'Rename drive')}
+						aria-label={t('drive.rename', 'Rename drive')}
+						onclick={startRename}
+					>
+						<Icon name="pencil-alt" />
+					</button>
+				{/if}
+			{/if}
+		</div>
 
 		<div class="card">
 			<h2><Icon name="info-circle" /> {t('drive.info', 'Drive info')}</h2>
@@ -134,6 +313,67 @@
 			{/if}
 		</div>
 
+		<div class="card">
+			<div class="members__header">
+				<h2><Icon name="users" /> {t('drive.members', 'Members')}</h2>
+				{#if canManageMembers}
+					<button
+						type="button"
+						class="btn btn-primary"
+						data-testid="drive-manage-members-btn"
+						onclick={() => (shareDialogOpen = true)}
+					>
+						<Icon name="user-plus" />
+						{t('drive.manage_members', 'Manage members')}
+					</button>
+				{/if}
+			</div>
+
+			{#if !membersLoaded}
+				<p class="muted">{t('common.loading', 'Loading…')}</p>
+			{:else if members.length === 0}
+				<p class="muted">
+					{membersError ?? t('drive.members_empty', 'No members.')}
+				</p>
+			{:else}
+				<!-- Read-only summary. Add/change/remove happens inside the
+				     ShareDialog modal opened by the button above; the inline
+				     row controls used to live here have moved into the dialog
+				     so the same flow handles file/folder + drive grants. -->
+				<ul class="members">
+					{#each members as m (m.id)}
+						<li class="members__row">
+							{#if m.subject.type === 'user'}
+								<UserVignette userId={m.subject.id} />
+							{:else if m.subject.type === 'group'}
+								<span class="members__group">
+									<Icon name="users" />
+									<span class="mono">{m.subject.id}</span>
+								</span>
+							{:else}
+								<span class="members__token">
+									<Icon name="link" />
+									<span class="mono">{m.subject.id}</span>
+								</span>
+							{/if}
+							<span class="members__role members__role--{m.role}">
+								{roleLabel(m.role)}
+							</span>
+						</li>
+					{/each}
+				</ul>
+
+				{#if !canManageMembers && drive.kind === 'personal'}
+					<p class="muted members__personal-note">
+						{t(
+							'drive.members.personal_immutable',
+							'Personal drives have a fixed single-owner membership.'
+						)}
+					</p>
+				{/if}
+			{/if}
+		</div>
+
 		{#if policyEntries.length > 0}
 			<div class="card">
 				<h2><Icon name="shield-alt" /> {t('drive.policies', 'Policies')}</h2>
@@ -147,6 +387,19 @@
 		{/if}
 	{/if}
 </div>
+
+<!-- Drive members modal — reuses the same ShareDialog as file/folder
+     sharing. `allowLinks={false}` hides the public-link tab because
+     drives don't support shareable URLs (the backend service refuses
+     token subjects on drive resources). -->
+{#if dialogItem}
+	<ShareDialog
+		bind:open={shareDialogOpen}
+		item={dialogItem}
+		allowLinks={false}
+		onchange={onShareDialogChange}
+	/>
+{/if}
 
 <style>
 	.config-drive {
@@ -247,5 +500,155 @@
 
 	.link:hover {
 		text-decoration: underline;
+	}
+
+	/* Drive title row: icon + name (or inline rename input) + edit/save
+	   affordances. Mirrors the visual weight of the previous static
+	   <h1> so the page layout doesn't shift when entering rename mode. */
+	.drive-title {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		margin-bottom: 1rem;
+	}
+
+	.drive-title__name {
+		margin: 0;
+	}
+
+	.drive-title__input {
+		flex: 1;
+		min-width: 0;
+		max-width: 28rem;
+		padding: 0.4rem 0.6rem;
+		font-size: 1.5rem;
+		font-weight: var(--weight-semibold, 600);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+		background: var(--color-bg-input);
+		color: var(--color-text);
+	}
+
+	/* Compact icon button used in the title row + nowhere else here.
+	   The shared `.icon-btn` style isn't promoted to a global yet, so
+	   we duplicate the minimum that this page needs. */
+	.icon-btn {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 2rem;
+		height: 2rem;
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+		background: var(--color-bg-surface);
+		color: var(--color-text);
+		cursor: pointer;
+	}
+
+	.icon-btn:disabled {
+		opacity: 0.45;
+		cursor: not-allowed;
+	}
+
+	/* Members card header: title on the left, "Manage members" button on
+	   the right when the caller can mutate membership. */
+	.members__header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-3, 0.75rem);
+		margin-bottom: var(--space-3, 0.75rem);
+	}
+
+	.members__header h2 {
+		margin: 0;
+	}
+
+	/* Members list */
+	.members {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.members__row {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		padding: 0.5rem 0.75rem;
+		border: 1px solid var(--color-border-faint);
+		border-radius: var(--radius-sm);
+		background: var(--color-bg-page);
+	}
+
+	.members__group,
+	.members__token {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+		flex: 1;
+		min-width: 0;
+		color: var(--color-text-secondary);
+	}
+
+	.members__role {
+		display: inline-flex;
+		align-items: center;
+		padding: 0.2rem 0.65rem;
+		border-radius: var(--radius-pill, 999px);
+		font-size: 0.8rem;
+		background: var(--color-bg-muted);
+		color: var(--color-text-secondary);
+		flex: none;
+	}
+
+	.members__role--owner {
+		background: var(--color-accent-tint, var(--color-bg-muted));
+		color: var(--color-accent-text, var(--color-text-secondary));
+		font-weight: var(--weight-semibold);
+	}
+
+	.members__role--editor,
+	.members__role--contributor {
+		background: var(--color-accent-ring, var(--color-bg-muted));
+		color: var(--color-accent-text, var(--color-text-secondary));
+	}
+
+	.members__role-select {
+		flex: none;
+		padding: 0.25rem 0.5rem;
+		border-radius: var(--radius-sm);
+		border: 1px solid var(--color-border);
+		background: var(--color-bg-input);
+		color: var(--color-text);
+		font: inherit;
+		font-size: 0.85rem;
+		cursor: pointer;
+	}
+
+	.members__remove {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 28px;
+		height: 28px;
+		border: none;
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--color-text-faint);
+		cursor: pointer;
+	}
+
+	.members__remove:hover {
+		background: var(--color-bg-hover);
+		color: var(--color-danger-text, var(--color-text));
+	}
+
+	.members__personal-note {
+		margin-top: 0.75rem;
+		font-size: 0.85rem;
 	}
 </style>
