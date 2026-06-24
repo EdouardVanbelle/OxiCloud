@@ -13,19 +13,6 @@
 #   bash tests/api/storage_cleanup_check.sh
 # =============================================================
 
-cat <<EOF
-
-XXX
-
- storage_cleanup_check.sh is disabled due to GC strategy change
-
-  may need to add an admin api call to trigger the GC and validate the correct cleanup of resources
-
-XXX
-EOF
-
-exit 0
-
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -116,18 +103,41 @@ log "Deleted $OTHER_USER_COUNT non-admin user(s) created by tests."
 
 ROOT_FOLDERS=$(curl -sf -H "$AUTH" "$base_url/api/folders" | jq -r '.[].id')
 
+# `/api/folders/{id}/resources` superseded the legacy `/listing` route
+# (commit 5790a145). Response shape:
+#   { "items": [ { "resource_type": "folder"|"file",
+#                  "resource": { "id": "<uuid>", … } } ],
+#     "next_cursor": "…" }
+# We trash one level deep — the server cascades into children.
+#
+# `GET /api/folders` (root listing) still uses the legacy
+# `user_id`-keyed query, so it can surface folders the admin
+# *created* but doesn't have a role on (e.g. shared drives spawned by
+# `drive_quota.hurl` for other users). Those return 404 on
+# `/resources` (no Read in the role bundle). Skip them — they aren't
+# admin's content to drain.
 for folder_id in $ROOT_FOLDERS; do
-    CONTENTS=$(curl -sf -H "$AUTH" "$base_url/api/folders/$folder_id/listing")
+    RES_HTTP=$(curl -s -H "$AUTH" -o /tmp/storage_cleanup_resources.json \
+                    -w "%{http_code}" \
+                    "$base_url/api/folders/$folder_id/resources?limit=500")
+    if [[ "$RES_HTTP" == "404" ]]; then
+        log "Skipping folder $folder_id (404 on /resources — not readable by admin)"
+        continue
+    fi
+    if [[ "$RES_HTTP" != "200" ]]; then
+        fail "/api/folders/$folder_id/resources returned HTTP $RES_HTTP"
+    fi
+    CONTENTS=$(cat /tmp/storage_cleanup_resources.json)
 
     while IFS= read -r sub_id; do
         [[ -z "$sub_id" ]] && continue
         curl -sf -X DELETE -H "$AUTH" "$base_url/api/folders/$sub_id" >/dev/null
-    done < <(echo "$CONTENTS" | jq -r '.folders[].id')
+    done < <(echo "$CONTENTS" | jq -r '.items[] | select(.resource_type == "folder") | .resource.id')
 
     while IFS= read -r file_id; do
         [[ -z "$file_id" ]] && continue
         curl -sf -X DELETE -H "$AUTH" "$base_url/api/files/$file_id" >/dev/null
-    done < <(echo "$CONTENTS" | jq -r '.files[].id')
+    done < <(echo "$CONTENTS" | jq -r '.items[] | select(.resource_type == "file") | .resource.id')
 done
 
 log "All live objects moved to trash."
@@ -135,9 +145,20 @@ log "All live objects moved to trash."
 # ── 2b. Verify all root folders are empty according to the API ────────────────
 
 for folder_id in $ROOT_FOLDERS; do
-    CONTENTS=$(curl -sf -H "$AUTH" "$base_url/api/folders/$folder_id/listing")
-    SUB_COUNT=$(echo "$CONTENTS"  | jq '.folders | length')
-    FILE_COUNT=$(echo "$CONTENTS" | jq '.files   | length')
+    RES_HTTP=$(curl -s -H "$AUTH" -o /tmp/storage_cleanup_resources.json \
+                    -w "%{http_code}" \
+                    "$base_url/api/folders/$folder_id/resources?limit=500")
+    # Same skip-on-404 as the trash loop above — admin owns the row but
+    # has no role-grant Read on it (shared drive created for someone else).
+    if [[ "$RES_HTTP" == "404" ]]; then
+        continue
+    fi
+    if [[ "$RES_HTTP" != "200" ]]; then
+        fail "/api/folders/$folder_id/resources returned HTTP $RES_HTTP"
+    fi
+    CONTENTS=$(cat /tmp/storage_cleanup_resources.json)
+    SUB_COUNT=$(echo  "$CONTENTS" | jq '[.items[] | select(.resource_type == "folder")] | length')
+    FILE_COUNT=$(echo "$CONTENTS" | jq '[.items[] | select(.resource_type == "file")]   | length')
     if [[ "$SUB_COUNT" -ne 0 || "$FILE_COUNT" -ne 0 ]]; then
         fail "folder $folder_id still has $SUB_COUNT subfolder(s) and $FILE_COUNT file(s)"
     fi
@@ -159,18 +180,53 @@ fi
 
 log "API confirms trash is empty."
 
+# ── 3c. Force the maintenance sweeps synchronously ────────────────────────────
+#
+# `trash/empty` already triggers an inline `garbage_collect()` at the end of
+# its `clear_trash_in` path, but that GC honours the 1-hour orphan-grace
+# window — a blob orphaned seconds ago survives the inline sweep. The
+# regular periodic sweep would catch it eventually, but tests need the
+# disk state to be quiescent NOW. The two admin-internal triggers below
+# (gated by `OXICLOUD_ENABLE_ADMIN_INTERNAL_ENDPOINTS=true`, set in
+# tests/common/server.env) make this deterministic:
+#
+#   1. trigger-sweep    — reconciles users.storage_used_bytes and
+#                         drives.used_bytes from SUM(size) — keeps the
+#                         cached counters honest for any quota
+#                         assertions that follow.
+#   2. trigger-gc?force=true — same `garbage_collect()` as the inline
+#                         call, but `force=true` bypasses the orphan
+#                         grace so freshly-orphaned blobs ARE reaped.
+#                         Safe here because the test has no concurrent
+#                         uploaders to race the row-delete → unlink
+#                         window the grace normally protects.
+#
+# Without `force=true`, the test would have to wait an hour for the
+# probe blob's `orphaned_at` timestamp to age past the grace window —
+# why this script was disabled until the admin-internal triggers
+# landed (commit `74b33744`).
+
+curl -sf -X POST -H "$AUTH" "$base_url/api/admin/internal/trigger-sweep" >/dev/null \
+    || fail "trigger-sweep failed (is OXICLOUD_ENABLE_ADMIN_INTERNAL_ENDPOINTS=true?)"
+log "Reconciliation sweep triggered."
+
+GC_RESULT=$(curl -sf -X POST -H "$AUTH" "$base_url/api/admin/internal/trigger-gc?force=true")
+[[ -z "$GC_RESULT" ]] && fail "trigger-gc returned an empty body"
+GC_BLOBS=$(echo "$GC_RESULT" | jq -r '.blobs_deleted')
+GC_BYTES=$(echo "$GC_RESULT" | jq -r '.bytes_freed')
+log "GC reaped $GC_BLOBS blob(s), $GC_BYTES byte(s) freed."
+
 # ── 4. Disk verification ──────────────────────────────────────────────────────
 
 THUMB_FILES=$(find "$STORAGE_PATH/.thumbnails" -type f 2>/dev/null || true)
 BLOB_FILES=$(find  "$STORAGE_PATH/.blobs"      -type f 2>/dev/null || true)
 
 if [[ -n "$THUMB_FILES" || -n "$BLOB_FILES" ]]; then
-    # Async thumbnail/blob workers may still be flushing writes from the
-    # last test's uploads when the cleanup phase reaches this point —
-    # particularly on fast CI runners where the test loop outpaces the
-    # worker. Poll for up to 5 s and exit the loop the moment storage
-    # drains. TODO: replace with a deterministic worker-drain signal
-    # (e.g. queue depth on /ready) when one exists.
+    # Even with the synchronous sweep + force-GC above, the on-disk
+    # unlink for thumbnails/blobs is handled by async workers that may
+    # still be draining when this `find` runs. Keep the short
+    # retry loop as a race guard. TODO: replace with a deterministic
+    # worker-drain signal (e.g. queue depth on /ready) when one exists.
     log "Thumb/blob leftovers detected — polling for async worker drain (race guard)"
     for attempt in 1 2 3 4 5; do
         sleep 1

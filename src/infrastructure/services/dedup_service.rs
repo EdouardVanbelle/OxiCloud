@@ -1895,6 +1895,27 @@ impl DedupService {
     /// The grace window and reference cross-checks together make the sweep safe
     /// against a concurrent uploader re-referencing a just-orphaned chunk.
     pub async fn garbage_collect(&self) -> Result<(u64, u64), DomainError> {
+        self.garbage_collect_with_grace(Self::GC_ORPHAN_GRACE_SECS)
+            .await
+    }
+
+    /// Test-only variant that bypasses the orphan grace window — used by
+    /// `POST /api/admin/internal/trigger-gc?force=true` so the
+    /// integration suite can reap just-orphaned blobs synchronously
+    /// (waiting out the production 1 h grace inside a test run is a
+    /// non-starter). Drops the same rows the regular sweep would, just
+    /// without the time floor. Unsafe under concurrent uploads because
+    /// it reopens the TOCTOU window the grace closes — only the
+    /// admin-internal route, itself gated by
+    /// `OXICLOUD_ENABLE_ADMIN_INTERNAL_ENDPOINTS`, may reach here.
+    pub async fn garbage_collect_force(&self) -> Result<(u64, u64), DomainError> {
+        self.garbage_collect_with_grace(0).await
+    }
+
+    async fn garbage_collect_with_grace(
+        &self,
+        grace_secs: i64,
+    ) -> Result<(u64, u64), DomainError> {
         const BATCH_SIZE: i64 = 500;
 
         let mut total_deleted = 0u64;
@@ -2001,7 +2022,7 @@ impl DedupService {
                   RETURNING hash, size",
             )
             .bind(BATCH_SIZE)
-            .bind(Self::GC_ORPHAN_GRACE_SECS as i32)
+            .bind(grace_secs as i32)
             .fetch_all(self.maintenance_pool.as_ref())
             .await
             .map_err(|e| DomainError::internal_error("Dedup", format!("GC blobs: {e}")))?;

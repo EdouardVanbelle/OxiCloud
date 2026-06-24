@@ -2085,6 +2085,22 @@ pub async fn internal_trigger_sweep(
         .into_response()
 }
 
+/// Query parameters for `POST /api/admin/internal/trigger-gc`.
+///
+/// `force=true` bypasses the orphan-grace window so the sweep reaps
+/// just-orphaned blobs in the same call. Without this, a blob orphaned
+/// less than `GC_ORPHAN_GRACE_SECS` (1 h) ago survives the sweep — the
+/// grace exists so a concurrent uploader pinning a just-orphaned chunk
+/// can't race the row-delete → file-unlink gap. Integration tests
+/// don't have concurrent uploaders, so the test runner sets
+/// `force=true` to make the sweep deterministic within a test's
+/// runtime.
+#[derive(Debug, serde::Deserialize, Default)]
+pub struct InternalTriggerGcQuery {
+    #[serde(default)]
+    pub force: bool,
+}
+
 /// `POST /api/admin/internal/trigger-gc` — run the blob garbage
 /// collector synchronously.
 ///
@@ -2092,10 +2108,12 @@ pub async fn internal_trigger_sweep(
 /// to the orphan-grace window) and their on-disk content. Same call
 /// as the inline post-purge GC and the periodic blob-GC sweep — just
 /// exposed under an admin route so Hurl can wait for it
-/// deterministically.
+/// deterministically. Add `?force=true` to bypass the grace window —
+/// see [`InternalTriggerGcQuery`].
 #[utoipa::path(
     post,
     path = "/api/admin/internal/trigger-gc",
+    params(("force" = Option<bool>, Query, description = "Bypass the orphan-grace window (test-only)")),
     responses(
         (status = 200, description = "GC ran"),
         (status = 401, description = "Unauthorized"),
@@ -2108,6 +2126,7 @@ pub async fn internal_trigger_sweep(
 pub async fn internal_trigger_gc(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(query): Query<InternalTriggerGcQuery>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     if !state.core.config.features.enable_admin_internal_endpoints {
@@ -2116,13 +2135,19 @@ pub async fn internal_trigger_gc(
     if let Err(e) = admin_guard(&state, &headers).await {
         return e.into_response();
     }
-    match state.core.dedup_service.garbage_collect().await {
+    let result = if query.force {
+        state.core.dedup_service.garbage_collect_force().await
+    } else {
+        state.core.dedup_service.garbage_collect().await
+    };
+    match result {
         Ok((blobs_deleted, bytes_freed)) => (
             StatusCode::OK,
             Json(serde_json::json!({
                 "ok": true,
                 "blobs_deleted": blobs_deleted,
                 "bytes_freed": bytes_freed,
+                "forced": query.force,
             })),
         )
             .into_response(),
