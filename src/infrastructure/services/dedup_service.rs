@@ -1972,6 +1972,16 @@ impl DedupService {
                     DomainError::internal_error("Dedup", format!("GC decrement chunks: {e}"))
                 })?;
 
+                // Fire the blob hooks against the **manifest's file_hash** —
+                // that's the key thumbnails are stored under (whole-file
+                // BLAKE3, not chunk hashes). Phase 2 below fires hooks for
+                // individual chunk hashes only; without this call, a
+                // CDC-chunked file's thumbnails leak on disk because the
+                // chunk-keyed hook never finds them. Symptom: orphan webp
+                // under `.thumbnails/{icon,preview,large}/<file_hash>.webp`
+                // after a user-cascade-delete of a video upload.
+                self.fire_blob_hooks(file_hash);
+
                 total_bytes += *size as u64;
                 tracing::debug!(
                     "GC: removed manifest {} ({} chunks)",
