@@ -518,11 +518,13 @@ impl AppServiceFactory {
         plugin_dispatch: Option<
             Arc<dyn crate::application::ports::plugin_ports::PluginDispatchPort>,
         >,
+        mount_router: Arc<crate::application::services::external_mount_router::MountRouter>,
     ) -> ApplicationServices {
         // Main services
         let folder_service = Arc::new(FolderService::new(
             repos.folder_repository.clone(),
             authz.clone(),
+            mount_router,
         ));
 
         // Built before the upload/management services so the plugin lifecycle
@@ -1160,6 +1162,27 @@ impl AppServiceFactory {
         let (plugin_dispatch, plugin_management) = self.create_plugin_ports();
 
         // 4. Application services (with trash + authz already wired)
+        // External mount registry + router. Built before the application
+        // services because `FolderService` holds the router to branch listing
+        // onto the provider. The router is always present (an empty registry is
+        // a cheap no-op); when the feature is enabled we load the configured
+        // mounts and build their providers up front. The registry is
+        // interior-mutable (arc-swap), so reloading here is visible to every
+        // holder of the shared router.
+        let mount_registry =
+            Arc::new(crate::application::services::mount_registry::MountRegistry::empty());
+        if self.config.features.enable_external_mounts {
+            let repo = crate::infrastructure::repositories::pg::ExternalMountPgRepository::new(
+                pool.clone(),
+            );
+            let factory =
+                crate::infrastructure::services::mount_provider_factory::DefaultMountProviderFactory::new();
+            mount_registry.reload(&repo, &factory).await;
+        }
+        let mount_router = Arc::new(
+            crate::application::services::external_mount_router::MountRouter::new(mount_registry),
+        );
+
         let mut apps = self.create_application_services(
             &core,
             &repos,
@@ -1169,6 +1192,7 @@ impl AppServiceFactory {
             &storage_usage,
             content_index.as_ref().map(|(idx, _)| idx.clone()),
             plugin_dispatch.clone(),
+            mount_router.clone(),
         );
 
         // 5. Share service
@@ -1441,6 +1465,7 @@ impl AppServiceFactory {
             locale_registry: self.locale_registry.clone(),
             db_pool: Some(pool.clone()),
             maintenance_pool: Some(maintenance_pool),
+            mount_router,
             auth_service: auth_services,
             nextcloud: nextcloud_services,
             admin_settings_service: None,
@@ -1894,6 +1919,13 @@ pub struct AppState {
     pub db_pool: Option<Arc<PgPool>>,
     /// Isolated pool for background / batch operations.
     pub maintenance_pool: Option<Arc<PgPool>>,
+    /// External-mount classifier + registry. Always present; an empty registry
+    /// (feature disabled or no mounts configured) makes `classify` a cheap no-op
+    /// that routes every id to native handling. Handlers consult this before
+    /// parsing an id as a UUID, then call the matching service-layer mount
+    /// method (which still owns the authorization check).
+    pub mount_router:
+        Arc<crate::application::services::external_mount_router::MountRouter>,
     pub auth_service: Option<AuthServices>,
     pub nextcloud: Option<NextcloudServices>,
     pub admin_settings_service: Option<Arc<AdminSettingsService>>,

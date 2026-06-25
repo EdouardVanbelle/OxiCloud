@@ -12,6 +12,12 @@ pub mod interfaces;
 #[cfg(integration_tests)]
 pub mod integration_test_support;
 
+// Shared testcontainers-backed harness for external-mount integration tests.
+// Gated on `test` too because it links the `testcontainers` dev-dependency,
+// which is only available to test targets (not the plain lib build).
+#[cfg(all(test, integration_tests))]
+mod mount_it_support;
+
 // Phase 0 perf-benchmark support: deterministic image corpus generation/loading
 // shared by `benches/thumbnails.rs` and `examples/bench_thumbnails_mem.rs`.
 // Gated behind the `bench` feature so it adds nothing to normal builds.

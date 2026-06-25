@@ -1,0 +1,154 @@
+//! PostgreSQL persistence for external mount configuration.
+//!
+//! P1 only needs [`ExternalMountRepositoryPort::list_all`] to (re)build the
+//! in-memory registry; admin CRUD lands with P4.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use sqlx::{PgPool, Row};
+use uuid::Uuid;
+
+use crate::application::ports::external_mount_ports::{
+    ExternalMountRecord, ExternalMountRepositoryPort,
+};
+use crate::domain::errors::DomainError;
+
+/// PostgreSQL implementation of [`ExternalMountRepositoryPort`].
+pub struct ExternalMountPgRepository {
+    pool: Arc<PgPool>,
+}
+
+impl ExternalMountPgRepository {
+    /// Construct over a connection pool.
+    pub fn new(pool: Arc<PgPool>) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl ExternalMountRepositoryPort for ExternalMountPgRepository {
+    async fn list_all(&self) -> Result<Vec<ExternalMountRecord>, DomainError> {
+        // Join each mount to its (non-trashed) root folder to pick up the
+        // drive scope and the materialized path needed for path resolution.
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                m.mount_folder_id AS mount_folder_id,
+                m.kind            AS kind,
+                m.config          AS config,
+                m.name            AS name,
+                m.owner_id        AS owner_id,
+                m.read_only       AS read_only,
+                f.drive_id        AS drive_id,
+                f.path            AS mount_path
+            FROM storage.external_mounts m
+            JOIN storage.folders f ON f.id = m.mount_folder_id
+            WHERE NOT f.is_trashed
+            "#,
+        )
+        .fetch_all(self.pool.as_ref())
+        .await
+        .map_err(|e| DomainError::database_error(format!("failed to list external mounts: {e}")))?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let drive_id: Option<Uuid> = row
+                .try_get("drive_id")
+                .map_err(|e| DomainError::database_error(format!("external mount row: {e}")))?;
+            let Some(drive_id) = drive_id else {
+                // A mount root without a drive shouldn't exist post-D0; skip safely.
+                tracing::warn!(
+                    target: "oxicloud::external_mounts",
+                    "skipping external mount with NULL drive_id"
+                );
+                continue;
+            };
+            out.push(ExternalMountRecord {
+                mount_folder_id: row
+                    .try_get("mount_folder_id")
+                    .map_err(|e| DomainError::database_error(format!("external mount row: {e}")))?,
+                kind: row
+                    .try_get("kind")
+                    .map_err(|e| DomainError::database_error(format!("external mount row: {e}")))?,
+                config: row
+                    .try_get("config")
+                    .map_err(|e| DomainError::database_error(format!("external mount row: {e}")))?,
+                name: row
+                    .try_get("name")
+                    .map_err(|e| DomainError::database_error(format!("external mount row: {e}")))?,
+                owner_id: row
+                    .try_get("owner_id")
+                    .map_err(|e| DomainError::database_error(format!("external mount row: {e}")))?,
+                read_only: row
+                    .try_get("read_only")
+                    .map_err(|e| DomainError::database_error(format!("external mount row: {e}")))?,
+                drive_id,
+                mount_path: row
+                    .try_get("mount_path")
+                    .map_err(|e| DomainError::database_error(format!("external mount row: {e}")))?,
+            });
+        }
+        Ok(out)
+    }
+}
+
+// Gated on `test` too: the module uses the `testcontainers` dev-dependency,
+// which is only linked into test targets — a plain `--cfg integration_tests`
+// lib build (e.g. clippy's lib pass) must not try to compile it.
+#[cfg(all(test, integration_tests))]
+mod integration_tests {
+    use super::*;
+    use crate::mount_it_support::{fresh_db, insert_mount, provision_folder};
+
+    #[tokio::test]
+    async fn list_all_returns_mount_joined_with_folder() {
+        let (_c, pool) = fresh_db().await;
+        let p = provision_folder(&pool, "mountowner", "Media").await;
+        insert_mount(&pool, &p, "/srv/media").await;
+
+        let repo = ExternalMountPgRepository::new(pool.clone());
+        let mounts = repo.list_all().await.expect("list_all");
+
+        assert_eq!(mounts.len(), 1);
+        let m = &mounts[0];
+        assert_eq!(m.mount_folder_id, p.mount_folder_id);
+        assert_eq!(m.kind, "local_fs");
+        assert_eq!(m.owner_id, p.owner_id);
+        assert_eq!(m.drive_id, p.drive_id);
+        assert!(!m.read_only);
+        // The joined folder path (drive-scoped materialized path) contains the
+        // mount folder's name.
+        assert!(
+            m.mount_path.contains("Media"),
+            "mount_path was {:?}",
+            m.mount_path
+        );
+        assert_eq!(m.config["path"], "/srv/media");
+    }
+
+    #[tokio::test]
+    async fn list_all_skips_trashed_mount_folder() {
+        let (_c, pool) = fresh_db().await;
+        let p = provision_folder(&pool, "mountowner", "Media").await;
+        insert_mount(&pool, &p, "/srv/media").await;
+
+        // Soft-delete the mount-root folder; the join filters NOT is_trashed.
+        sqlx::query("UPDATE storage.folders SET is_trashed = true WHERE id = $1")
+            .bind(p.mount_folder_id)
+            .execute(pool.as_ref())
+            .await
+            .unwrap();
+
+        let repo = ExternalMountPgRepository::new(pool.clone());
+        let mounts = repo.list_all().await.expect("list_all");
+        assert!(mounts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_all_empty_when_no_mounts() {
+        let (_c, pool) = fresh_db().await;
+        let repo = ExternalMountPgRepository::new(pool.clone());
+        assert!(repo.list_all().await.expect("list_all").is_empty());
+    }
+}

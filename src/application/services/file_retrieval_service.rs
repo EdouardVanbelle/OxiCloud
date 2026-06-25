@@ -5,10 +5,14 @@ use std::sync::Arc;
 
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::ports::authorization_ports::AuthorizationEngine;
+use crate::application::ports::blob_storage_ports::BlobStream;
+use crate::application::ports::external_mount_ports::MountStat;
 use crate::application::ports::file_ports::{FileRetrievalUseCase, OptimizedFileContent};
 use crate::application::ports::storage_ports::FileReadPort;
+use crate::application::services::mount_registry::MountConfig;
 use crate::common::errors::DomainError;
 use crate::domain::services::authorization::{Permission, Resource, Subject};
+use crate::domain::services::external_mount_id::NodeId;
 use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
 use crate::infrastructure::services::file_content_cache::FileContentCache;
 use crate::infrastructure::services::image_transcode_service::{
@@ -60,6 +64,22 @@ impl FileRetrievalService {
             file_read,
             content_cache: Some(content_cache),
             transcode: Some(transcode),
+            authz: Some(authz),
+        }
+    }
+
+    /// Test-only constructor: authorization engine without the cache/transcode
+    /// tiers. The external-mount read methods only consult `authz` + the
+    /// provider, so this is sufficient to exercise their authorization.
+    #[cfg(all(test, integration_tests))]
+    pub(crate) fn new_with_authz_for_test(
+        file_read: Arc<FileBlobReadRepository>,
+        authz: Arc<PgAclEngine>,
+    ) -> Self {
+        Self {
+            file_read,
+            content_cache: None,
+            transcode: None,
             authz: Some(authz),
         }
     }
@@ -120,6 +140,50 @@ impl FileRetrievalService {
         authz
             .require(Subject::User(caller_id), perm, Resource::Folder(uuid))
             .await
+    }
+
+    /// Authorize then `stat` a file inside an external mount. Authorization
+    /// collapses onto the mount-root folder (a `Read` grant there covers
+    /// everything in the mount).
+    pub async fn stat_mount_file_with_perms(
+        &self,
+        cfg: &MountConfig,
+        node_id: &NodeId,
+        caller_id: Uuid,
+    ) -> Result<MountStat, DomainError> {
+        let authz = self.authz.as_ref().ok_or_else(|| {
+            DomainError::internal_error("FileRetrieval", "Authorization engine unavailable")
+        })?;
+        authz
+            .require(
+                Subject::User(caller_id),
+                Permission::Read,
+                Resource::Folder(cfg.mount_id),
+            )
+            .await?;
+        cfg.provider.stat(node_id).await
+    }
+
+    /// Authorize then open a (optionally ranged) read stream over a mount file.
+    /// `range` is `(start, end_inclusive_opt)`.
+    pub async fn open_mount_file_with_perms(
+        &self,
+        cfg: &MountConfig,
+        node_id: &NodeId,
+        caller_id: Uuid,
+        range: Option<(u64, Option<u64>)>,
+    ) -> Result<BlobStream, DomainError> {
+        let authz = self.authz.as_ref().ok_or_else(|| {
+            DomainError::internal_error("FileRetrieval", "Authorization engine unavailable")
+        })?;
+        authz
+            .require(
+                Subject::User(caller_id),
+                Permission::Read,
+                Resource::Folder(cfg.mount_id),
+            )
+            .await?;
+        cfg.provider.open_read_stream(node_id, range).await
     }
 
     /// Try to transcode image content to WebP and return transcoded variant.

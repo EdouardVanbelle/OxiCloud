@@ -4,10 +4,14 @@ use crate::application::dtos::folder_dto::{
     MoveFolderDto, RenameFolderDto,
 };
 use crate::application::ports::authorization_ports::AuthorizationEngine;
+use crate::application::ports::external_mount_ports::MountEntry;
 use crate::application::ports::folder_ports::FolderUseCase;
+use crate::application::services::external_mount_router::MountRouter;
+use crate::application::services::mount_registry::MountConfig;
 use crate::common::errors::{DomainError, ErrorKind};
 use crate::domain::repositories::folder_repository::FolderRepository;
-use crate::domain::services::authorization::{Permission, Resource, Subject};
+use crate::domain::services::authorization::{Permission, Resource, ResourceKind, Subject};
+use crate::domain::services::external_mount_id::NodeId;
 use crate::domain::services::path_service::{StoragePath, validate_storage_name};
 use crate::infrastructure::repositories::pg::folder_db_repository::FolderDbRepository;
 use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
@@ -18,15 +22,29 @@ use uuid::Uuid;
 pub struct FolderService {
     folder_storage: Arc<FolderDbRepository>,
     authz: Arc<PgAclEngine>,
+    /// External-mount classifier. Lets folder operations branch a mount-root or
+    /// `ext:` id onto the provider instead of the PostgreSQL repositories.
+    mount_router: Arc<MountRouter>,
 }
 
 impl FolderService {
     /// Creates a new folder service
-    pub fn new(folder_storage: Arc<FolderDbRepository>, authz: Arc<PgAclEngine>) -> Self {
+    pub fn new(
+        folder_storage: Arc<FolderDbRepository>,
+        authz: Arc<PgAclEngine>,
+        mount_router: Arc<MountRouter>,
+    ) -> Self {
         Self {
             folder_storage,
             authz,
+            mount_router,
         }
+    }
+
+    /// Borrow the external-mount classifier (handlers branch on this before
+    /// treating an id as a native UUID).
+    pub fn mount_router(&self) -> &MountRouter {
+        &self.mount_router
     }
 
     /// Batch counterpart of `get_folder`: resolve many folder ids in ONE
@@ -615,6 +633,125 @@ impl FolderService {
 
         Ok((rows, next_cursor))
     }
+
+    /// List one directory inside an external mount (the mount root when
+    /// `node_id` is empty, or a nested virtual folder otherwise).
+    ///
+    /// Authorization collapses onto the mount-root folder: a caller who may
+    /// `Read` the mount root may browse everything inside it. The provider
+    /// reads the live backend; entries are sorted in memory and paginated with
+    /// a name-keyset cursor (directories are bounded, see provider cap).
+    ///
+    /// Returns the page of raw [`MountEntry`]s plus an encoded next cursor; the
+    /// handler maps each entry to a `FolderResourceItemDto` with a synthetic
+    /// `ext:` id.
+    pub async fn list_mount_dir_with_perms(
+        &self,
+        cfg: &MountConfig,
+        node_id: &NodeId,
+        caller_id: Uuid,
+        opts: ListResourcesOptions<'_>,
+    ) -> Result<(Vec<MountEntry>, Option<String>), DomainError> {
+        // AuthZ — everything in the mount is gated by the mount-root folder.
+        self.authz
+            .require(
+                Subject::User(caller_id),
+                Permission::Read,
+                Resource::Folder(cfg.mount_id),
+            )
+            .await?;
+
+        let entries = cfg.provider.list_dir(node_id).await?;
+        let cursor_name = opts.cursor.as_ref().and_then(|c| c.sort_str.as_deref());
+        Ok(paginate_mount_entries(
+            entries,
+            opts.kinds,
+            opts.order_by,
+            opts.reverse,
+            opts.limit,
+            cursor_name,
+        ))
+    }
+}
+
+/// Filter, sort, and page a directory's worth of mount entries, returning the
+/// page plus an encoded next cursor. Pure (no I/O / authz) so it can be tested
+/// exhaustively.
+///
+/// The cursor is a **name keyset**: names are unique within a directory, so the
+/// last emitted name is a stable resume key under any sort dimension. Resume is
+/// best-effort — if the cursor's entry was deleted out-of-band the page restarts
+/// from the top (documented; avoids an infinite loop).
+fn paginate_mount_entries(
+    mut entries: Vec<MountEntry>,
+    kinds: Option<&[ResourceKind]>,
+    order_by: &str,
+    reverse: bool,
+    limit: usize,
+    cursor_name: Option<&str>,
+) -> (Vec<MountEntry>, Option<String>) {
+    if let Some(kinds) = kinds {
+        let want_files = kinds.contains(&ResourceKind::File);
+        let want_folders = kinds.contains(&ResourceKind::Folder);
+        entries.retain(|e| if e.is_dir { want_folders } else { want_files });
+    }
+
+    sort_mount_entries(&mut entries, order_by, reverse);
+
+    let start = match cursor_name {
+        Some(name) => entries
+            .iter()
+            .position(|e| name.eq_ignore_ascii_case(&e.name))
+            .map(|i| i + 1)
+            .unwrap_or(0),
+        None => 0,
+    };
+
+    let has_more = entries.len() > start + limit;
+    let page: Vec<MountEntry> = entries.into_iter().skip(start).take(limit).collect();
+
+    let next_cursor = if has_more {
+        page.last().map(|last| {
+            FolderResourceCursor {
+                order_by: order_by.to_owned(),
+                resource_id: Uuid::nil(),
+                sort_str: Some(last.name.clone()),
+                sort_int: None,
+                sort_ts: None,
+                reverse,
+            }
+            .encode()
+        })
+    } else {
+        None
+    };
+
+    (page, next_cursor)
+}
+
+/// Sort mount entries in place. Folders sort before files for the `name`/`type`
+/// dimensions; otherwise by the requested key with name as the tie-breaker.
+/// `reverse` flips the final order.
+fn sort_mount_entries(entries: &mut [MountEntry], order_by: &str, reverse: bool) {
+    use std::cmp::Ordering;
+    let name_key = |e: &MountEntry| e.name.to_lowercase();
+    entries.sort_by(|a, b| {
+        let primary = match order_by {
+            "modified_at" => a.modified_at.cmp(&b.modified_at),
+            "created_at" => a.created_at.cmp(&b.created_at),
+            "size" => a.size.cmp(&b.size),
+            // "name" / "type" / anything else: folders first, then by name.
+            _ => b.is_dir.cmp(&a.is_dir),
+        };
+        let ord = primary.then_with(|| name_key(a).cmp(&name_key(b)));
+        if ord == Ordering::Equal {
+            Ordering::Equal
+        } else if reverse {
+            ord.reverse()
+        } else {
+            ord
+        }
+    });
 }
 
 /// Build the next-page cursor from the last row of the current page.
@@ -840,5 +977,343 @@ impl UserLifecycleHook for PersonalDriveLifecycleHook {
             "Personal drive (and tree) will be removed via FK CASCADE on user delete"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod mount_listing_tests {
+    use super::{paginate_mount_entries, sort_mount_entries};
+    use crate::application::dtos::cursor::PageCursor;
+    use crate::application::dtos::folder_dto::FolderResourceCursor;
+    use crate::application::ports::external_mount_ports::MountEntry;
+    use crate::domain::services::authorization::ResourceKind;
+    use crate::domain::services::external_mount_id::NodeId;
+
+    fn entry(name: &str, is_dir: bool, size: u64, modified: u64) -> MountEntry {
+        MountEntry {
+            name: name.to_string(),
+            node_id: NodeId(name.to_string()),
+            is_dir,
+            size,
+            modified_at: modified,
+            created_at: modified,
+        }
+    }
+
+    fn names(entries: &[MountEntry]) -> Vec<String> {
+        entries.iter().map(|e| e.name.clone()).collect()
+    }
+
+    #[test]
+    fn sorts_folders_first_then_name_case_insensitive() {
+        let mut e = vec![
+            entry("Banana.txt", false, 1, 1),
+            entry("apple", true, 0, 1),
+            entry("Cherry", true, 0, 1),
+            entry("almond.txt", false, 1, 1),
+        ];
+        sort_mount_entries(&mut e, "name", false);
+        assert_eq!(names(&e), ["apple", "Cherry", "almond.txt", "Banana.txt"]);
+    }
+
+    #[test]
+    fn reverse_flips_order() {
+        let mut e = vec![
+            entry("a", false, 1, 1),
+            entry("b", false, 1, 1),
+            entry("d", true, 0, 1),
+        ];
+        sort_mount_entries(&mut e, "name", true);
+        // folders-first then name, reversed.
+        assert_eq!(names(&e), ["b", "a", "d"]);
+    }
+
+    #[test]
+    fn sorts_by_size_modified_created() {
+        let mut by_size = vec![
+            entry("big", false, 100, 1),
+            entry("small", false, 1, 1),
+            entry("mid", false, 50, 1),
+        ];
+        sort_mount_entries(&mut by_size, "size", false);
+        assert_eq!(names(&by_size), ["small", "mid", "big"]);
+
+        let mut by_mtime = vec![
+            entry("new", false, 1, 300),
+            entry("old", false, 1, 100),
+            entry("mid", false, 1, 200),
+        ];
+        sort_mount_entries(&mut by_mtime, "modified_at", false);
+        assert_eq!(names(&by_mtime), ["old", "mid", "new"]);
+
+        let mut by_ctime = vec![entry("z", false, 1, 9), entry("a", false, 1, 5)];
+        sort_mount_entries(&mut by_ctime, "created_at", false);
+        assert_eq!(names(&by_ctime), ["a", "z"]);
+    }
+
+    #[test]
+    fn filters_by_kind() {
+        let make = || vec![entry("dir", true, 0, 1), entry("file.txt", false, 1, 1)];
+        let (files_only, _) =
+            paginate_mount_entries(make(), Some(&[ResourceKind::File]), "name", false, 50, None);
+        assert_eq!(names(&files_only), ["file.txt"]);
+
+        let (folders_only, _) = paginate_mount_entries(
+            make(),
+            Some(&[ResourceKind::Folder]),
+            "name",
+            false,
+            50,
+            None,
+        );
+        assert_eq!(names(&folders_only), ["dir"]);
+
+        let (both, _) = paginate_mount_entries(
+            make(),
+            Some(&[ResourceKind::File, ResourceKind::Folder]),
+            "name",
+            false,
+            50,
+            None,
+        );
+        assert_eq!(both.len(), 2);
+    }
+
+    #[test]
+    fn paginates_with_name_keyset_cursor() {
+        let all = || {
+            vec![
+                entry("a", false, 1, 1),
+                entry("b", false, 1, 1),
+                entry("c", false, 1, 1),
+                entry("d", false, 1, 1),
+                entry("e", false, 1, 1),
+            ]
+        };
+
+        // Page 1: limit 2 → [a, b], cursor present.
+        let (p1, c1) = paginate_mount_entries(all(), None, "name", false, 2, None);
+        assert_eq!(names(&p1), ["a", "b"]);
+        let c1 = c1.expect("cursor after first page");
+        let decoded = FolderResourceCursor::decode(&c1).expect("decodes");
+        assert_eq!(decoded.sort_str.as_deref(), Some("b"));
+        assert!(!decoded.reverse);
+
+        // Page 2: resume after "b" → [c, d], cursor present.
+        let (p2, c2) = paginate_mount_entries(all(), None, "name", false, 2, Some("b"));
+        assert_eq!(names(&p2), ["c", "d"]);
+        assert!(c2.is_some());
+
+        // Page 3: resume after "d" → [e], no further cursor.
+        let (p3, c3) = paginate_mount_entries(all(), None, "name", false, 2, Some("d"));
+        assert_eq!(names(&p3), ["e"]);
+        assert!(c3.is_none());
+    }
+
+    #[test]
+    fn no_cursor_when_page_is_last() {
+        let e = vec![entry("a", false, 1, 1), entry("b", false, 1, 1)];
+        let (page, cursor) = paginate_mount_entries(e, None, "name", false, 50, None);
+        assert_eq!(page.len(), 2);
+        assert!(cursor.is_none());
+    }
+
+    #[test]
+    fn deleted_cursor_entry_restarts_best_effort() {
+        // Cursor names "zzz" which is not present → start from the top.
+        let e = vec![entry("a", false, 1, 1), entry("b", false, 1, 1)];
+        let (page, _) = paginate_mount_entries(e, None, "name", false, 50, Some("zzz"));
+        assert_eq!(names(&page), ["a", "b"]);
+    }
+
+    #[test]
+    fn empty_directory_yields_empty_page() {
+        let (page, cursor) = paginate_mount_entries(vec![], None, "name", false, 50, None);
+        assert!(page.is_empty());
+        assert!(cursor.is_none());
+    }
+
+    #[test]
+    fn limit_larger_than_len_returns_all_without_cursor() {
+        let e = vec![entry("a", false, 1, 1), entry("b", false, 1, 1)];
+        let (page, cursor) = paginate_mount_entries(e, None, "name", false, 100, None);
+        assert_eq!(page.len(), 2);
+        assert!(cursor.is_none());
+    }
+
+    #[test]
+    fn kind_filter_excluding_all_yields_empty() {
+        let e = vec![entry("only_dir", true, 0, 1)];
+        let (page, cursor) =
+            paginate_mount_entries(e, Some(&[ResourceKind::File]), "name", false, 50, None);
+        assert!(page.is_empty());
+        assert!(cursor.is_none());
+    }
+
+    #[test]
+    fn cursor_preserves_reverse_flag() {
+        let e = vec![
+            entry("a", false, 1, 1),
+            entry("b", false, 1, 1),
+            entry("c", false, 1, 1),
+        ];
+        let (_p, c) = paginate_mount_entries(e, None, "name", true, 1, None);
+        let decoded = FolderResourceCursor::decode(&c.unwrap()).unwrap();
+        assert!(decoded.reverse);
+        assert_eq!(decoded.order_by, "name");
+    }
+}
+
+#[cfg(all(test, integration_tests))]
+mod mount_authz_integration {
+    use super::*;
+    use crate::application::dtos::folder_dto::ListResourcesOptions;
+    use crate::application::services::external_mount_router::{MountRouter, ResolvedId};
+    use crate::application::services::file_retrieval_service::FileRetrievalService;
+    use crate::application::services::mount_registry::MountRegistry;
+    use crate::domain::services::external_mount_id::{NodeId, encode_child_id};
+    use crate::infrastructure::repositories::pg::{
+        ExternalMountPgRepository, FileBlobReadRepository, SubjectGroupPgRepository,
+    };
+    use crate::infrastructure::services::mount_provider_factory::DefaultMountProviderFactory;
+    use crate::mount_it_support::{fresh_db, insert_mount, make_user, provision_folder};
+    use std::sync::Arc;
+
+    fn opts<'a>() -> ListResourcesOptions<'a> {
+        ListResourcesOptions {
+            limit: 50,
+            cursor: None,
+            order_by: "name",
+            kinds: None,
+            reverse: false,
+        }
+    }
+
+    /// Build a real PgAclEngine over the live pool. The folder-ancestry cascade
+    /// uses the engine's own pool; the file repo is a stub (not exercised by
+    /// folder checks).
+    fn acl(pool: &Arc<sqlx::PgPool>) -> Arc<PgAclEngine> {
+        Arc::new(PgAclEngine::new(
+            pool.clone(),
+            Arc::new(FolderDbRepository::new(pool.clone())),
+            Arc::new(FileBlobReadRepository::new_stub()),
+            Arc::new(SubjectGroupPgRepository::new(pool.clone())),
+        ))
+    }
+
+    /// Full read path: owner can list a mount's live contents; a stranger with
+    /// no grant is denied. Exercises the REAL authorization cascade
+    /// (`authz.require(Resource::Folder(mount_id))`) over ltree ancestry.
+    #[tokio::test]
+    async fn owner_lists_mount_contents_stranger_denied() {
+        let (_c, pool) = fresh_db().await;
+
+        // Real host directory the mount points at.
+        let host = tempfile::tempdir().unwrap();
+        std::fs::write(host.path().join("a.txt"), b"hello").unwrap();
+        std::fs::create_dir(host.path().join("sub")).unwrap();
+
+        let p = provision_folder(&pool, "owner", "Media").await;
+        insert_mount(&pool, &p, host.path().to_str().unwrap()).await;
+
+        // Build the registry from the DB (also exercises reload + provider build).
+        let registry = Arc::new(MountRegistry::empty());
+        registry
+            .reload(
+                &ExternalMountPgRepository::new(pool.clone()),
+                &DefaultMountProviderFactory::new(),
+            )
+            .await;
+        let router = Arc::new(MountRouter::new(registry.clone()));
+        let folder_service = FolderService::new(
+            Arc::new(FolderDbRepository::new(pool.clone())),
+            acl(&pool),
+            router.clone(),
+        );
+
+        let cfg = registry.get(&p.mount_folder_id).expect("mount registered");
+
+        // The mount root UUID classifies as a MountRoot.
+        assert!(matches!(
+            router.classify(&p.mount_folder_id.to_string()),
+            ResolvedId::MountRoot { .. }
+        ));
+
+        // Owner lists the live directory contents.
+        let (entries, _cursor) = folder_service
+            .list_mount_dir_with_perms(&cfg, &NodeId::default(), p.owner_id, opts())
+            .await
+            .expect("owner may list");
+        let mut names: Vec<_> = entries.iter().map(|e| e.name.clone()).collect();
+        names.sort();
+        assert_eq!(names, ["a.txt", "sub"]);
+
+        // A stranger with no grant on the mount-root folder is denied
+        // (NotFound — anti-enumeration).
+        let stranger = make_user(&pool, "stranger").await;
+        let err = folder_service
+            .list_mount_dir_with_perms(&cfg, &NodeId::default(), stranger, opts())
+            .await
+            .expect_err("stranger must be denied");
+        assert_eq!(err.kind, crate::domain::errors::ErrorKind::NotFound);
+    }
+
+    /// Download path authz: owner can stat/open a mount file; stranger denied.
+    #[tokio::test]
+    async fn owner_reads_mount_file_stranger_denied() {
+        let (_c, pool) = fresh_db().await;
+
+        let host = tempfile::tempdir().unwrap();
+        std::fs::write(host.path().join("doc.txt"), b"payload").unwrap();
+
+        let p = provision_folder(&pool, "owner", "Media").await;
+        insert_mount(&pool, &p, host.path().to_str().unwrap()).await;
+
+        let registry = Arc::new(MountRegistry::empty());
+        registry
+            .reload(
+                &ExternalMountPgRepository::new(pool.clone()),
+                &DefaultMountProviderFactory::new(),
+            )
+            .await;
+        let cfg = registry.get(&p.mount_folder_id).expect("registered");
+
+        let retrieval = FileRetrievalService::new_with_authz_for_test(
+            Arc::new(FileBlobReadRepository::new_stub()),
+            acl(&pool),
+        );
+
+        let node = NodeId::from("doc.txt");
+
+        // Owner: stat succeeds with the real size.
+        let stat = retrieval
+            .stat_mount_file_with_perms(&cfg, &node, p.owner_id)
+            .await
+            .expect("owner may stat");
+        assert_eq!(stat.size, 7);
+        assert!(!stat.is_dir);
+
+        // Owner: open succeeds (smoke — stream is consumed elsewhere).
+        assert!(
+            retrieval
+                .open_mount_file_with_perms(&cfg, &node, p.owner_id, None)
+                .await
+                .is_ok()
+        );
+
+        // The synthetic id for this file round-trips through the router.
+        let ext_id = encode_child_id(p.mount_folder_id, "doc.txt");
+        assert!(matches!(
+            MountRouter::new(registry.clone()).classify(&ext_id),
+            ResolvedId::MountChild { .. }
+        ));
+
+        // Stranger: denied.
+        let stranger = make_user(&pool, "stranger").await;
+        let err = retrieval
+            .stat_mount_file_with_perms(&cfg, &node, stranger)
+            .await
+            .expect_err("stranger denied");
+        assert_eq!(err.kind, crate::domain::errors::ErrorKind::NotFound);
     }
 }

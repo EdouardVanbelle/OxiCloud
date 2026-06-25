@@ -11,13 +11,18 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use utoipa::ToSchema;
 
+use crate::application::ports::external_mount_ports::MountStat;
 use crate::application::ports::file_ports::{
     FileManagementUseCase, FileRetrievalUseCase, FileUploadUseCase,
 };
 use crate::application::ports::storage_ports::{FileReadPort, StorageUsagePort};
 use crate::application::ports::thumbnail_ports::ThumbnailPort;
 use crate::application::ports::{file_ports::OptimizedFileContent, folder_ports::FolderUseCase};
+use crate::application::services::external_mount_router::ResolvedId;
+use crate::application::services::mount_registry::MountConfig;
 use crate::common::di::AppState;
+use crate::domain::errors::DomainError;
+use crate::domain::services::external_mount_id::{NodeId, virtual_file_etag};
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::AuthUser;
 use crate::interfaces::range_requests::not_modified_response;
@@ -631,6 +636,22 @@ impl FileHandler {
         Query(params): Query<HashMap<String, String>>,
         headers: HeaderMap,
     ) -> impl IntoResponse {
+        // External mount: download a file living on the provider's backend.
+        // (A mount-root UUID is a folder and is not downloadable — it falls
+        // through and 404s as a non-file.)
+        if let ResolvedId::MountChild { cfg, node_id } = state.mount_router.classify(&id) {
+            return Self::download_mount_file(
+                &state,
+                &cfg,
+                &node_id,
+                &id,
+                auth_user.id,
+                &params,
+                &headers,
+            )
+            .await;
+        }
+
         let retrieval = &state.applications.file_retrieval_service;
 
         // ── Get file metadata (ownership-scoped) ────────────────────────
@@ -765,6 +786,146 @@ impl FileHandler {
                     .unwrap()
                     .into_response(),
             },
+            Err(err) => AppError::from(err).into_response(),
+        }
+    }
+
+    /// Download a file living inside an external mount: stat via the provider
+    /// (authorized against the mount root), then serve metadata / 304 / Range /
+    /// full stream straight from the backend. No blob cache, dedup, or WebP
+    /// transcode — mount content is served as-is.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn download_mount_file(
+        state: &AppState,
+        cfg: &MountConfig,
+        node_id: &NodeId,
+        id: &str,
+        caller_id: uuid::Uuid,
+        params: &HashMap<String, String>,
+        headers: &HeaderMap,
+    ) -> axum::response::Response {
+        let retrieval = &state.applications.file_retrieval_service;
+
+        let stat: MountStat = match retrieval
+            .stat_mount_file_with_perms(cfg, node_id, caller_id)
+            .await
+        {
+            Ok(s) => s,
+            Err(err) => return AppError::from(err).into_response(),
+        };
+        if stat.is_dir {
+            // Directories are not downloadable through this endpoint.
+            return AppError::from(DomainError::not_found("File", id)).into_response();
+        }
+
+        let name = node_id
+            .as_str()
+            .rsplit('/')
+            .next()
+            .unwrap_or_else(|| node_id.as_str());
+
+        // ── Metadata-only request ────────────────────────────────────
+        if params
+            .get("metadata")
+            .is_some_and(|v| v == "true" || v == "1")
+        {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "size": stat.size,
+                    "mime_type": stat.mime_type,
+                    "modified_at": stat.modified_at,
+                })),
+            )
+                .into_response();
+        }
+
+        let etag = format!("\"{}\"", virtual_file_etag(stat.size, stat.modified_at));
+        if let Some(resp) = not_modified_response(headers, &etag) {
+            return resp.into_response();
+        }
+
+        // ── Range Requests ───────────────────────────────────────────
+        if let Some(range_header) = headers.get(header::RANGE)
+            && let Ok(range_str) = range_header.to_str()
+            && let Ok(ranges) = parse_range_header(range_str)
+        {
+            match ranges.validate(stat.size) {
+                Ok(valid_ranges) => {
+                    if let Some(range) = valid_ranges.first() {
+                        let start = *range.start();
+                        let end = *range.end();
+                        let range_length = end - start + 1;
+                        let disposition = Self::content_disposition(name, &stat.mime_type, params);
+                        match retrieval
+                            .open_mount_file_with_perms(
+                                cfg,
+                                node_id,
+                                caller_id,
+                                Some((start, Some(end))),
+                            )
+                            .await
+                        {
+                            Ok(stream) => {
+                                return Response::builder()
+                                    .status(StatusCode::PARTIAL_CONTENT)
+                                    .header(header::CONTENT_TYPE, &stat.mime_type)
+                                    .header(header::CONTENT_DISPOSITION, &disposition)
+                                    .header(header::CONTENT_LENGTH, range_length)
+                                    .header(
+                                        header::CONTENT_RANGE,
+                                        format!("bytes {}-{}/{}", start, end, stat.size),
+                                    )
+                                    .header(header::ACCEPT_RANGES, "bytes")
+                                    .header(header::ETAG, &etag)
+                                    .header(
+                                        header::CACHE_CONTROL,
+                                        "private, max-age=3600, must-revalidate",
+                                    )
+                                    .body(Body::from_stream(stream))
+                                    .unwrap()
+                                    .into_response();
+                            }
+                            Err(err) => {
+                                tracing::error!("Error creating mount range stream: {}", err);
+                                // fall through to full download
+                            }
+                        }
+                    }
+                }
+                Err(_) => {
+                    return Response::builder()
+                        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                        .header(header::CONTENT_RANGE, format!("bytes */{}", stat.size))
+                        .body(Body::empty())
+                        .unwrap()
+                        .into_response();
+                }
+            }
+        }
+
+        // ── Normal download ──────────────────────────────────────────
+        let disposition = Self::content_disposition(name, &stat.mime_type, params);
+        match retrieval
+            .open_mount_file_with_perms(cfg, node_id, caller_id, None)
+            .await
+        {
+            Ok(stream) => Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, &stat.mime_type)
+                .header(header::CONTENT_DISPOSITION, &disposition)
+                .header(header::CONTENT_LENGTH, stat.size)
+                .header(header::ETAG, &etag)
+                .header(
+                    header::CACHE_CONTROL,
+                    "private, max-age=3600, must-revalidate",
+                )
+                .header(header::ACCEPT_RANGES, "bytes")
+                .body(Body::from_stream(stream))
+                .unwrap()
+                .into_response(),
             Err(err) => AppError::from(err).into_response(),
         }
     }
