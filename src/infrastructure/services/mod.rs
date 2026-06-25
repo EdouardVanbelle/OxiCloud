@@ -31,6 +31,7 @@ pub mod path_service;
 pub mod pg_acl_engine;
 #[cfg(feature = "plugins")]
 pub mod plugins;
+pub mod recent_recording_hook;
 pub mod retry_blob_backend;
 pub mod s3_blob_backend;
 pub mod search_index;

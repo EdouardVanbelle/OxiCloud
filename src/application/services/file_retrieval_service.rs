@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::file_ports::{FileRetrievalUseCase, OptimizedFileContent};
+use crate::application::ports::resource_access_hook::ResourceAccessHook;
 use crate::application::ports::storage_ports::FileReadPort;
 use crate::common::errors::DomainError;
 use crate::domain::services::authorization::{Permission, Resource, Subject};
@@ -33,6 +34,11 @@ pub struct FileRetrievalService {
     content_cache: Option<Arc<FileContentCache>>,
     transcode: Option<Arc<ImageTranscodeService>>,
     authz: Option<Arc<PgAclEngine>>,
+    /// Optional read-event observer. Currently fans out to the Recent-list
+    /// recorder; future observers (audit trail, "last seen by", …) attach
+    /// to the same hook so service code only knows the trait, not the impl.
+    /// `None` for the test/stub path that constructs via [`Self::new`].
+    resource_access_hook: Option<Arc<dyn ResourceAccessHook>>,
 }
 
 impl FileRetrievalService {
@@ -45,6 +51,7 @@ impl FileRetrievalService {
             content_cache: None,
             transcode: None,
             authz: None,
+            resource_access_hook: None,
         }
     }
 
@@ -61,6 +68,32 @@ impl FileRetrievalService {
             content_cache: Some(content_cache),
             transcode: Some(transcode),
             authz: Some(authz),
+            resource_access_hook: None,
+        }
+    }
+
+    /// Builder: attach a [`ResourceAccessHook`] that fires after every
+    /// authorised `_with_perms` read. Without it the service is silent —
+    /// existing behaviour for stub / test paths.
+    pub fn with_resource_access_hook(mut self, hook: Arc<dyn ResourceAccessHook>) -> Self {
+        self.resource_access_hook = Some(hook);
+        self
+    }
+
+    /// Fire the access hook if registered. Called from every `_with_perms`
+    /// read after the authZ + lookup has succeeded (never on failure
+    /// paths — denied reads must not surface in Recent).
+    ///
+    /// `pub` because the WebDAV / NextCloud DAV handlers resolve files
+    /// by path and authorise via that resolver, not via the
+    /// `*_with_perms` service methods — they then serve content through
+    /// the no-perms `get_file_stream` / `get_file_range_stream`. Those
+    /// handlers must call this directly after their own authZ has
+    /// passed so cross-protocol downloads (NC desktop, davx5, native
+    /// `/webdav/`) also surface in Recent.
+    pub fn notify_file_accessed(&self, caller_id: Uuid, file_id: &str) {
+        if let Some(hook) = &self.resource_access_hook {
+            hook.on_file_accessed(caller_id, file_id);
         }
     }
 
@@ -262,6 +295,11 @@ impl FileRetrievalUseCase for FileRetrievalService {
     async fn get_file_with_perms(&self, id: &str, caller_id: Uuid) -> Result<FileDto, DomainError> {
         self.require_file(id, Permission::Read, caller_id).await?;
         let file = self.file_read.get_file(id).await?;
+        // After authZ + lookup succeed: this caller has just inspected the
+        // file. Recent listing observes via the hook. The throttle in the
+        // recording impl coalesces repeat metadata fetches against the same
+        // file (file viewer poll, browse-then-download pattern).
+        self.notify_file_accessed(caller_id, id);
         Ok(FileDto::from(file))
     }
 
@@ -333,6 +371,7 @@ impl FileRetrievalUseCase for FileRetrievalService {
         caller_id: Uuid,
     ) -> Result<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>, DomainError> {
         self.require_file(id, Permission::Read, caller_id).await?;
+        self.notify_file_accessed(caller_id, id);
         self.file_read.get_file_stream(id).await
     }
 
@@ -359,6 +398,7 @@ impl FileRetrievalUseCase for FileRetrievalService {
         self.require_file(id, Permission::Read, caller_id).await?;
         let file = self.file_read.get_file(id).await?;
         let dto = FileDto::from(file);
+        self.notify_file_accessed(caller_id, id);
         self.optimized_inner(id, dto, accept_webp, prefer_original)
             .await
     }
@@ -393,6 +433,10 @@ impl FileRetrievalUseCase for FileRetrievalService {
         end: Option<u64>,
     ) -> Result<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>, DomainError> {
         self.require_file(id, Permission::Read, caller_id).await?;
+        // Range requests are bursty (video seeks, NC chunked downloads) —
+        // the recording hook's per-(caller, file) throttle absorbs the
+        // storm so one watched video lands as one Recent row, not 1000.
+        self.notify_file_accessed(caller_id, id);
         self.file_read.get_file_range_stream(id, start, end).await
     }
 

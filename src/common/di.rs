@@ -518,6 +518,9 @@ impl AppServiceFactory {
         plugin_dispatch: Option<
             Arc<dyn crate::application::ports::plugin_ports::PluginDispatchPort>,
         >,
+        resource_access_hook: Option<
+            Arc<dyn crate::application::ports::resource_access_hook::ResourceAccessHook>,
+        >,
     ) -> ApplicationServices {
         // Main services
         let folder_service = Arc::new(FolderService::new(
@@ -529,20 +532,26 @@ impl AppServiceFactory {
         // bridge (which looks file metadata up by id) can be wired into the
         // dispatcher they receive. It depends only on repos + core, never on
         // the upload service, so the reorder is safe.
-        let file_retrieval_service = Arc::new(FileRetrievalService::new_with_cache(
-            repos.file_read_repository.clone(),
-            core.file_content_cache.clone(),
-            core.image_transcode_service.clone(),
-            authz.clone(),
-        ));
+        let file_retrieval_service = {
+            let mut svc = FileRetrievalService::new_with_cache(
+                repos.file_read_repository.clone(),
+                core.file_content_cache.clone(),
+                core.image_transcode_service.clone(),
+                authz.clone(),
+            );
+            if let Some(hook) = resource_access_hook.clone() {
+                svc = svc.with_resource_access_hook(hook);
+            }
+            Arc::new(svc)
+        };
 
         // Effective lifecycle dispatcher: the core hooks (thumbnails, metadata)
         // plus, when the plugins feature is enabled, the WASM plugin bridge.
         let file_lifecycle =
             self.effective_file_lifecycle(core, &file_retrieval_service, plugin_dispatch);
 
-        let file_upload_service = Arc::new(
-            FileUploadService::new_with_read(
+        let file_upload_service = Arc::new({
+            let mut svc = FileUploadService::new_with_read(
                 repos.file_write_repository.clone(),
                 repos.file_read_repository.clone(),
             )
@@ -562,8 +571,12 @@ impl AppServiceFactory {
                 authz.clone(),
                 core.dedup_service.clone(),
                 storage_usage.clone(),
-            ),
-        );
+            );
+            if let Some(hook) = resource_access_hook.clone() {
+                svc = svc.with_resource_access_hook(hook);
+            }
+            svc
+        });
 
         // Delta-upload protocol — chunk negotiation over the same dedup
         // store. Bounded by the same whole-file ceiling as byte uploads.
@@ -580,8 +593,8 @@ impl AppServiceFactory {
         );
 
         // FileManagementService — ref_count handled by PG trigger, no dedup port needed
-        let file_management_service = Arc::new(
-            FileManagementService::with_trash(
+        let file_management_service = Arc::new({
+            let mut svc = FileManagementService::with_trash(
                 repos.file_write_repository.clone(),
                 trash_service.clone(),
                 Some(repos.file_read_repository.clone()),
@@ -589,8 +602,12 @@ impl AppServiceFactory {
                 Some(core.file_content_cache.clone()),
                 authz.clone(),
             )
-            .with_file_lifecycle_hook(file_lifecycle.clone()),
-        );
+            .with_file_lifecycle_hook(file_lifecycle.clone());
+            if let Some(hook) = resource_access_hook.clone() {
+                svc = svc.with_resource_access_hook(hook);
+            }
+            svc
+        });
 
         let file_use_case_factory = Arc::new(AppFileUseCaseFactory::new(
             repos.file_read_repository.clone(),
@@ -1121,6 +1138,31 @@ impl AppServiceFactory {
         let pool = Arc::new(pools.primary);
         let maintenance_pool = Arc::new(pools.maintenance);
 
+        // Recent service + recording hook are built up-front so the
+        // hook can be threaded into `create_application_services` below.
+        // The file services hold the hook directly so every authorised
+        // `_with_perms` read/write fires into `auth.user_recent_files`
+        // without per-handler wiring. Reordering vs the legacy in-block
+        // creation (further down) is safe: `create_recent_service` only
+        // needs `pool`, which is already in scope.
+        //
+        // The back-edge `recent_service_eager.set_resource_access_hook`
+        // closes the loop so the clear/remove handlers can drop the
+        // hook's in-memory throttle entries — without it a freshly
+        // cleared Recent list refuses to re-record the same file for a
+        // full TTL window, surfacing as "I cleared, opened the file,
+        // and Recent is still empty" (caught by tests/api/recent.hurl
+        // step 8).
+        let recent_service_eager = self.create_recent_service(&pool);
+        let resource_access_hook: Arc<
+            dyn crate::application::ports::resource_access_hook::ResourceAccessHook,
+        > = Arc::new(
+            crate::infrastructure::services::recent_recording_hook::RecentRecordingHook::new(
+                recent_service_eager.clone(),
+            ),
+        );
+        recent_service_eager.set_resource_access_hook(resource_access_hook.clone());
+
         // 1. Core services (PgPool needed for DedupService index)
         let core = self.create_core_services(&pool, &maintenance_pool).await?;
 
@@ -1179,6 +1221,7 @@ impl AppServiceFactory {
             &storage_usage,
             content_index.as_ref().map(|(idx, _)| idx.clone()),
             plugin_dispatch.clone(),
+            Some(resource_access_hook.clone()),
         );
 
         // 5. Share service
@@ -1217,9 +1260,11 @@ impl AppServiceFactory {
             favorites_service = Some(favs.clone());
             apps.favorites_service = Some(favs);
 
-            let recent = self.create_recent_service(&pool);
-            recent_service = Some(recent.clone());
-            apps.recent_service = Some(recent);
+            // Already built up-front so the file services could hold the
+            // RecentRecordingHook — reuse the same Arc here so AppState and
+            // the recording hook share one service instance.
+            recent_service = Some(recent_service_eager.clone());
+            apps.recent_service = Some(recent_service_eager.clone());
 
             places_service = if core.config.features.enable_places {
                 Some(self.create_places_service(&repos.file_read_repository))

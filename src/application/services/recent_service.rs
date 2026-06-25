@@ -1,10 +1,11 @@
 use crate::application::dtos::cursor::PageCursor;
 use crate::application::dtos::recent_dto::{RecentCursor, RecentItemDto, RecentResourceRow};
 use crate::application::ports::recent_ports::{RecentItemsRepositoryPort, RecentItemsUseCase};
+use crate::application::ports::resource_access_hook::ResourceAccessHook;
 use crate::common::errors::{DomainError, ErrorKind, Result};
 use crate::domain::services::authorization::ResourceKind;
 use crate::infrastructure::repositories::pg::RecentItemsPgRepository;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tracing::info;
 use uuid::Uuid;
 
@@ -15,6 +16,14 @@ use uuid::Uuid;
 pub struct RecentService {
     repo: Arc<RecentItemsPgRepository>,
     max_recent_items: i32,
+    /// Set after construction via [`Self::set_resource_access_hook`].
+    /// The hook is built FROM this service (it wraps an `Arc<Self>`), so
+    /// we can't take it as a constructor arg without circular ownership;
+    /// the OnceLock holds the back-edge so this service can notify the
+    /// hook when the user clears or removes Recent rows. The notification
+    /// lets the hook drop its in-memory throttle entries — otherwise a
+    /// freshly-cleared Recent refuses to re-record until the TTL expires.
+    resource_access_hook: OnceLock<Arc<dyn ResourceAccessHook>>,
 }
 
 impl RecentService {
@@ -23,6 +32,25 @@ impl RecentService {
         Self {
             repo,
             max_recent_items: max_recent_items.clamp(1, 100),
+            resource_access_hook: OnceLock::new(),
+        }
+    }
+
+    /// Wire the access hook in after construction. Idempotent: a second
+    /// `set` is a no-op (returns the existing value as `Err`). Called
+    /// from DI once `RecentRecordingHook::new(Arc<Self>)` has produced
+    /// the back-edge that closes the loop.
+    pub fn set_resource_access_hook(&self, hook: Arc<dyn ResourceAccessHook>) {
+        let _ = self.resource_access_hook.set(hook);
+    }
+
+    /// Internal helper: notify the hook (if registered) that `user_id`
+    /// has emptied their Recent list — wholly or by removing a single
+    /// row. The hook drops its in-memory throttle entries so the very
+    /// next access re-records into the freshly-empty table.
+    fn notify_recents_cleared(&self, user_id: Uuid) {
+        if let Some(hook) = self.resource_access_hook.get() {
+            hook.on_recents_cleared(user_id);
         }
     }
 }
@@ -100,6 +128,12 @@ impl RecentItemsUseCase for RecentService {
             item_id,
             user_id
         );
+        // Drop the throttle entries so the next access re-records. We
+        // notify on every call (even when `removed == false`) so the
+        // semantics are "the user expressed intent to forget this" —
+        // the hook owns the per-(user, item) cache anyway, dropping a
+        // miss is a no-op.
+        self.notify_recents_cleared(user_id);
         Ok(removed)
     }
 
@@ -108,6 +142,7 @@ impl RecentItemsUseCase for RecentService {
         info!("Clearing all recent items for user {}", user_id);
         self.repo.clear_all(user_id).await?;
         info!("Cleared all recent items for user {}", user_id);
+        self.notify_recents_cleared(user_id);
         Ok(())
     }
 }

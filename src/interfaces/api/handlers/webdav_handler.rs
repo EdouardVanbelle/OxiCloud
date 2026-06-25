@@ -833,6 +833,14 @@ async fn handle_get(
         return Ok(resp);
     }
 
+    // Recent recording deliberately does NOT fire here: native WebDAV
+    // is overwhelmingly a sync-engine surface (rclone, davfs2, Finder
+    // mounts) and a first descent would push every synced file into
+    // Recent, drowning out the SPA's "what I actually opened" signal.
+    // See memory note `project_recent_session_intent.md` — the planned
+    // session-intent gate (interactive JWT vs app-password) will turn
+    // this back on for the rare human-driven DAV access.
+
     // Range Requests — mount-style clients (rclone, davfs2, Finder) read
     // by ranges; serve 206/416 instead of re-sending the whole file on
     // every seek or resume.

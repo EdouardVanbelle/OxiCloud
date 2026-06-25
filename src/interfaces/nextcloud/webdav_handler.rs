@@ -355,6 +355,15 @@ async fn handle_get(
         return Ok(resp);
     }
 
+    // Recent recording deliberately does NOT fire here: NC's primary
+    // client (Nextcloud desktop, davx5, mobile NC apps) is a sync
+    // engine, and a first-time descent of a large library would push
+    // every file into Recent, drowning out the SPA's "what I actually
+    // opened" signal. See memory note
+    // `project_recent_session_intent.md` — the planned session-intent
+    // gate (interactive JWT vs app-password) will turn this back on
+    // for human-driven NC web access in the same browser session.
+
     // Range Requests — serve 206/416 instead of the whole file on seeks.
     if let Some(resp) = range_response(headers, &file, &etag, file_service).await {
         return Ok(resp);

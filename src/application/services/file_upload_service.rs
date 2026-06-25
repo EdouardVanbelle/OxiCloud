@@ -5,6 +5,7 @@ use crate::application::dtos::file_dto::FileDto;
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::file_lifecycle::FileLifecycleHook;
 use crate::application::ports::file_ports::{FileUploadUseCase, StoredBlob};
+use crate::application::ports::resource_access_hook::ResourceAccessHook;
 use crate::application::ports::storage_ports::{FileReadPort, FileWritePort, StorageUsagePort};
 use crate::application::services::storage_usage_service::StorageUsageService;
 use crate::common::errors::DomainError;
@@ -35,6 +36,12 @@ pub struct FileUploadService {
     content_cache: Option<Arc<FileContentCache>>,
     /// Single lifecycle dispatcher — fires on_file_created / on_file_updated.
     file_lifecycle_hook: Option<Arc<dyn FileLifecycleHook>>,
+    /// Read-event hook — fires "caller just touched this file" so Recent
+    /// records uploads / overwrites alongside reads. Distinct from
+    /// `file_lifecycle_hook` because the lifecycle dispatcher only knows
+    /// `(file_id, blob_hash, content_type)`; the recording side needs the
+    /// `caller_id` the service already has in hand.
+    resource_access_hook: Option<Arc<dyn ResourceAccessHook>>,
     /// Dependencies of the instant-upload path
     /// (`create_file_from_owned_blob_with_perms`); `None` in minimal test
     /// wiring.
@@ -58,6 +65,7 @@ impl FileUploadService {
             storage_usage_service: None,
             content_cache: None,
             file_lifecycle_hook: None,
+            resource_access_hook: None,
             instant_upload: None,
         }
     }
@@ -73,6 +81,7 @@ impl FileUploadService {
             storage_usage_service: None,
             content_cache: None,
             file_lifecycle_hook: None,
+            resource_access_hook: None,
             instant_upload: None,
         }
     }
@@ -103,6 +112,19 @@ impl FileUploadService {
     pub fn with_file_lifecycle_hook(mut self, hook: Arc<dyn FileLifecycleHook>) -> Self {
         self.file_lifecycle_hook = Some(hook);
         self
+    }
+
+    /// Registers the read/write access hook (Recent list recorder).
+    pub fn with_resource_access_hook(mut self, hook: Arc<dyn ResourceAccessHook>) -> Self {
+        self.resource_access_hook = Some(hook);
+        self
+    }
+
+    /// Internal helper: fire the access hook if registered.
+    fn notify_file_accessed(&self, caller_id: Uuid, file_id: &str) {
+        if let Some(hook) = &self.resource_access_hook {
+            hook.on_file_accessed(caller_id, file_id);
+        }
     }
 
     /// Configures the storage usage service
@@ -282,6 +304,9 @@ impl FileUploadService {
         if let Some(hook) = &self.file_lifecycle_hook {
             hook.on_file_updated(file_id, &dto.content_hash, &dto.mime_type);
         }
+        // Delta-upload commit path — record the swap so Recent reflects
+        // "this is the file I just delta-updated".
+        self.notify_file_accessed(caller_id, file_id);
         Ok(dto)
     }
 
@@ -372,6 +397,9 @@ impl FileUploadUseCase for FileUploadService {
         if let Some(hook) = &self.file_lifecycle_hook {
             hook.on_file_created(&dto.id, &dto.content_hash, &dto.mime_type, blob.is_new_blob);
         }
+        // The caller just created this file — surface it in Recent so the
+        // "I just uploaded X" UX matches the pre-SvelteKit behaviour.
+        self.notify_file_accessed(caller_id, &dto.id);
         Ok(dto)
     }
 
@@ -429,6 +457,7 @@ impl FileUploadUseCase for FileUploadService {
             if let Some(hook) = &self.file_lifecycle_hook {
                 hook.on_file_updated(&file_id, &dto.content_hash, content_type);
             }
+            self.notify_file_accessed(caller_id, &file_id);
             return Ok(dto);
         }
 
@@ -474,6 +503,7 @@ impl FileUploadUseCase for FileUploadService {
         if let Some(hook) = &self.file_lifecycle_hook {
             hook.on_file_created(&dto.id, &dto.content_hash, content_type, is_new_blob);
         }
+        self.notify_file_accessed(caller_id, &dto.id);
         Ok(dto)
     }
 }

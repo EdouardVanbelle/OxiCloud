@@ -4,6 +4,7 @@ use crate::application::dtos::file_dto::FileDto;
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::file_lifecycle::FileLifecycleHook;
 use crate::application::ports::file_ports::FileManagementUseCase;
+use crate::application::ports::resource_access_hook::ResourceAccessHook;
 use crate::application::ports::storage_ports::{CopyFolderTreeResult, FileWritePort};
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::application::services::trash_service::TrashService;
@@ -31,6 +32,11 @@ pub struct FileManagementService {
     authz: Arc<PgAclEngine>,
     /// Lifecycle hook dispatcher — fired on file created (copy) and deleted.
     file_lifecycle_hook: Option<Arc<dyn FileLifecycleHook>>,
+    /// Read/write access hook — fired so Recent reflects "this is the file
+    /// I just copied / renamed / moved", same way the read paths surface
+    /// downloads. Distinct from the lifecycle hook because lifecycle hooks
+    /// don't carry the `caller_id` the recording side needs.
+    resource_access_hook: Option<Arc<dyn ResourceAccessHook>>,
 }
 
 impl FileManagementService {
@@ -53,6 +59,7 @@ impl FileManagementService {
             content_cache,
             authz,
             file_lifecycle_hook: None,
+            resource_access_hook: None,
         }
     }
 
@@ -60,6 +67,19 @@ impl FileManagementService {
     pub fn with_file_lifecycle_hook(mut self, hook: Arc<dyn FileLifecycleHook>) -> Self {
         self.file_lifecycle_hook = Some(hook);
         self
+    }
+
+    /// Registers the read/write access hook (Recent list recorder).
+    pub fn with_resource_access_hook(mut self, hook: Arc<dyn ResourceAccessHook>) -> Self {
+        self.resource_access_hook = Some(hook);
+        self
+    }
+
+    /// Internal helper: fire the access hook if registered.
+    fn notify_file_accessed(&self, caller_id: Uuid, file_id: &str) {
+        if let Some(hook) = &self.resource_access_hook {
+            hook.on_file_accessed(caller_id, file_id);
+        }
     }
 
     /// Engine check for a file resource. Parses the id into a `Uuid` and
@@ -156,6 +176,9 @@ impl FileManagementService {
         if let Some(hook) = &self.file_lifecycle_hook {
             hook.on_file_copied(&dto.id, &dto.content_hash, &dto.mime_type, file_id);
         }
+        // The caller just spawned a fresh file — show it in their Recent
+        // list. The source file isn't recorded; only the visible target.
+        self.notify_file_accessed(caller_id, &dto.id);
         Ok(dto)
     }
 

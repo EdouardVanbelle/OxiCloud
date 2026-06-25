@@ -20,6 +20,7 @@ pub mod music_ports;
 pub mod outbound;
 pub mod plugin_ports;
 pub mod recent_ports;
+pub mod resource_access_hook;
 pub mod share_ports;
 pub mod storage_ports;
 pub mod thumbnail_ports;
