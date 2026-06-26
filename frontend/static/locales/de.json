@@ -806,7 +806,23 @@
     "title": "Admin",
     "user": "Benutzer",
     "username": "Benutzername",
-    "users": "Benutzer"
+    "users": "Benutzer",
+    "drive_manage_policies": "Richtlinien verwalten",
+    "drive_manage_policies_for": "Richtlinien — {{name}}",
+    "drive_manage_policies_help": "Richtlinien sind nur für Administratoren. Drive-Eigentümer können sie nicht ändern. Jeder Schalter steuert eine Durchsetzungsregel.",
+    "drive_policy": {
+      "forbid_sharing": "Freigabe pro Ressource verbieten",
+      "forbid_sharing_help": "Blockiert Freigaben pro Datei / Ordner (umfasst auch öffentliche Links und externe Freigabe). Drive-Mitgliedschaft bleibt möglich.",
+      "forbid_public_links": "Öffentliche Links verbieten",
+      "forbid_public_links_help": "Blockiert anonyme Freigabelinks für Ressourcen in diesem Drive.",
+      "forbid_external_sharing": "Externe Freigabe verbieten",
+      "forbid_external_sharing_help": "Blockiert Freigaben an externe Benutzer (E-Mail-Einladungen und bereits vorhandene externe Konten).",
+      "forbid_cross_drive_move": "Verschieben zwischen Drives verbieten",
+      "forbid_cross_drive_move_help": "Blockiert das Verschieben von Dateien oder Ordnern in einen anderen Drive. Verhindert kein Herunterladen + erneutes Hochladen.",
+      "forbid_owner_role_change": "Eigentümerliste sperren",
+      "forbid_owner_role_change_help": "Nur Administratoren können Drive-Eigentümer hinzufügen, entfernen oder zurückstufen, solange diese Regel aktiv ist.",
+      "implied_by_forbid_sharing": "Bereits durch „Freigabe pro Ressource verbieten\" durchgesetzt."
+    }
   },
   "profile": {
     "page_title": "Profil",
@@ -1078,7 +1094,8 @@
     "rename": "Umbenennen",
     "save": "Speichern",
     "search": "Suchen",
-    "yes": "Ja"
+    "yes": "Ja",
+    "saving": "Speichern…"
   },
   "device": {
     "continue": "Weiter",

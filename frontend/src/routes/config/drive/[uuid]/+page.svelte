@@ -179,37 +179,10 @@
 		return Math.min(100, (drive.used_bytes / drive.quota_bytes) * 100);
 	});
 
-	const policyEntries = $derived.by(() => {
-		if (!drive) return [];
-		return Object.entries(drive.policies).map(([key, value]) => ({ key, value }));
-	});
-
-	function policyLabel(key: string): string {
-		// Known policy keys get a friendlier translated label; unknown keys
-		// surface verbatim so operators still see them (forward-compat).
-		switch (key) {
-			case 'forbid_public_links':
-				return t('drive.policy.forbid_public_links', 'Forbid public links');
-			case 'forbid_external_sharing':
-				return t('drive.policy.forbid_external_sharing', 'Forbid external sharing');
-			case 'forbid_sharing':
-				return t('drive.policy.forbid_sharing', 'Forbid sharing');
-			case 'forbid_cross_drive_move':
-				return t('drive.policy.forbid_cross_drive_move', 'Forbid cross-drive move');
-			case 'include_in_photo_index':
-				return t('drive.policy.include_in_photo_index', 'Include in photo index');
-			case 'forbid_music_index':
-				return t('drive.policy.forbid_music_index', 'Forbid music index');
-			default:
-				return key;
-		}
-	}
-
-	function policyValueDisplay(value: unknown): string {
-		if (value === true) return t('drive.policy.on', 'On');
-		if (value === false) return t('drive.policy.off', 'Off');
-		return String(value);
-	}
+	// Drive policies are OxiCloud-admin-only post-D5 — owners can no
+	// longer mutate them, so this page no longer surfaces them at all
+	// (the admin panel hosts the policy editor). See
+	// `docs/plan/drive.md` §8.
 
 	onMount(() => {
 		void drivesStore.load();
@@ -412,18 +385,6 @@
 				{/if}
 			{/if}
 		</div>
-
-		{#if policyEntries.length > 0}
-			<div class="card">
-				<h2><Icon name="shield-alt" /> {t('drive.policies', 'Policies')}</h2>
-				<dl class="info-grid">
-					{#each policyEntries as p (p.key)}
-						<dt>{policyLabel(p.key)}</dt>
-						<dd>{policyValueDisplay(p.value)}</dd>
-					{/each}
-				</dl>
-			</div>
-		{/if}
 
 		{#if canDelete}
 			<!-- Danger zone: drive delete (D3b). Only rendered for Owners on

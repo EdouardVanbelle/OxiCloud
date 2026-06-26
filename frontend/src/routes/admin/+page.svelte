@@ -52,14 +52,20 @@
 		type StorageSettings,
 		type StorageTestResult
 	} from '$lib/api/endpoints/admin';
-	import { createDrive } from '$lib/api/endpoints/drives';
+	import { createDrive, updateDrivePolicies } from '$lib/api/endpoints/drives';
 	import {
 		ensureResolvers,
 		resolveRecipient,
 		searchRecipients,
 		type Recipient
 	} from '$lib/api/endpoints/recipients';
-	import type { Drive, DriveMember, User } from '$lib/api/types';
+	import type {
+		Drive,
+		DriveMember,
+		DrivePolicies,
+		DrivePoliciesPartial,
+		User
+	} from '$lib/api/types';
 	import Icon from '$lib/icons/Icon.svelte';
 	import Modal from '$lib/components/Modal.svelte';
 	import OwnerAvatarStack from '$lib/components/OwnerAvatarStack.svelte';
@@ -1061,6 +1067,154 @@
 				)
 			: []
 	);
+
+	// ── Manage-policies modal (D5 admin-only mutation) ─────────────────────
+	// Policies were owner-mutable in the original D5 design; the carve-out
+	// to admin-only fixed the self-policing-soft-cap hole (an owner could
+	// disable forbid_external_sharing, share, re-enable — net zero
+	// enforcement). The owner UI no longer surfaces policies at all; this
+	// modal is the only editor. See `docs/plan/drive.md` §8.
+	let managePoliciesDrive = $state<Drive | null>(null);
+	let managePoliciesDraft = $state<Required<DrivePoliciesPartial>>({
+		forbid_sharing: false,
+		forbid_external_sharing: false,
+		forbid_public_links: false,
+		forbid_cross_drive_move: false,
+		forbid_owner_role_change: false
+	});
+	let managePoliciesError = $state<string | null>(null);
+	let managePoliciesBusy = $state(false);
+
+	function readPolicyBool(p: Record<string, unknown>, key: string): boolean {
+		// JSONB returns unknown keys verbatim; default missing/non-bool to
+		// `false` so a freshly-created drive (empty `{}` bag) shows every
+		// toggle off without ad-hoc nullish handling per row.
+		const v = p[key];
+		return typeof v === 'boolean' ? v : false;
+	}
+
+	function openManagePolicies(d: Drive) {
+		managePoliciesDrive = d;
+		managePoliciesError = null;
+		const p = (d.policies ?? {}) as Record<string, unknown>;
+		managePoliciesDraft = {
+			forbid_sharing: readPolicyBool(p, 'forbid_sharing'),
+			forbid_external_sharing: readPolicyBool(p, 'forbid_external_sharing'),
+			forbid_public_links: readPolicyBool(p, 'forbid_public_links'),
+			forbid_cross_drive_move: readPolicyBool(p, 'forbid_cross_drive_move'),
+			forbid_owner_role_change: readPolicyBool(p, 'forbid_owner_role_change')
+		};
+	}
+
+	function closeManagePolicies() {
+		managePoliciesDrive = null;
+		managePoliciesError = null;
+	}
+
+	async function saveManagePolicies() {
+		if (!managePoliciesDrive) return;
+		managePoliciesBusy = true;
+		managePoliciesError = null;
+		try {
+			const merged: DrivePolicies = await updateDrivePolicies(
+				managePoliciesDrive.id,
+				managePoliciesDraft
+			);
+			// Refresh the drive row's policies in place so the next time
+			// the admin opens this modal they see the persisted state.
+			const driveId = managePoliciesDrive.id;
+			drivesList = drivesList.map((d) =>
+				d.id === driveId ? { ...d, policies: { ...d.policies, ...merged } } : d
+			);
+			closeManagePolicies();
+		} catch (e) {
+			managePoliciesError = errorMessage(e);
+		} finally {
+			managePoliciesBusy = false;
+		}
+	}
+
+	// Policy keys + labels for the toggle list. Mirrors the entity field
+	// order in `src/domain/entities/drive.rs` so a future 6th policy lands
+	// here as one literal-array push.
+	//
+	// `impliedBy` captures the semantic dependency between policies: when
+	// the named parent policy is on, this subordinate gate is moot
+	// (its enforcement is already covered by the broader rule). The UI
+	// disables the toggle and shows a hint so the admin understands the
+	// hierarchy without our having to actually mutate the stored value —
+	// their preference is preserved for the moment they relax the parent.
+	const policyDefs: Array<{
+		key: keyof Required<DrivePoliciesPartial>;
+		label: () => string;
+		help: () => string;
+		impliedBy?: keyof Required<DrivePoliciesPartial>;
+		impliedHint?: () => string;
+	}> = [
+		{
+			key: 'forbid_sharing',
+			label: () => t('admin.drive_policy.forbid_sharing', 'Forbid per-resource sharing'),
+			help: () =>
+				t(
+					'admin.drive_policy.forbid_sharing_help',
+					'Block per-file / per-folder grants (covers public links and external sharing as well). Drive-level membership still works.'
+				)
+		},
+		{
+			key: 'forbid_public_links',
+			label: () => t('admin.drive_policy.forbid_public_links', 'Forbid public links'),
+			help: () =>
+				t(
+					'admin.drive_policy.forbid_public_links_help',
+					'Block anonymous share links on resources in this drive.'
+				),
+			impliedBy: 'forbid_sharing',
+			impliedHint: () =>
+				t(
+					'admin.drive_policy.implied_by_forbid_sharing',
+					'Already enforced by Forbid per-resource sharing.'
+				)
+		},
+		{
+			key: 'forbid_external_sharing',
+			label: () => t('admin.drive_policy.forbid_external_sharing', 'Forbid external sharing'),
+			help: () =>
+				t(
+					'admin.drive_policy.forbid_external_sharing_help',
+					'Block grants to external users (email invitations and pre-existing external accounts).'
+				),
+			impliedBy: 'forbid_sharing',
+			impliedHint: () =>
+				t(
+					'admin.drive_policy.implied_by_forbid_sharing',
+					'Already enforced by Forbid per-resource sharing.'
+				)
+		},
+		{
+			key: 'forbid_cross_drive_move',
+			label: () => t('admin.drive_policy.forbid_cross_drive_move', 'Forbid cross-drive move'),
+			help: () =>
+				t(
+					'admin.drive_policy.forbid_cross_drive_move_help',
+					'Block moving files or folders out to another drive. Does not stop download + re-upload.'
+				)
+		},
+		{
+			key: 'forbid_owner_role_change',
+			label: () => t('admin.drive_policy.forbid_owner_role_change', 'Lock Owner roster'),
+			help: () =>
+				t(
+					'admin.drive_policy.forbid_owner_role_change_help',
+					'Only admin can add, remove, or demote drive Owners while this is on.'
+				)
+		}
+	];
+
+	// Reactive helper for the template: is this policy currently
+	// disabled because its parent policy implies it?
+	function isPolicyImplied(def: (typeof policyDefs)[number]): boolean {
+		return def.impliedBy !== undefined && managePoliciesDraft[def.impliedBy];
+	}
 
 	// Admin-driven delete-drive flow (D3b). Guarded by the confirm modal
 	// because the action is destructive and irreversible. The backend
@@ -2205,7 +2359,13 @@
 								     <td> stays a plain table cell so its baseline +
 								     bottom-border align with the rest of the row even on
 								     personal-drive rows where the wrapper is empty. -->
-								<div class="actions">
+								<div class="actions actions--drive">
+									<!-- Each action sits in a fixed grid column so icons
+									     line up across rows even when the row's drive
+									     kind doesn't support some of them (personal drives
+									     have no owner roster; default drives can't be
+									     deleted). Inapplicable actions render as invisible
+									     placeholders to reserve their column. -->
 									{#if d.kind === 'shared'}
 										<button
 											class="icon-btn"
@@ -2216,10 +2376,27 @@
 										>
 											<Icon name="users-cog" />
 										</button>
+									{:else}
+										<span class="icon-btn icon-btn--placeholder" aria-hidden="true"></span>
 									{/if}
+									<!-- D5 policy editor — admin-only mutation (the
+									     owner UI no longer surfaces policies at all).
+									     Available on every drive kind including personal,
+									     so the operator can lock a personal drive's
+									     external-sharing surface from outside. -->
+									<button
+										class="icon-btn"
+										data-testid={`admin-drive-manage-policies-${d.id}`}
+										title={t('admin.drive_manage_policies', 'Manage policies')}
+										aria-label={t('admin.drive_manage_policies', 'Manage policies')}
+										onclick={() => openManagePolicies(d)}
+									>
+										<Icon name="shield-alt" />
+									</button>
 									<!-- Default-personal drives can never be deleted
-									     (backend returns 405). Hide the action entirely
-									     so the admin doesn't get a meaningless 405 toast. -->
+									     (backend returns 405). Render an invisible
+									     placeholder so the row's columns still line up
+									     with the deletable rows above and below. -->
 									{#if !d.default_for_user}
 										<button
 											class="icon-btn icon-btn--danger"
@@ -2230,6 +2407,8 @@
 										>
 											<Icon name="trash-alt" />
 										</button>
+									{:else}
+										<span class="icon-btn icon-btn--placeholder" aria-hidden="true"></span>
 									{/if}
 								</div>
 							</td>
@@ -2637,6 +2816,78 @@
 	{#snippet footer()}
 		<button class="btn" data-testid="admin-manage-owners-close-btn" onclick={closeManageOwners}>
 			{t('common.close', 'Close')}
+		</button>
+	{/snippet}
+</Modal>
+
+<!-- Manage-policies modal (D5 admin-only). Toggles for the five known
+     policy keys; unknown keys on the JSONB bag are preserved by the
+     backend merge but not surfaced here (forward-compat is at the
+     server). Save → PATCH /api/drives/{id}/policies. -->
+<Modal
+	open={managePoliciesDrive !== null}
+	title={managePoliciesDrive
+		? t(
+				'admin.drive_manage_policies_for',
+				{ name: managePoliciesDrive.name },
+				'Manage policies — {{name}}'
+			)
+		: t('admin.drive_manage_policies', 'Manage policies')}
+	onclose={closeManagePolicies}
+>
+	{#if managePoliciesDrive}
+		<div class="form">
+			<p class="muted">
+				{t(
+					'admin.drive_manage_policies_help',
+					'Policies are admin-only — drive owners cannot mutate them. Each toggle controls one enforcement gate.'
+				)}
+			</p>
+			<ul class="policy-list">
+				{#each policyDefs as def (def.key)}
+					{@const implied = isPolicyImplied(def)}
+					<li class="policy-row" class:policy-row--implied={implied}>
+						<label class="policy-row__label">
+							<span class="policy-row__head">
+								<input
+									type="checkbox"
+									data-testid={`admin-policy-${def.key}`}
+									bind:checked={managePoliciesDraft[def.key]}
+									disabled={managePoliciesBusy || implied}
+								/>
+								<span class="policy-row__title">{def.label()}</span>
+							</span>
+							<span class="policy-row__help muted">
+								{def.help()}
+								{#if implied && def.impliedHint}
+									<span class="policy-row__implied">{def.impliedHint()}</span>
+								{/if}
+							</span>
+						</label>
+					</li>
+				{/each}
+			</ul>
+			{#if managePoliciesError}
+				<p class="status--error">{managePoliciesError}</p>
+			{/if}
+		</div>
+	{/if}
+	{#snippet footer()}
+		<button
+			class="btn"
+			data-testid="admin-manage-policies-cancel-btn"
+			onclick={closeManagePolicies}
+			disabled={managePoliciesBusy}
+		>
+			{t('common.cancel', 'Cancel')}
+		</button>
+		<button
+			class="btn btn-primary"
+			data-testid="admin-manage-policies-save-btn"
+			onclick={saveManagePolicies}
+			disabled={managePoliciesBusy}
+		>
+			{managePoliciesBusy ? t('common.saving', 'Saving…') : t('common.save', 'Save')}
 		</button>
 	{/snippet}
 </Modal>
@@ -3625,5 +3876,97 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+
+	/* D5 policy editor (admin-only). Same row shape as `.owners-list__row`
+	   so the modal feels consistent; the label inside is a flex row so the
+	   checkbox sits beside the text instead of stacking vertically. */
+	.policy-list {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-2);
+	}
+
+	.policy-row {
+		padding: var(--space-2);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+	}
+
+	.policy-row__label {
+		/* Column layout: head (checkbox + title inline) on top, help
+		   text underneath. The checkbox + title share a row via
+		   `.policy-row__head` so the title sits beside the checkbox
+		   instead of wrapping to its own line. */
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-1);
+		cursor: pointer;
+		margin: 0;
+	}
+
+	.policy-row__head {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		min-width: 0;
+	}
+
+	.policy-row__head input[type='checkbox'] {
+		margin: 0;
+		flex-shrink: 0;
+	}
+
+	.policy-row__title {
+		font-weight: 600;
+	}
+
+	.policy-row__help {
+		/* Indent the help text under the title so the relationship is
+		   visually obvious. Width = checkbox width + the head's gap. */
+		padding-left: calc(1rem + var(--space-2));
+	}
+
+	/* Implied state — the row's gate is already covered by a broader
+	   policy (e.g. forbid_public_links when forbid_sharing is on).
+	   Visually dimmed so the admin understands they don't need to
+	   toggle it; the stored value is preserved for the moment they
+	   relax the parent policy. */
+	.policy-row--implied {
+		opacity: 0.55;
+	}
+
+	.policy-row--implied .policy-row__label {
+		cursor: not-allowed;
+	}
+
+	.policy-row__implied {
+		display: block;
+		margin-top: var(--space-1);
+		font-style: italic;
+	}
+
+	/* Drives table action cell — same shape as `.actions` plus a fixed
+	   3-column grid so the [users] [policies] [delete] icons line up
+	   vertically across rows regardless of which actions a given drive
+	   supports. Inapplicable actions render as invisible placeholders
+	   (see `.icon-btn--placeholder`). */
+	.actions--drive {
+		display: grid;
+		grid-template-columns: repeat(3, auto);
+		justify-content: end;
+		align-items: center;
+	}
+
+	.icon-btn--placeholder {
+		/* Reserves the column width without rendering anything
+		   interactive. `visibility: hidden` keeps layout intact;
+		   pointer-events:none stops accidental focus from keyboard
+		   nav. */
+		visibility: hidden;
+		pointer-events: none;
 	}
 </style>

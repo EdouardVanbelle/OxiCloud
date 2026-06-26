@@ -806,7 +806,23 @@
     "title": "Administrator",
     "user": "Użytkownik",
     "username": "Nazwa użytkownika",
-    "users": "Użytkownicy"
+    "users": "Użytkownicy",
+    "drive_manage_policies": "Zarządzaj zasadami",
+    "drive_manage_policies_for": "Zasady — {{name}}",
+    "drive_manage_policies_help": "Zasady są tylko dla administratorów — właściciele Drive nie mogą ich modyfikować. Każdy przełącznik kontroluje jedną regułę.",
+    "drive_policy": {
+      "forbid_sharing": "Zakaz udostępniania per-zasób",
+      "forbid_sharing_help": "Blokuje uprawnienia na poszczególne pliki / foldery (obejmuje również linki publiczne i udostępnianie zewnętrzne). Członkostwo na poziomie Drive nadal działa.",
+      "forbid_public_links": "Zakaz linków publicznych",
+      "forbid_public_links_help": "Blokuje tworzenie anonimowych linków udostępniających dla zasobów w tym Drive.",
+      "forbid_external_sharing": "Zakaz udostępniania zewnętrznego",
+      "forbid_external_sharing_help": "Blokuje uprawnienia dla użytkowników zewnętrznych (zaproszenia e-mail i istniejące konta zewnętrzne).",
+      "forbid_cross_drive_move": "Zakaz przenoszenia między Drive",
+      "forbid_cross_drive_move_help": "Blokuje przenoszenie plików lub folderów do innego Drive. Nie zatrzymuje pobierania + ponownego przesyłania.",
+      "forbid_owner_role_change": "Zablokuj listę właścicieli",
+      "forbid_owner_role_change_help": "Tylko administrator może dodawać, usuwać lub degradować właścicieli Drive, gdy ta zasada jest aktywna.",
+      "implied_by_forbid_sharing": "Już egzekwowane przez «Zakaz udostępniania per-zasób»."
+    }
   },
   "profile": {
     "page_title": "Profil",
@@ -1078,7 +1094,8 @@
     "rename": "Zmień nazwę",
     "save": "Zapisz",
     "search": "Szukaj",
-    "yes": "Tak"
+    "yes": "Tak",
+    "saving": "Zapisywanie…"
   },
   "device": {
     "continue": "Kontynuuj",

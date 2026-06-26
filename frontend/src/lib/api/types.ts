@@ -237,11 +237,38 @@ export interface Drive {
 	root_folder_id: string;
 	quota_bytes?: number | null;
 	used_bytes: number;
+	/**
+	 * Drive policies — raw JSONB bag from the backend. Unknown keys are
+	 * preserved verbatim. For the typed view used by the admin policy
+	 * editor, see [`DrivePolicies`].
+	 */
 	policies: Record<string, unknown>;
 	created_at: string;
 	updated_at: string;
 	caller_role?: DriveRole | null;
 }
+
+/**
+ * Typed mirror of the five known D5 policy keys. Every field defaults to
+ * `false` (= allowed). The wire shape returned by
+ * `PATCH /api/drives/{id}/policies` carries all five keys; the request
+ * body uses [`DrivePoliciesPartial`] so unsupplied keys aren't disturbed.
+ *
+ * See `docs/plan/drive.md` §8 for what each key gates.
+ */
+export interface DrivePolicies {
+	forbid_sharing: boolean;
+	forbid_external_sharing: boolean;
+	forbid_public_links: boolean;
+	forbid_cross_drive_move: boolean;
+	forbid_owner_role_change: boolean;
+}
+
+/**
+ * Body shape for the admin policy editor — every key optional so omitting
+ * a field leaves that policy untouched (the backend uses a JSONB merge).
+ */
+export type DrivePoliciesPartial = Partial<DrivePolicies>;
 
 /**
  * Request body for `POST /api/drives` (D3a). Mirrors `CreateDriveDto` in

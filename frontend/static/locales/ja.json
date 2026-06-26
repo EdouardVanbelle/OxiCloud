@@ -806,7 +806,23 @@
     "title": "管理者",
     "user": "ユーザー",
     "username": "ユーザー名",
-    "users": "ユーザー"
+    "users": "ユーザー",
+    "drive_manage_policies": "ポリシーを管理",
+    "drive_manage_policies_for": "ポリシー — {{name}}",
+    "drive_manage_policies_help": "ポリシーは管理者専用です。ドライブの所有者は変更できません。各スイッチが 1 つの実施ルールを制御します。",
+    "drive_policy": {
+      "forbid_sharing": "リソース単位の共有を禁止",
+      "forbid_sharing_help": "ファイル / フォルダー単位の付与をブロック（公開リンクや外部共有もカバー）。ドライブレベルのメンバーシップは引き続き利用可能。",
+      "forbid_public_links": "公開リンクを禁止",
+      "forbid_public_links_help": "このドライブのリソースに対する匿名共有リンクの作成をブロックします。",
+      "forbid_external_sharing": "外部共有を禁止",
+      "forbid_external_sharing_help": "外部ユーザーへの付与をブロック（メール招待および既存の外部アカウント）。",
+      "forbid_cross_drive_move": "ドライブ間移動を禁止",
+      "forbid_cross_drive_move_help": "別のドライブへのファイル・フォルダーの移動をブロックします。ダウンロード + 再アップロードは防げません。",
+      "forbid_owner_role_change": "所有者リストをロック",
+      "forbid_owner_role_change_help": "有効中は、管理者のみがドライブ所有者を追加・削除・降格できます。",
+      "implied_by_forbid_sharing": "すでに「リソース単位の共有を禁止」によって適用済み。"
+    }
   },
   "profile": {
     "page_title": "プロフィール",
@@ -1078,7 +1094,8 @@
     "rename": "名前を変更",
     "save": "保存",
     "search": "検索",
-    "yes": "あり"
+    "yes": "あり",
+    "saving": "保存中…"
   },
   "device": {
     "continue": "続行",

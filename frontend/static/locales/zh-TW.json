@@ -789,7 +789,23 @@
     "title": "管理員",
     "user": "使用者",
     "username": "使用者名稱",
-    "users": "使用者"
+    "users": "使用者",
+    "drive_manage_policies": "管理政策",
+    "drive_manage_policies_for": "政策 — {{name}}",
+    "drive_manage_policies_help": "政策僅限管理員設定 — Drive 擁有者無法修改。每個開關控制一項強制規則。",
+    "drive_policy": {
+      "forbid_sharing": "禁止以資源為單位的分享",
+      "forbid_sharing_help": "封鎖以檔案 / 資料夾為單位的授權（同時涵蓋公開連結與外部分享）。Drive 層級的成員資格仍可使用。",
+      "forbid_public_links": "禁止公開連結",
+      "forbid_public_links_help": "封鎖在此 Drive 的資源上建立匿名分享連結。",
+      "forbid_external_sharing": "禁止外部分享",
+      "forbid_external_sharing_help": "封鎖授權給外部使用者（電子郵件邀請及既有的外部帳號）。",
+      "forbid_cross_drive_move": "禁止在 Drive 之間移動",
+      "forbid_cross_drive_move_help": "封鎖將檔案或資料夾移動到另一個 Drive。並不阻止下載後再上傳。",
+      "forbid_owner_role_change": "鎖定擁有者名單",
+      "forbid_owner_role_change_help": "此項啟用時，僅管理員可新增、移除或降級 Drive 擁有者。",
+      "implied_by_forbid_sharing": "已由「禁止以資源為單位的分享」強制執行。"
+    }
   },
   "profile": {
     "page_title": "個人資料",
@@ -1078,7 +1094,8 @@
     "rename": "重新命名",
     "save": "儲存",
     "search": "搜尋",
-    "yes": "有"
+    "yes": "有",
+    "saving": "儲存中…"
   },
   "device": {
     "continue": "繼續",

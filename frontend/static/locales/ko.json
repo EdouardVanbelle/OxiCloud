@@ -806,7 +806,23 @@
     "title": "관리자",
     "user": "사용자",
     "username": "사용자 이름",
-    "users": "사용자"
+    "users": "사용자",
+    "drive_manage_policies": "정책 관리",
+    "drive_manage_policies_for": "정책 — {{name}}",
+    "drive_manage_policies_help": "정책은 관리자 전용입니다. 드라이브 소유자는 정책을 변경할 수 없습니다. 각 스위치는 하나의 적용 규칙을 제어합니다.",
+    "drive_policy": {
+      "forbid_sharing": "리소스별 공유 금지",
+      "forbid_sharing_help": "파일 / 폴더별 권한 부여를 차단합니다(공유 링크와 외부 공유도 포함). 드라이브 단위 멤버십은 계속 작동합니다.",
+      "forbid_public_links": "공유 링크 금지",
+      "forbid_public_links_help": "이 드라이브 리소스에 대한 익명 공유 링크 생성을 차단합니다.",
+      "forbid_external_sharing": "외부 공유 금지",
+      "forbid_external_sharing_help": "외부 사용자에 대한 권한 부여를 차단합니다(이메일 초대 및 기존 외부 계정).",
+      "forbid_cross_drive_move": "드라이브 간 이동 금지",
+      "forbid_cross_drive_move_help": "파일이나 폴더를 다른 드라이브로 이동하는 것을 차단합니다. 다운로드 + 재업로드는 막지 않습니다.",
+      "forbid_owner_role_change": "소유자 명단 잠금",
+      "forbid_owner_role_change_help": "이 설정이 켜져 있는 동안 관리자만 드라이브 소유자를 추가, 제거, 강등할 수 있습니다.",
+      "implied_by_forbid_sharing": "이미 「리소스별 공유 금지」에 의해 적용됨."
+    }
   },
   "profile": {
     "page_title": "프로필",
@@ -1078,7 +1094,8 @@
     "rename": "이름 변경",
     "save": "저장",
     "search": "검색",
-    "yes": "있음"
+    "yes": "있음",
+    "saving": "저장 중…"
   },
   "device": {
     "continue": "계속",

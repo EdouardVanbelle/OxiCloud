@@ -806,7 +806,23 @@
     "title": "Beheerder",
     "user": "Gebruiker",
     "username": "Gebruikersnaam",
-    "users": "Gebruikers"
+    "users": "Gebruikers",
+    "drive_manage_policies": "Beleid beheren",
+    "drive_manage_policies_for": "Beleid — {{name}}",
+    "drive_manage_policies_help": "Beleid is alleen voor beheerders — Drive-eigenaren kunnen het niet wijzigen. Elke schakelaar beheert één handhavingsregel.",
+    "drive_policy": {
+      "forbid_sharing": "Per-resource delen verbieden",
+      "forbid_sharing_help": "Blokkeert delen per bestand / map (omvat ook openbare links en extern delen). Drive-lidmaatschap blijft werken.",
+      "forbid_public_links": "Openbare links verbieden",
+      "forbid_public_links_help": "Blokkeert anonieme deellinks op bronnen in deze Drive.",
+      "forbid_external_sharing": "Extern delen verbieden",
+      "forbid_external_sharing_help": "Blokkeert verleningen aan externe gebruikers (e-mailuitnodigingen en bestaande externe accounts).",
+      "forbid_cross_drive_move": "Verplaatsen tussen Drives verbieden",
+      "forbid_cross_drive_move_help": "Blokkeert het verplaatsen van bestanden of mappen naar een andere Drive. Voorkomt geen downloaden + opnieuw uploaden.",
+      "forbid_owner_role_change": "Eigenaarsoverzicht vergrendelen",
+      "forbid_owner_role_change_help": "Alleen de beheerder kan Drive-eigenaren toevoegen, verwijderen of degraderen zolang dit aanstaat.",
+      "implied_by_forbid_sharing": "Al afgedwongen door «Per-resource delen verbieden»."
+    }
   },
   "profile": {
     "page_title": "Profiel",
@@ -1078,7 +1094,8 @@
     "rename": "Hernoemen",
     "save": "Opslaan",
     "search": "Zoeken",
-    "yes": "Ja"
+    "yes": "Ja",
+    "saving": "Opslaan…"
   },
   "device": {
     "continue": "Doorgaan",

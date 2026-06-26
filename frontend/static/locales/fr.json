@@ -806,7 +806,23 @@
     "title": "Admin",
     "user": "Utilisateur",
     "username": "Nom d'utilisateur",
-    "users": "Utilisateurs"
+    "users": "Utilisateurs",
+    "drive_manage_policies": "Gérer les règles",
+    "drive_manage_policies_for": "Règles du Drive — {{name}}",
+    "drive_manage_policies_help": "Les règles sont réservées aux administrateurs : les propriétaires du Drive ne peuvent pas les modifier. Chaque interrupteur contrôle une restriction.",
+    "drive_policy": {
+      "forbid_sharing": "Interdire le partage par ressource",
+      "forbid_sharing_help": "Bloque les partages par fichier ou par dossier (couvre également les liens publics et le partage externe). L'adhésion au Drive reste possible.",
+      "forbid_public_links": "Interdire les liens publics",
+      "forbid_public_links_help": "Bloque la création de liens partagés anonymes sur les ressources du Drive.",
+      "forbid_external_sharing": "Interdire le partage externe",
+      "forbid_external_sharing_help": "Bloque les partages aux utilisateurs externes (invitations par e-mail et comptes externes existants).",
+      "forbid_cross_drive_move": "Interdire le déplacement entre Drives",
+      "forbid_cross_drive_move_help": "Bloque le déplacement de fichiers ou de dossiers vers un autre Drive. N'empêche pas le téléchargement puis le ré-envoi.",
+      "forbid_owner_role_change": "Verrouiller la liste des propriétaires",
+      "forbid_owner_role_change_help": "Seul l'administrateur peut ajouter, retirer ou rétrograder les propriétaires du Drive tant que cette règle est active.",
+      "implied_by_forbid_sharing": "Déjà appliqué par « Interdire le partage par ressource »."
+    }
   },
   "profile": {
     "page_title": "Profil",
@@ -1078,7 +1094,8 @@
     "rename": "Renommer",
     "save": "Enregistrer",
     "search": "Rechercher",
-    "yes": "Oui"
+    "yes": "Oui",
+    "saving": "Enregistrement…"
   },
   "device": {
     "continue": "Continuer",

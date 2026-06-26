@@ -806,7 +806,23 @@
     "title": "Admin",
     "user": "Usuário",
     "username": "Nome de usuário",
-    "users": "Usuários"
+    "users": "Usuários",
+    "drive_manage_policies": "Gerenciar políticas",
+    "drive_manage_policies_for": "Políticas — {{name}}",
+    "drive_manage_policies_help": "As políticas são exclusivas do administrador — os proprietários do Drive não podem modificá-las. Cada interruptor controla uma regra.",
+    "drive_policy": {
+      "forbid_sharing": "Proibir compartilhamento por recurso",
+      "forbid_sharing_help": "Bloqueia as concessões por arquivo / pasta (cobre também links públicos e compartilhamento externo). A associação ao Drive continua funcionando.",
+      "forbid_public_links": "Proibir links públicos",
+      "forbid_public_links_help": "Bloqueia a criação de links de compartilhamento anônimos nos recursos deste Drive.",
+      "forbid_external_sharing": "Proibir compartilhamento externo",
+      "forbid_external_sharing_help": "Bloqueia as concessões para usuários externos (convites por e-mail e contas externas existentes).",
+      "forbid_cross_drive_move": "Proibir movimentação entre Drives",
+      "forbid_cross_drive_move_help": "Bloqueia mover arquivos ou pastas para outro Drive. Não impede download + reupload.",
+      "forbid_owner_role_change": "Bloquear lista de proprietários",
+      "forbid_owner_role_change_help": "Apenas o administrador pode adicionar, remover ou rebaixar proprietários do Drive enquanto esta política estiver ativa.",
+      "implied_by_forbid_sharing": "Já aplicado por «Proibir compartilhamento por recurso»."
+    }
   },
   "profile": {
     "page_title": "Perfil",
@@ -1078,7 +1094,8 @@
     "rename": "Renomear",
     "save": "Salvar",
     "search": "Pesquisar",
-    "yes": "Sim"
+    "yes": "Sim",
+    "saving": "Salvando…"
   },
   "device": {
     "continue": "Continuar",

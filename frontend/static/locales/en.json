@@ -1091,7 +1091,23 @@
     "encryption": "Encryption",
     "encryption_hint": "Generate an AES-256 key for at-rest blob encryption, then set it as OXICLOUD_STORAGE_ENCRYPTION_KEY in your server environment.",
     "gen_key": "Generate key",
-    "gen_key_warning": "Store this key securely. If it is lost, the encrypted data is irrecoverably lost."
+    "gen_key_warning": "Store this key securely. If it is lost, the encrypted data is irrecoverably lost.",
+    "drive_manage_policies": "Manage policies",
+    "drive_manage_policies_for": "Manage policies — {{name}}",
+    "drive_manage_policies_help": "Policies are admin-only — drive owners cannot mutate them. Each toggle controls one enforcement gate.",
+    "drive_policy": {
+      "forbid_sharing": "Forbid per-resource sharing",
+      "forbid_sharing_help": "Block per-file / per-folder grants (covers public links and external sharing as well). Drive-level membership still works.",
+      "forbid_public_links": "Forbid public links",
+      "forbid_public_links_help": "Block anonymous share links on resources in this drive.",
+      "forbid_external_sharing": "Forbid external sharing",
+      "forbid_external_sharing_help": "Block grants to external users (email invitations and pre-existing external accounts).",
+      "forbid_cross_drive_move": "Forbid cross-drive move",
+      "forbid_cross_drive_move_help": "Block moving files or folders out to another drive. Does not stop download + re-upload.",
+      "forbid_owner_role_change": "Lock Owner roster",
+      "forbid_owner_role_change_help": "Only admin can add, remove, or demote drive Owners while this is on.",
+      "implied_by_forbid_sharing": "Already enforced by Forbid per-resource sharing."
+    }
   },
   "profile": {
     "page_title": "Profile",
@@ -1391,7 +1407,8 @@
     "select": "Select",
     "select_all": "Select all",
     "yes": "Yes",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "saving": "Saving…"
   },
   "device": {
     "approve": "Approve",

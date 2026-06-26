@@ -13,6 +13,8 @@ import type {
 	Drive,
 	DriveMember,
 	DriveMemberSubject,
+	DrivePolicies,
+	DrivePoliciesPartial,
 	DriveRole
 } from '$lib/api/types';
 
@@ -128,6 +130,41 @@ export async function deleteDrive(driveId: string): Promise<void> {
 		}
 		throw new Error(detail || `delete drive failed: ${res.status}`);
 	}
+}
+
+/**
+ * `PATCH /api/drives/{id}/policies` — update drive policies (D5).
+ *
+ * **OxiCloud-admin only.** Owners cannot mutate policies — the carve-out
+ * exists because policies are a compliance surface (an owner who could
+ * flip them would defeat the gates by disabling, sharing, re-enabling).
+ * Non-admin callers receive 404 (anti-enum). The frontend only surfaces
+ * this from the admin panel.
+ *
+ * Body is a partial — keys not present are left untouched at the JSONB
+ * merge layer. Returns the post-merge typed view.
+ */
+export async function updateDrivePolicies(
+	driveId: string,
+	partial: DrivePoliciesPartial
+): Promise<DrivePolicies> {
+	const res = await apiFetch(`/api/drives/${encodeURIComponent(driveId)}/policies`, {
+		method: 'PATCH',
+		headers: { ...JSON_HEADERS, ...getCsrfHeaders() },
+		credentials: 'same-origin',
+		body: JSON.stringify(partial)
+	});
+	if (!res.ok) {
+		let detail = '';
+		try {
+			const parsed = (await res.json()) as { error?: string; message?: string };
+			detail = parsed.error ?? parsed.message ?? '';
+		} catch {
+			/* response body wasn't JSON */
+		}
+		throw new Error(detail || `update policies failed: ${res.status}`);
+	}
+	return (await res.json()) as DrivePolicies;
 }
 
 /**

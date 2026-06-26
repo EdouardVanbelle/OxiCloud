@@ -789,7 +789,23 @@
     "title": "管理员",
     "user": "用户",
     "username": "用户名",
-    "users": "用户"
+    "users": "用户",
+    "drive_manage_policies": "管理策略",
+    "drive_manage_policies_for": "策略 — {{name}}",
+    "drive_manage_policies_help": "策略仅限管理员配置 — Drive 所有者无法修改。每个开关控制一项强制规则。",
+    "drive_policy": {
+      "forbid_sharing": "禁止按资源共享",
+      "forbid_sharing_help": "阻止按文件 / 文件夹的授予（同时涵盖公开链接和外部共享）。Drive 级别的成员资格仍然有效。",
+      "forbid_public_links": "禁止公开链接",
+      "forbid_public_links_help": "阻止在此 Drive 的资源上创建匿名共享链接。",
+      "forbid_external_sharing": "禁止外部共享",
+      "forbid_external_sharing_help": "阻止向外部用户授予权限（电子邮件邀请和已存在的外部帐户）。",
+      "forbid_cross_drive_move": "禁止跨 Drive 移动",
+      "forbid_cross_drive_move_help": "阻止将文件或文件夹移动到另一个 Drive。不阻止下载后再上传。",
+      "forbid_owner_role_change": "锁定所有者名单",
+      "forbid_owner_role_change_help": "在此项启用时，只有管理员可以添加、移除或降级 Drive 所有者。",
+      "implied_by_forbid_sharing": "已由\"禁止按资源共享\"强制执行。"
+    }
   },
   "profile": {
     "page_title": "个人资料",
@@ -1078,7 +1094,8 @@
     "rename": "重命名",
     "save": "保存",
     "search": "搜索",
-    "yes": "有"
+    "yes": "有",
+    "saving": "保存中…"
   },
   "device": {
     "continue": "继续",

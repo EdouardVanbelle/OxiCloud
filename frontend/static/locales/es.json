@@ -821,7 +821,23 @@
     "encryption": "Cifrado",
     "encryption_hint": "Genera una clave AES-256 para el cifrado de blobs en reposo y configúrala como OXICLOUD_STORAGE_ENCRYPTION_KEY en el entorno del servidor.",
     "gen_key": "Generar clave",
-    "gen_key_warning": "Guarda esta clave de forma segura. Si se pierde, los datos cifrados se pierden de forma irrecuperable."
+    "gen_key_warning": "Guarda esta clave de forma segura. Si se pierde, los datos cifrados se pierden de forma irrecuperable.",
+    "drive_manage_policies": "Gestionar políticas",
+    "drive_manage_policies_for": "Políticas — {{name}}",
+    "drive_manage_policies_help": "Las políticas son exclusivas de administradores; los propietarios del Drive no pueden modificarlas. Cada interruptor controla una restricción.",
+    "drive_policy": {
+      "forbid_sharing": "Prohibir compartir por recurso",
+      "forbid_sharing_help": "Bloquea los permisos por archivo o carpeta (incluye también enlaces públicos y compartir externo). La membresía del Drive sigue funcionando.",
+      "forbid_public_links": "Prohibir enlaces públicos",
+      "forbid_public_links_help": "Bloquea la creación de enlaces compartidos anónimos en los recursos de este Drive.",
+      "forbid_external_sharing": "Prohibir compartir externo",
+      "forbid_external_sharing_help": "Bloquea los permisos a usuarios externos (invitaciones por correo y cuentas externas existentes).",
+      "forbid_cross_drive_move": "Prohibir mover entre Drives",
+      "forbid_cross_drive_move_help": "Bloquea mover archivos o carpetas a otro Drive. No impide descargar y volver a subir.",
+      "forbid_owner_role_change": "Bloquear lista de propietarios",
+      "forbid_owner_role_change_help": "Solo los administradores pueden añadir, retirar o degradar propietarios del Drive mientras esta política esté activa.",
+      "implied_by_forbid_sharing": "Ya aplicada por «Prohibir compartir por recurso»."
+    }
   },
   "profile": {
     "page_title": "Perfil",
@@ -1093,7 +1109,8 @@
     "rename": "Renombrar",
     "save": "Guardar",
     "search": "Buscar",
-    "yes": "Sí"
+    "yes": "Sí",
+    "saving": "Guardando…"
   },
   "device": {
     "continue": "Continuar",

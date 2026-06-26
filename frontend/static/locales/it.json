@@ -806,7 +806,23 @@
     "title": "Admin",
     "user": "Utente",
     "username": "Nome utente",
-    "users": "Utenti"
+    "users": "Utenti",
+    "drive_manage_policies": "Gestisci criteri",
+    "drive_manage_policies_for": "Criteri — {{name}}",
+    "drive_manage_policies_help": "I criteri sono riservati all'amministratore — i proprietari del Drive non possono modificarli. Ogni interruttore controlla una regola.",
+    "drive_policy": {
+      "forbid_sharing": "Vieta condivisione per risorsa",
+      "forbid_sharing_help": "Blocca le concessioni per file / cartella (copre anche i link pubblici e la condivisione esterna). L'appartenenza al Drive continua a funzionare.",
+      "forbid_public_links": "Vieta link pubblici",
+      "forbid_public_links_help": "Blocca i link di condivisione anonima sulle risorse di questo Drive.",
+      "forbid_external_sharing": "Vieta condivisione esterna",
+      "forbid_external_sharing_help": "Blocca le concessioni a utenti esterni (inviti via email e account esterni preesistenti).",
+      "forbid_cross_drive_move": "Vieta spostamento tra Drive",
+      "forbid_cross_drive_move_help": "Blocca lo spostamento di file o cartelle verso un altro Drive. Non impedisce download + nuovo upload.",
+      "forbid_owner_role_change": "Blocca elenco proprietari",
+      "forbid_owner_role_change_help": "Solo l'amministratore può aggiungere, rimuovere o retrocedere i proprietari del Drive mentre questa regola è attiva.",
+      "implied_by_forbid_sharing": "Già imposto da «Vieta condivisione per risorsa»."
+    }
   },
   "profile": {
     "page_title": "Profilo",
@@ -1078,7 +1094,8 @@
     "rename": "Rinomina",
     "save": "Salva",
     "search": "Cerca",
-    "yes": "Sì"
+    "yes": "Sì",
+    "saving": "Salvataggio…"
   },
   "device": {
     "continue": "Continua",
