@@ -157,10 +157,24 @@ front-design:
     node scripts/check-brand-drift.mjs
 
 
-# Hurl API functional tests (starts postgres + server, tears down after)
+# Hurl-driven functional tests (starts postgres + server, tears down after).
+#
+# Three runners — each isolated, brings up its own sidecars + server config:
+#   * tests/api/run.sh    — REST API surface, default server.env
+#   * tests/webdav/run.sh — native WebDAV + NextCloud DAV, default server.env
+#   * tests/oidc/run.sh   — OIDC SSO end-to-end against a fake IdP
+#                           (tests/oidc/fake_idp, a Node panva/oidc-provider
+#                           wrapper); server launched with
+#                           --config server-with-oidc.env so the api and
+#                           webdav suites stay on the OIDC-off config.
+#
+# Same chain runs in CI under the `api-test` job in
+# .github/workflows/ci.yml; keep the order in sync so a local pass means
+# CI passes.
 api-test:
     bash tests/api/run.sh
     bash tests/webdav/run.sh
+    bash tests/oidc/run.sh
 
 # ---------------------------------------------------------------------------
 # SvelteKit frontend (frontend/) — the only frontend. These `fe-*` recipes

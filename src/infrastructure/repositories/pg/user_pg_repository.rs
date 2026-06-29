@@ -123,18 +123,25 @@ impl UserRepository for UserPgRepository {
                 let role_str = user_clone.role().to_string();
 
                 // Modify the SQL to do an explicit cast to the auth.userrole type
+                // `image` is included here (was missing pre-fix); without
+                // it a JIT-provisioned OIDC user landed in the row with
+                // a NULL profile picture even when the IdP's `picture`
+                // claim was non-empty. `update_user` already wrote the
+                // column so existing-user re-logins worked, but the
+                // first-time INSERT silently dropped it — surfaced by
+                // tests/oidc/oidc.hurl Step 6 asserting on `$.image`.
                 let _result = sqlx::query(
                     r#"
                         INSERT INTO auth.users (
                             id, username, email, password_hash, role,
                             storage_quota_bytes, storage_used_bytes,
                             created_at, updated_at, last_login_at, active,
-                            oidc_provider, oidc_subject, is_external,
+                            oidc_provider, oidc_subject, image, is_external,
                             given_name, family_name, email_verified_at,
                             preferred_locale, notify_on_share
                         ) VALUES (
                             $1, $2, $3, $4, $5::auth.userrole, $6, $7, $8, $9, $10, $11,
-                            $12, $13, $14, $15, $16, $17, $18, $19
+                            $12, $13, $14, $15, $16, $17, $18, $19, $20
                         )
                         RETURNING *
                         "#,
@@ -152,6 +159,7 @@ impl UserRepository for UserPgRepository {
                 .bind(user_clone.is_active())
                 .bind(user_clone.oidc_provider())
                 .bind(user_clone.oidc_subject())
+                .bind(user_clone.image())
                 .bind(user_clone.is_external())
                 .bind(user_clone.given_name())
                 .bind(user_clone.family_name())

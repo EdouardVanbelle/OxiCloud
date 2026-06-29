@@ -298,7 +298,7 @@ jobs:
           retention-days: 1
 
   api-test:
-    name: API & Webdav tests
+    name: API, WebDAV & OIDC tests
     needs: build
     if: github.event_name == 'pull_request'
     timeout-minutes: 30
@@ -331,13 +331,34 @@ jobs:
           tar -xzf "xq_${XQ_VERSION}_linux_amd64.tar.gz" xq
           sudo install -m 0755 xq /usr/local/bin/xq
 
+      # Node for the OIDC fake IdP (tests/oidc/fake_idp/server.js — a
+      # panva/node-oidc-provider wrapper). Pinned to match the version
+      # used elsewhere in this workflow (frontend Playwright job uses
+      # 26.3.0 too).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26.3.0
+          cache: npm
+          cache-dependency-path: tests/oidc/fake_idp/package-lock.json
+
       - name: Run Hurl API tests
         run: bash tests/api/run.sh
         env:
           BUILD_TARGET: release
 
-      - name: Run Webdav tests
+      - name: Run WebDAV tests
         run: bash tests/webdav/run.sh
+        env:
+          BUILD_TARGET: release
+
+      # OIDC integration: drives the SPA's SSO flow end-to-end against
+      # the fake IdP (auto-approve login + consent, real PKCE/JWT
+      # round-trip) and asserts the d1bbe8ba contract — OIDC callback
+      # MUST redirect to `/login?oidc_code=…`, not `/?oidc_code=…`.
+      # That bug shipped to users in production once already; the
+      # assertion at tests/oidc/oidc.hurl:Step 4 is its guard.
+      - name: Run OIDC tests
+        run: bash tests/oidc/run.sh
         env:
           BUILD_TARGET: release
 
