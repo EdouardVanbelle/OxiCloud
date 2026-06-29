@@ -206,6 +206,12 @@ pub struct FolderResourceRow {
     pub created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
     pub owner_id: Uuid,
+    /// Drive that owns this row. Same column as
+    /// `storage.folders.drive_id` / `storage.files.drive_id`. Surfaced
+    /// on the listing so a UI can tell when a child lives in a
+    /// different drive than its parent (post-D6 cross-drive moves +
+    /// copies make this reachable).
+    pub drive_id: Uuid,
     /// Raw BLAKE3 content hash. `Some(_)` for file rows, `None` for
     /// folder rows. Populates `FileDto::content_hash` + `FileDto::etag`
     /// on the REST `/api/folders/{id}/resources` listing so API

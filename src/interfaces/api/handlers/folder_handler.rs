@@ -502,10 +502,7 @@ pub async fn list_folder_resources(
                             path: String::new(), // cleared — share recipients must not see hierarchy
                             parent_id: row.parent_id.map(|u| u.to_string()),
                             owner_id: Some(row.owner_id.to_string()),
-                            // Resources listing — drive_id is informational
-                            // here; not selected by the underlying query.
-                            // Path-based lookups never enter this code path.
-                            drive_id: uuid::Uuid::nil(),
+                            drive_id: row.drive_id,
                             created_at: row.created_at.timestamp() as u64,
                             modified_at: row.modified_at.timestamp() as u64,
                             is_root: false,

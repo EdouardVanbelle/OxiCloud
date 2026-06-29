@@ -216,11 +216,7 @@ pub async fn list_favorites_resources(
                             path,
                             parent_id: row.parent_id.map(|u| u.to_string()),
                             owner_id: Some(row.owner_id.to_string()),
-                            // Listing handler — drive_id is informational
-                            // and the favorites row doesn't currently
-                            // SELECT it. Path-based lookups never enter
-                            // this code path.
-                            drive_id: uuid::Uuid::nil(),
+                            drive_id: row.drive_id,
                             created_at: row.resource_created_at.timestamp() as u64,
                             modified_at: row.modified_at.timestamp() as u64,
                             is_root: false,

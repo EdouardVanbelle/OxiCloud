@@ -105,6 +105,11 @@ pub struct RecentResourceRow {
     pub resource_created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
     pub owner_id: Uuid,
+    /// Drive that owns this row. Surfaced on the recent listing
+    /// so a UI can tell when a recently-accessed item lives in a
+    /// different drive than the user's home (post-D6 cross-drive
+    /// moves + copies make this reachable).
+    pub drive_id: Uuid,
     /// Raw BLAKE3 content hash. `Some(_)` for file rows, `None` for
     /// folder rows. Feeds `File::compute_etag` so this listing's
     /// `etag` matches GET/HEAD/PROPFIND for the same file.

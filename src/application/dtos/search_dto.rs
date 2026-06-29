@@ -155,6 +155,10 @@ pub struct SearchFolderResultDto {
     pub path: String,
     /// Parent folder ID
     pub parent_id: Option<String>,
+    /// Drive that owns this folder. Same column as `storage.folders.drive_id`,
+    /// carried through so downstream callers (e.g. the NC search REPORT
+    /// handler) can populate `FolderDto::drive_id` without a fallback sentinel.
+    pub drive_id: uuid::Uuid,
     /// Creation timestamp
     pub created_at: u64,
     /// Last modification timestamp

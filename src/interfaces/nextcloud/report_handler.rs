@@ -361,10 +361,7 @@ fn folder_dto_from_search(
         path: sr.path.clone(),
         parent_id: sr.parent_id.clone(),
         owner_id: None,
-        // Search result — drive_id is informational. The search row
-        // doesn't currently SELECT it, and path-based lookups never
-        // enter this code path.
-        drive_id: uuid::Uuid::nil(),
+        drive_id: sr.drive_id,
         created_at: sr.created_at,
         modified_at: sr.modified_at,
         is_root: sr.is_root,

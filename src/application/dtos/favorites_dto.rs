@@ -125,6 +125,11 @@ pub struct FavoriteResourceRow {
     pub resource_created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
     pub owner_id: Uuid,
+    /// Drive that owns this row. Surfaced on the favorites listing
+    /// so a UI can tell when a favorited item lives in a different
+    /// drive than the user's home (post-D6 cross-drive moves +
+    /// copies make this reachable).
+    pub drive_id: Uuid,
     /// Raw BLAKE3 content hash. `Some(_)` for file rows, `None` for
     /// folder rows. Routes into `FileDto::content_hash` and feeds
     /// `File::compute_etag` to populate `FileDto::etag`.

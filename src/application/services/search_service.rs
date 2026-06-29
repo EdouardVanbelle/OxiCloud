@@ -241,6 +241,7 @@ impl SearchService {
             name: folder.name.clone(),
             path: folder.path.clone(),
             parent_id: folder.parent_id.clone(),
+            drive_id: folder.drive_id,
             created_at: folder.created_at,
             modified_at: folder.modified_at,
             is_root: folder.is_root,
