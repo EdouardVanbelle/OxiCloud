@@ -1587,6 +1587,23 @@ async fn handle_delete(
         None => return Err(AppError::not_found(format!("Resource not found: {}", path))),
     }
 
+    // Reap dead properties so a future resource at the same path
+    // doesn't inherit tombstone metadata from the deleted one. Best-
+    // effort: a failure to clear leaves orphan rows but the user-
+    // facing DELETE has succeeded, so we don't propagate the error.
+    // Caught by tests/api/webdav_dead_properties.hurl Step 10.
+    if let Err(e) = state
+        .webdav_dead_props
+        .remove_resource(&path, user.id)
+        .await
+    {
+        tracing::warn!(
+            user_id = %user.id,
+            path = %path,
+            "dead-property cleanup on DELETE failed: {e}"
+        );
+    }
+
     Ok(Response::builder()
         .status(StatusCode::NO_CONTENT)
         .body(Body::empty())
