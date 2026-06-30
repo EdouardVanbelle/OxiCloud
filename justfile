@@ -172,9 +172,17 @@ front-design:
 # .github/workflows/ci.yml; keep the order in sync so a local pass means
 # CI passes.
 api-test:
-    bash tests/api/run.sh
-    bash tests/webdav/run.sh
-    bash tests/oidc/run.sh
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ./tests/api/run.sh
+    ./tests/webdav/run.sh
+    ./tests/oidc/run.sh
+    if which litmus >/dev/null 2>/dev/null
+    then
+        ./tests/webdav/run-litmus.sh
+    else
+        echo "XXX litmus webdav not found, ignore test"
+    fi
 
 # ---------------------------------------------------------------------------
 # SvelteKit frontend (frontend/) — the only frontend. These `fe-*` recipes
