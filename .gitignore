@@ -100,6 +100,7 @@ tests/e2e/test-results/
 tests/e2e/blob-report/
 tests/e2e/playwright/.cache/
 tests/e2e/playwright/.auth/
+tests/webdav/storage-litmus/
 
 # Test fixtures generated on-the-fly by tests/api/run.sh
 tests/fixtures/chunk-over-cap-*.bin
