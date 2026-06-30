@@ -17,7 +17,9 @@ use chrono::Utc;
 use quick_xml::Writer;
 use uuid::Uuid;
 
-use crate::application::adapters::webdav_adapter::{LockInfo, PropFindRequest, WebDavAdapter};
+use crate::application::adapters::webdav_adapter::{
+    LockInfo, PropFindRequest, PropPatchOp, QualifiedName, WebDavAdapter,
+};
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
 use crate::application::ports::file_ports::FileRetrievalUseCase;
@@ -487,6 +489,7 @@ async fn handle_propfind(
             Ok(ResolvedResource::File(file)) => {
                 let dead_props = state.webdav_dead_props.get_all(&path, user.id).await
                     .unwrap_or_default();
+                let file_href = webdav_href(&client_path);
                 let mut buf = Vec::with_capacity(1024);
                 {
                     let mut xml_writer = Writer::new(&mut buf);
@@ -496,7 +499,7 @@ async fn handle_propfind(
                         &mut xml_writer,
                         &file,
                         &propfind_request,
-                        &base_href,
+                        &file_href,
                         &dead_props,
                     )
                     .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
@@ -540,6 +543,7 @@ async fn handle_propfind(
             assert_owner(file.owner_id.as_deref(), &user.id.to_string(), &path)?;
             let dead_props = state.webdav_dead_props.get_all(&path, user.id).await
                 .unwrap_or_default();
+            let file_href = webdav_href(&client_path);
             let mut buf = Vec::with_capacity(1024);
             {
                 let mut xml_writer = Writer::new(&mut buf);
@@ -549,7 +553,7 @@ async fn handle_propfind(
                     &mut xml_writer,
                     &file,
                     &propfind_request,
-                    &base_href,
+                    &file_href,
                     &dead_props,
                 )
                 .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
@@ -772,26 +776,25 @@ async fn handle_proppatch(
         .map_err(|e| {
             AppError::payload_too_large(format!("PROPPATCH body too large or unreadable: {}", e))
         })?;
-    let (props_to_set, props_to_remove) = WebDavAdapter::parse_proppatch(body_bytes.reader())
+    let ops = WebDavAdapter::parse_proppatch(body_bytes.reader())
         .map_err(|e| AppError::bad_request(format!("Failed to parse PROPPATCH request: {}", e)))?;
 
-    // Persist dead properties (RFC 4918 §4.2 — stored verbatim, returned by PROPFIND).
+    // Apply operations in document order (RFC 4918 §9.2).
     let dead_props = &state.webdav_dead_props;
-    for prop in &props_to_set {
-        dead_props.set(&path, user.id, prop.name.clone(), prop.value.clone()).await
-            .map_err(|e| AppError::internal_error(format!("Failed to store dead property: {e}")))?;
-    }
-    for name in &props_to_remove {
-        dead_props.remove(&path, user.id, name).await
-            .map_err(|e| AppError::internal_error(format!("Failed to remove dead property: {e}")))?;
-    }
-
-    let mut results = Vec::new();
-    for prop in &props_to_set {
-        results.push((&prop.name, true));
-    }
-    for prop in &props_to_remove {
-        results.push((prop, true));
+    let mut results: Vec<(&QualifiedName, bool)> = Vec::new();
+    for op in &ops {
+        match op {
+            PropPatchOp::Set(pv) => {
+                dead_props.set(&path, user.id, pv.name.clone(), pv.value.clone()).await
+                    .map_err(|e| AppError::internal_error(format!("Failed to store dead property: {e}")))?;
+                results.push((&pv.name, true));
+            }
+            PropPatchOp::Remove(name) => {
+                dead_props.remove(&path, user.id, name).await
+                    .map_err(|e| AppError::internal_error(format!("Failed to remove dead property: {e}")))?;
+                results.push((name, true));
+            }
+        }
     }
 
     // Generate response — use client-facing path so href matches the request URL.
@@ -1109,10 +1112,8 @@ fn enforce_native_lock(
             if p.is_empty() {
                 return None;
             }
-            if let Some(e) = lock_store.get_by_path(p) {
-                if e.info.depth.eq_ignore_ascii_case("infinity") {
-                    return Some(e);
-                }
+            if let Some(e) = lock_store.get_by_path(p) && e.info.depth.eq_ignore_ascii_case("infinity") {
+                return Some(e);
             }
         }
     });
@@ -1828,6 +1829,13 @@ async fn handle_move(
             }
         }
     }
+
+    // Migrate dead properties to the new path (RFC 4918 §9.9 — MOVE preserves properties).
+    state
+        .webdav_dead_props
+        .rename_resource(&source_path, user.id, &destination_path)
+        .await
+        .map_err(|e| AppError::internal_error(format!("Failed to migrate dead properties: {e}")))?;
 
     // RFC 4918 §9.9.5: 201 Created when destination is new, 204 when overwritten.
     let status = if dest_existed {

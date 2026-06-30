@@ -733,11 +733,10 @@ async fn handle_proppatch(
         .await
         .map_err(|e| AppError::bad_request(format!("Failed to read request body: {}", e)))?;
 
-    let (props_to_set, props_to_remove) =
-        crate::application::adapters::webdav_adapter::WebDavAdapter::parse_proppatch(
-            body_bytes.reader(),
-        )
-        .map_err(|e| AppError::bad_request(format!("Failed to parse PROPPATCH: {}", e)))?;
+    let ops = crate::application::adapters::webdav_adapter::WebDavAdapter::parse_proppatch(
+        body_bytes.reader(),
+    )
+    .map_err(|e| AppError::bad_request(format!("Failed to parse PROPPATCH: {}", e)))?;
 
     let effective_path = strip_username_prefix(path);
     let address_book_id = effective_path.split('/').next().unwrap_or(effective_path);
@@ -754,12 +753,14 @@ async fn handle_proppatch(
         user_id: user.id.to_string(),
     };
 
-    for prop in &props_to_set {
-        match prop.name.name.as_str() {
-            "displayname" => update.name = Some(prop.value.clone().unwrap_or_default()),
-            "addressbook-description" => update.description = prop.value.clone(),
-            "calendar-color" | "addressbook-color" => update.color = prop.value.clone(),
-            _ => {}
+    for op in &ops {
+        if let crate::application::adapters::webdav_adapter::PropPatchOp::Set(prop) = op {
+            match prop.name.name.as_str() {
+                "displayname" => update.name = Some(prop.value.clone().unwrap_or_default()),
+                "addressbook-description" => update.description = prop.value.clone(),
+                "calendar-color" | "addressbook-color" => update.color = prop.value.clone(),
+                _ => {}
+            }
         }
     }
 
@@ -773,11 +774,15 @@ async fn handle_proppatch(
     }
 
     let mut results = Vec::new();
-    for prop in &props_to_set {
-        results.push((&prop.name, true));
-    }
-    for prop in &props_to_remove {
-        results.push((prop, true));
+    for op in &ops {
+        match op {
+            crate::application::adapters::webdav_adapter::PropPatchOp::Set(prop) => {
+                results.push((&prop.name, true));
+            }
+            crate::application::adapters::webdav_adapter::PropPatchOp::Remove(name) => {
+                results.push((name, true));
+            }
+        }
     }
 
     let href = format!("/carddav/{}", path);
