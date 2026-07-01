@@ -419,7 +419,12 @@ impl WebDavAdapter {
     ///
     /// Written AFTER the live-property propstats inside a `<D:response>`.
     /// Only emitted when `dead_props` is non-empty.
-    fn write_dead_props_propstat<W: Write>(
+    ///
+    /// `pub(crate)` so the NextCloud-compatible handler
+    /// (`interfaces::nextcloud::webdav_handler`) can append the same
+    /// dead-property block to its own bespoke PROPFIND writers instead
+    /// of duplicating this XML shape.
+    pub(crate) fn write_dead_props_propstat<W: Write>(
         xml_writer: &mut Writer<W>,
         dead_props: &[(QualifiedName, Option<String>)],
     ) -> Result<()> {
