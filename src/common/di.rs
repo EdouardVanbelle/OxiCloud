@@ -915,17 +915,14 @@ impl AppServiceFactory {
     /// repository — the data is the caller's Photos-scope geotagged photos
     /// (§15: default personal drive + drives with
     /// `include_in_photo_index = true` AND caller has Read).
-    /// `authorization` is used for the same subject expansion that
-    /// `photos_handler::list_photos` runs.
+    /// Group-membership expansion is inline in the SQL via
+    /// `storage.caller_group_ids`, so the service needs no AuthZ engine
+    /// handle.
     pub fn create_places_service(
         &self,
         file_read: &Arc<FileBlobReadRepository>,
-        authorization: &Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine>,
     ) -> Arc<PlacesService> {
-        let service = Arc::new(PlacesService::new(
-            file_read.clone(),
-            authorization.clone(),
-        ));
+        let service = Arc::new(PlacesService::new(file_read.clone()));
         tracing::info!("Places service initialized");
         service
     }
@@ -1293,7 +1290,7 @@ impl AppServiceFactory {
             apps.recent_service = Some(recent_service_eager.clone());
 
             places_service = if core.config.features.enable_places {
-                Some(self.create_places_service(&repos.file_read_repository, &authorization))
+                Some(self.create_places_service(&repos.file_read_repository))
             } else {
                 None
             };

@@ -452,29 +452,28 @@ impl FileBlobReadRepository {
     /// drive_id already ordered by capture date, so LIMIT stops the scan
     /// early. Same O(LIMIT) shape as the pre-D7 `user_id`-keyed hot path.
     ///
-    /// Scope (`docs/plan/drive.md` §15): the caller's *effective subjects*
-    /// × drives with `policies.include_in_photo_index = true`. Default
-    /// personal drives always match because the flag is materialised to
-    /// `true` at drive creation (see
+    /// Scope (`docs/plan/drive.md` §15): drives with
+    /// `policies.include_in_photo_index = true` where the caller has a
+    /// direct grant (`subject_type = 'user'`) OR a grant on a group they
+    /// belong to transitively. Group membership is expanded inline by the
+    /// `storage.caller_group_ids(caller)` SQL function (migration
+    /// `20260901000002_caller_group_ids_function.sql`) — no ceremony at
+    /// the handler layer, no cross-space ambiguity from the earlier
+    /// parallel-arrays pattern.
+    ///
+    /// Default personal drives always match because the flag is
+    /// materialised to `true` at drive creation (see
     /// `DriveRepository::create_personal_drive_atomic` + the backfill
     /// migration `20260901000000_default_personal_photo_music_flags.sql`)
     /// — no per-kind carve-out needed. Non-default drives (secondary
     /// personals, shared drives) surface here only after their owner
     /// flips the flag on via the admin "Manage policies" modal.
-    ///
-    /// `subject_types` / `subject_ids` are the caller expanded through
-    /// their group memberships (`AuthorizationEngine::
-    /// expand_subject_for_listing`); the arrays reach into the ANY()
-    /// predicates so a group-mediated grant on a drive counts too.
     pub async fn list_media_files(
         &self,
-        subject_types: &[&str],
-        subject_ids: &[Uuid],
+        caller_id: Uuid,
         before: Option<i64>,
         limit: i64,
     ) -> Result<(Vec<File>, Vec<i64>, Vec<(Option<i32>, Option<i32>)>), DomainError> {
-        let subject_types_owned: Vec<String> =
-            subject_types.iter().map(|s| s.to_string()).collect();
         let rows: Vec<MediaFileRow> = sqlx::query_as(
             r#"
             SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
@@ -495,21 +494,23 @@ impl FileBlobReadRepository {
                        JOIN storage.role_grants g
                          ON g.resource_type = 'drive'
                         AND g.resource_id   = d.id
-                      WHERE g.subject_type = ANY($1)
-                        AND g.subject_id   = ANY($2)
+                      WHERE (
+                              (g.subject_type = 'user'  AND g.subject_id = $1)
+                           OR (g.subject_type = 'group' AND g.subject_id IN
+                                   (SELECT storage.caller_group_ids($1)))
+                            )
                         AND (g.expires_at IS NULL OR g.expires_at > NOW())
                         AND (d.policies->>'include_in_photo_index')::boolean = true
                    )
                AND NOT fi.is_trashed
                AND (fi.mime_type LIKE 'image/%' OR fi.mime_type LIKE 'video/%')
-               AND ($3::bigint IS NULL
-                    OR EXTRACT(EPOCH FROM fi.media_sort_date)::bigint < $3::bigint)
+               AND ($2::bigint IS NULL
+                    OR EXTRACT(EPOCH FROM fi.media_sort_date)::bigint < $2::bigint)
              ORDER BY fi.media_sort_date DESC
-             LIMIT $4
+             LIMIT $3
             "#,
         )
-        .bind(&subject_types_owned)
-        .bind(subject_ids)
+        .bind(caller_id)
         .bind(before)
         .bind(limit)
         .fetch_all(self.pool.as_ref())
@@ -537,21 +538,18 @@ impl FileBlobReadRepository {
     /// Scope: same `include_in_photo_index` predicate as
     /// `list_media_files` (§15). Places is the map view over the same
     /// content set the Photos timeline shows, so the two surfaces MUST
-    /// agree on drive scope. If a drive is opt-out for Photos its
-    /// geotagged files never appear on the map either.
+    /// agree on drive scope. Group membership is expanded inline by
+    /// `storage.caller_group_ids(caller)`.
     ///
     /// This query is a per-cell aggregate (group by rounded lat/lng
     /// bucket) rather than an ORDER BY / LIMIT hot path — the plain
     /// `idx_files_drive_id` is sufficient to seek by drive.
     pub async fn list_geo_clusters(
         &self,
-        subject_types: &[&str],
-        subject_ids: &[Uuid],
+        caller_id: Uuid,
         bounds: GeoBounds,
         cell: f64,
     ) -> Result<Vec<GeoCluster>, DomainError> {
-        let subject_types_owned: Vec<String> =
-            subject_types.iter().map(|s| s.to_string()).collect();
         let rows: Vec<(i64, f64, f64, String)> = sqlx::query_as(
             r#"
             SELECT count(*)              AS n,
@@ -566,21 +564,23 @@ impl FileBlobReadRepository {
                        JOIN storage.role_grants g
                          ON g.resource_type = 'drive'
                         AND g.resource_id   = d.id
-                      WHERE g.subject_type = ANY($1)
-                        AND g.subject_id   = ANY($2)
+                      WHERE (
+                              (g.subject_type = 'user'  AND g.subject_id = $1)
+                           OR (g.subject_type = 'group' AND g.subject_id IN
+                                   (SELECT storage.caller_group_ids($1)))
+                            )
                         AND (g.expires_at IS NULL OR g.expires_at > NOW())
                         AND (d.policies->>'include_in_photo_index')::boolean = true
                    )
                AND NOT fi.is_trashed
                AND fm.latitude IS NOT NULL
                AND fm.longitude IS NOT NULL
-               AND fm.longitude BETWEEN $3 AND $4
-               AND fm.latitude  BETWEEN $5 AND $6
-             GROUP BY round(fm.longitude / $7), round(fm.latitude / $7)
+               AND fm.longitude BETWEEN $2 AND $3
+               AND fm.latitude  BETWEEN $4 AND $5
+             GROUP BY round(fm.longitude / $6), round(fm.latitude / $6)
             "#,
         )
-        .bind(&subject_types_owned)
-        .bind(subject_ids)
+        .bind(caller_id)
         .bind(bounds.west)
         .bind(bounds.east)
         .bind(bounds.south)

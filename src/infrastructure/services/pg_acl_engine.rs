@@ -377,10 +377,15 @@ impl PgAclEngine {
 
     /// Public wrapper around `subject_match_set` for callers that need
     /// the expanded `(subject_types, subject_ids)` pair without invoking
-    /// the engine's full `check`/`require` pipeline. Used by
-    /// `GET /api/drives` (and future drive-aware listing surfaces) to
-    /// ask the `DriveRepository` for every drive the caller can read,
-    /// reusing the engine's cached group-expansion logic.
+    /// the engine's full `check`/`require` pipeline.
+    ///
+    /// **Retained for legacy callers only** — new listing queries embed
+    /// the `storage.caller_group_ids` PostgreSQL function inline (see
+    /// migration `20260901000002_caller_group_ids_function.sql`) and
+    /// take a bare `caller_id: Uuid` instead of the pre-expanded arrays.
+    /// The engine's Moka cache still backs the fast path for per-request
+    /// AuthZ decisions (`check_inner`, `drive_role_cache`) where the
+    /// same subject is looked up repeatedly.
     pub async fn expand_subject_for_listing(
         &self,
         subject: Subject,

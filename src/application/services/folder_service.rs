@@ -358,18 +358,18 @@ impl FolderUseCase for FolderService {
                 .await?;
             return self.list_folders(parent_id).await;
         }
-        // No parent → list the user's root folders.
+        // No parent → list the caller's readable root folders. The
+        // predicate scopes by drive-membership grants (post-PR-B),
+        // closing the pre-D7 gap where the legacy `user_id` filter
+        // surfaced admin-created folders that admin had no role on.
         let folders = self
             .folder_storage
-            .list_folders_by_owner(parent_id, caller_id)
+            .list_root_folders_for_caller(caller_id)
             .await
             .map_err(|e| {
                 DomainError::internal_error(
                     "FolderStorage",
-                    format!(
-                        "Failed to list folders for owner '{}' in parent {:?}: {}",
-                        caller_id, parent_id, e
-                    ),
+                    format!("Failed to list root folders for caller '{caller_id}': {e}"),
                 )
             })?;
         Ok(folders.into_iter().map(FolderDto::from).collect())
@@ -432,8 +432,7 @@ impl FolderUseCase for FolderService {
         } else {
             let (folders, total_items) = self
             .folder_storage
-            .list_folders_by_owner_paginated(
-                parent_id,
+            .list_root_folders_for_caller_paginated(
                 owner_id,
                 pagination.offset(),
                 pagination.limit(),
@@ -444,8 +443,8 @@ impl FolderUseCase for FolderService {
                 DomainError::internal_error(
                     "FolderStorage",
                     format!(
-                        "Failed to list folders for owner '{}' with pagination in parent {:?}: {}",
-                        owner_id, parent_id, e
+                        "Failed to list root folders for caller '{}' with pagination: {}",
+                        owner_id, e
                     ),
                 )
             })?;

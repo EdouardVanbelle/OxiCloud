@@ -392,47 +392,55 @@ impl FolderRepository for FolderDbRepository {
             .collect()
     }
 
-    #[allow(clippy::type_complexity)]
-    async fn list_folders_by_owner(
+    async fn list_root_folders_for_caller(
         &self,
-        parent_id: Option<&str>,
-        owner_id: Uuid,
+        caller_id: Uuid,
     ) -> Result<Vec<Folder>, DomainError> {
-        let rows: Vec<FolderRow> = if let Some(pid) = parent_id {
-            sqlx::query_as(
-                r#"
-                SELECT id::text, name, path, parent_id::text, user_id, drive_id,
-                       EXTRACT(EPOCH FROM created_at)::bigint,
-                       EXTRACT(EPOCH FROM updated_at)::bigint,
-                       EXTRACT(EPOCH FROM tree_modified_at)::bigint,
-                         created_by, updated_by
-                  FROM storage.folders
-                 WHERE parent_id = $1::uuid AND user_id = $2 AND NOT is_trashed
-                 ORDER BY name
-                "#,
-            )
-            .bind(pid)
-            .bind(owner_id)
-            .fetch_all(self.pool())
-            .await
-        } else {
-            sqlx::query_as(
-                r#"
-                SELECT id::text, name, path, parent_id::text, user_id, drive_id,
-                       EXTRACT(EPOCH FROM created_at)::bigint,
-                       EXTRACT(EPOCH FROM updated_at)::bigint,
-                       EXTRACT(EPOCH FROM tree_modified_at)::bigint,
-                         created_by, updated_by
-                  FROM storage.folders
-                 WHERE parent_id IS NULL AND user_id = $1 AND NOT is_trashed
-                 ORDER BY name
-                "#,
-            )
-            .bind(owner_id)
-            .fetch_all(self.pool())
-            .await
-        }
-        .map_err(|e| DomainError::internal_error("FolderDb", format!("list_by_owner: {e}")))?;
+        // Drive-scoped root-folder listing: return every root folder
+        // whose drive the caller has any role_grant on. Group
+        // memberships (direct + transitive) resolve inline via
+        // `storage.caller_group_ids($1)`.
+        //
+        // Closes `bug_root_folder_listing_legacy_user_id`: pre-D7 this
+        // query filtered on `folders.user_id = $caller`, which returned
+        // rows admin had created for other users' drives without ever
+        // getting a role on them. The drive-membership predicate below
+        // makes the "admin's own listing" correct without a separate
+        // filter.
+        //
+        // `caller_role` is NOT surfaced here — see the memory
+        // `project_caller_role_on_file_folder_dto` and the note at the
+        // top of `folder_repository.rs`. Frontend cross-references
+        // `/api/drives::caller_role` via `folder.drive_id`.
+        let rows: Vec<FolderRow> = sqlx::query_as(
+            r#"
+            SELECT f.id::text, f.name, f.path, f.parent_id::text, f.user_id, f.drive_id,
+                   EXTRACT(EPOCH FROM f.created_at)::bigint,
+                   EXTRACT(EPOCH FROM f.updated_at)::bigint,
+                   EXTRACT(EPOCH FROM f.tree_modified_at)::bigint,
+                   f.created_by, f.updated_by
+              FROM storage.folders f
+             WHERE f.parent_id IS NULL
+               AND NOT f.is_trashed
+               AND EXISTS (
+                     SELECT 1
+                       FROM storage.role_grants g
+                      WHERE g.resource_type = 'drive'
+                        AND g.resource_id   = f.drive_id
+                        AND (g.expires_at IS NULL OR g.expires_at > NOW())
+                        AND (
+                              (g.subject_type = 'user'  AND g.subject_id = $1)
+                           OR (g.subject_type = 'group' AND g.subject_id IN
+                                   (SELECT storage.caller_group_ids($1)))
+                            )
+                   )
+             ORDER BY f.name
+            "#,
+        )
+        .bind(caller_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(|e| DomainError::internal_error("FolderDb", format!("list_root_folders: {e}")))?;
 
         rows.into_iter()
             .map(|(id, name, path, pid, uid, did, ca, ma, tma, cb, ub)| {
@@ -512,60 +520,52 @@ impl FolderRepository for FolderDbRepository {
         Ok((folders?, total))
     }
 
-    /// Paginated folder listing filtered by owner — single query with
-    /// `COUNT(*) OVER()` to avoid a separate COUNT round-trip.
-    #[allow(clippy::type_complexity)]
-    async fn list_folders_by_owner_paginated(
+    /// Paginated companion to `list_root_folders_for_caller` — same
+    /// drive-membership predicate, adds LIMIT/OFFSET and an optional
+    /// window-function COUNT so total pages can be surfaced without a
+    /// second round-trip.
+    async fn list_root_folders_for_caller_paginated(
         &self,
-        parent_id: Option<&str>,
-        owner_id: Uuid,
+        caller_id: Uuid,
         offset: usize,
         limit: usize,
         include_total: bool,
     ) -> Result<(Vec<Folder>, Option<usize>), DomainError> {
-        let rows: Vec<FolderRowPaginated> = if let Some(pid) = parent_id {
-            sqlx::query_as(
-                r#"
-                SELECT id::text, name, path, parent_id::text, user_id, drive_id,
-                       EXTRACT(EPOCH FROM created_at)::bigint,
-                       EXTRACT(EPOCH FROM updated_at)::bigint,
-                       EXTRACT(EPOCH FROM tree_modified_at)::bigint,
-                       created_by, updated_by,
-                       COUNT(*) OVER() AS total_count
-                  FROM storage.folders
-                 WHERE parent_id = $1::uuid AND user_id = $2 AND NOT is_trashed
-                 ORDER BY name
-                 LIMIT $3 OFFSET $4
-                "#,
-            )
-            .bind(pid)
-            .bind(owner_id)
-            .bind(limit as i64)
-            .bind(offset as i64)
-            .fetch_all(self.pool())
-            .await
-        } else {
-            sqlx::query_as(
-                r#"
-                SELECT id::text, name, path, parent_id::text, user_id, drive_id,
-                       EXTRACT(EPOCH FROM created_at)::bigint,
-                       EXTRACT(EPOCH FROM updated_at)::bigint,
-                       EXTRACT(EPOCH FROM tree_modified_at)::bigint,
-                       created_by, updated_by,
-                       COUNT(*) OVER() AS total_count
-                  FROM storage.folders
-                 WHERE parent_id IS NULL AND user_id = $1 AND NOT is_trashed
-                 ORDER BY name
-                 LIMIT $2 OFFSET $3
-                "#,
-            )
-            .bind(owner_id)
-            .bind(limit as i64)
-            .bind(offset as i64)
-            .fetch_all(self.pool())
-            .await
-        }
-        .map_err(|e| DomainError::internal_error("FolderDb", format!("paginate_by_owner: {e}")))?;
+        let rows: Vec<FolderRowPaginated> = sqlx::query_as(
+            r#"
+            SELECT f.id::text, f.name, f.path, f.parent_id::text, f.user_id, f.drive_id,
+                   EXTRACT(EPOCH FROM f.created_at)::bigint,
+                   EXTRACT(EPOCH FROM f.updated_at)::bigint,
+                   EXTRACT(EPOCH FROM f.tree_modified_at)::bigint,
+                   f.created_by, f.updated_by,
+                   COUNT(*) OVER() AS total_count
+              FROM storage.folders f
+             WHERE f.parent_id IS NULL
+               AND NOT f.is_trashed
+               AND EXISTS (
+                     SELECT 1
+                       FROM storage.role_grants g
+                      WHERE g.resource_type = 'drive'
+                        AND g.resource_id   = f.drive_id
+                        AND (g.expires_at IS NULL OR g.expires_at > NOW())
+                        AND (
+                              (g.subject_type = 'user'  AND g.subject_id = $1)
+                           OR (g.subject_type = 'group' AND g.subject_id IN
+                                   (SELECT storage.caller_group_ids($1)))
+                            )
+                   )
+             ORDER BY f.name
+             LIMIT $2 OFFSET $3
+            "#,
+        )
+        .bind(caller_id)
+        .bind(limit as i64)
+        .bind(offset as i64)
+        .fetch_all(self.pool())
+        .await
+        .map_err(|e| {
+            DomainError::internal_error("FolderDb", format!("list_root_folders_paginated: {e}"))
+        })?;
 
         let total = if include_total {
             Some(rows.first().map_or(0, |r| r.11) as usize)

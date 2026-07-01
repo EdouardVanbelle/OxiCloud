@@ -27,7 +27,7 @@ pub trait TrashRepository: Send + Sync {
     ///
     /// **Caller contract**: pass only drive UUIDs the caller has
     /// `Permission::Delete` on (resolved by the service via
-    /// `DriveRepository::list_for_subjects` + role-bundle filter). This
+    /// `DriveRepository::list_readable_by` + role-bundle filter). This
     /// repository performs no authorization — see
     /// `TrashService::empty_trash` for the canonical call site.
     async fn clear_trash(&self, drive_ids: &[Uuid]) -> Result<()>;

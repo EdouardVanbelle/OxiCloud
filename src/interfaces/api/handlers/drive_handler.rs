@@ -48,23 +48,7 @@ pub async fn list_drives(
 ) -> impl IntoResponse {
     let caller_id = auth_user.id;
 
-    let (subject_types, subject_ids) = match state
-        .authorization
-        .expand_subject_for_listing(Subject::User(caller_id))
-        .await
-    {
-        Ok(pair) => pair,
-        Err(e) => {
-            error!("list_drives: subject expansion failed: {e}");
-            return AppError::from(e).into_response();
-        }
-    };
-
-    match state
-        .drive_repo
-        .list_for_subjects(&subject_types, &subject_ids)
-        .await
-    {
+    match state.drive_repo.list_readable_by(caller_id).await {
         Ok(drives) => {
             let dtos: Vec<DriveDto> = drives.into_iter().map(DriveDto::from).collect();
             (StatusCode::OK, Json(dtos)).into_response()

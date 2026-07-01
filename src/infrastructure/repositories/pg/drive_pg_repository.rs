@@ -3,7 +3,7 @@
 //! The repo deals only with the `storage.drives` table itself. Drive
 //! membership lives in `storage.role_grants` (`resource_type='drive'`)
 //! and is queried through the engine's existing grant paths;
-//! `list_for_subjects` below resolves `role_grants` → `storage.drives`
+//! `list_readable_by` below resolves `role_grants` → `storage.drives`
 //! via a single join.
 //!
 //! See `migrations/20260802000000_drives_schema_additive.sql` for the
@@ -75,7 +75,7 @@ impl DrivePgRepository {
     /// is declared owner→viewer (strongest→weakest), so `MIN` picks the
     /// strongest of the caller's grants on the drive (direct +
     /// group-mediated collapsed by GROUP BY). Used only by
-    /// `list_for_subjects`.
+    /// `list_readable_by`.
     fn row_to_drive_with_name_and_role(
         row: &sqlx::postgres::PgRow,
     ) -> Result<DriveWithRootName, DriveRepositoryError> {
@@ -463,13 +463,15 @@ impl DriveRepository for DrivePgRepository {
         Self::row_to_drive_with_name(&row)
     }
 
-    async fn list_for_subjects(
+    async fn list_readable_by(
         &self,
-        subject_types: &[&str],
-        subject_ids: &[Uuid],
+        caller_id: Uuid,
     ) -> Result<Vec<DriveWithRootName>, DriveRepositoryError> {
         // Joining role_grants → drives → folders returns every drive the
-        // expanded subject set can read, paired with its display name.
+        // caller can read, paired with its display name. Group
+        // memberships (direct + transitive) are expanded inline by
+        // `storage.caller_group_ids($caller)` — no Rust-side ceremony.
+        //
         // ORDER BY puts default drives first (so the picker UI doesn't
         // need a follow-up sort), then alphabetical by name. GROUP BY
         // collapses duplicate role_grants on the same drive (direct +
@@ -481,8 +483,6 @@ impl DriveRepository for DrivePgRepository {
         // weakest), so MIN returns the strongest. Cast `::text` matches
         // the codebase convention for reading enum columns into Rust
         // (see `pg_acl_engine.rs`); `Role::parse` handles the trip back.
-        // Collapses direct + group-mediated grants on the same drive
-        // into one row alongside the existing GROUP BY.
         let rows = sqlx::query(
             r#"
             SELECT d.id, d.kind, d.default_for_user, d.root_folder_id,
@@ -495,8 +495,11 @@ impl DriveRepository for DrivePgRepository {
               JOIN storage.role_grants g
                 ON g.resource_type = 'drive'
                AND g.resource_id   = d.id
-             WHERE g.subject_type = ANY($1)
-               AND g.subject_id   = ANY($2)
+             WHERE (
+                     (g.subject_type = 'user'  AND g.subject_id = $1)
+                  OR (g.subject_type = 'group' AND g.subject_id IN
+                          (SELECT storage.caller_group_ids($1)))
+                   )
                AND (g.expires_at IS NULL OR g.expires_at > NOW())
              GROUP BY d.id, d.kind, d.default_for_user, d.root_folder_id,
                       d.quota_bytes, d.used_bytes, d.policies,
@@ -505,16 +508,10 @@ impl DriveRepository for DrivePgRepository {
                       LOWER(f.name) ASC
             "#,
         )
-        .bind(
-            subject_types
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>(),
-        )
-        .bind(subject_ids)
+        .bind(caller_id)
         .fetch_all(self.pool.as_ref())
         .await
-        .map_err(|e| Self::map_sqlx_err("list_for_subjects", e))?;
+        .map_err(|e| Self::map_sqlx_err("list_readable_by", e))?;
 
         rows.iter()
             .map(Self::row_to_drive_with_name_and_role)

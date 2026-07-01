@@ -13,6 +13,17 @@ use crate::domain::entities::folder::Folder;
 use crate::domain::services::path_service::StoragePath;
 use uuid::Uuid;
 
+// NOTE on `caller_role` for the two listing methods below:
+// We deliberately do NOT compute or return the caller's role per row.
+// The frontend already fetches `/api/drives` (which surfaces
+// `caller_role` per drive) and cross-references by `folder.drive_id` —
+// see `MoveDialog.svelte` and the config/drive page. Adding
+// `caller_role` to `FolderDto` would either (a) mean redundant
+// server-side work for a client-side concern the client already
+// handles, or (b) drag folder-level grant cascades into the query
+// which is real cost for a rare edge case. Punted; see
+// `project_caller_role_on_file_folder_dto` memory.
+
 /// Domain port for folder persistence.
 ///
 /// Defines the CRUD and management operations required for
@@ -51,13 +62,20 @@ pub trait FolderRepository: Send + Sync + 'static {
     /// Lists folders within a parent folder
     async fn list_folders(&self, parent_id: Option<&str>) -> Result<Vec<Folder>, DomainError>;
 
-    /// Lists root-level folders owned by a specific user.
-    /// For non-root queries (parent_id is Some), ownership is implicit
-    /// because the parent already belongs to the user.
-    async fn list_folders_by_owner(
+    /// Lists root-level folders the caller can read — scoped through
+    /// drive-membership grants (`role_grants` on `resource_type='drive'`)
+    /// rather than the legacy `folders.user_id` column. Group memberships
+    /// are expanded inline by `storage.caller_group_ids($caller)` in the
+    /// SQL. Closes [[bug-root-folder-listing-legacy-user-id]] — root
+    /// folders admin created for other users but has no role on no
+    /// longer surface in the admin's `GET /api/folders`.
+    ///
+    /// Non-root queries (parent_id != None) go through `list_folders`
+    /// with the parent already permission-checked at the service layer,
+    /// so this method carries no `parent_id` parameter.
+    async fn list_root_folders_for_caller(
         &self,
-        parent_id: Option<&str>,
-        owner_id: Uuid,
+        caller_id: Uuid,
     ) -> Result<Vec<Folder>, DomainError>;
 
     /// Lists folders with pagination
@@ -69,13 +87,12 @@ pub trait FolderRepository: Send + Sync + 'static {
         include_total: bool,
     ) -> Result<(Vec<Folder>, Option<usize>), DomainError>;
 
-    /// Lists folders with pagination, scoped to a specific owner.
-    /// Combines the owner filtering of `list_folders_by_owner` with
-    /// the pagination of `list_folders_paginated`.
-    async fn list_folders_by_owner_paginated(
+    /// Paginated companion to `list_root_folders_for_caller` — same
+    /// drive-scoped predicate, adds LIMIT/OFFSET + optional
+    /// window-function COUNT.
+    async fn list_root_folders_for_caller_paginated(
         &self,
-        parent_id: Option<&str>,
-        owner_id: Uuid,
+        caller_id: Uuid,
         offset: usize,
         limit: usize,
         include_total: bool,

@@ -4,29 +4,23 @@ use uuid::Uuid;
 
 use crate::application::dtos::geo_dto::{GeoBounds, GeoCluster};
 use crate::common::errors::DomainError;
-use crate::domain::services::authorization::Subject;
 use crate::infrastructure::repositories::pg::FileBlobReadRepository;
-use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
 
 /// "Places" use case: the caller's geotagged photos aggregated into map
 /// clusters.
 ///
 /// Post-§15 the surface follows the Photos scope: default personal drive
 /// + drives where `policies.include_in_photo_index = true` AND caller
-/// has Read. The repository query joins `role_grants` on the drive
-/// resource type; group-mediated grants are honoured via the caller
-/// expansion done here.
+/// has Read. Group-membership expansion is handled inline by
+/// `storage.caller_group_ids(caller)` inside the repo's SQL, so this
+/// service is a thin coordinate-math wrapper — no engine dependency.
 pub struct PlacesService {
     file_read: Arc<FileBlobReadRepository>,
-    authorization: Arc<PgAclEngine>,
 }
 
 impl PlacesService {
-    pub fn new(file_read: Arc<FileBlobReadRepository>, authorization: Arc<PgAclEngine>) -> Self {
-        Self {
-            file_read,
-            authorization,
-        }
+    pub fn new(file_read: Arc<FileBlobReadRepository>) -> Self {
+        Self { file_read }
     }
 
     /// Aggregation cell side, in degrees, for a slippy-map zoom level. The
@@ -46,12 +40,8 @@ impl PlacesService {
         zoom: u8,
     ) -> Result<Vec<GeoCluster>, DomainError> {
         let cell = Self::cell_for_zoom(zoom);
-        let (subject_types, subject_ids) = self
-            .authorization
-            .expand_subject_for_listing(Subject::User(caller_id))
-            .await?;
         self.file_read
-            .list_geo_clusters(&subject_types, &subject_ids, bounds, cell)
+            .list_geo_clusters(caller_id, bounds, cell)
             .await
     }
 }

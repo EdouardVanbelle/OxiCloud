@@ -745,10 +745,9 @@ impl FolderRepository for MockFolderRepository {
         Ok(vec![])
     }
 
-    async fn list_folders_by_owner(
+    async fn list_root_folders_for_caller(
         &self,
-        _parent_id: Option<&str>,
-        _owner_id: Uuid,
+        _caller_id: Uuid,
     ) -> std::result::Result<Vec<Folder>, DomainError> {
         Ok(vec![])
     }
@@ -763,10 +762,9 @@ impl FolderRepository for MockFolderRepository {
         Ok((vec![], Some(0)))
     }
 
-    async fn list_folders_by_owner_paginated(
+    async fn list_root_folders_for_caller_paginated(
         &self,
-        _parent_id: Option<&str>,
-        _owner_id: Uuid,
+        _caller_id: Uuid,
         _offset: usize,
         _limit: usize,
         _include_total: bool,
