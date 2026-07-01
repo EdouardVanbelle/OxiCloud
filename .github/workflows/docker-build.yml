@@ -42,6 +42,15 @@ jobs:
           tags: test/oxicloud:test
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Pipe GitHub Actions env into the build container so build.rs
+          # can stamp GIT_HASH/GIT_BRANCH into the binary. Without this,
+          # `oxicloud --version` reports "unknown" because Docker builds
+          # have no .git/ in the context and the workflow's env isn't
+          # automatically visible to RUN steps.
+          build-args: |
+            GITHUB_SHA=${{ github.sha }}
+            GITHUB_REF_NAME=${{ github.ref_name }}
+            GITHUB_HEAD_REF=${{ github.head_ref }}
 
       - name: Verify image starts correctly
         run: |

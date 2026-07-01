@@ -104,8 +104,16 @@ jobs:
             ${{ env.REGISTRY_IMAGE }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # GitHub Actions env piped through so build.rs stamps
+          # GIT_HASH/GIT_BRANCH into the published binary — without
+          # these, `oxicloud --version` would report "unknown" because
+          # the build container has no .git/ and the workflow env
+          # isn't auto-visible to RUN steps.
           build-args: |
             VERSION=${{ env.VERSION }}
+            GITHUB_SHA=${{ github.sha }}
+            GITHUB_REF_NAME=${{ github.ref_name }}
+            GITHUB_HEAD_REF=${{ github.head_ref }}
 
       - name: Verify published image
         run: |

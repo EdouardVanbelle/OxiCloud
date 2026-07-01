@@ -63,10 +63,28 @@ COPY migrations migrations
 COPY templates templates
 # Build with all optimizations (DATABASE_URL only needed at compile-time for sqlx)
 ARG DATABASE_URL="postgres://postgres:postgres@localhost/oxicloud"
+# Git metadata pipe-through. build.rs reads these env vars to stamp
+# GIT_HASH / GIT_BRANCH into the binary (consumed by `oxicloud
+# --version`). Without this pipe-through Docker builds always fall
+# back to "unknown" — there's no .git/ in the build context, and the
+# workflow's GitHub Actions env (GITHUB_SHA / GITHUB_REF_NAME /
+# GITHUB_HEAD_REF) isn't visible to RUN steps unless threaded in
+# explicitly as build-args. CI passes these via build-args in the
+# docker-build and docker-publish workflows; local `docker build` can
+# pass `--build-arg GITHUB_SHA=$(git rev-parse HEAD) --build-arg
+# GITHUB_REF_NAME=$(git rev-parse --abbrev-ref HEAD)` to get the same
+# stamping behaviour.
+ARG GITHUB_SHA=""
+ARG GITHUB_REF_NAME=""
+ARG GITHUB_HEAD_REF=""
 # Explicit --bin list: defence-in-depth so the prod image never ships
 # test-only bins (e.g. load-seed) even if `required-features` gating
 # changes upstream.
-RUN DATABASE_URL="${DATABASE_URL}" cargo build --release --bin oxicloud --bin generate-openapi --bin migrate-nfc-filenames
+RUN DATABASE_URL="${DATABASE_URL}" \
+    GITHUB_SHA="${GITHUB_SHA}" \
+    GITHUB_REF_NAME="${GITHUB_REF_NAME}" \
+    GITHUB_HEAD_REF="${GITHUB_HEAD_REF}" \
+    cargo build --release --bin oxicloud --bin generate-openapi --bin migrate-nfc-filenames
 # The SPA is built by the Vite frontend stage; bring it in for the runtime copy
 # below (build.rs has no asset pipeline — it only injects git metadata).
 COPY --from=frontend /static-dist ./static-dist
@@ -93,10 +111,19 @@ COPY templates templates
 COPY --from=frontend /static-dist ./static-dist
 ARG DATABASE_URL="postgres://postgres:postgres@localhost/oxicloud"
 ARG TARGETARCH
+# Git metadata pipe-through (see builder stage above for why this
+# matters and what callers must pass).
+ARG GITHUB_SHA=""
+ARG GITHUB_REF_NAME=""
+ARG GITHUB_HEAD_REF=""
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=shared \
     --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=shared \
     --mount=type=cache,id=oxicloud-target-${TARGETARCH},target=/app/target,sharing=locked \
-    DATABASE_URL="${DATABASE_URL}" cargo build --release && \
+    DATABASE_URL="${DATABASE_URL}" \
+    GITHUB_SHA="${GITHUB_SHA}" \
+    GITHUB_REF_NAME="${GITHUB_REF_NAME}" \
+    GITHUB_HEAD_REF="${GITHUB_HEAD_REF}" \
+    cargo build --release && \
     mkdir -p /app/bin && \
     cp target/release/oxicloud /app/bin/oxicloud && \
     cp target/release/migrate-nfc-filenames /app/bin/migrate-nfc-filenames
