@@ -181,6 +181,26 @@ pub struct DrivePolicies {
     /// writes) and `::remove_member` (refuses Owner removals) when the
     /// caller is non-admin.
     pub forbid_owner_role_change: bool,
+    /// Opts this drive into the `/api/photos` timeline (§15). Non-default
+    /// drives are omitted by default so a random shared folder full of
+    /// screenshots doesn't bleed into the personal timeline; owners flip
+    /// this on when the drive genuinely is a photo library (e.g. "Family
+    /// Photos"). Default personal drives get `true` on creation via the
+    /// `PersonalDriveLifecycleHook` + a one-shot backfill for existing
+    /// rows, so the SQL predicate is a single positive rule with no
+    /// per-kind carve-out. Read at `file_blob_read_repository::
+    /// list_media_files` + `list_geo_clusters`. See §15 for the query
+    /// shape and rationale.
+    pub include_in_photo_index: bool,
+    /// Same shape as `include_in_photo_index`, applied to the Music
+    /// library surface (playlists today; a `/api/music/tracks` library
+    /// view later). Symmetric opt-in — Music was originally cross-drive
+    /// via a `forbid_music_index` opt-out, but that mixed-form naming
+    /// created "one include-in, one forbid" confusion and the
+    /// "shared audio is always intentional" claim didn't hold under
+    /// scrutiny (voicemail MP3s in a work drive shouldn't bleed into
+    /// the personal library). See §15.
+    pub include_in_music_index: bool,
 }
 
 impl DrivePolicies {

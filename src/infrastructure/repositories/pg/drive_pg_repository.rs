@@ -116,11 +116,22 @@ impl DriveRepository for DrivePgRepository {
             .map_err(|e| Self::map_sqlx_err("create_personal_drive_atomic.begin", e))?;
 
         // 1. Drive row (root_folder_id NULL — populated in step 3).
+        //
+        // Default personal drives are seeded with `include_in_photo_index`
+        // + `include_in_music_index` = true so the Photos / Music
+        // predicates (§15) can be a single positive rule keyed off the
+        // JSONB flag — no per-kind carve-out needed at query time. Any
+        // future admin PATCH toggling either flag off shows a confirm
+        // dialog in the UI (unusual action; empties the user's Photos
+        // timeline / Music library).
         let drive_id: Uuid = sqlx::query_scalar(
             r#"
             INSERT INTO storage.drives
                 (kind, default_for_user, quota_bytes, policies)
-            VALUES ('personal', $1, $2, '{}'::jsonb)
+            VALUES (
+                'personal', $1, $2,
+                '{"include_in_photo_index": true, "include_in_music_index": true}'::jsonb
+            )
             RETURNING id
             "#,
         )
@@ -636,16 +647,17 @@ impl DriveRepository for DrivePgRepository {
     async fn update_policies(
         &self,
         drive_id: Uuid,
-        partial: &crate::domain::entities::drive::DrivePolicies,
+        partial: &serde_json::Value,
     ) -> Result<crate::domain::entities::drive::DrivePolicies, DriveRepositoryError> {
         // JSONB-level merge (`||`) keeps unknown keys already on disk —
         // the column remains the canonical bag (see
         // `DrivePolicies::from_value` — typed read is lenient, untyped
-        // write is preserving). RETURNING surfaces the post-merge bag so
-        // the audit log shows what the row actually carries afterwards.
-        let partial_json = serde_json::to_value(partial).map_err(|e| {
-            DriveRepositoryError::StorageError(format!("serialise partial policies: {e}"))
-        })?;
+        // write is preserving). The caller passes a raw `Value` with
+        // ONLY the keys it wants to change (never a full `DrivePolicies`
+        // round-trip, which would serialise all-false defaults into the
+        // merge and clobber other flags). RETURNING surfaces the
+        // post-merge bag so the audit log shows what the row actually
+        // carries afterwards.
         let row: Option<(serde_json::Value,)> = sqlx::query_as(
             "UPDATE storage.drives \
                 SET policies   = policies || $2, \
@@ -654,7 +666,7 @@ impl DriveRepository for DrivePgRepository {
               RETURNING policies",
         )
         .bind(drive_id)
-        .bind(&partial_json)
+        .bind(partial)
         .fetch_optional(self.pool.as_ref())
         .await
         .map_err(|e| Self::map_sqlx_err("update_policies", e))?;

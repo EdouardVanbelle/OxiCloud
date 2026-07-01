@@ -1080,7 +1080,13 @@
 		forbid_external_sharing: false,
 		forbid_public_links: false,
 		forbid_cross_drive_move: false,
-		forbid_owner_role_change: false
+		forbid_owner_role_change: false,
+		// §15 opt-in scope flags. Default personal drives ship with `true`
+		// on the wire (materialised by the DB-side create path + backfill
+		// migration), so `readPolicyBool` will surface the correct current
+		// state on modal open.
+		include_in_photo_index: false,
+		include_in_music_index: false
 	});
 	let managePoliciesError = $state<string | null>(null);
 	let managePoliciesBusy = $state(false);
@@ -1102,7 +1108,9 @@
 			forbid_external_sharing: readPolicyBool(p, 'forbid_external_sharing'),
 			forbid_public_links: readPolicyBool(p, 'forbid_public_links'),
 			forbid_cross_drive_move: readPolicyBool(p, 'forbid_cross_drive_move'),
-			forbid_owner_role_change: readPolicyBool(p, 'forbid_owner_role_change')
+			forbid_owner_role_change: readPolicyBool(p, 'forbid_owner_role_change'),
+			include_in_photo_index: readPolicyBool(p, 'include_in_photo_index'),
+			include_in_music_index: readPolicyBool(p, 'include_in_music_index')
 		};
 	}
 
@@ -1206,6 +1214,24 @@
 				t(
 					'admin.drive_policy.forbid_owner_role_change_help',
 					'Only admin can add, remove, or demote drive Owners while this is on.'
+				)
+		},
+		{
+			key: 'include_in_photo_index',
+			label: () => t('admin.drive_policy.include_in_photo_index', 'Include in Photos'),
+			help: () =>
+				t(
+					'admin.drive_policy.include_in_photo_index_help',
+					'Show image and video files from this drive in the Photos timeline and on the Places map. Default personal drives are opted in automatically; turn on for shared drives that genuinely hold photos (e.g. "Family Photos").'
+				)
+		},
+		{
+			key: 'include_in_music_index',
+			label: () => t('admin.drive_policy.include_in_music_index', 'Include in Music'),
+			help: () =>
+				t(
+					'admin.drive_policy.include_in_music_index_help',
+					'Include audio files from this drive in the Music library. Default personal drives are opted in automatically; turn on for shared drives that genuinely hold a music collection (e.g. "Family Music", "Band Collaboration").'
 				)
 		}
 	];

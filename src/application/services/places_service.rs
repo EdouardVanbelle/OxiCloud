@@ -4,22 +4,29 @@ use uuid::Uuid;
 
 use crate::application::dtos::geo_dto::{GeoBounds, GeoCluster};
 use crate::common::errors::DomainError;
+use crate::domain::services::authorization::Subject;
 use crate::infrastructure::repositories::pg::FileBlobReadRepository;
+use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
 
 /// "Places" use case: the caller's geotagged photos aggregated into map
 /// clusters.
 ///
-/// Strictly user-scoped — the repository filters `WHERE fi.user_id = $1`, so,
-/// like [`RecentService`](super::recent_service::RecentService) and the photos
-/// timeline, it needs no `AuthorizationEngine` check: the `caller_id`
-/// parameter *is* the access scope.
+/// Post-§15 the surface follows the Photos scope: default personal drive
+/// + drives where `policies.include_in_photo_index = true` AND caller
+/// has Read. The repository query joins `role_grants` on the drive
+/// resource type; group-mediated grants are honoured via the caller
+/// expansion done here.
 pub struct PlacesService {
     file_read: Arc<FileBlobReadRepository>,
+    authorization: Arc<PgAclEngine>,
 }
 
 impl PlacesService {
-    pub fn new(file_read: Arc<FileBlobReadRepository>) -> Self {
-        Self { file_read }
+    pub fn new(file_read: Arc<FileBlobReadRepository>, authorization: Arc<PgAclEngine>) -> Self {
+        Self {
+            file_read,
+            authorization,
+        }
     }
 
     /// Aggregation cell side, in degrees, for a slippy-map zoom level. The
@@ -30,7 +37,8 @@ impl PlacesService {
         360.0 / (2_f64.powi(z) * 4.0)
     }
 
-    /// Clustered geotagged photos for `caller_id` within `bounds`.
+    /// Clustered geotagged photos in the caller's Photos-scope drive set,
+    /// within `bounds`.
     pub async fn clusters(
         &self,
         caller_id: Uuid,
@@ -38,8 +46,12 @@ impl PlacesService {
         zoom: u8,
     ) -> Result<Vec<GeoCluster>, DomainError> {
         let cell = Self::cell_for_zoom(zoom);
+        let (subject_types, subject_ids) = self
+            .authorization
+            .expand_subject_for_listing(Subject::User(caller_id))
+            .await?;
         self.file_read
-            .list_geo_clusters(caller_id, bounds, cell)
+            .list_geo_clusters(&subject_types, &subject_ids, bounds, cell)
             .await
     }
 }

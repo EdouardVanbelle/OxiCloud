@@ -448,7 +448,7 @@ impl DriveManagementService {
         &self,
         caller_id: Uuid,
         drive_id: Uuid,
-        partial: crate::domain::entities::drive::DrivePolicies,
+        partial: serde_json::Value,
     ) -> Result<crate::domain::entities::drive::DrivePolicies, DomainError> {
         let merged = self
             .drive_repo
@@ -474,6 +474,8 @@ impl DriveManagementService {
             forbid_public_links = merged.forbid_public_links,
             forbid_cross_drive_move = merged.forbid_cross_drive_move,
             forbid_owner_role_change = merged.forbid_owner_role_change,
+            include_in_photo_index = merged.include_in_photo_index,
+            include_in_music_index = merged.include_in_music_index,
             "📜 drive policies updated",
         );
         Ok(merged)

@@ -256,10 +256,18 @@ pub trait DriveRepository: Send + Sync + 'static {
     ///
     /// Caller is responsible for the `Manage` permission check; this
     /// method does not re-verify.
+    ///
+    /// `partial` is a raw JSON object carrying **only** the keys the
+    /// caller wants to change — the repo passes it verbatim to the
+    /// `policies || $partial` JSONB merge. Using the typed
+    /// `DrivePolicies` here would serialise every field (including
+    /// unset ones as `false`) and clobber other flags on the row;
+    /// keeping the merge on the raw `Value` preserves the
+    /// partial-update semantic the handler documents.
     async fn update_policies(
         &self,
         drive_id: Uuid,
-        partial: &crate::domain::entities::drive::DrivePolicies,
+        partial: &serde_json::Value,
     ) -> Result<crate::domain::entities::drive::DrivePolicies, DriveRepositoryError>;
 }
 

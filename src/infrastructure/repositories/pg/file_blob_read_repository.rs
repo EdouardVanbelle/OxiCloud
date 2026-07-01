@@ -445,15 +445,36 @@ impl FileBlobReadRepository {
     ///
     /// Uses the denormalised `media_sort_date` column (synced from
     /// `file_metadata.captured_at` by trigger) so no JOIN with
-    /// `file_metadata` is needed.  The partial index
-    /// `idx_files_media_timeline` covers the full query: filter + ORDER BY
-    /// in a single Index Scan — O(LIMIT) not O(N).
+    /// `file_metadata` is needed.  The partial covering index
+    /// `idx_files_media_timeline_by_drive` (migration 20260901000001)
+    /// keys on `(drive_id, media_sort_date DESC)` filtered on non-trashed
+    /// image/video rows — Postgres does one IndexScan per in-scope
+    /// drive_id already ordered by capture date, so LIMIT stops the scan
+    /// early. Same O(LIMIT) shape as the pre-D7 `user_id`-keyed hot path.
+    ///
+    /// Scope (`docs/plan/drive.md` §15): the caller's *effective subjects*
+    /// × drives with `policies.include_in_photo_index = true`. Default
+    /// personal drives always match because the flag is materialised to
+    /// `true` at drive creation (see
+    /// `DriveRepository::create_personal_drive_atomic` + the backfill
+    /// migration `20260901000000_default_personal_photo_music_flags.sql`)
+    /// — no per-kind carve-out needed. Non-default drives (secondary
+    /// personals, shared drives) surface here only after their owner
+    /// flips the flag on via the admin "Manage policies" modal.
+    ///
+    /// `subject_types` / `subject_ids` are the caller expanded through
+    /// their group memberships (`AuthorizationEngine::
+    /// expand_subject_for_listing`); the arrays reach into the ANY()
+    /// predicates so a group-mediated grant on a drive counts too.
     pub async fn list_media_files(
         &self,
-        owner_id: Uuid,
+        subject_types: &[&str],
+        subject_ids: &[Uuid],
         before: Option<i64>,
         limit: i64,
     ) -> Result<(Vec<File>, Vec<i64>, Vec<(Option<i32>, Option<i32>)>), DomainError> {
+        let subject_types_owned: Vec<String> =
+            subject_types.iter().map(|s| s.to_string()).collect();
         let rows: Vec<MediaFileRow> = sqlx::query_as(
             r#"
             SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
@@ -468,16 +489,27 @@ impl FileBlobReadRepository {
               FROM storage.files fi
               LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
               LEFT JOIN storage.file_metadata fm ON fm.file_id = fi.id
-             WHERE fi.user_id = $1
+             WHERE fi.drive_id IN (
+                     SELECT d.id
+                       FROM storage.drives d
+                       JOIN storage.role_grants g
+                         ON g.resource_type = 'drive'
+                        AND g.resource_id   = d.id
+                      WHERE g.subject_type = ANY($1)
+                        AND g.subject_id   = ANY($2)
+                        AND (g.expires_at IS NULL OR g.expires_at > NOW())
+                        AND (d.policies->>'include_in_photo_index')::boolean = true
+                   )
                AND NOT fi.is_trashed
                AND (fi.mime_type LIKE 'image/%' OR fi.mime_type LIKE 'video/%')
-               AND ($2::bigint IS NULL
-                    OR EXTRACT(EPOCH FROM fi.media_sort_date)::bigint < $2::bigint)
+               AND ($3::bigint IS NULL
+                    OR EXTRACT(EPOCH FROM fi.media_sort_date)::bigint < $3::bigint)
              ORDER BY fi.media_sort_date DESC
-             LIMIT $3
+             LIMIT $4
             "#,
         )
-        .bind(owner_id)
+        .bind(&subject_types_owned)
+        .bind(subject_ids)
         .bind(before)
         .bind(limit)
         .fetch_all(self.pool.as_ref())
@@ -500,15 +532,26 @@ impl FileBlobReadRepository {
     }
 
     /// Aggregate the caller's geotagged photos into grid cells of side `cell`
-    /// (degrees) within `bounds`. Plain SQL (no PostGIS), scoped to `user_id`.
-    /// Returns one cluster per non-empty cell with its centroid, photo count
-    /// and a representative photo id (for the cluster thumbnail).
+    /// (degrees) within `bounds`. Plain SQL (no PostGIS).
+    ///
+    /// Scope: same `include_in_photo_index` predicate as
+    /// `list_media_files` (§15). Places is the map view over the same
+    /// content set the Photos timeline shows, so the two surfaces MUST
+    /// agree on drive scope. If a drive is opt-out for Photos its
+    /// geotagged files never appear on the map either.
+    ///
+    /// This query is a per-cell aggregate (group by rounded lat/lng
+    /// bucket) rather than an ORDER BY / LIMIT hot path — the plain
+    /// `idx_files_drive_id` is sufficient to seek by drive.
     pub async fn list_geo_clusters(
         &self,
-        user_id: Uuid,
+        subject_types: &[&str],
+        subject_ids: &[Uuid],
         bounds: GeoBounds,
         cell: f64,
     ) -> Result<Vec<GeoCluster>, DomainError> {
+        let subject_types_owned: Vec<String> =
+            subject_types.iter().map(|s| s.to_string()).collect();
         let rows: Vec<(i64, f64, f64, String)> = sqlx::query_as(
             r#"
             SELECT count(*)              AS n,
@@ -517,16 +560,27 @@ impl FileBlobReadRepository {
                    min(fm.file_id::text) AS sample_id
               FROM storage.file_metadata fm
               JOIN storage.files fi ON fi.id = fm.file_id
-             WHERE fi.user_id = $1
+             WHERE fi.drive_id IN (
+                     SELECT d.id
+                       FROM storage.drives d
+                       JOIN storage.role_grants g
+                         ON g.resource_type = 'drive'
+                        AND g.resource_id   = d.id
+                      WHERE g.subject_type = ANY($1)
+                        AND g.subject_id   = ANY($2)
+                        AND (g.expires_at IS NULL OR g.expires_at > NOW())
+                        AND (d.policies->>'include_in_photo_index')::boolean = true
+                   )
                AND NOT fi.is_trashed
                AND fm.latitude IS NOT NULL
                AND fm.longitude IS NOT NULL
-               AND fm.longitude BETWEEN $2 AND $3
-               AND fm.latitude  BETWEEN $4 AND $5
-             GROUP BY round(fm.longitude / $6), round(fm.latitude / $6)
+               AND fm.longitude BETWEEN $3 AND $4
+               AND fm.latitude  BETWEEN $5 AND $6
+             GROUP BY round(fm.longitude / $7), round(fm.latitude / $7)
             "#,
         )
-        .bind(user_id)
+        .bind(&subject_types_owned)
+        .bind(subject_ids)
         .bind(bounds.west)
         .bind(bounds.east)
         .bind(bounds.south)

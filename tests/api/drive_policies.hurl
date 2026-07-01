@@ -472,6 +472,67 @@ HTTP 201
 
 
 # ─────────────────────────────────────────────────────────────
+# Step 10c — partial-merge regression guard.
+#
+# The `PATCH /api/drives/{id}/policies` handler documents that
+# omitting a field means "leave it alone", not "set it to false".
+# Prior implementation round-tripped the wire body through the
+# typed `DrivePolicies` struct (which has `#[serde(default)]`, so
+# every omitted field defaults to `false`) and then serialised the
+# whole struct into the JSONB `||` merge — silently clobbering
+# every unmentioned flag back to `false`. This step exercises
+# multi-flag interaction so that regression can't creep back:
+#
+#   1. Set `forbid_sharing = true`, assert the bag.
+#   2. In a SEPARATE PATCH, set only `forbid_public_links = true`.
+#   3. Assert `forbid_sharing` STILL reads `true` in the response
+#      — proving the merge honoured "leave omitted keys alone".
+#
+# Reset both back to false at the end so the shared-drive steps
+# below start from a clean state.
+# ─────────────────────────────────────────────────────────────
+PATCH {{base_url}}/api/drives/{{personal_drive_id}}/policies
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{
+  "forbid_sharing": true
+}
+
+HTTP 200
+[Asserts]
+jsonpath "$.forbid_sharing"      == true
+jsonpath "$.forbid_public_links" == false
+
+PATCH {{base_url}}/api/drives/{{personal_drive_id}}/policies
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{
+  "forbid_public_links": true
+}
+
+HTTP 200
+[Asserts]
+# The load-bearing assertion — `forbid_sharing` must NOT have been
+# clobbered by the omitted-key regression.
+jsonpath "$.forbid_sharing"      == true
+jsonpath "$.forbid_public_links" == true
+
+# Reset both.
+PATCH {{base_url}}/api/drives/{{personal_drive_id}}/policies
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{
+  "forbid_sharing":      false,
+  "forbid_public_links": false
+}
+
+HTTP 200
+[Asserts]
+jsonpath "$.forbid_sharing"      == false
+jsonpath "$.forbid_public_links" == false
+
+
+# ─────────────────────────────────────────────────────────────
 # Step 11 — `forbid_external_sharing` on a SHARED drive, via
 #           `POST /api/drives/{id}/members`.
 #

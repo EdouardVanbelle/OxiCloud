@@ -12,6 +12,8 @@ use tracing::{error, info};
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::geo_dto::GeoBounds;
 use crate::common::di::AppState;
+use crate::domain::services::authorization::Subject;
+use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::AuthUser;
 
 /// Query parameters for the photos timeline endpoint.
@@ -63,13 +65,29 @@ pub async fn list_photos(
     headers: HeaderMap,
     Query(params): Query<PhotosQueryParams>,
 ) -> impl IntoResponse {
-    let user_id = auth_user.id;
+    let caller_id = auth_user.id;
     let limit = params.limit.unwrap_or(200).clamp(1, 500);
+
+    // Expand the caller into (subject_types, subject_ids) so group-mediated
+    // drive memberships surface in the Photos timeline too. Mirrors what
+    // `drive_handler::list_drives` and `trash_service::list_resources_paged`
+    // already do — one call to the AuthZ engine per request.
+    let (subject_types, subject_ids) = match state
+        .authorization
+        .expand_subject_for_listing(Subject::User(caller_id))
+        .await
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            error!("list_photos: subject expansion failed: {e}");
+            return AppError::from(e).into_response();
+        }
+    };
 
     let file_read = &state.repositories.file_read_repository;
 
     match file_read
-        .list_media_files(user_id, params.before, limit)
+        .list_media_files(&subject_types, &subject_ids, params.before, limit)
         .await
     {
         Ok((files, sort_dates, dims)) => {

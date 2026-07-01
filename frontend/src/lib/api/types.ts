@@ -24,7 +24,12 @@ export interface FolderItem {
 	is_root: boolean;
 	modified_at: number;
 	name: string;
-	owner_id: string;
+	// `null` on share-recipient responses — the backend's
+	// `FolderDto::without_hierarchy_info` (folder_dto.rs:154) clears
+	// hierarchy fields (including owner_id) for non-owner callers.
+	// Backend serialises `Option<String>` (folder_dto.rs:53); this
+	// type just tells the truth about the wire.
+	owner_id: string | null;
 	parent_id: string | null;
 	path: string;
 	etag: string;
@@ -39,7 +44,9 @@ export interface FileItem {
 	mime_type: string;
 	modified_at: number;
 	name: string;
-	owner_id: string;
+	// `null` on share-recipient responses (same as FolderItem above).
+	// Backend serialises `Option<String>` at file_dto.rs:59.
+	owner_id: string | null;
 	folder_id: string;
 	path: string;
 	size: number;
@@ -249,12 +256,16 @@ export interface Drive {
 }
 
 /**
- * Typed mirror of the five known D5 policy keys. Every field defaults to
- * `false` (= allowed). The wire shape returned by
- * `PATCH /api/drives/{id}/policies` carries all five keys; the request
- * body uses [`DrivePoliciesPartial`] so unsupplied keys aren't disturbed.
+ * Typed mirror of the known drive policy keys. Every field defaults to
+ * `false` (= "opted out" for the `include_in_*` keys, "allowed" for the
+ * `forbid_*` keys). The wire shape returned by
+ * `PATCH /api/drives/{id}/policies` carries every known key; the request
+ * body uses [`DrivePoliciesPartial`] so unsupplied keys aren't disturbed
+ * (the backend uses a JSONB `||` merge — see
+ * `drive_pg_repository.rs::update_policies`).
  *
- * See `docs/plan/drive.md` §8 for what each key gates.
+ * See `docs/plan/drive.md` §8 for the `forbid_*` gates and §15 for the
+ * `include_in_*_index` scope flags.
  */
 export interface DrivePolicies {
 	forbid_sharing: boolean;
@@ -262,6 +273,18 @@ export interface DrivePolicies {
 	forbid_public_links: boolean;
 	forbid_cross_drive_move: boolean;
 	forbid_owner_role_change: boolean;
+	/**
+	 * §15 opt-in for `/api/photos` timeline scope. Default personal drives
+	 * are created with `true`; non-default drives (secondary personals,
+	 * shared) start `false` and opt in via the admin policy modal.
+	 */
+	include_in_photo_index: boolean;
+	/**
+	 * §15 opt-in for the Music library surface (currently playlists;
+	 * future `/api/music/tracks` library view will read this too).
+	 * Symmetric shape to `include_in_photo_index`.
+	 */
+	include_in_music_index: boolean;
 }
 
 /**
