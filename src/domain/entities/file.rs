@@ -22,7 +22,6 @@ pub struct FileParts {
     pub folder_id: Option<String>,
     pub created_at: u64,
     pub modified_at: u64,
-    pub owner_id: Option<Uuid>,
     /// BLAKE3 content hash. See [`File::content_hash`] for semantics.
     pub blob_hash: String,
     /// §14 provenance: original creator. See [`File::created_by`].
@@ -70,9 +69,6 @@ pub struct File {
     /// Last modification timestamp (seconds since UNIX epoch)
     modified_at: u64,
 
-    /// Owner user ID (from storage.files.user_id)
-    owner_id: Option<Uuid>,
-
     /// BLAKE3 content hash. Stable across renames/moves, changes only
     /// when the file's content bytes change. Source of truth for both
     /// content-addressable storage and the HTTP ETag (via
@@ -109,7 +105,6 @@ impl Default for File {
             folder_id: None,
             created_at: 0,
             modified_at: 0,
-            owner_id: None,
             blob_hash: String::new(),
             created_by: None,
             updated_by: None,
@@ -150,7 +145,6 @@ impl File {
             folder_id,
             created_at: now,
             modified_at: now,
-            owner_id: None,
             blob_hash: String::new(),
             created_by: None,
             updated_by: None,
@@ -184,7 +178,6 @@ impl File {
             folder_id: parent_id,
             created_at,
             modified_at,
-            owner_id: None,
             blob_hash: String::new(),
             created_by: None,
             updated_by: None,
@@ -201,7 +194,6 @@ impl File {
         folder_id: Option<String>,
         created_at: u64,
         modified_at: u64,
-        owner_id: Option<Uuid>,
     ) -> FileResult<Self> {
         Self::with_timestamps_and_blob_hash(
             id,
@@ -212,7 +204,6 @@ impl File {
             folder_id,
             created_at,
             modified_at,
-            owner_id,
             String::new(),
         )
     }
@@ -227,7 +218,6 @@ impl File {
         folder_id: Option<String>,
         created_at: u64,
         modified_at: u64,
-        owner_id: Option<Uuid>,
         blob_hash: String,
     ) -> FileResult<Self> {
         Self::with_timestamps_blob_hash_and_provenance(
@@ -239,7 +229,6 @@ impl File {
             folder_id,
             created_at,
             modified_at,
-            owner_id,
             blob_hash,
             None,
             None,
@@ -259,7 +248,6 @@ impl File {
         folder_id: Option<String>,
         created_at: u64,
         modified_at: u64,
-        owner_id: Option<Uuid>,
         blob_hash: String,
         created_by: Option<Uuid>,
         updated_by: Option<Uuid>,
@@ -282,7 +270,6 @@ impl File {
             folder_id,
             created_at,
             modified_at,
-            owner_id,
             blob_hash,
             created_by,
             updated_by,
@@ -304,7 +291,6 @@ impl File {
             folder_id: self.folder_id,
             created_at: self.created_at,
             modified_at: self.modified_at,
-            owner_id: self.owner_id,
             blob_hash: self.blob_hash,
             created_by: self.created_by,
             updated_by: self.updated_by,
@@ -407,10 +393,6 @@ impl File {
         self.modified_at
     }
 
-    pub fn owner_id(&self) -> Option<Uuid> {
-        self.owner_id
-    }
-
     /// User that originally created this file (§14 provenance).
     /// `None` when the referenced user has been deleted
     /// (FK is `ON DELETE SET NULL`) or for stub/DTO entities.
@@ -455,7 +437,6 @@ impl File {
             folder_id,
             created_at,
             modified_at,
-            owner_id: None,
             blob_hash: String::new(),
             // DTO round-trips don't carry provenance; callers needing
             // it must reload from the repository.
@@ -607,7 +588,6 @@ mod tests {
             None,
             1_000,
             2_000,
-            None,
             "abcdef0123456789ZZZZZZZZ".to_string(),
         )
         .unwrap();
@@ -632,7 +612,6 @@ mod tests {
             None,
             1_000,
             2_000,
-            None,
             "shorthash".to_string(),
         )
         .unwrap();
@@ -655,7 +634,6 @@ mod tests {
             None,
             1_000,
             2_000,
-            None,
             "stable-content-hash".to_string(),
         )
         .unwrap();

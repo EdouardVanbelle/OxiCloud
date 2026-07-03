@@ -129,11 +129,6 @@ impl FolderDbRepository {
     /// extra queries needed. `created_by` / `updated_by` carry the
     /// §14 provenance signal through the entity layer; both are
     /// `Option<Uuid>` because the FK is `ON DELETE SET NULL`.
-    ///
-    /// Post-D7-step-6: the `storage.folders.user_id` column is gone;
-    /// the entity's legacy `user_id` field is populated with `None`
-    /// at construction time (removed in the follow-up entity
-    /// cleanup PR).
     #[allow(clippy::too_many_arguments)]
     fn row_to_folder(
         id: String,
@@ -153,7 +148,6 @@ impl FolderDbRepository {
             name,
             storage_path,
             parent_id,
-            None, // Post-D7: `folders.user_id` column dropped.
             drive_id,
             created_at as u64,
             modified_at as u64,

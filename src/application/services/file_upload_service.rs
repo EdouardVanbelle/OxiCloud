@@ -296,7 +296,6 @@ impl FileUploadService {
             parts.folder_id,
             parts.created_at,
             updated_at as u64,
-            parts.owner_id,
             new_hash,
         )
         .map_err(|e| DomainError::internal_error("FileUpload", format!("rebuild entity: {e}")))?;
@@ -467,7 +466,6 @@ impl FileUploadUseCase for FileUploadService {
                 parts.folder_id,
                 parts.created_at,
                 updated_at as u64,
-                parts.owner_id,
                 new_hash,
             )
             .map_err(|e| {

@@ -397,8 +397,6 @@ impl FileBlobReadRepository {
         }
     }
 
-    /// Post-D7-step-6: `storage.files.user_id` dropped; the entity's
-    /// legacy `user_id` field is populated with `None` here.
     #[allow(clippy::too_many_arguments)]
     fn row_to_file(
         id: String,
@@ -423,7 +421,6 @@ impl FileBlobReadRepository {
             folder_id,
             created_at as u64,
             modified_at as u64,
-            None, // Post-D7: `files.user_id` column dropped.
             blob_hash,
             created_by,
             updated_by,
