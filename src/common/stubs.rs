@@ -500,7 +500,7 @@ impl FileUploadUseCase for StubFileUploadUseCase {
         Ok(FileDto::default())
     }
 
-    async fn update_file_streaming(
+    async fn update_file_streaming_with_perms(
         &self,
         _path: &str,
         _drive_id: Uuid,

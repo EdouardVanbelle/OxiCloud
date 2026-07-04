@@ -264,7 +264,7 @@ async fn put_file(
         .app_state
         .applications
         .file_upload_service
-        .update_file_streaming(
+        .update_file_streaming_with_perms(
             &file.path,
             drive_id,
             ingested.stored(),

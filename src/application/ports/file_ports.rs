@@ -75,7 +75,12 @@ pub trait FileUploadUseCase: Send + Sync + 'static {
     /// `updated_by` column reflects the principal that performed the
     /// PUT — not the file's existing owner (D2 shared drives let
     /// non-owners overwrite content).
-    async fn update_file_streaming(
+    /// `_with_perms` suffix (AGENTS.md AuthZ convention): the
+    /// implementation calls `authz.require(caller, Update, File(id))`
+    /// on the overwrite branch and `authz.require(caller, Create,
+    /// Folder|Drive(id))` on the new-file branch. Handlers just plumb
+    /// `caller_id` through — no protocol-layer authz.
+    async fn update_file_streaming_with_perms(
         &self,
         path: &str,
         drive_id: Uuid,

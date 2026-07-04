@@ -871,7 +871,7 @@ async fn handle_put(
     // Single streaming path — handles both update and create internally,
     // swapping the file row onto the already-ingested blob.
     let stored = upload_service
-        .update_file_streaming(
+        .update_file_streaming_with_perms(
             &internal_path,
             chroot.drive_id,
             ingested.stored(),

@@ -1756,7 +1756,7 @@ async fn handle_put(
     // internally via its `_with_perms` shape.
     let content_type = ingested.content_type.clone();
     let result = file_upload_service
-        .update_file_streaming(
+        .update_file_streaming_with_perms(
             &path,
             drive_id,
             ingested.stored(),
