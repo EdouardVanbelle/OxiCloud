@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::domain::repositories::drive_repository::DriveRepository;
 use crate::domain::repositories::folder_repository::FolderRepository;
-use crate::domain::services::authorization::{Resource, Role, Subject};
+use crate::domain::services::authorization::{Permission, Resource, Role, Subject};
 use crate::infrastructure::repositories::pg::DrivePgRepository;
 use crate::infrastructure::repositories::pg::SharePgRepository;
 use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
@@ -242,6 +242,28 @@ impl ShareUseCase for ShareService {
             .map_err(|e| ShareServiceError::InvalidItemType(e.to_string()))?;
 
         self.verify_item_exists(&dto.item_id, &item_type).await?;
+
+        // AuthZ: only callers with `Share` on the resource may mint a
+        // public link. Without this gate, an ex-Viewer who kept a
+        // guessed UUID could launder a temporary read into a
+        // permanent anonymous URL that survives their own grant
+        // revocation. `Permission::Share` is bundled with the
+        // `owner` and `editor` role_grants only. `require` returns
+        // `not_found` on denial (anti-enum, matches the shape used
+        // by every other share route). See `docs/plan/authz_audit/`.
+        let item_uuid_for_authz = Uuid::parse_str(&dto.item_id)
+            .map_err(|_| ShareServiceError::Validation("Invalid item UUID".to_string()))?;
+        let resource_for_authz = match item_type {
+            ShareItemType::File => Resource::File(item_uuid_for_authz),
+            ShareItemType::Folder => Resource::Folder(item_uuid_for_authz),
+        };
+        self.authorization
+            .require(
+                Subject::User(user_id),
+                Permission::Share,
+                resource_for_authz,
+            )
+            .await?;
 
         // D5: `forbid_public_links` policy gate. The drive owner can
         // disable anonymous-link creation on every resource in their
