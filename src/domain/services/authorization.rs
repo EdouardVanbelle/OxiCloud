@@ -78,11 +78,20 @@ pub enum Resource {
     /// membership and policy bag. Added in D0; membership lives in
     /// `storage.role_grants` (no separate `drive_members` table).
     Drive(Uuid),
-    // Reserved for future use:
-    // Calendar(Uuid),
-    // Reserved for future use:
-    // AddressBook(Uuid),
-    // Reserved for future use:
+    /// A CalDAV calendar. Membership + sharing lives in
+    /// `storage.role_grants` with `resource_type='calendar'` —
+    /// replaces the pre-Round-3 dedicated `caldav.calendar_shares`
+    /// table and the `check_calendar_access` bespoke helper. No
+    /// cascade parent (calendars are top-level per user); the engine
+    /// resolves directly against `role_grants` on the resource.
+    Calendar(Uuid),
+    /// A CardDAV address book. Same shape as `Calendar` —
+    /// `storage.role_grants` with `resource_type='address_book'`
+    /// replaces `carddav.address_book_shares` and the
+    /// `check_address_book_access` bespoke helper.
+    AddressBook(Uuid),
+    // Reserved for future use — same shape but tracked separately
+    // (music-service rewrite is its own PR):
     // Playlist(Uuid),
 }
 
@@ -92,17 +101,19 @@ impl Resource {
             Resource::Folder(_) => "folder",
             Resource::File(_) => "file",
             Resource::Drive(_) => "drive",
-            //Resource::Calendar(_) => "calendar",
-            //Resource::AddressBook(_) => "adressbook",
+            Resource::Calendar(_) => "calendar",
+            Resource::AddressBook(_) => "address_book",
             //Resource::Playlist(_) => "playlist",
         }
     }
 
     pub fn id(&self) -> Uuid {
         match self {
-            Resource::Folder(id) | Resource::File(id) | Resource::Drive(id) => *id,
-            //| Resource::Calendar(id)
-            //| Resource::AddressBook(id)
+            Resource::Folder(id)
+            | Resource::File(id)
+            | Resource::Drive(id)
+            | Resource::Calendar(id)
+            | Resource::AddressBook(id) => *id,
             //| Resource::Playlist(id)
         }
     }
@@ -112,8 +123,8 @@ impl Resource {
             "folder" => Some(Resource::Folder(id)),
             "file" => Some(Resource::File(id)),
             "drive" => Some(Resource::Drive(id)),
-            //"calendar" => Some(Resource::Calendar(id)),
-            //"adressbook" => Some(Resource::AddressBook(id)),
+            "calendar" => Some(Resource::Calendar(id)),
+            "address_book" => Some(Resource::AddressBook(id)),
             //"playlist" => Some(Resource::Playlist(id)),
             _ => None,
         }

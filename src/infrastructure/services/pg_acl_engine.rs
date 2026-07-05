@@ -479,11 +479,18 @@ impl PgAclEngine {
     /// Returns the `drive_id` for a File / Folder. Drives don't have a parent
     /// drive — this returns `NotFound` for `Resource::Drive` and the caller
     /// must not invoke it on Drive resources.
+    ///
+    /// `Resource::Calendar` and `Resource::AddressBook` are top-level per
+    /// user with no drive ancestor; they also return `NotFound` and the
+    /// engine short-circuits to a direct `role_grants` lookup (no drive
+    /// precheck applies).
     async fn drive_of(&self, resource: Resource) -> Result<Uuid, DomainError> {
         match resource {
             Resource::Folder(id) => self.folder_repo.get_folder_drive_id(&id.to_string()).await,
             Resource::File(id) => self.file_repo.get_file_drive_id(&id.to_string()).await,
-            Resource::Drive(_) => Err(DomainError::not_found("Drive", resource.id().to_string())),
+            Resource::Drive(_) | Resource::Calendar(_) | Resource::AddressBook(_) => Err(
+                DomainError::not_found(resource.type_str(), resource.id().to_string()),
+            ),
         }
     }
 
@@ -519,6 +526,49 @@ impl PgAclEngine {
     /// permission — see `roles_implying()`.
     ///
     /// Uses the GiST index on `storage.folders.lpath` for O(log N) cascade.
+    /// Direct grant lookup with no cascade — used for top-level
+    /// resources whose ACL lives entirely on their own row
+    /// (`Resource::Calendar`, `Resource::AddressBook`). Same
+    /// role-array + subject-set shape as the cascade helpers so a
+    /// caller's group memberships still resolve, but no ltree /
+    /// folder ancestry / drive precheck applies. Calendars and
+    /// address books have no parent to inherit from.
+    async fn direct_grant_exists(
+        &self,
+        subject_types: &[&str],
+        subject_ids: &[Uuid],
+        permission: Permission,
+        resource_type: &'static str,
+        resource_id: Uuid,
+        counters: &QueryCounters,
+    ) -> Result<bool, DomainError> {
+        counters.sql_queries.fetch_add(1, Ordering::Relaxed);
+        let roles = Self::roles_implying_strings(permission);
+        let exists: Option<i32> = sqlx::query_scalar(
+            r#"
+            SELECT 1
+              FROM storage.role_grants g
+             WHERE g.subject_type  = ANY($1)
+               AND g.subject_id    = ANY($2)
+               AND g.role          = ANY($3::storage.grant_role[])
+               AND g.resource_type = $4
+               AND g.resource_id   = $5
+               AND (g.expires_at IS NULL OR g.expires_at > NOW())
+             LIMIT 1
+            "#,
+        )
+        .bind(subject_types)
+        .bind(subject_ids)
+        .bind(&roles)
+        .bind(resource_type)
+        .bind(resource_id)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(|e| DomainError::internal_error("PgAcl", format!("direct grant: {e}")))?;
+
+        Ok(exists.is_some())
+    }
+
     async fn folder_cascade_grant_exists(
         &self,
         subject_types: &[&str],
@@ -818,6 +868,39 @@ impl PgAclEngine {
                     .caller_role_on_drive_cached(subject, id, counters)
                     .await?
                     .is_some_and(|r| r.expand().contains(&permission)))
+            }
+            // Top-level resources with no cascade parent — the ACL
+            // lives entirely on their own `role_grants` rows. Owner is
+            // an explicit grant seeded at MKCALENDAR / address-book
+            // create time (Round 3 phase 2 migration), so the common
+            // "owner accessing their own calendar" case is one SQL
+            // round-trip — no drive_role_cache short-circuit (no
+            // drive), no cascade.
+            Resource::Calendar(id) => {
+                let (subject_types, subject_ids) =
+                    self.subject_match_set(subject, counters).await?;
+                self.direct_grant_exists(
+                    &subject_types,
+                    &subject_ids,
+                    permission,
+                    "calendar",
+                    id,
+                    counters,
+                )
+                .await
+            }
+            Resource::AddressBook(id) => {
+                let (subject_types, subject_ids) =
+                    self.subject_match_set(subject, counters).await?;
+                self.direct_grant_exists(
+                    &subject_types,
+                    &subject_ids,
+                    permission,
+                    "address_book",
+                    id,
+                    counters,
+                )
+                .await
             }
         }
     }

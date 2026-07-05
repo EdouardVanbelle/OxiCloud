@@ -55,11 +55,13 @@ impl From<Subject> for SubjectDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum ResourceTypeDto {
     Folder,
     File,
     Drive,
+    Calendar,
+    AddressBook,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -75,6 +77,8 @@ impl From<ResourceDto> for Resource {
             ResourceTypeDto::Folder => Resource::Folder(dto.id),
             ResourceTypeDto::File => Resource::File(dto.id),
             ResourceTypeDto::Drive => Resource::Drive(dto.id),
+            ResourceTypeDto::Calendar => Resource::Calendar(dto.id),
+            ResourceTypeDto::AddressBook => Resource::AddressBook(dto.id),
         }
     }
 }
@@ -85,6 +89,8 @@ impl From<Resource> for ResourceDto {
             Resource::Folder(id) => (ResourceTypeDto::Folder, id),
             Resource::File(id) => (ResourceTypeDto::File, id),
             Resource::Drive(id) => (ResourceTypeDto::Drive, id),
+            Resource::Calendar(id) => (ResourceTypeDto::Calendar, id),
+            Resource::AddressBook(id) => (ResourceTypeDto::AddressBook, id),
         };
         ResourceDto { kind, id }
     }
