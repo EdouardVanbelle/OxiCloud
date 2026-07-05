@@ -583,7 +583,7 @@
     "item_deleted_permanently": "Elemento eliminato definitivamente",
     "trash_emptied": "Cestino svuotato con successo",
     "empty": "Nessuna notifica",
-    "title": "Notifiche"
+    "title": "Notifiche",
     "link_created": "Link creato",
     "share_success": "Link di condivisione creato con successo",
     "upload_files_section_title": "Caricamento non disponibile qui",
@@ -948,7 +948,7 @@
     "size": "Dimensione",
     "favoriteDate": "Data preferito",
     "byFiles": "Per file",
-    "sharedWith": "Condiviso con"
+    "sharedWith": "Condiviso con",
     "justAdded": "Nuovo",
     "folders": "Cartelle"
   },
