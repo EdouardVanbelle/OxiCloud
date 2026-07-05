@@ -1,4 +1,4 @@
-name: Docker Hub & GHCR Release
+name: "Docker Hub & GHCR Release"
 
 on:
   push:
