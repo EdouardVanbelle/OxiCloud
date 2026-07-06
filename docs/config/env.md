@@ -70,6 +70,7 @@ Most runtime variables use the `OXICLOUD_` prefix. A few build-time or allocator
 | `OXICLOUD_ENABLE_MUSIC` | `true` | Music playlists and audio metadata |
 | `OXICLOUD_EXPOSE_SYSTEM_USERS` | `true` | Expose other OxiCloud users as a read-only address book at `GET /api/address-books` |
 | `OXICLOUD_ENABLE_ADMIN_INTERNAL_ENDPOINTS` | `false` | Expose `POST /api/admin/internal/trigger-sweep` and `POST /api/admin/internal/trigger-gc` — test-only synchronous triggers for the storage-usage reconciliation sweep and blob garbage collector. Used by the API test suite to assert post-delete quota convergence without waiting out the periodic ticker. Leave **off** in production: the routes return 404 even to an admin token when disabled. |
+| `OXICLOUD_WEBDAV_DRIVE_LISTING_PREFIX` | `@drive` | Native WebDAV URL segment that renders the caller's drive list. Sanitized by trimming leading/trailing `/`. Three shapes: (1) default `@drive` — `/webdav/…` addresses the caller's default personal drive (back-compat), `/webdav/@drive/` returns the drive listing, `/webdav/@drive/<uuid\|name>/…` targets a specific drive. (2) empty string `""` — `/webdav/` IS the drive listing, `/webdav/<uuid\|name>/…` targets a specific drive, no default-drive shortcut. (3) any other string (e.g. `drives`) — same shape as `@drive` with that segment substituted. Only drives the caller has Read on via `role_grants` resolve. |
 
 ## Storage Backend
 

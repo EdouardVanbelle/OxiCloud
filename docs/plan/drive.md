@@ -761,15 +761,24 @@ accommodates them without schema migration)
 
 #### Native WebDAV (`/webdav/...`)
 
-| URL | Resolves to |
-|---|---|
-| `/webdav/<path>` | Caller's default personal drive root + `<path>` (back-compat with today's behaviour) |
-| `/webdav/@drive/<drive-uuid>/<path>` | Specific drive root + `<path>` |
+**SHIPPED 2026-07-06.** Config-driven via env
+`OXICLOUD_WEBDAV_DRIVE_LISTING_PREFIX` (`FeaturesConfig::webdav_drive_listing_prefix`;
+default `"@drive"`, sanitized by trimming leading/trailing `/`).
+Three deployment shapes:
 
-Today's `/webdav/<path>` handler implicitly looks up the caller's
-home folder and prepends it. Post-drives, the same handler looks up
-the caller's personal drive and resolves paths inside it. **Zero
-breakage** for existing native WebDAV clients.
+| `WEBDAV_DRIVE_LISTING_PREFIX` | URL | Resolves to |
+|---|---|---|
+| `@drive` (default) | `/webdav/…` | caller's default personal drive (back-compat) |
+| `@drive` | `/webdav/@drive/` | drive listing |
+| `@drive` | `/webdav/@drive/<sel>/…` | specific drive |
+| `""` (empty) | `/webdav/` | drive listing |
+| `""` | `/webdav/<sel>/…` | specific drive |
+| any other | same shape as `@drive`, segment substituted | |
+
+`<sel>` is a drive UUID **or** the drive's display name (matched
+against `storage.folders.name` of the drive root). Only drives the
+caller has Read on via `role_grants` resolve; unknown selector and
+permission denial both return 404 (anti-enumeration).
 
 **Why the `@drive` sigil and NOT `/webdav/drives/<uuid>/...`**
 (earlier draft) or top-level `/drives/<uuid>/...` (also
@@ -777,32 +786,47 @@ considered): `@` is the established structural-routing sigil
 (GitHub `@user/repo`, npm `@scope/pkg`, LDAP `@domain`) — it
 reads as "this is not user content, this is a routing token."
 Realistic collision risk drops to near-zero: nobody creates a
-top-level folder named exactly `@drive` by accident, and the
-defensive layer collapses to a single one-liner in MKCOL / PUT /
-REST create paths that refuses that literal name at any drive
-root. Compared to top-level `/drives/<uuid>/...`, the `@drive`
-shape keeps **one URL root for everything WebDAV** — single
-`<Location>` block in reverse-proxy configs, single mental model
-for sysadmins, single dispatcher in `webdav_routes()`.
+top-level folder named exactly `@drive` by accident. Keeps **one
+URL root for everything WebDAV** — single `<Location>` block in
+reverse-proxy configs, single mental model for sysadmins, single
+dispatcher in `webdav_routes()`. Making the segment
+config-tunable per deployment lets operators pick a different
+sigil (`drives`) or drop it entirely (`""` = drive-listing at
+root) without a code change.
 
-**Implementation notes:**
-- Route parser accepts both `/webdav/@drive/<uuid>/...` and the
-  URL-encoded form `/webdav/%40drive/<uuid>/...` — WebDAV clients
-  percent-encode `@` inconsistently.
-- One-liner guard in upload paths refuses creation of a folder
-  literally named `@drive` at any drive root (case-sensitive).
-- `webdav_href()` (today at `webdav_handler.rs:94`) becomes
-  drive-context-aware: responses for a request under
-  `/webdav/@drive/<uuid>/...` must reference back to
-  `/webdav/@drive/<uuid>/...`, otherwise the client follows the
-  `<D:href>` and lands on the back-compat surface (wrong drive).
+**Implementation:** `resolve_webdav_scope` in
+`src/interfaces/api/handlers/webdav_handler.rs`. Selector accepts
+UUIDs and display names; UUID form is tried first. Legacy
+tolerance in the default-drive branch: bookmarks that already
+carried the drive-root name as their first segment
+(`/webdav/Personal/foo` under a Personal-default user) are
+passed through instead of double-prepended.
 
-The `drives` path segment is **reserved**: a folder literally named
-`drives` cannot exist at the top level of any drive. Migration
-pre-check refuses to start if existing data violates this — operator
-must rename before upgrading. (Conservative estimate: zero existing
-folders are named exactly `drives`. The migration script reports any
-collisions for manual fix-up.)
+**Hurl coverage:**
+- `tests/api/webdav_drive_root.hurl` — default `@drive` config
+- `tests/webdav-drive-root/drive_root_empty_config.hurl` — empty
+  config (separately-configured server; runs under
+  `tests/webdav-drive-root/run.sh`, wired into `just api-test`
+  and CI's `api-test` job)
+
+**Href construction — verified drive-aware:** `webdav_href()`
+prints `/webdav/<path>`, but the `<path>` input is `client_path`
+extracted from `req.uri()` (the URL segment after `/webdav/`), not
+the scope-resolved db_path. So a request to
+`/webdav/@drive/<sel>/folder/` renders children as
+`/webdav/@drive/<sel>/folder/<child>/` — the `@drive/<sel>/`
+prefix is preserved on every hop. `client_path` is threaded into
+`base_href` at `handle_propfind` and passed through
+`build_streaming_propfind_response` unchanged.
+
+**Deferred (not blocking):**
+- One-liner guard refusing folder creation named literally
+  `@drive` at drive root (defensive against future collisions —
+  today an unknown `@drive` folder at drive root is unreachable
+  via WebDAV under the default config, so it's low priority).
+- Cross-drive MOVE / COPY currently 403 — same-drive only.
+  Cross-drive copy has REST-side support; WebDAV MOVE/COPY
+  could route through it once permission mapping is designed.
 
 #### NextCloud-compat WebDAV (`/remote.php/dav/...`)
 

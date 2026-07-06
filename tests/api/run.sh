@@ -185,6 +185,8 @@ hurl --variables-file "$API_DIR/test.env" --file-root "$REPO_ROOT/tests" --test 
   "$API_DIR/cross_drive_move.hurl" \
   "$API_DIR/cross_drive_copy.hurl" \
   "$API_DIR/webdav_dead_properties.hurl" \
+  "$API_DIR/webdav_drive_root.hurl" \
+  "$API_DIR/webdav_permissions.hurl" \
   "$API_DIR/webdav_nested_move_cascade.hurl" \
   "$API_DIR/wopi_authz.hurl"
 

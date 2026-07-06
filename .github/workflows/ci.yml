@@ -369,6 +369,15 @@ jobs:
         env:
           BUILD_TARGET: release
 
+      # WebDAV URL-scheme variant: `OXICLOUD_WEBDAV_DRIVE_PATH=""`
+      # (drive listing at `/webdav/`, no `@drive` sigil). Runs a
+      # separately-configured server on its own port so the default
+      # WebDAV suite above stays on the `"@drive"` back-compat config.
+      - name: Run WebDAV drive-root variant tests
+        run: bash tests/webdav-drive-root/run.sh
+        env:
+          BUILD_TARGET: release
+
       # OIDC integration: drives the SPA's SSO flow end-to-end against
       # the fake IdP (auto-approve login + consent, real PKCE/JWT
       # round-trip) and asserts the d1bbe8ba contract — OIDC callback
