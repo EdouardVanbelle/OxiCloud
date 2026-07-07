@@ -3,7 +3,16 @@
 	<head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
-		<link rel="icon" href="%sveltekit.assets%/favicon.ico" />
+		<!-- Icon set — mirrors the legacy static/index.html head. SVG is
+		     the primary (modern browsers use it, scales at every DPI); the
+		     .ico fallback covers old browsers + Windows taskbar shortcuts.
+		     Apple touch icon: iOS home-screen. Safari mask icon: pinned
+		     tabs. Manifest wires the PWA install flow. -->
+		<link rel="icon" type="image/svg+xml" href="%sveltekit.assets%/logo/logo-plain.svg" />
+		<link rel="icon" href="%sveltekit.assets%/favicon.ico" sizes="32x32" />
+		<link rel="apple-touch-icon" href="%sveltekit.assets%/logo/apple-touch-icon.png" />
+		<link rel="mask-icon" href="%sveltekit.assets%/logo/logo-plain.svg" color="#ff5e3a" />
+		<link rel="manifest" href="%sveltekit.assets%/manifest.webmanifest" />
 		<meta name="color-scheme" content="light dark" />
 		%sveltekit.head%
 		<!--
