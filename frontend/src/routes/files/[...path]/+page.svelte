@@ -61,6 +61,11 @@
 	import { formatBytes } from '$lib/utils/format';
 	import { formatDate, iconNameFromClass, fileIconKindClass } from '$lib/utils/display';
 	import { gridColumns } from '$lib/utils/grid';
+	import {
+		canThumbnailClientSide,
+		preloadPdf,
+		queueGenerate as queueThumbnailGenerate
+	} from '$lib/utils/thumbnail';
 
 	// File preview and the WOPI editor are heavy and only appear on demand, so
 	// their modules load the first time the user opens one (see the effects that
@@ -731,7 +736,11 @@
 	 */
 	function canThumbnail(file: FileItem): boolean {
 		const m = file.mime_type ?? '';
-		return m.startsWith('image/') || m.startsWith('video/');
+		// PDF joins image/video: the client-side generator ported from
+		// the legacy vanilla frontend renders PDFs via pdf.js on the
+		// `<img onerror>` fallback path. Without this the img never
+		// mounts for PDFs and the fallback never fires.
+		return m.startsWith('image/') || m.startsWith('video/') || m === 'application/pdf';
 	}
 
 	// ── Multi-select + batch ────────────────────────────────────────────────
@@ -1918,7 +1927,20 @@
 						src={fileThumbnailUrl(file.id)}
 						alt=""
 						loading="lazy"
-						onerror={(e) => ((e.currentTarget as HTMLImageElement).style.display = 'none')}
+						onerror={(e) => {
+							// Server-side thumbnail is missing (404) — try client-side
+							// generation for image / PDF / video and PUT the result
+							// back so the next viewer gets the server thumbnail.
+							// Ported from the legacy static/js/features/thumbnail.js.
+							const img = e.currentTarget as HTMLImageElement;
+							img.style.display = 'none';
+							if (!canThumbnailClientSide(file)) return;
+							if (file.mime_type === 'application/pdf') preloadPdf();
+							void queueThumbnailGenerate(file, (dataUrl) => {
+								img.src = dataUrl;
+								img.style.display = '';
+							});
+						}}
 					/>
 				{/if}
 			</div>
