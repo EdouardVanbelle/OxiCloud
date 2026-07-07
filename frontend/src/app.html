@@ -8,9 +8,16 @@
 		%sveltekit.head%
 		<!--
 			Anti-FOUC theme init — runs synchronously before first paint.
-			Ported from static/js/core/theme-init.js. Keeps the legacy
-			`oxicloud_theme` localStorage key and `data-color-scheme` attribute
-			so existing users keep their preference across the migration.
+			Reads the `oxi-theme` localStorage key (part of the normalised
+			`oxi-*` prefs namespace, see $lib/utils/localStoragePrefs) and
+			reflects it on `<html data-color-scheme>`.
+
+			KEEP IN SYNC: the 'oxi-theme' string below MUST match
+			`THEME_STORAGE_KEY` exported from
+			$lib/stores/theme.svelte.ts. The inline script runs before
+			any JS bundle loads, so it can't `import` the constant. A
+			drift check in $lib/stores/theme.test.ts reads this file
+			and fails CI if the two get out of sync.
 
 			Placed AFTER %sveltekit.head% so it follows the CSP <meta> SvelteKit
 			injects there, hence it IS governed by that policy. svelte.config.js
@@ -21,7 +28,7 @@
 		<script id="theme-init">
 			(function () {
 				try {
-					var s = localStorage.getItem('oxicloud_theme');
+					var s = localStorage.getItem('oxi-theme');
 					var h = document.documentElement;
 					if (s === 'light' || s === 'dark') h.setAttribute('data-color-scheme', s);
 					else h.removeAttribute('data-color-scheme');

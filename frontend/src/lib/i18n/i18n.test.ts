@@ -81,7 +81,7 @@ describe('initI18n — lazy English fallback', () => {
 	let resolveEn: () => void;
 
 	beforeEach(() => {
-		localStorage.setItem('oxicloud-locale', 'es');
+		localStorage.setItem('oxi-locale', 'es');
 		resolveEn = () => {};
 		globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
 			const url = String(input);

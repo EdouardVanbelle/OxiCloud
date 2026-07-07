@@ -71,7 +71,7 @@ export const LANGUAGES: readonly LanguageMeta[] = [
 	{ code: 'pl', name: 'Polski', flag: '🇵🇱' }
 ];
 
-const STORAGE_KEY = 'oxicloud-locale';
+const STORAGE_KEY = 'oxi-locale';
 
 /**
  * Reflect the active locale on `<html>`: sets `lang` and flips `dir` to `rtl`

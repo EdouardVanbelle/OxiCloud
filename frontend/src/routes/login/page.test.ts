@@ -1,11 +1,22 @@
 import { it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 
-const { goto, pageState, session } = vi.hoisted(() => ({
-	goto: vi.fn(),
-	pageState: { url: new URL('http://localhost/login') } as { url: URL },
-	session: { user: null } as { user: unknown }
-}));
+const { goto, pageState, session } = vi.hoisted(() => {
+	// `setUser` mirrors the real SessionStore method: sets the user and
+	// runs `ensureActiveUser` (localStorage cleanup on account switch).
+	// Tests don't care about the cleanup; the mock just assigns.
+	const store: { user: unknown; setUser: (u: unknown) => void } = {
+		user: null,
+		setUser(u) {
+			store.user = u;
+		}
+	};
+	return {
+		goto: vi.fn(),
+		pageState: { url: new URL('http://localhost/login') } as { url: URL },
+		session: store
+	};
+});
 vi.mock('$app/navigation', () => ({ goto }));
 vi.mock('$app/state', () => ({ page: pageState }));
 vi.mock('$lib/stores/session.svelte', () => ({ session }));

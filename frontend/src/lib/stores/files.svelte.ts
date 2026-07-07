@@ -72,7 +72,7 @@ export type Section =
 	| 'photos'
 	| 'music';
 
-const VIEW_KEY = 'oxicloud_view_mode';
+const VIEW_KEY = 'oxi-view-mode';
 
 function readViewMode(): ViewMode {
 	if (typeof localStorage === 'undefined') return 'grid';
