@@ -126,17 +126,6 @@ impl CalendarStoragePort for CalendarStorageAdapter {
         Ok(calendars.into_iter().map(CalendarDto::from).collect())
     }
 
-    async fn list_calendars_shared_with_user(
-        &self,
-        user_id: Uuid,
-    ) -> Result<Vec<CalendarDto>, DomainError> {
-        let calendars = self
-            .calendar_repository
-            .list_calendars_shared_with_user(user_id)
-            .await?;
-        Ok(calendars.into_iter().map(CalendarDto::from).collect())
-    }
-
     async fn list_public_calendars(
         &self,
         limit: i64,
@@ -147,78 +136,6 @@ impl CalendarStoragePort for CalendarStorageAdapter {
             .list_public_calendars(limit, offset)
             .await?;
         Ok(calendars.into_iter().map(CalendarDto::from).collect())
-    }
-
-    async fn check_calendar_access(
-        &self,
-        calendar_id: &str,
-        user_id: Uuid,
-    ) -> Result<bool, DomainError> {
-        let uuid = Uuid::parse_str(calendar_id).map_err(|_| {
-            DomainError::new(
-                ErrorKind::InvalidInput,
-                "Calendar",
-                "Invalid calendar ID format",
-            )
-        })?;
-
-        self.calendar_repository
-            .user_has_calendar_access(&uuid, user_id)
-            .await
-    }
-
-    // Calendar sharing
-
-    async fn share_calendar(
-        &self,
-        calendar_id: &str,
-        user_id: Uuid,
-        access_level: &str,
-    ) -> Result<(), DomainError> {
-        let uuid = Uuid::parse_str(calendar_id).map_err(|_| {
-            DomainError::new(
-                ErrorKind::InvalidInput,
-                "Calendar",
-                "Invalid calendar ID format",
-            )
-        })?;
-
-        self.calendar_repository
-            .share_calendar(&uuid, user_id, access_level)
-            .await
-    }
-
-    async fn remove_calendar_sharing(
-        &self,
-        calendar_id: &str,
-        user_id: Uuid,
-    ) -> Result<(), DomainError> {
-        let uuid = Uuid::parse_str(calendar_id).map_err(|_| {
-            DomainError::new(
-                ErrorKind::InvalidInput,
-                "Calendar",
-                "Invalid calendar ID format",
-            )
-        })?;
-
-        self.calendar_repository
-            .remove_calendar_sharing(&uuid, user_id)
-            .await
-    }
-
-    async fn get_calendar_shares(
-        &self,
-        calendar_id: &str,
-    ) -> Result<Vec<(String, String)>, DomainError> {
-        let uuid = Uuid::parse_str(calendar_id).map_err(|_| {
-            DomainError::new(
-                ErrorKind::InvalidInput,
-                "Calendar",
-                "Invalid calendar ID format",
-            )
-        })?;
-
-        self.calendar_repository.get_calendar_shares(&uuid).await
     }
 
     // Calendar properties

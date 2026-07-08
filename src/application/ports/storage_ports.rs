@@ -1,6 +1,5 @@
 use bytes::Bytes;
 use futures::Stream;
-use serde_json::Value;
 use std::path::PathBuf;
 use std::pin::Pin;
 use uuid::Uuid;
@@ -445,10 +444,4 @@ pub trait StorageUsagePort: Send + Sync + 'static {
         drive_id: Uuid,
         additional_bytes: u64,
     ) -> Result<(), DomainError>;
-}
-
-/// Generic storage service interface for calendar and contact services
-pub trait StorageUseCase: Send + Sync + 'static {
-    /// Handle a request with the specified action and parameters
-    async fn handle_request(&self, action: &str, params: Value) -> Result<Value, DomainError>;
 }

@@ -346,6 +346,18 @@ async fn handle_propfind(
                     .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
                     .body(Body::from(response_body))
                     .unwrap())
+            } else if first_is_uuid {
+                // Path segment IS a UUID but the calendar isn't
+                // accessible to the caller — could be another
+                // owner's calendar or genuinely missing. Return
+                // 404 (anti-enum, matches every other OxiCloud
+                // surface post-D7). The pre-Round-3 fall-through
+                // silently listed the caller's OWN calendars,
+                // which was misleading (the URL claimed one calendar,
+                // response returned unrelated ones) and violated
+                // the anti-enumeration contract audited in
+                // `docs/plan/authz_audit/caldav_carddav_wopi.md`.
+                Err(AppError::not_found("Calendar not found"))
             } else {
                 // Not a calendar ID — treat as user calendar home (e.g. /caldav/{username}/)
                 // List all calendars for this user

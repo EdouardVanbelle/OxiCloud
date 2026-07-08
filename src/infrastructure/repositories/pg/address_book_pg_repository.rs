@@ -184,44 +184,6 @@ impl AddressBookRepository for AddressBookPgRepository {
         Ok(result)
     }
 
-    async fn get_shared_address_books(
-        &self,
-        user_id: Uuid,
-    ) -> AddressBookRepositoryResult<Vec<AddressBook>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT a.id, a.name, a.owner_id, a.description, a.color, a.is_public, a.created_at, a.updated_at
-            FROM carddav.address_books a
-            INNER JOIN carddav.address_book_shares s ON a.id = s.address_book_id
-            WHERE s.user_id = $1
-            ORDER BY a.name
-            "#
-        )
-        .bind(user_id)
-        .fetch_all(&*self.pool)
-        .await
-        .map_err(|e| DomainError::database_error(format!("Failed to get shared address books: {}", e)))?;
-
-        let result = rows
-            .into_iter()
-            .map(|row| {
-                let owner_id: Uuid = row.get("owner_id");
-                AddressBook::from_raw(
-                    row.get("id"),
-                    row.get("name"),
-                    owner_id.to_string(),
-                    row.get("description"),
-                    row.get("color"),
-                    row.get("is_public"),
-                    row.get("created_at"),
-                    row.get("updated_at"),
-                )
-            })
-            .collect();
-
-        Ok(result)
-    }
-
     async fn get_public_address_books(&self) -> AddressBookRepositoryResult<Vec<AddressBook>> {
         let rows = sqlx::query(
             r#"
@@ -251,81 +213,6 @@ impl AddressBookRepository for AddressBookPgRepository {
                     row.get("created_at"),
                     row.get("updated_at"),
                 )
-            })
-            .collect();
-
-        Ok(result)
-    }
-
-    async fn share_address_book(
-        &self,
-        address_book_id: &Uuid,
-        user_id: Uuid,
-        can_write: bool,
-    ) -> AddressBookRepositoryResult<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO carddav.address_book_shares (address_book_id, user_id, can_write)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (address_book_id, user_id) DO UPDATE SET can_write = $3
-            "#,
-        )
-        .bind(address_book_id)
-        .bind(user_id)
-        .bind(can_write)
-        .execute(&*self.pool)
-        .await
-        .map_err(|e| DomainError::database_error(format!("Failed to share address book: {}", e)))?;
-
-        Ok(())
-    }
-
-    async fn unshare_address_book(
-        &self,
-        address_book_id: &Uuid,
-        user_id: Uuid,
-    ) -> AddressBookRepositoryResult<()> {
-        sqlx::query(
-            r#"
-            DELETE FROM carddav.address_book_shares
-            WHERE address_book_id = $1 AND user_id = $2
-            "#,
-        )
-        .bind(address_book_id)
-        .bind(user_id)
-        .execute(&*self.pool)
-        .await
-        .map_err(|e| {
-            DomainError::database_error(format!("Failed to unshare address book: {}", e))
-        })?;
-
-        Ok(())
-    }
-
-    async fn get_address_book_shares(
-        &self,
-        address_book_id: &Uuid,
-    ) -> AddressBookRepositoryResult<Vec<(String, bool)>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT user_id, can_write
-            FROM carddav.address_book_shares
-            WHERE address_book_id = $1
-            ORDER BY user_id
-            "#,
-        )
-        .bind(address_book_id)
-        .fetch_all(&*self.pool)
-        .await
-        .map_err(|e| {
-            DomainError::database_error(format!("Failed to get address book shares: {}", e))
-        })?;
-
-        let result = rows
-            .into_iter()
-            .map(|row| {
-                let user_id: Uuid = row.get("user_id");
-                (user_id.to_string(), row.get("can_write"))
             })
             .collect();
 

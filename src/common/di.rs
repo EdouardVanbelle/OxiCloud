@@ -50,13 +50,13 @@ use crate::application::ports::video_frame_ports::VideoFramePort;
 use crate::application::services::app_password_service::AppPasswordService;
 use crate::application::services::blob_lifecycle_service::BlobLifecycleService;
 use crate::application::services::calendar_service::CalendarService;
+use crate::application::services::contact_service::ContactService;
 use crate::application::services::device_auth_service::DeviceAuthService;
 use crate::application::services::file_lifecycle_service::FileLifecycleService;
 use crate::application::services::music_service::MusicService;
 use crate::application::services::storage_usage_service::StorageUsageService;
 use crate::application::services::wopi_lock_service::WopiLockService;
 use crate::application::services::wopi_token_service::WopiTokenService;
-use crate::infrastructure::adapters::contact_storage_adapter::ContactStorageAdapter;
 use crate::infrastructure::repositories::AppPasswordPgRepository;
 use crate::infrastructure::repositories::DeviceCodePgRepository;
 use crate::infrastructure::repositories::pg::{
@@ -1558,7 +1558,6 @@ impl AppServiceFactory {
             people_service,
             storage_usage_service,
             calendar_service: None,
-            contact_service: None,
             calendar_use_case: None,
             addressbook_use_case: None,
             contact_use_case: None,
@@ -1829,6 +1828,7 @@ impl AppServiceFactory {
             let calendar_service = Arc::new(
                 crate::application::services::calendar_service::CalendarService::new(
                     calendar_storage,
+                    authorization.clone(),
                 ),
             );
             app_state.calendar_use_case = Some(calendar_service as Arc<CalendarService>);
@@ -1845,15 +1845,23 @@ impl AppServiceFactory {
                     pool.clone(),
                 ),
             );
+            // Post-Round-3: symmetric with CalendarService/CalendarStorageAdapter.
+            //   * ContactStorageAdapter → pure ContactStoragePort impl
+            //     (raw PG storage, no ACL, no sharing).
+            //   * ContactService → gates every call through the
+            //     AuthorizationEngine, then delegates through the port.
+            //     Owns both AddressBookUseCase + ContactUseCase impls.
             let contact_storage = Arc::new(
                 crate::infrastructure::adapters::contact_storage_adapter::ContactStorageAdapter::new(
                     address_book_repo,
                     contact_repo,
                     group_repo,
-                )
+                ),
             );
-            app_state.addressbook_use_case = Some(contact_storage.clone());
-            app_state.contact_use_case = Some(contact_storage);
+            let contact_service =
+                Arc::new(ContactService::new(contact_storage, authorization.clone()));
+            app_state.addressbook_use_case = Some(contact_service.clone());
+            app_state.contact_use_case = Some(contact_service);
 
             tracing::info!("CalDAV and CardDAV services initialized with PostgreSQL repositories");
         }
@@ -2022,10 +2030,9 @@ pub struct AppState {
     pub people_service: Option<Arc<PeopleService>>,
     pub storage_usage_service: Option<Arc<StorageUsageService>>,
     pub calendar_service: Option<Arc<CalendarService>>,
-    pub contact_service: Option<Arc<ContactStorageAdapter>>,
     pub calendar_use_case: Option<Arc<CalendarService>>,
-    pub addressbook_use_case: Option<Arc<ContactStorageAdapter>>,
-    pub contact_use_case: Option<Arc<ContactStorageAdapter>>,
+    pub addressbook_use_case: Option<Arc<ContactService>>,
+    pub contact_use_case: Option<Arc<ContactService>>,
     pub music_service: Option<Arc<MusicService>>,
     pub wopi_token_service:
         Option<Arc<crate::application::services::wopi_token_service::WopiTokenService>>,

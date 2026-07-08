@@ -307,20 +307,25 @@ impl MagicLinkInviteService {
         let (kind, resource_id) = match resource {
             Resource::Folder(id) => (MagicLinkResourceKind::Folder, id),
             Resource::File(id) => (MagicLinkResourceKind::File, id),
-            // Drive sharing — and therefore drive magic-link invitations —
-            // land in D2. The grant DTOs accept `Resource::Drive` from the
-            // wire today (see ResourceTypeDto) but no public API path
-            // actually grants on a drive in D0, so this arm is
-            // defensively unreachable. Treating it as an audit-logged
-            // no-op (grant is in place, mail suppressed) matches the
-            // ineligible-recipient branch above.
-            Resource::Drive(_) => {
+            // Drive / Calendar / AddressBook sharing is out-of-band for
+            // the magic-link flow. Drive shares land through
+            // `/api/drives/{id}/members`; Calendar / AddressBook shares
+            // through the Round-3 `/api/(calendars|address-books)/{id}/shares`
+            // endpoints. The DTOs accept every `Resource` variant on
+            // the wire (see `ResourceTypeDto`) but only file/folder
+            // grants trigger an invitation email. Treating the other
+            // arms as audit-logged suppressed no-ops keeps the grant
+            // in place while matching the ineligible-recipient branch
+            // above.
+            Resource::Drive(_) | Resource::Calendar(_) | Resource::AddressBook(_) => {
                 tracing::info!(
                     target: "audit",
                     event = "magic_link.invitation_suppressed",
-                    reason = "drive_resource_unsupported",
+                    reason = "resource_kind_unsupported",
                     user_id = %recipient.id(),
-                    "📭 magic-link invitation suppressed: drive resources aren't invitable until D2",
+                    resource_kind = %resource.type_str(),
+                    "📭 magic-link invitation suppressed: {} resources aren't invitable via email",
+                    resource.type_str(),
                 );
                 return Ok(());
             }
@@ -347,10 +352,12 @@ impl MagicLinkInviteService {
             Resource::Folder(_) => "server.magic_link.email.kind_folder",
             Resource::File(_) => "server.magic_link.email.kind_file",
             // Unreachable — the early-return above exits before we get
-            // here for a Drive resource. The arm exists only to satisfy
-            // exhaustiveness; if you find this firing, the early-return
-            // was bypassed.
-            Resource::Drive(_) => "server.magic_link.email.kind_folder",
+            // here for Drive / Calendar / AddressBook resources. The
+            // arms exist only to satisfy exhaustiveness; if you find
+            // any firing, the early-return was bypassed.
+            Resource::Drive(_) | Resource::Calendar(_) | Resource::AddressBook(_) => {
+                "server.magic_link.email.kind_folder"
+            }
         };
         // PR C: render in the recipient's preferred locale (set by UI
         // switcher, OIDC JIT claim, or inviter inheritance at row

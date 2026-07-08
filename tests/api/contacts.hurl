@@ -276,3 +276,318 @@ Authorization: Bearer {{token}}
 HTTP 200
 [Asserts]
 jsonpath "$" isCollection
+
+
+# ═════════════════════════════════════════════════════════════
+# Round 3 — CardDAV/AddressBook AuthZ regression
+# ═════════════════════════════════════════════════════════════
+# Post-Round-3, address-book access + sharing routes through
+# `AuthorizationEngine` and `storage.role_grants`. The dedicated
+# `carddav.address_book_shares` table stopped being consulted;
+# the generic `POST /api/grants` endpoint accepts
+# `resource.type = "address_book"` as a first-class ReBAC
+# resource.
+#
+# Coverage:
+#   15. Fresh book owned by admin (Alice).
+#   16. Non-member user (Bob) doesn't see the book.
+#   17. Bob's direct GET on the book → 404 (anti-enum, was 403
+#       pre-Round-3).
+#   18. Alice shares with Bob as Viewer via `POST /api/grants`.
+#   19. Bob's listing includes the book with is_readonly=true.
+#   20. Viewer role's bundle has no Create — Bob's contact
+#       write → 404 (anti-enum).
+#   21. Alice revokes via `DELETE /api/grants/{id}`.
+#   22. Bob no longer sees the book.
+#   23. Cleanup.
+# =============================================================
+
+
+# Step 15 — Alice creates a fresh book for the share regression.
+POST {{base_url}}/api/address-books
+Authorization: Bearer {{token}}
+Content-Type: application/json
+{
+  "name": "Round3 Share Book",
+  "description": "Book for the multi-user share regression",
+  "is_public": false
+}
+
+HTTP 201
+[Captures]
+share_book_id: jsonpath "$.id"
+
+
+# Step 16 — Provision Bob. Idempotent: accept 201 on first run,
+# 409 on subsequent runs; login is the actual precondition.
+POST {{base_url}}/api/admin/users
+Authorization: Bearer {{token}}
+Content-Type: application/json
+{
+  "username": "carddav_bob",
+  "password": "CarddavBobPassword1!",
+  "email":    "carddav_bob@example.com",
+  "role":     "user"
+}
+
+HTTP *
+
+
+POST {{base_url}}/api/auth/login
+Content-Type: application/json
+{
+  "username": "carddav_bob",
+  "password": "CarddavBobPassword1!"
+}
+
+HTTP 200
+[Captures]
+bob_token:   jsonpath "$.access_token"
+bob_user_id: jsonpath "$.user.id"
+
+
+# Step 17 — Bob's book listing does NOT include Alice's book.
+GET {{base_url}}/api/address-books
+Authorization: Bearer {{bob_token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$[*].id" not contains {{share_book_id}}
+
+
+# Step 18a — Direct GET on Alice's book: 404 (anti-enum).
+GET {{base_url}}/api/address-books/{{share_book_id}}/contacts
+Authorization: Bearer {{bob_token}}
+
+HTTP 404
+
+
+# Step 18b — Contact-write into Alice's book: 404. Bob has no
+# grant, so authz.require(Create) rejects with NotFound.
+# Body is minimal on purpose — the endpoint's wire DTO
+# (`CreateContactRequest`) marks every collection field
+# `#[serde(default)]`, so `full_name` alone deserialises
+# fine and lets the request reach the authz gate. Any
+# body-side 422 here would mask the AuthZ regression the
+# step is meant to verify.
+POST {{base_url}}/api/address-books/{{share_book_id}}/contacts
+Authorization: Bearer {{bob_token}}
+Content-Type: application/json
+{
+  "full_name": "Sneaky Insert"
+}
+
+HTTP 404
+
+
+# Step 19 — Alice shares the book with Bob as Viewer via the
+# generic ReBAC grant endpoint. `resource.type = "address_book"`
+# is a first-class variant post-Round-3.
+POST {{base_url}}/api/grants
+Authorization: Bearer {{token}}
+Content-Type: application/json
+{
+  "subject":  { "type": "user", "id": "{{bob_user_id}}" },
+  "resource": { "type": "address_book", "id": "{{share_book_id}}" },
+  "role":     "viewer"
+}
+
+HTTP 201
+[Captures]
+share_grant_id: jsonpath "$.grants[0].id"
+[Asserts]
+jsonpath "$.grants[0].role"           == "viewer"
+jsonpath "$.grants[0].resource.type"  == "address_book"
+jsonpath "$.grants[0].resource.id"    == "{{share_book_id}}"
+
+
+# Step 20 — Bob's listing now includes the book, marked readonly
+# because he's not the owner.
+GET {{base_url}}/api/address-books
+Authorization: Bearer {{bob_token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$[?(@.id == '{{share_book_id}}')].is_readonly" == true
+
+
+# Step 21 — Viewer bundle has no Create permission — Bob's
+# contact write still 404s. Same minimal-body reasoning as
+# Step 18b: keep the request valid at the wire layer so any
+# rejection has to come from the AuthZ engine.
+POST {{base_url}}/api/address-books/{{share_book_id}}/contacts
+Authorization: Bearer {{bob_token}}
+Content-Type: application/json
+{
+  "full_name": "Viewer Cannot Write"
+}
+
+HTTP 404
+
+
+# Step 22 — Alice revokes the grant.
+DELETE {{base_url}}/api/grants/{{share_grant_id}}
+Authorization: Bearer {{token}}
+
+HTTP 204
+
+
+# Step 23 — Bob's listing no longer includes the book.
+GET {{base_url}}/api/address-books
+Authorization: Bearer {{bob_token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$[*].id" not contains {{share_book_id}}
+
+
+# Step 24 — Cleanup: Alice deletes the book.
+DELETE {{base_url}}/api/address-books/{{share_book_id}}
+Authorization: Bearer {{token}}
+
+HTTP 204
+
+
+# ═════════════════════════════════════════════════════════════
+# Round 3 — CardDAV protocol coverage
+# ═════════════════════════════════════════════════════════════
+# Verifies the CardDAV surface end-to-end:
+#
+#   * MKCOL creates an address book via the CardDAV protocol
+#     (`ContactService::create_address_book` seeds an Owner
+#     role_grant on the caller so the engine's cache warms).
+#   * PROPFIND lists it in the caller's address-book home.
+#   * A non-member's PROPFIND doesn't include the book.
+#   * `POST /api/grants` with `resource.type = "address_book"`
+#     grants Read to the non-member.
+#   * The recipient's PROPFIND now includes the book.
+#   * Revoke → book vanishes.
+#   * DELETE cleans up.
+#
+# Book UUID is server-assigned at MKCOL time and appears in the
+# PROPFIND multistatus as `<D:href>/carddav/<uuid>/</D:href>`.
+# Regex-capture is unambiguous only if admin has zero
+# pre-existing CardDAV books — true on the CI DB (fresh from
+# `tests/webdav/run.sh`'s private Postgres), false in a
+# populated dev DB.
+# =============================================================
+
+
+# Step 25 — Alice creates a fresh book via CardDAV MKCOL.
+# Empty body — `handle_mkcol` derives the display name from the
+# path's last segment.
+MKCOL {{base_url}}/carddav/round3-carddav-book/
+Authorization: Bearer {{token}}
+
+HTTP 201
+
+
+# Step 26 — Alice PROPFIND at Depth 1 lists her books. Capture
+# the server-assigned UUID with a regex on the `<D:href>` value.
+PROPFIND {{base_url}}/carddav/
+Authorization: Bearer {{token}}
+Depth: 1
+Content-Type: application/xml
+```
+<?xml version="1.0" encoding="UTF-8"?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:displayname/>
+    <D:resourcetype/>
+  </D:prop>
+</D:propfind>
+```
+
+HTTP 207
+[Captures]
+carddav_book_id: body regex "/carddav/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/"
+
+
+# Step 27 — Bob PROPFIND: the book UUID is NOT in his response.
+# (Bob's lifecycle-provisioned books, if any, get their own
+# UUIDs — no collision.)
+PROPFIND {{base_url}}/carddav/
+Authorization: Bearer {{bob_token}}
+Depth: 1
+Content-Type: application/xml
+```
+<?xml version="1.0" encoding="UTF-8"?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop><D:displayname/><D:resourcetype/></D:prop>
+</D:propfind>
+```
+
+HTTP 207
+[Asserts]
+body not contains "{{carddav_book_id}}"
+
+
+# Step 28 — Alice shares the book with Bob as Viewer via the
+# generic ReBAC grant endpoint (same wire format as the
+# calendar test, only the resource type differs).
+POST {{base_url}}/api/grants
+Authorization: Bearer {{token}}
+Content-Type: application/json
+{
+  "subject":  { "type": "user", "id": "{{bob_user_id}}" },
+  "resource": { "type": "address_book", "id": "{{carddav_book_id}}" },
+  "role":     "viewer"
+}
+
+HTTP 201
+[Captures]
+carddav_grant_id: jsonpath "$.grants[0].id"
+
+
+# Step 29 — Bob PROPFIND now includes the shared book. The
+# CardDAV handler routes through the same
+# `list_user_address_books` as the REST API, so the shared
+# book flows in via the role_grants union.
+PROPFIND {{base_url}}/carddav/
+Authorization: Bearer {{bob_token}}
+Depth: 1
+Content-Type: application/xml
+```
+<?xml version="1.0" encoding="UTF-8"?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop><D:displayname/><D:resourcetype/></D:prop>
+</D:propfind>
+```
+
+HTTP 207
+[Asserts]
+body contains "{{carddav_book_id}}"
+
+
+# Step 30 — Alice revokes the grant.
+DELETE {{base_url}}/api/grants/{{carddav_grant_id}}
+Authorization: Bearer {{token}}
+
+HTTP 204
+
+
+# Step 31 — Bob PROPFIND no longer includes the book.
+PROPFIND {{base_url}}/carddav/
+Authorization: Bearer {{bob_token}}
+Depth: 1
+Content-Type: application/xml
+```
+<?xml version="1.0" encoding="UTF-8"?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop><D:displayname/><D:resourcetype/></D:prop>
+</D:propfind>
+```
+
+HTTP 207
+[Asserts]
+body not contains "{{carddav_book_id}}"
+
+
+# Step 32 — Cleanup: Alice deletes the book via CardDAV DELETE.
+DELETE {{base_url}}/carddav/{{carddav_book_id}}/
+Authorization: Bearer {{token}}
+
+HTTP *
+[Asserts]
+status >= 200
+status <  300
