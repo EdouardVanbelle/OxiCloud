@@ -2006,7 +2006,11 @@ async fn handle_put(
 /// range isn't supported, use `append` or PUT for that.
 ///
 /// Returns `(start, end)`; `end` is `None` for `append`.
-fn parse_update_range(header: &str, size: u64) -> Result<(u64, Option<u64>), AppError> {
+///
+/// `pub(crate)` so the NextCloud-surface PATCH handler
+/// (`nextcloud/webdav_handler.rs::handle_patch`) can reuse it instead of
+/// duplicating the parsing logic.
+pub(crate) fn parse_update_range(header: &str, size: u64) -> Result<(u64, Option<u64>), AppError> {
     let header = header.trim();
     if header.eq_ignore_ascii_case("append") {
         return Ok((size, None));

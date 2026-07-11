@@ -5,11 +5,13 @@ use axum::{
 };
 use bytes::{Buf, Bytes};
 use chrono::Utc;
+use futures::stream::{self, Stream};
 use quick_xml::{
     Writer,
     events::{BytesEnd, BytesStart, BytesText, Event},
 };
 use std::collections::{HashMap, HashSet};
+use std::pin::Pin;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -29,12 +31,12 @@ use crate::domain::services::authorization::{Permission, Resource, Subject};
 use crate::infrastructure::services::path_resolver_service::ResolvedResource;
 use crate::infrastructure::services::webdav_dead_property_store::ResourceRef;
 use crate::interfaces::api::handlers::webdav_handler::{
-    PROPFIND_BATCH_SIZE, dead_props_for, file_dead_props, files_dead_props_map, folder_dead_props,
-    folders_dead_props_map,
+    PROPFIND_BATCH_SIZE, dead_props_for, file_dead_props, files_dead_props_map, folder_dead_props, parse_update_range,
+    folders_dead_props_map, streamed_file_dead_props,
 };
 use crate::interfaces::errors::AppError;
 use crate::interfaces::range_requests::{not_modified_response, range_response};
-use crate::interfaces::upload_ingest::ingest_body_to_cas;
+use crate::interfaces::upload_ingest::{ingest_body_to_cas, ingest_range_patch_to_cas};
 
 /// Extension trait to map XML write errors to `String` concisely.
 trait XmlResultExt<T> {
@@ -232,6 +234,7 @@ pub async fn handle_nc_webdav(
         "PROPFIND" => handle_propfind(state, req, &session, &subpath).await,
         "GET" => handle_get(state, &session, &subpath, req.headers()).await,
         "PUT" => handle_put(state, req, &session, &subpath).await,
+        "PATCH" => handle_patch(state, req, &session, &subpath).await,
         "MKCOL" => handle_mkcol(state, &session, &subpath).await,
         "DELETE" => handle_delete(state, &session, &subpath).await,
         "MOVE" => handle_move(state, req, &session, &subpath).await,
@@ -267,7 +270,7 @@ fn handle_options() -> Result<Response<Body>, AppError> {
         .header(HEADER_DAV, "1, 3")
         .header(
             header::ALLOW,
-            "OPTIONS, GET, HEAD, PUT, DELETE, MKCOL, MOVE, PROPFIND, PROPPATCH, REPORT, SEARCH",
+            "OPTIONS, GET, HEAD, PUT, PATCH, DELETE, MKCOL, MOVE, PROPFIND, PROPPATCH, REPORT, SEARCH",
         )
         .body(Body::empty())
         .unwrap())
@@ -959,6 +962,174 @@ async fn handle_put(
         .status(status)
         .header(header::ETAG, format!("\"{}\"", stored.etag))
         .header("oc-etag", format!("\"{}\"", stored.etag))
+        .body(Body::empty())
+        .unwrap())
+}
+
+// ──────────────────── PATCH ────────────────────
+
+/// Handles PATCH requests (RFC 5789) for partial byte-range content
+/// updates on the NextCloud file surface — extends the plain WebDAV
+/// surface's `X-Update-Range` mechanism (see
+/// `api/handlers/webdav_handler.rs::handle_patch` / `parse_update_range`)
+/// here. New content is assembled by splicing the request body between
+/// the file's untouched prefix/suffix byte ranges and re-ingesting the
+/// result as one continuous stream through the same content-addressable
+/// pipeline `handle_put` uses ([`ingest_range_patch_to_cas`]) — unedited
+/// chunks on either side of the edit typically dedup for free.
+///
+/// No active-lock guard here — the NC surface has no LOCK/UNLOCK dispatch
+/// arm at all (see `handle_options`'s doc comment), matching `handle_put`
+/// above, which has the same omission.
+async fn handle_patch(
+    state: Arc<AppState>,
+    req: Request<Body>,
+    session: &crate::interfaces::nextcloud::session::NcSession,
+    subpath: &str,
+) -> Result<Response<Body>, AppError> {
+    let chroot = session.require_chroot()?;
+    let internal_path = nc_to_internal_path(chroot, subpath)?;
+    let file_service = &state.applications.file_retrieval_service;
+    let upload_service = &state.applications.file_upload_service;
+
+    if subpath.is_empty() || subpath == "/" {
+        return Err(AppError::bad_request("Cannot PATCH the root folder"));
+    }
+
+    // RFC 5789 doesn't define Content-Range semantics; this server uses a
+    // dedicated `X-Update-Range` header instead (see `parse_update_range`)
+    // to avoid ambiguity with HTTP Range-Request semantics.
+    if req.headers().contains_key(header::CONTENT_RANGE) {
+        return Err(AppError::bad_request(
+            "PATCH must not use Content-Range; use the X-Update-Range header instead",
+        ));
+    }
+
+    let update_range_header = req
+        .headers()
+        .get("X-Update-Range")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .ok_or_else(|| AppError::bad_request("PATCH requires an X-Update-Range header"))?;
+
+    // Extract all headers before consuming `req` into the body stream.
+    let if_none_match = req
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let if_match = req
+        .headers()
+        .get(header::IF_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let content_length = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+    let claimed_type = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let max_upload = state.core.config.storage.direct_put_max_bytes;
+
+    // ── Existence check ───────────────────────────────────────────────
+    // Unlike PUT, PATCH requires an existing file — a partial update of
+    // nothing isn't meaningful.
+    let file = file_service
+        .get_file_by_path(&internal_path, chroot.drive_id)
+        .await
+        .map_err(|_| AppError::not_found(format!("File not found: {}", internal_path)))?;
+
+    // ── RFC 7232 conditional preconditions ────────────────────────────
+    let current_etag = Some(file.etag.as_str());
+    if let Some(ref value) = if_none_match
+        && if_none_match_precondition_fails(value, current_etag)
+    {
+        return Ok(precondition_failed_response());
+    }
+    if let Some(ref value) = if_match
+        && if_match_precondition_fails(value, current_etag)
+    {
+        return Ok(precondition_failed_response());
+    }
+
+    // ── Range parsing + validation ─────────────────────────────────────
+    let (start, end) = parse_update_range(&update_range_header, file.size)?;
+    if let (Some(end), Some(len)) = (end, content_length) {
+        let expected = end - start + 1;
+        if len != expected {
+            return Err(AppError::bad_request(format!(
+                "Content-Length {len} does not match X-Update-Range span {expected}"
+            )));
+        }
+    }
+
+    // ── Splice prefix/suffix around the patched span ───────────────────
+    let prefix_stream: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> =
+        if start == 0 {
+            Box::pin(stream::empty())
+        } else {
+            Box::into_pin(
+                file_service
+                    .get_file_range_stream_with_perms(&file.id, session.user.id, 0, Some(start))
+                    .await
+                    .map_err(AppError::from)?,
+            )
+        };
+    let suffix_stream: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> = match end
+    {
+        Some(end) if end + 1 < file.size => Box::into_pin(
+            file_service
+                .get_file_range_stream_with_perms(&file.id, session.user.id, end + 1, None)
+                .await
+                .map_err(AppError::from)?,
+        ),
+        _ => Box::pin(stream::empty()),
+    };
+
+    let filename = filename_from_path(subpath).to_string();
+    let ingested = ingest_range_patch_to_cas(
+        prefix_stream,
+        req.into_body(),
+        suffix_stream,
+        &state.core.dedup_service,
+        &filename,
+        &claimed_type,
+        max_upload,
+    )
+    .await?;
+
+    // ── Atomic store ──────────────────────────────────────────────────
+    let new_size = ingested.size;
+    let content_type = ingested.content_type.clone();
+    let stored = upload_service
+        .update_file_streaming_with_perms(
+            &internal_path,
+            chroot.drive_id,
+            ingested.stored(),
+            &content_type,
+            None,
+            session.user.id,
+        )
+        .await
+        .map_err(|e| AppError::internal_error(format!("Failed to store file: {}", e)))?;
+
+    // Everything from `start` to the new EOF reflects the patch (the
+    // untouched suffix, if any, may have shifted when the body's length
+    // differs from the replaced span).
+    let range_end = new_size.saturating_sub(1);
+    Ok(Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .header(header::ETAG, format!("\"{}\"", stored.etag))
+        .header("oc-etag", format!("\"{}\"", stored.etag))
+        .header(
+            header::CONTENT_RANGE,
+            format!("bytes {}-{}/{}", start, range_end, new_size),
+        )
         .body(Body::empty())
         .unwrap())
 }
