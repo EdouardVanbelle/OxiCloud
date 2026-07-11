@@ -13,6 +13,7 @@
 //! detection before being forwarded unchanged.
 
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -247,6 +248,36 @@ pub async fn ingest_body_to_cas(
         }
     });
     ingest_stream_to_cas(source, dedup, filename, claimed_type, max_bytes, None).await
+}
+
+/// Splice a PATCH request body ([RFC 5789]) between the file's untouched
+/// `prefix`/`suffix` byte ranges and ingest the result as one continuous
+/// stream into the CDC chunk store.
+///
+/// `prefix`/`suffix` are `stream::empty()`-backed when the edit starts at
+/// byte 0 or reaches EOF respectively — callers build the real ranges from
+/// [`FileRetrievalUseCase::get_file_range_stream_with_perms`](crate::application::ports::file_ports::FileRetrievalUseCase::get_file_range_stream_with_perms).
+/// Because FastCDC chunking is content-defined rather than offset-defined,
+/// unedited chunks on either side of the edit typically dedup for free.
+///
+/// [RFC 5789]: https://www.rfc-editor.org/rfc/rfc5789
+pub async fn ingest_range_patch_to_cas(
+    prefix: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>,
+    body: Body,
+    suffix: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>,
+    dedup: &Arc<DedupService>,
+    filename: &str,
+    claimed_type: &str,
+    max_bytes: usize,
+) -> Result<IngestedBlob, AppError> {
+    let body_stream = BodyStream::new(body).filter_map(|item| async move {
+        match item {
+            Ok(frame) => frame.into_data().ok().map(Ok),
+            Err(e) => Some(Err(std::io::Error::other(e.to_string()))),
+        }
+    });
+    let combined = prefix.chain(body_stream).chain(suffix);
+    ingest_stream_to_cas(combined, dedup, filename, claimed_type, max_bytes, None).await
 }
 
 /// Adapt a multipart field into a byte stream for [`ingest_stream_to_cas`].

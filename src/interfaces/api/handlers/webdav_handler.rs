@@ -14,7 +14,9 @@ use axum::{
 };
 use bytes::{Buf, Bytes};
 use chrono::Utc;
+use futures::stream::{self, Stream};
 use quick_xml::Writer;
+use std::pin::Pin;
 use uuid::Uuid;
 
 use crate::application::adapters::webdav_adapter::{
@@ -408,6 +410,7 @@ async fn handle_webdav_dispatch(
         "GET" => handle_get(state, req, path).await,
         "HEAD" => handle_head(state, req, path).await,
         "PUT" => handle_put(state, req, path).await,
+        "PATCH" => handle_patch(state, req, path).await,
         "MKCOL" => handle_mkcol(state, req, path).await,
         "DELETE" => handle_delete(state, req, path).await,
         "MOVE" => handle_move(state, req, path).await,
@@ -439,7 +442,7 @@ async fn handle_options(_path: String) -> Result<Response<Body>, AppError> {
         .header(HEADER_DAV, "1, 2") // Class 1 and 2 WebDAV support
         .header(
             header::ALLOW,
-            "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK",
+            "OPTIONS, GET, HEAD, PUT, PATCH, DELETE, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK",
         )
         .body(Body::empty())
         .unwrap())
@@ -1996,6 +1999,285 @@ async fn handle_put(
     }
 }
 
+/// Parses the `X-Update-Range` header used by [`handle_patch`] (RFC 5789
+/// partial content updates): either `append`, or `bytes=<start>-<end>`
+/// (inclusive, 0-based). For the explicit-range form both bounds must fall
+/// strictly within the current file size — growing the file via a byte
+/// range isn't supported, use `append` or PUT for that.
+///
+/// Returns `(start, end)`; `end` is `None` for `append`.
+fn parse_update_range(header: &str, size: u64) -> Result<(u64, Option<u64>), AppError> {
+    let header = header.trim();
+    if header.eq_ignore_ascii_case("append") {
+        return Ok((size, None));
+    }
+    let spec = header.strip_prefix("bytes=").ok_or_else(|| {
+        AppError::bad_request("X-Update-Range must be 'append' or 'bytes=<start>-<end>'")
+    })?;
+    let (start_str, end_str) = spec
+        .split_once('-')
+        .ok_or_else(|| AppError::bad_request("X-Update-Range must be 'bytes=<start>-<end>'"))?;
+    let start: u64 = start_str
+        .parse()
+        .map_err(|_| AppError::bad_request("X-Update-Range: invalid start offset"))?;
+    let end: u64 = end_str
+        .parse()
+        .map_err(|_| AppError::bad_request("X-Update-Range: invalid end offset"))?;
+    if start > end {
+        return Err(AppError::bad_request(
+            "X-Update-Range: start must be <= end",
+        ));
+    }
+    if end >= size {
+        return Err(AppError::new(
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            format!("X-Update-Range end {end} is out of bounds for a {size}-byte file"),
+            "RangeNotSatisfiable",
+        ));
+    }
+    Ok((start, Some(end)))
+}
+
+/**
+ * Handles PATCH requests (RFC 5789) for partial byte-range content updates.
+ *
+ * RFC 4918 §9.7.1 forbids partial content updates on PUT (see the explicit
+ * `Content-Range` rejection in [`handle_put`]); PATCH is the mechanism this
+ * server offers instead, via the `X-Update-Range` header (see
+ * [`parse_update_range`]).
+ *
+ * The new content is assembled by splicing the request body between the
+ * file's untouched prefix/suffix byte ranges and re-ingesting the result as
+ * one continuous stream through the same content-addressable pipeline PUT
+ * uses ([`upload_ingest::ingest_range_patch_to_cas`]) — unedited chunks on
+ * either side of the edit typically dedup for free.
+ *
+ * @param state The application state containing service dependencies
+ * @param req   The HTTP request containing the partial content and
+ *              `X-Update-Range` header
+ * @param path  The requested resource path
+ * @return HTTP response: 204 with `Content-Range`/`ETag` on success
+ */
+async fn handle_patch(
+    state: Arc<AppState>,
+    req: Request<Body>,
+    path: String,
+) -> Result<Response<Body>, AppError> {
+    use crate::interfaces::upload_ingest;
+
+    let user = extract_user(&req)?;
+    let file_upload_service = &state.applications.file_upload_service;
+    let file_retrieval_service = &state.applications.file_retrieval_service;
+
+    if path.is_empty() || path == "/" {
+        return Err(AppError::bad_request("Cannot PATCH the root folder"));
+    }
+
+    // RFC 5789 doesn't define Content-Range semantics; this server uses a
+    // dedicated `X-Update-Range` header instead (see `parse_update_range`)
+    // to avoid ambiguity with HTTP Range-Request semantics.
+    if req.headers().contains_key(header::CONTENT_RANGE) {
+        return Err(AppError::bad_request(
+            "PATCH must not use Content-Range; use the X-Update-Range header instead",
+        ));
+    }
+
+    let update_range_header = req
+        .headers()
+        .get("X-Update-Range")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .ok_or_else(|| AppError::bad_request("PATCH requires an X-Update-Range header"))?;
+
+    // Extract all headers before consuming `req` into the body stream.
+    let if_header_owned = req
+        .headers()
+        .get("If")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let if_none_match = req
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string());
+    let if_match = req
+        .headers()
+        .get(header::IF_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string());
+    let content_length = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+    let content_type = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let max_upload = state.core.config.storage.direct_put_max_bytes;
+
+    let scope = resolve_webdav_scope_or_405(&state, user.id, &path).await?;
+    let drive_id = scope.drive_id;
+    let path = scope.db_path;
+
+    // ── Existence check ───────────────────────────────────────────────
+    // Unlike PUT, PATCH requires an existing file — a partial update of
+    // nothing isn't meaningful. Resolver is drive-scoped, not
+    // owner-scoped (see `handle_put`'s identical comment), so the
+    // explicit `authz.require(Read, …)` below is the defence-in-depth
+    // existence-proof before any field of `file` is trusted.
+    let resolver = state.path_resolver.as_ref().ok_or_else(|| {
+        AppError::method_not_allowed("PATCH requires WebDAV path resolver support")
+    })?;
+    let file = match resolver.resolve_path_in_drive(&path, drive_id).await {
+        Ok(ResolvedResource::File(f)) => f,
+        Ok(ResolvedResource::Folder(_)) => {
+            return Err(AppError::conflict("Cannot PATCH a directory"));
+        }
+        Err(_) => return Err(AppError::not_found(format!("File not found: {}", path))),
+    };
+    let file_uuid = Uuid::parse_str(&file.id)
+        .map_err(|_| AppError::not_found(format!("File not found: {}", path)))?;
+    state
+        .authorization
+        .require(
+            Subject::User(user.id),
+            Permission::Read,
+            Resource::File(file_uuid),
+        )
+        .await?;
+
+    // ── Active-lock guard + RFC 4918 §10.4 If: evaluation ─────────────
+    if let Some(resp) = enforce_native_lock(
+        &state.webdav_lock_store,
+        if_header_owned.as_deref(),
+        &path,
+        Some(&file.etag),
+    ) {
+        return Ok(resp);
+    }
+
+    // ── RFC 7232 conditional preconditions ────────────────────────────
+    if let Some(ref inm) = if_none_match {
+        let server_tag = file.etag.trim_matches('"');
+        if inm == "*" || inm.trim_matches('"') == server_tag {
+            return Err(AppError::precondition_failed(
+                "If-None-Match — resource already exists with that ETag",
+            ));
+        }
+    }
+    if let Some(ref im) = if_match
+        && im != "*"
+    {
+        let client_tag = im.trim_matches('"');
+        let server_tag = file.etag.trim_matches('"');
+        if client_tag != server_tag {
+            return Err(AppError::precondition_failed("If-Match — ETag mismatch"));
+        }
+    }
+
+    // ── Range parsing + validation ─────────────────────────────────────
+    let (start, end) = parse_update_range(&update_range_header, file.size)?;
+    if let (Some(end), Some(len)) = (end, content_length) {
+        let expected = end - start + 1;
+        if len != expected {
+            return Err(AppError::bad_request(format!(
+                "Content-Length {len} does not match X-Update-Range span {expected}"
+            )));
+        }
+    }
+
+    // ── Splice prefix/suffix around the patched span ───────────────────
+    let prefix_stream: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> =
+        if start == 0 {
+            Box::pin(stream::empty())
+        } else {
+            Box::into_pin(
+                file_retrieval_service
+                    .get_file_range_stream_with_perms(&file.id, user.id, 0, Some(start))
+                    .await
+                    .map_err(AppError::from)?,
+            )
+        };
+    let suffix_stream: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> = match end
+    {
+        Some(end) if end + 1 < file.size => Box::into_pin(
+            file_retrieval_service
+                .get_file_range_stream_with_perms(&file.id, user.id, end + 1, None)
+                .await
+                .map_err(AppError::from)?,
+        ),
+        _ => Box::pin(stream::empty()),
+    };
+
+    let filename = crate::common::mime_detect::filename_from_path(&path).to_string();
+    let ingested = upload_ingest::ingest_range_patch_to_cas(
+        prefix_stream,
+        req.into_body(),
+        suffix_stream,
+        &state.core.dedup_service,
+        &filename,
+        &content_type,
+        max_upload,
+    )
+    .await?;
+
+    // ── Quota enforcement ─────────────────────────────────────────────
+    if let Some(storage_svc) = state.storage_usage_service.as_ref()
+        && let Err(err) = storage_svc
+            .check_storage_quota(user.id, ingested.size)
+            .await
+    {
+        upload_ingest::discard_ingested(&state.core.dedup_service, &ingested).await;
+        tracing::warn!(
+            "⛔ WEBDAV PATCH REJECTED (quota): user={}, file={}, size={}",
+            user.id,
+            path,
+            ingested.size
+        );
+        return Err(AppError::new(
+            StatusCode::INSUFFICIENT_STORAGE,
+            err.message,
+            "QuotaExceeded",
+        ));
+    }
+
+    // ── Atomic store ──────────────────────────────────────────────────
+    let new_size = ingested.size;
+    let content_type = ingested.content_type.clone();
+    let result = file_upload_service
+        .update_file_streaming_with_perms(
+            &path,
+            drive_id,
+            ingested.stored(),
+            &content_type,
+            None,
+            user.id,
+        )
+        .await;
+
+    match result {
+        Ok(file_dto) => {
+            // Everything from `start` to the new EOF reflects the patch
+            // (the untouched suffix, if any, may have shifted when the
+            // body's length differs from the replaced span).
+            let range_end = new_size.saturating_sub(1);
+            Ok(Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .header(header::ETAG, &file_dto.etag)
+                .header(
+                    header::CONTENT_RANGE,
+                    format!("bytes {}-{}/{}", start, range_end, new_size),
+                )
+                .body(Body::empty())
+                .unwrap())
+        }
+        Err(e) => Err(AppError::from(e)),
+    }
+}
+
 /**
  * Handles MKCOL requests to create folders.
  *
@@ -3382,5 +3664,46 @@ mod tests {
             webdav_collection_href("My Photos/2024"),
             "/webdav/My%20Photos/2024/"
         );
+    }
+
+    // ── RFC 5789 PATCH: `X-Update-Range` parsing ────────────────────
+
+    #[test]
+    fn parse_update_range_append() {
+        assert_eq!(parse_update_range("append", 100).unwrap(), (100, None));
+        assert_eq!(parse_update_range("APPEND", 0).unwrap(), (0, None));
+    }
+
+    #[test]
+    fn parse_update_range_explicit_span() {
+        assert_eq!(parse_update_range("bytes=5-9", 100).unwrap(), (5, Some(9)));
+        // Single-byte span at offset 0.
+        assert_eq!(parse_update_range("bytes=0-0", 1).unwrap(), (0, Some(0)));
+    }
+
+    #[test]
+    fn parse_update_range_rejects_missing_prefix() {
+        assert!(parse_update_range("5-9", 100).is_err());
+    }
+
+    #[test]
+    fn parse_update_range_rejects_malformed_bounds() {
+        assert!(parse_update_range("bytes=abc-9", 100).is_err());
+        assert!(parse_update_range("bytes=5-abc", 100).is_err());
+        assert!(parse_update_range("bytes=9", 100).is_err());
+    }
+
+    #[test]
+    fn parse_update_range_rejects_start_after_end() {
+        assert!(parse_update_range("bytes=9-5", 100).is_err());
+    }
+
+    #[test]
+    fn parse_update_range_rejects_end_at_or_past_size() {
+        // `end` must be strictly within the current file — growing the
+        // file via a byte-range PATCH isn't supported (use `append`).
+        let err = parse_update_range("bytes=5-9", 9).unwrap_err();
+        assert_eq!(err.status_code, StatusCode::RANGE_NOT_SATISFIABLE);
+        assert!(parse_update_range("bytes=0-0", 0).is_err());
     }
 }
