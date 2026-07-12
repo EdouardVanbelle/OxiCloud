@@ -1479,7 +1479,7 @@ impl crate::application::ports::blob_lifecycle::BlobLifecycleHook for ThumbnailS
                 for format in [ThumbnailFormat::Webp, ThumbnailFormat::Jpeg] {
                     let path =
                         root.join(size.dir_name())
-                            .join(format!("{}.{}", &blob_hash, format.ext()));
+                            .join(format!("{}.{}", blob_hash, format.ext()));
                     if tokio::fs::metadata(&path).await.is_ok() {
                         let _ = tokio::fs::remove_file(&path).await;
                     }
