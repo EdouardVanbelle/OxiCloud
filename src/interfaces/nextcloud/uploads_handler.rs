@@ -150,7 +150,20 @@ async fn handle_propfind_session(
         .map_err(|e| AppError::internal_error(format!("Failed to list chunks: {}", e)))?
         .ok_or_else(|| AppError::not_found("Upload session not found"))?;
 
-    let session_href = format!("/remote.php/dav/uploads/{}/{}/", user.username, upload_id);
+    // Href MUST use `session.raw_username` (composite `admin~<uuid>` on
+    // non-home drives), NOT `user.username` (bare `admin`). The
+    // `NcSession` extractor cross-checks the URL `{user}` segment
+    // against `raw_username` and 403s on mismatch — a composite-cred
+    // client that PROPFINDs, then MOVEs a chunk href back to us, would
+    // otherwise 403 at the extractor before any handler runs. Same
+    // fix shape as `trashbin_handler::handle_propfind` and
+    // `handle_assemble`'s destination-URL parsing. Storage-side keying
+    // stays on `user.username` — upload sessions are per-user, not
+    // per-drive.
+    let session_href = format!(
+        "/remote.php/dav/uploads/{}/{}/",
+        session.raw_username, upload_id
+    );
     let session_last_modified =
         chrono::DateTime::<chrono::Utc>::from_timestamp(listing.session_mtime as i64, 0)
             .unwrap_or_else(chrono::Utc::now)
@@ -176,7 +189,7 @@ async fn handle_propfind_session(
     for chunk in &listing.chunks {
         let chunk_href = format!(
             "/remote.php/dav/uploads/{}/{}/{}",
-            user.username, upload_id, chunk.name
+            session.raw_username, upload_id, chunk.name
         );
         let chunk_modified = chrono::DateTime::<chrono::Utc>::from_timestamp(chunk.mtime as i64, 0)
             .unwrap_or_else(chrono::Utc::now)
@@ -342,7 +355,18 @@ async fn handle_assemble(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<i64>().ok());
 
-    let dest_subpath = extract_files_subpath(&destination, &user.username)
+    // Strip the destination URL prefix using the SESSION's raw username
+    // (`admin~<drive-uuid>` on non-home drives), NOT `user.username`
+    // (bare `admin`). NC clients send `Destination: /remote.php/dav/files/
+    // {raw_username}/…` — the URL user-segment mirrors the credential
+    // they authenticated with. Passing bare `admin` here strips only
+    // `admin/` from a `admin~<uuid>/…` destination, leaving the tilde
+    // marker glued to the leading path segment; the write then targets
+    // `<drive-root>/~<uuid>/…` and fails with a parent-folder lookup
+    // error. Matches `webdav_handler::handle_move`'s call to
+    // `extract_nc_subpath_from_dest(&destination, url_user)` where
+    // `url_user = &session.raw_username` (webdav_handler.rs:1177).
+    let dest_subpath = extract_files_subpath(&destination, &session.raw_username)
         .ok_or_else(|| AppError::bad_request("Invalid Destination URL"))?;
 
     // Stream the chunk parts, in order, straight into the CDC chunk store —
