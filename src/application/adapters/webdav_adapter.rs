@@ -223,10 +223,42 @@ impl NextcloudPropContext {
     }
 }
 
+/// Defense-in-depth cap on attributes per XML element in WebDAV request
+/// bodies. Legitimate PROPFIND / PROPPATCH elements carry a handful of
+/// `xmlns:*` declarations and, occasionally, per-property namespace
+/// bindings — a dozen is already a lot. 100 is generous headroom and
+/// three orders of magnitude below what an attacker would need to
+/// exploit a quadratic parser bug (see quick-xml #969, fixed in 0.41;
+/// this cap fences the same threat model for any future analogous bug
+/// in whatever parser we swap to).
+///
+/// A rejected element yields 400 Bad Request via the ParseError path.
+pub const MAX_ATTRIBUTES_PER_ELEMENT: usize = 100;
+
 /// WebDAV adapter for converting between XML and domain objects
 pub struct WebDavAdapter;
 
 impl WebDavAdapter {
+    /// Refuse elements carrying an unreasonable attribute count.
+    /// See [`MAX_ATTRIBUTES_PER_ELEMENT`] for the reasoning.
+    ///
+    /// `Attributes::count()` is O(N) in the number of attributes (each
+    /// attribute is parsed once), so this check itself is safe even
+    /// against very large elements. The parser may still have paid a
+    /// quadratic cost by the time we get here on a vulnerable version
+    /// of the underlying library — the bump to quick-xml 0.41 closes
+    /// that specific bug; this cap is defense-in-depth against future
+    /// analogous bugs and against adversarially large XML that would
+    /// otherwise reach our downstream code.
+    fn check_attribute_cap(e: &BytesStart) -> Result<()> {
+        if e.attributes().count() > MAX_ATTRIBUTES_PER_ELEMENT {
+            return Err(WebDavError::ParseError(format!(
+                "Element carries more than {MAX_ATTRIBUTES_PER_ELEMENT} attributes"
+            )));
+        }
+        Ok(())
+    }
+
     /// Collect namespace prefix → URI mappings from element attributes.
     /// E.g. `xmlns:D="DAV:"` maps prefix `"D"` to `"DAV:"`.
     pub fn collect_ns_decls(
@@ -236,11 +268,17 @@ impl WebDavAdapter {
         for attr in e.attributes().flatten() {
             let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
             if let Some(prefix) = key.strip_prefix("xmlns:") {
-                let uri = attr.unescape_value().unwrap_or_default().to_string();
+                let uri = attr
+                    .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                    .unwrap_or_default()
+                    .to_string();
                 ns_map.insert(prefix.to_string(), uri);
             } else if key == "xmlns" {
                 // Default namespace declaration: xmlns="uri"
-                let uri = attr.unescape_value().unwrap_or_default().to_string();
+                let uri = attr
+                    .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                    .unwrap_or_default()
+                    .to_string();
                 ns_map.insert(String::new(), uri);
             }
         }
@@ -252,7 +290,9 @@ impl WebDavAdapter {
         for attr in e.attributes().flatten() {
             let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
             if key.starts_with("xmlns:") {
-                let uri = attr.unescape_value().unwrap_or_default();
+                let uri = attr
+                    .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                    .unwrap_or_default();
                 if uri.is_empty() {
                     return Err(WebDavError::ParseError(
                         "Invalid namespace declaration: prefix bound to empty URI".to_string(),
@@ -305,6 +345,7 @@ impl WebDavAdapter {
         loop {
             match xml_reader.read_event_into(&mut buffer) {
                 Ok(Event::Start(ref e)) => {
+                    Self::check_attribute_cap(e)?;
                     Self::collect_ns_decls(e, &mut ns_map);
                     Self::check_ns_decls_valid(e)?;
                     let name = e.name();
@@ -343,6 +384,7 @@ impl WebDavAdapter {
                     }
                 }
                 Ok(Event::Empty(ref e)) => {
+                    Self::check_attribute_cap(e)?;
                     Self::collect_ns_decls(e, &mut ns_map);
                     Self::check_ns_decls_valid(e)?;
                     let name = e.name();
@@ -981,6 +1023,7 @@ impl WebDavAdapter {
         loop {
             match xml_reader.read_event_into(&mut buffer) {
                 Ok(Event::Start(ref e)) => {
+                    Self::check_attribute_cap(e)?;
                     Self::collect_ns_decls(e, &mut ns_map);
                     let name = e.name();
                     let name_str = std::str::from_utf8(name.as_ref()).unwrap_or("");
@@ -1063,6 +1106,7 @@ impl WebDavAdapter {
                     }
                 }
                 Ok(Event::Empty(ref e)) => {
+                    Self::check_attribute_cap(e)?;
                     Self::collect_ns_decls(e, &mut ns_map);
                     let name = e.name();
                     let name_str = std::str::from_utf8(name.as_ref()).unwrap_or("");

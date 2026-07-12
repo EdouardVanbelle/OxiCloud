@@ -821,6 +821,10 @@
       "forbid_cross_drive_move_help": "Blokuje przenoszenie plików lub folderów do innego Drive. Nie zatrzymuje pobierania + ponownego przesyłania.",
       "forbid_owner_role_change": "Zablokuj listę właścicieli",
       "forbid_owner_role_change_help": "Tylko administrator może dodawać, usuwać lub degradować właścicieli Drive, gdy ta zasada jest aktywna.",
+      "include_in_photo_index": "Uwzględnij w Zdjęciach",
+      "include_in_photo_index_help": "Wyświetlaj obrazy i filmy z tego Dysku na osi czasu Zdjęć i na mapie Miejsc. Domyślne dyski osobiste są uwzględniane automatycznie; włącz to dla dysków współdzielonych, które faktycznie zawierają zdjęcia (np. «Zdjęcia rodzinne»).",
+      "include_in_music_index": "Uwzględnij w Muzyce",
+      "include_in_music_index_help": "Uwzględniaj pliki audio z tego Dysku w bibliotece Muzyki. Domyślne dyski osobiste są uwzględniane automatycznie; włącz to dla dysków współdzielonych, które faktycznie zawierają kolekcję muzyczną (np. «Muzyka rodzinna», «Współpraca zespołu»).",
       "implied_by_forbid_sharing": "Już egzekwowane przez «Zakaz udostępniania per-zasób»."
     }
   },

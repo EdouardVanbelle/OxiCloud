@@ -38,16 +38,33 @@ wait_for_http() {
 
 SERVER_PID=""
 
+WOPI_MOCK_PID=""
+
 cleanup() {
   if [[ -n "$SERVER_PID" ]]; then
     log "Stopping OxiCloud server (pid $SERVER_PID)..."
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
   fi
+  if [[ -n "$WOPI_MOCK_PID" ]]; then
+    log "Stopping WOPI mock discovery (pid $WOPI_MOCK_PID)..."
+    kill "$WOPI_MOCK_PID" 2>/dev/null || true
+    wait "$WOPI_MOCK_PID" 2>/dev/null || true
+  fi
   bash "$COMMON/stop-db.sh"
 }
 
 trap cleanup EXIT
+
+# ── 0. WOPI mock discovery ────────────────────────────────────────────────────
+# Serves the static discovery.xml `OXICLOUD_WOPI_DISCOVERY_URL`
+# points at (server.env pins port 9100). Started BEFORE OxiCloud so
+# the server's cache-fill on first WOPI request finds it. The mock
+# is stdlib-only Python (no deps) — see the file header for what it
+# returns and why it's cheap.
+log "Starting WOPI mock discovery on port 9100..."
+node "$COMMON/wopi_mock_discovery.js" > /tmp/wopi-mock-discovery.log 2>&1 &
+WOPI_MOCK_PID=$!
 
 # ── 1. Start postgres ─────────────────────────────────────────────────────────
 
@@ -144,6 +161,8 @@ hurl --variables-file "$API_DIR/test.env" --file-root "$REPO_ROOT/tests" --test 
   "$API_DIR/batch_folder_copy.hurl" \
   "$API_DIR/dedup_blob_cleanup.hurl" \
   "$API_DIR/contacts.hurl" \
+  "$API_DIR/calendar.hurl" \
+  "$API_DIR/playlists.hurl" \
   "$API_DIR/public_shares.hurl" \
   "$API_DIR/permissions.hurl" \
   "$API_DIR/grants.hurl" \
@@ -170,7 +189,10 @@ hurl --variables-file "$API_DIR/test.env" --file-root "$REPO_ROOT/tests" --test 
   "$API_DIR/webdav_dead_properties.hurl" \
   "$API_DIR/nc_webdav_dead_properties.hurl" \
   "$API_DIR/webdav_protected_properties.hurl" \
-  "$API_DIR/webdav_nested_move_cascade.hurl"
+  "$API_DIR/webdav_drive_root.hurl" \
+  "$API_DIR/webdav_permissions.hurl" \
+  "$API_DIR/webdav_nested_move_cascade.hurl" \
+  "$API_DIR/wopi_authz.hurl"
 
 #bash "$API_DIR/dedup_bulk_upload.sh"
 

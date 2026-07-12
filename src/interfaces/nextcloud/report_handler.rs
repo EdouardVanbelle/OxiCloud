@@ -63,6 +63,15 @@ async fn handle_filter_files(
 ) -> Result<Response<Body>, AppError> {
     let user = &session.user;
     let url_user = &session.raw_username;
+    // Chroot-scope the response: NC's `oc:filter-files` REPORT is a
+    // single-drive surface (the client PROPFINDs favorites under its
+    // "home" URL and has no cross-drive concept). Favorites that live
+    // in another drive the caller is a member of are dropped from
+    // this response; they're still reachable via REST
+    // `/api/favorites/resources`. `session.require_chroot()` is safe
+    // here — the REPORT verb only reaches this handler through a
+    // path-scoped route.
+    let chroot = session.require_chroot()?;
     let fav_svc = match state.favorites_service.as_ref() {
         Some(svc) => svc,
         None => return Ok(empty_multistatus()),
@@ -85,11 +94,11 @@ async fn handle_filter_files(
     // All items in this response are favorites.
     let favorite_ids: HashSet<String> = favorites.iter().map(|f| f.item_id.clone()).collect();
 
-    // TODO(D1): replace the hardcoded "Personal/" prefix with the
-    // caller's default-drive root folder name read from
-    // `drives.root_folder_id`. Correct for D0-provisioned default
-    // drives; secondary drives keep their original root name.
-    let home_prefix = "Personal/";
+    // `home_prefix` is unused after the chroot-aware strip
+    // (see `strip_home_prefix`); kept as a positional argument in
+    // the emit calls below for signature stability with the
+    // report-handler tests and the parallel search-pass caller.
+    let home_prefix = "";
 
     // Pass 1: resolve the favorited DTOs in two batch queries (was one
     // get_* per favorite — up to N serial round-trips on a sync client's
@@ -156,7 +165,17 @@ async fn handle_filter_files(
         // multi-drive `~{drive}` form is echoed back to the client;
         // owner-id stays canonical via `&user.username`.
         for file in &files {
-            let subpath = strip_home_prefix(&file.path, home_prefix);
+            // Skip favorites that live outside the caller's chroot
+            // (other-drive favorites); reachable via REST if needed.
+            let Some(subpath) = strip_home_prefix(chroot, &file.path, home_prefix) else {
+                tracing::debug!(
+                    target: "oxicloud::nc",
+                    "REPORT filter-files: dropping cross-chroot favorite '{}' at '{}'",
+                    file.id,
+                    file.path,
+                );
+                continue;
+            };
             let href = nc_href(url_user, subpath);
             let fid = file_id_map.get(&file.id).copied();
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
@@ -174,7 +193,15 @@ async fn handle_filter_files(
         }
 
         for folder in &folders {
-            let subpath = strip_home_prefix(&folder.path, home_prefix);
+            let Some(subpath) = strip_home_prefix(chroot, &folder.path, home_prefix) else {
+                tracing::debug!(
+                    target: "oxicloud::nc",
+                    "REPORT filter-files: dropping cross-chroot favorite folder '{}' at '{}'",
+                    folder.id,
+                    folder.path,
+                );
+                continue;
+            };
             let href = format!("{}/", nc_href(url_user, subpath));
             let fid = folder_id_map.get(&folder.id).copied();
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
@@ -210,9 +237,13 @@ async fn handle_search(
     session: &crate::interfaces::nextcloud::session::NcSession,
 ) -> Result<Response<Body>, AppError> {
     let user = &session.user;
-    // Validate chroot up-front (path-scoped handler); `resolve_scope_folder`
-    // below re-pulls it from the session for the path-mapping step.
-    session.require_chroot()?;
+    // Chroot-scope the response: NC's search REPORT is a single-drive
+    // surface. Results that live outside the chroot (other drives the
+    // caller is a member of) are dropped from the multistatus and
+    // recorded at debug — reachable via REST search if needed.
+    // `resolve_scope_folder` below re-pulls chroot from the session
+    // for the path-mapping step.
+    let chroot = session.require_chroot()?;
     let url_user = &session.raw_username;
     let search_svc = match state.applications.search_service.as_ref() {
         Some(svc) => svc,
@@ -244,10 +275,9 @@ async fn handle_search(
 
     let nc = state.nextcloud.as_ref();
     let file_id_svc = nc.map(|n| &n.file_ids);
-    // TODO(D1): same as the favorites pass above — replace the
-    // hardcoded "Personal/" with the caller's actual default-drive
-    // root folder name from `drives.root_folder_id`.
-    let home_prefix = "Personal/";
+    // See the favorites pass above: `home_prefix` is unused after the
+    // chroot-aware strip, kept only for signature stability.
+    let home_prefix = "";
 
     // No favorite checking for search results -- pass an empty set.
     let favorite_ids: HashSet<String> = HashSet::new();
@@ -269,7 +299,15 @@ async fn handle_search(
 
         // Files.
         for file in &files {
-            let subpath = strip_home_prefix(&file.path, home_prefix);
+            let Some(subpath) = strip_home_prefix(chroot, &file.path, home_prefix) else {
+                tracing::debug!(
+                    target: "oxicloud::nc",
+                    "REPORT search: dropping cross-chroot file '{}' at '{}'",
+                    file.id,
+                    file.path,
+                );
+                continue;
+            };
             let href = nc_href(url_user, subpath);
             let fid = file_id_map.get(&file.id).copied();
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
@@ -288,7 +326,15 @@ async fn handle_search(
 
         // Folders.
         for folder in &folders {
-            let subpath = strip_home_prefix(&folder.path, home_prefix);
+            let Some(subpath) = strip_home_prefix(chroot, &folder.path, home_prefix) else {
+                tracing::debug!(
+                    target: "oxicloud::nc",
+                    "REPORT search: dropping cross-chroot folder '{}' at '{}'",
+                    folder.id,
+                    folder.path,
+                );
+                continue;
+            };
             let href = format!("{}/", nc_href(url_user, subpath));
             let fid = folder_id_map.get(&folder.id).copied();
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
@@ -345,7 +391,6 @@ fn file_dto_from_search(fr: &crate::application::dtos::search_dto::SearchFileRes
             .into(),
         category: category_for(&fr.name, &fr.mime_type).to_string().into(),
         size_formatted: format_file_size(fr.size),
-        owner_id: None,
         sort_date: None,
         content_hash: fr.blob_hash.clone(),
         etag,
@@ -365,7 +410,6 @@ fn folder_dto_from_search(
         name: sr.name.clone(),
         path: sr.path.clone(),
         parent_id: sr.parent_id.clone(),
-        owner_id: None,
         drive_id: sr.drive_id,
         created_at: sr.created_at,
         modified_at: sr.modified_at,
@@ -552,7 +596,19 @@ fn extract_subpath_from_scope(href: &str, url_user: &str) -> Option<String> {
     None
 }
 
-/// Strip the `My Folder - {username}/` prefix to get the DAV subpath.
-fn strip_home_prefix<'a>(path: &'a str, prefix: &str) -> &'a str {
-    path.strip_prefix(prefix).unwrap_or(path)
+/// Strip the caller's chroot prefix from an internal path so the
+/// caller-facing DAV subpath is chroot-relative. Delegates to
+/// `webdav_handler::strip_chroot_prefix` — chroot-aware, multi-segment
+/// safe, and rejects items outside the chroot. Callers must decide
+/// per-response whether an out-of-chroot item is dropped or falls
+/// back to the naive strip.
+///
+/// See `strip_chroot_prefix` for the full contract. The `_prefix`
+/// legacy arg stays for signature stability with the emit helpers.
+fn strip_home_prefix<'a>(
+    chroot: &crate::application::dtos::folder_dto::FolderDto,
+    path: &'a str,
+    _prefix: &str,
+) -> Option<&'a str> {
+    crate::interfaces::nextcloud::webdav_handler::strip_chroot_prefix(chroot, path)
 }

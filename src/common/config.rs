@@ -915,6 +915,22 @@ pub struct FeaturesConfig {
     /// deployments don't want them reachable. Env:
     /// `OXICLOUD_ENABLE_ADMIN_INTERNAL_ENDPOINTS`.
     pub enable_admin_internal_endpoints: bool,
+    /// Native WebDAV path segment that lists the caller's drives.
+    ///
+    /// * Default `"@drive"` — bare `/webdav/` addresses the caller's
+    ///   default personal drive (back-compat). Drive listing lives at
+    ///   `/webdav/@drive/`; explicit drive at
+    ///   `/webdav/@drive/<uuid|name>/…`.
+    /// * `""` (empty) — no default-drive shortcut. Bare `/webdav/`
+    ///   returns the drive listing; explicit drive at
+    ///   `/webdav/<uuid|name>/…`. Operators who don't want a "default
+    ///   drive" concept exposed via WebDAV pick this.
+    /// * Any other string (e.g. `"drives"`) — same shape as the default,
+    ///   just with that path segment. Loaded via `trim_matches('/')`
+    ///   so operators can safely pass `"/drives/"`.
+    ///
+    /// Env: `OXICLOUD_WEBDAV_DRIVE_LISTING_PREFIX`.
+    pub webdav_drive_listing_prefix: String,
 }
 
 impl Default for FeaturesConfig {
@@ -934,6 +950,10 @@ impl Default for FeaturesConfig {
             // deployments do NOT need this; the periodic ticker handles
             // reconciliation transparently.
             enable_admin_internal_endpoints: false,
+            // Back-compat with pre-multi-drive clients — bare `/webdav/`
+            // maps to the caller's default drive; drive listing is
+            // reachable at `/webdav/@drive/`.
+            webdav_drive_listing_prefix: "@drive".to_string(),
         }
     }
 }
@@ -1503,6 +1523,15 @@ impl AppConfig {
             && let Ok(val) = enable_internal
         {
             config.features.enable_admin_internal_endpoints = val;
+        }
+
+        // Native WebDAV drive-picker path segment. Sanitised by
+        // stripping leading/trailing slashes so operators can pass
+        // `/drives/` or `drives` interchangeably; empty string means
+        // "no default-drive shortcut, `/webdav/` IS the drive listing".
+        // See `FeaturesConfig::webdav_drive_listing_prefix`.
+        if let Ok(raw) = env::var("OXICLOUD_WEBDAV_DRIVE_LISTING_PREFIX") {
+            config.features.webdav_drive_listing_prefix = raw.trim_matches('/').to_string();
         }
 
         if let Ok(enable_faces) = env::var("OXICLOUD_ENABLE_FACES").map(|v| v.parse::<bool>())

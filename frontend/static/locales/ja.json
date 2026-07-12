@@ -821,6 +821,10 @@
       "forbid_cross_drive_move_help": "別のドライブへのファイル・フォルダーの移動をブロックします。ダウンロード + 再アップロードは防げません。",
       "forbid_owner_role_change": "所有者リストをロック",
       "forbid_owner_role_change_help": "有効中は、管理者のみがドライブ所有者を追加・削除・降格できます。",
+      "include_in_photo_index": "写真に含める",
+      "include_in_photo_index_help": "この Drive の画像・動画ファイルを「写真」タイムラインと「場所」マップに表示します。デフォルトの個人 Drive は自動的に含まれます。実際に写真を含む共有 Drive の場合はオンにしてください (例: 「家族写真」)。",
+      "include_in_music_index": "音楽に含める",
+      "include_in_music_index_help": "この Drive の音声ファイルを「音楽」ライブラリに含めます。デフォルトの個人 Drive は自動的に含まれます。実際に音楽コレクションを含む共有 Drive の場合はオンにしてください (例: 「家族の音楽」「バンド共同作業」)。",
       "implied_by_forbid_sharing": "すでに「リソース単位の共有を禁止」によって適用済み。"
     }
   },

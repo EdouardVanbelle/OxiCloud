@@ -96,7 +96,9 @@ impl CalDavAdapter {
                             for attr in e.attributes().flatten() {
                                 let attr_name =
                                     std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
-                                let attr_value = attr.unescape_value().unwrap_or_default();
+                                let attr_value = attr
+                                    .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                    .unwrap_or_default();
 
                                 if attr_name == "start" {
                                     // Parse ISO date format with Z for UTC
@@ -161,7 +163,9 @@ impl CalDavAdapter {
                         // Parse time-range attributes
                         for attr in e.attributes().flatten() {
                             let attr_name = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
-                            let attr_value = attr.unescape_value().unwrap_or_default();
+                            let attr_value = attr
+                                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                .unwrap_or_default();
 
                             if attr_name == "start" {
                                 // Parse ISO date format with Z for UTC

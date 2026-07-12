@@ -75,9 +75,11 @@ BEGIN
     VALUES ('personal', admin_id, NULL)
     RETURNING id INTO drive_id;
 
+    -- Post-D7: `storage.folders.user_id` dropped. Ownership lives on the
+    -- drive-Owner role_grant below; provenance in `created_by`/`updated_by`.
     INSERT INTO storage.folders
-        (name, parent_id, user_id, drive_id, created_by, updated_by)
-    VALUES ('Personal', NULL, admin_id, drive_id, admin_id, admin_id)
+        (name, parent_id, drive_id, created_by, updated_by)
+    VALUES ('Personal', NULL, drive_id, admin_id, admin_id)
     RETURNING id INTO folder_id;
 
     UPDATE storage.drives SET root_folder_id = folder_id WHERE id = drive_id;

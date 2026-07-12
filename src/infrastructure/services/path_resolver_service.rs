@@ -15,6 +15,8 @@ use crate::application::dtos::display_helpers::{
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
 use crate::common::errors::DomainError;
+use crate::domain::entities::file::File;
+use crate::domain::entities::folder::Folder;
 
 /// Result of resolving a WebDAV path — either a folder or a file.
 #[derive(Debug, Clone)]
@@ -33,14 +35,20 @@ impl PathResolverService {
         Self { pool }
     }
 
-    /// Resolve `path` to a folder or file **owned by `user_id`**.
+    /// Resolve `path` to a folder or file **within the given drive**.
     ///
-    /// Adds `AND fo.user_id = $4` / `AND fi.user_id = $4` so that one
-    /// user can never resolve another user's resources.
-    pub async fn resolve_path_for_user(
+    /// Filters on `fo.drive_id = $4` / `fi.drive_id = $4`. Callers
+    /// pre-resolve which drive they're operating in — native WebDAV
+    /// derives it from the caller's default drive
+    /// (`resolve_drive_id_for_native_webdav`); NC WebDAV takes it from
+    /// the URL-selected chroot (`chroot.drive_id`). Shared by both
+    /// surfaces so the single-query UNION ALL optimisation lands
+    /// consistently and no path lookup keys on the doomed
+    /// `storage.{files,folders}.user_id` column.
+    pub async fn resolve_path_in_drive(
         &self,
         path: &str,
-        user_id: Uuid,
+        drive_id: Uuid,
     ) -> Result<ResolvedResource, DomainError> {
         let path = path.trim_start_matches('/').trim_end_matches('/');
         if path.is_empty() {
@@ -55,6 +63,13 @@ impl PathResolverService {
             String::new()
         };
 
+        // Widened SELECT: also fetches `blob_hash` (for file ETag) and
+        // `tree_modified_at` (for folder ETag). Both share the same
+        // canonical formulas as the rest of the codebase — see
+        // [`File::compute_etag`] and [`Folder::compute_etag`]. Without
+        // these two extra columns the resolver used to emit empty
+        // ETag strings, and NC's `If-Match` round-trips broke
+        // (see the F6b regression on `test_nc_put_mkcol_blake3.sh`).
         let row = sqlx::query_as::<
             _,
             (
@@ -63,34 +78,37 @@ impl PathResolverService {
                 String,         // name
                 String,         // path
                 Option<String>, // parent_id
-                Option<String>, // user_id
                 Uuid,           // drive_id
                 i64,            // created_at
                 i64,            // modified_at
                 Option<i64>,    // size
                 Option<String>, // mime_type
                 Option<String>, // folder_id
+                Option<String>, // blob_hash (files only)
+                Option<i64>,    // tree_modified_at (folders only)
             ),
         >(
             r#"
-            SELECT resource_type, id, name, path, parent_id, user_id, drive_id,
-                   created_at, modified_at, size, mime_type, folder_id
+            SELECT resource_type, id, name, path, parent_id, drive_id,
+                   created_at, modified_at, size, mime_type, folder_id,
+                   blob_hash, tree_modified_at
               FROM (
                 SELECT 'folder'::text       AS resource_type,
                        fo.id::text,
                        fo.name,
                        fo.path,
                        fo.parent_id::text,
-                       fo.user_id::text,
                        fo.drive_id,
                        EXTRACT(EPOCH FROM fo.created_at)::bigint AS created_at,
                        EXTRACT(EPOCH FROM fo.updated_at)::bigint AS modified_at,
                        NULL::bigint         AS size,
                        NULL::text           AS mime_type,
-                       NULL::text           AS folder_id
+                       NULL::text           AS folder_id,
+                       NULL::text           AS blob_hash,
+                       EXTRACT(EPOCH FROM fo.tree_modified_at)::bigint AS tree_modified_at
                   FROM storage.folders fo
                  WHERE fo.path = $1 AND NOT fo.is_trashed
-                   AND fo.user_id = $4
+                   AND fo.drive_id = $4
 
                 UNION ALL
 
@@ -103,13 +121,14 @@ impl PathResolverService {
                          ELSE fi.name
                        END                  AS path,
                        NULL::text           AS parent_id,
-                       fi.user_id::text,
                        fi.drive_id,
                        EXTRACT(EPOCH FROM fi.created_at)::bigint AS created_at,
                        EXTRACT(EPOCH FROM fi.updated_at)::bigint AS modified_at,
                        fi.size,
                        fi.mime_type,
-                       fi.folder_id::text
+                       fi.folder_id::text,
+                       fi.blob_hash,
+                       NULL::bigint         AS tree_modified_at
                   FROM storage.files fi
                   LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
                  WHERE fi.name = $2
@@ -118,7 +137,7 @@ impl PathResolverService {
                          OR fo.path = $3
                        )
                    AND NOT fi.is_trashed
-                   AND fi.user_id = $4
+                   AND fi.drive_id = $4
               ) sub
              LIMIT 1
             "#,
@@ -126,10 +145,10 @@ impl PathResolverService {
         .bind(path) // $1
         .bind(filename) // $2
         .bind(&folder_path) // $3
-        .bind(user_id) // $4
+        .bind(drive_id) // $4
         .fetch_optional(self.pool.as_ref())
         .await
-        .map_err(|e| DomainError::internal_error("PathResolver", format!("resolve_for_user: {e}")))?
+        .map_err(|e| DomainError::internal_error("PathResolver", format!("resolve_in_drive: {e}")))?
         .ok_or_else(|| DomainError::not_found("Resource", path))?;
 
         let (
@@ -138,45 +157,46 @@ impl PathResolverService {
             name,
             res_path,
             parent_id,
-            uid,
             drive_id,
             created_at,
             modified_at,
             size,
             mime_type,
             folder_id,
+            blob_hash,
+            tree_modified_at,
         ) = row;
 
         match resource_type.as_str() {
-            "folder" => Ok(ResolvedResource::Folder(FolderDto {
-                etag: id.clone(),
-                id,
-                name: name.clone(),
-                path: res_path,
-                parent_id,
-                owner_id: uid,
-                drive_id,
-                created_at: created_at as u64,
-                modified_at: modified_at as u64,
-                is_root: false,
-                icon_class: Arc::from("fas fa-folder"),
-                icon_special_class: Arc::from("folder-icon"),
-                category: Arc::from("Folder"),
-                // §14 provenance not selected by this resolver path —
-                // it's used for existence/type discrimination, not
-                // detailed DTO emission. Callers that need provenance
-                // reload through the repo.
-                created_by: None,
-                updated_by: None,
-            })),
+            "folder" => {
+                let tree_mod = tree_modified_at.unwrap_or(modified_at) as u64;
+                Ok(ResolvedResource::Folder(FolderDto {
+                    etag: Folder::compute_etag(&id, tree_mod),
+                    id,
+                    name: name.clone(),
+                    path: res_path,
+                    parent_id,
+                    drive_id,
+                    created_at: created_at as u64,
+                    modified_at: modified_at as u64,
+                    is_root: false,
+                    icon_class: Arc::from("fas fa-folder"),
+                    icon_special_class: Arc::from("folder-icon"),
+                    category: Arc::from("Folder"),
+                    // §14 provenance not selected by this resolver path —
+                    // it's used for existence/type discrimination, not
+                    // detailed DTO emission. Callers that need provenance
+                    // reload through the repo.
+                    created_by: None,
+                    updated_by: None,
+                }))
+            }
             _ => {
                 let mime = mime_type.unwrap_or_else(|| "application/octet-stream".to_string());
                 let sz = size.unwrap_or(0) as u64;
-                // `content_hash`/`etag` are empty here: this resolver
-                // path doesn't select `blob_hash` from SQL — callers
-                // are doing existence/type discrimination, not ETag
-                // emission. If a caller ever needs an ETag from this
-                // codepath, widen the SELECT and populate properly.
+                let hash = blob_hash.unwrap_or_default();
+                let modified_at_u = modified_at as u64;
+                let etag = File::compute_etag(&hash, modified_at_u);
                 Ok(ResolvedResource::File(FileDto {
                     id,
                     name: name.clone(),
@@ -185,15 +205,14 @@ impl PathResolverService {
                     mime_type: Arc::from(&*mime),
                     folder_id,
                     created_at: created_at as u64,
-                    modified_at: modified_at as u64,
+                    modified_at: modified_at_u,
                     icon_class: Arc::from(icon_class_for(&name, &mime)),
                     icon_special_class: Arc::from(icon_special_class_for(&name, &mime)),
                     category: Arc::from(category_for(&name, &mime)),
                     size_formatted: format_file_size(sz),
-                    owner_id: uid,
                     sort_date: None,
-                    content_hash: String::new(),
-                    etag: String::new(),
+                    content_hash: hash,
+                    etag,
                     // §14 provenance not selected by this resolver path
                     created_by: None,
                     updated_by: None,
@@ -203,7 +222,10 @@ impl PathResolverService {
     }
 
     /// Returns `true` if the resource at `path` belongs to `user_id`.
-    pub async fn exists_for_user(&self, path: &str, user_id: Uuid) -> Result<bool, DomainError> {
+    /// Check whether `path` resolves to a folder or file within the
+    /// given drive. Companion to `resolve_path_in_drive` — same scope
+    /// filter, existence-only projection.
+    pub async fn exists_in_drive(&self, path: &str, drive_id: Uuid) -> Result<bool, DomainError> {
         let path = path.trim_start_matches('/').trim_end_matches('/');
         if path.is_empty() {
             return Ok(false);
@@ -221,7 +243,7 @@ impl PathResolverService {
             r#"
             SELECT EXISTS(
               SELECT 1 FROM storage.folders
-               WHERE path = $1 AND NOT is_trashed AND user_id = $4
+               WHERE path = $1 AND NOT is_trashed AND drive_id = $4
             ) OR EXISTS(
               SELECT 1
                 FROM storage.files fi
@@ -229,18 +251,18 @@ impl PathResolverService {
                WHERE fi.name = $2
                  AND (($3 = '' AND fi.folder_id IS NULL) OR fo.path = $3)
                  AND NOT fi.is_trashed
-                 AND fi.user_id = $4
+                 AND fi.drive_id = $4
             )
             "#,
         )
         .bind(path)
         .bind(filename)
         .bind(&folder_path)
-        .bind(user_id)
+        .bind(drive_id)
         .fetch_one(self.pool.as_ref())
         .await
         .map_err(|e| {
-            DomainError::internal_error("PathResolver", format!("exists_for_user: {e}"))
+            DomainError::internal_error("PathResolver", format!("exists_in_drive: {e}"))
         })?;
 
         Ok(exists)

@@ -206,6 +206,20 @@ impl RecentItemsRepositoryPort for RecentItemsPgRepository {
         // ── Build the UNION ALL CTE ─────────────────────────────────────────
         let mut cte_branches: Vec<&str> = Vec::new();
 
+        // Post-D7: `is_owner` means "the caller holds an Owner
+        // role_grant on the drive owning this row". Personal drives:
+        // the single-owner invariant makes this trivially true for the
+        // owner and false for anyone else. Shared drives: multiple
+        // Owners possible; each of them gets `true`. Used only to gate
+        // whether the handler exposes the full path (path-hierarchy
+        // hiding for share recipients — see `recent_handler.rs`).
+        //
+        // The `created_by` projection is separate — §14 provenance,
+        // used for the "Owner" column and the owner sort's username
+        // JOIN. The two signals genuinely differ post-D2: e.g. Bob
+        // (Editor on Alice's shared drive) making a file has
+        // `created_by = Bob` but `is_owner = false` because Alice owns
+        // the drive.
         let folder_branch = r#"
     SELECT
         'folder'::text                   AS resource_type,
@@ -216,10 +230,18 @@ impl RecentItemsRepositoryPort for RecentItemsPgRepository {
         -1::bigint                       AS size,
         fld.created_at                   AS resource_created_at,
         fld.updated_at                   AS modified_at,
-        fld.user_id                      AS owner_id,
         fld.drive_id                     AS drive_id,
         NULL::text                       AS blob_hash,
-        (fld.user_id = $1::uuid)         AS is_owner,
+        fld.created_by                   AS created_by,
+        EXISTS (
+            SELECT 1 FROM storage.role_grants g
+             WHERE g.resource_type = 'drive'
+               AND g.resource_id   = fld.drive_id
+               AND g.role          = 'owner'
+               AND g.subject_type  = 'user'
+               AND g.subject_id    = $1::uuid
+               AND (g.expires_at IS NULL OR g.expires_at > NOW())
+        )                                AS is_owner,
         ur.accessed_at                   AS accessed_at,
         fld.path::text                   AS resource_path,
         LOWER(fld.name)                  AS sort_str,
@@ -240,10 +262,18 @@ impl RecentItemsRepositoryPort for RecentItemsPgRepository {
         f.size::bigint,
         f.created_at                     AS resource_created_at,
         f.updated_at                     AS modified_at,
-        f.user_id                        AS owner_id,
         f.drive_id                       AS drive_id,
         f.blob_hash,
-        (f.user_id = $1::uuid)           AS is_owner,
+        f.created_by                     AS created_by,
+        EXISTS (
+            SELECT 1 FROM storage.role_grants g
+             WHERE g.resource_type = 'drive'
+               AND g.resource_id   = f.drive_id
+               AND g.role          = 'owner'
+               AND g.subject_type  = 'user'
+               AND g.subject_id    = $1::uuid
+               AND (g.expires_at IS NULL OR g.expires_at > NOW())
+        )                                AS is_owner,
         ur.accessed_at                   AS accessed_at,
         COALESCE(pfld.path::text || '/' || f.name, f.name) AS resource_path,
         LOWER(f.name)                    AS sort_str,
@@ -394,7 +424,9 @@ impl RecentItemsRepositoryPort for RecentItemsPgRepository {
         };
 
         let user_join = if need_user_join {
-            "LEFT JOIN auth.users u ON u.id = r.owner_id"
+            // Post-D7: `owner_id` column retired; use `created_by`
+            // (§14 provenance) as the "owner" identity for the sort.
+            "LEFT JOIN auth.users u ON u.id = r.created_by"
         } else {
             ""
         };
@@ -411,7 +443,7 @@ impl RecentItemsRepositoryPort for RecentItemsPgRepository {
 SELECT
     r.resource_type, r.resource_id, r.name, r.parent_id,
     r.mime_type, r.size, r.resource_created_at, r.modified_at,
-    r.owner_id, r.drive_id, r.is_owner, r.accessed_at, r.resource_path,
+    r.drive_id, r.is_owner, r.accessed_at, r.resource_path,
     r.sort_str, r.type_order, r.folder_first{username_col}
 FROM resources r
 {user_join}
@@ -486,7 +518,6 @@ LIMIT $6"
                     size,
                     resource_created_at: row.get("resource_created_at"),
                     modified_at: row.get("modified_at"),
-                    owner_id: row.get("owner_id"),
                     drive_id: row.get("drive_id"),
                     blob_hash: row.try_get("blob_hash").ok(),
                     is_owner: row.try_get("is_owner").unwrap_or(false),

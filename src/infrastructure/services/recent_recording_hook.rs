@@ -29,7 +29,6 @@ use std::time::Duration;
 use moka::sync::Cache;
 use uuid::Uuid;
 
-use crate::application::ports::recent_ports::RecentItemsUseCase;
 use crate::application::ports::resource_access_hook::ResourceAccessHook;
 use crate::application::services::recent_service::RecentService;
 
@@ -85,7 +84,16 @@ impl ResourceAccessHook for RecentRecordingHook {
         let recent = Arc::clone(&self.recent);
         let (caller_id, file_id) = key;
         tokio::spawn(async move {
-            if let Err(e) = recent.record_item_access(caller_id, &file_id, "file").await {
+            // Fast path: skip the trait's `authz.require(Read, …)`
+            // (upstream `_with_perms` service already gated). The
+            // extra SQL round-trip pushes the upsert past the client's
+            // immediate `GET /api/recent/resources` in
+            // `tests/api/recent.hurl` step 7 — the whole reason for
+            // the internal variant.
+            if let Err(e) = recent
+                .record_item_access_internal(caller_id, &file_id, "file")
+                .await
+            {
                 tracing::warn!(
                     target: "oxicloud::recent",
                     caller_id = %caller_id,

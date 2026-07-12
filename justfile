@@ -159,23 +159,34 @@ front-design:
 
 # Hurl-driven functional tests (starts postgres + server, tears down after).
 #
-# Three runners — each isolated, brings up its own sidecars + server config:
-#   * tests/api/run.sh    — REST API surface, default server.env
-#   * tests/webdav/run.sh — native WebDAV + NextCloud DAV, default server.env
-#   * tests/oidc/run.sh   — OIDC SSO end-to-end against a fake IdP
-#                           (tests/oidc/fake_idp, a Node panva/oidc-provider
-#                           wrapper); server launched with
-#                           --config server-with-oidc.env so the api and
-#                           webdav suites stay on the OIDC-off config.
+# Four runners — each isolated, brings up its own sidecars + server config:
+#   * tests/api/run.sh              — REST API surface, default server.env
+#   * tests/webdav/run.sh           — native WebDAV + NextCloud DAV, default server.env
+#   * tests/webdav-drive-root/run.sh — WebDAV `OXICLOUD_WEBDAV_DRIVE_PATH=""`
+#                                     variant (drive listing served at
+#                                     `/webdav/` instead of `/webdav/@drive/`).
+#                                     Server launched with
+#                                     --config server-webdav-drive-root.env
+#                                     so the default runners stay on the
+#                                     `"@drive"` config.
+#   * tests/oidc/run.sh             — OIDC SSO end-to-end against a fake IdP
+#                                     (tests/oidc/fake_idp, a Node
+#                                     panva/oidc-provider wrapper); server
+#                                     launched with
+#                                     --config server-with-oidc.env so the
+#                                     api and webdav suites stay on the
+#                                     OIDC-off config.
 #
 # Same chain runs in CI under the `api-test` job in
 # .github/workflows/ci.yml; keep the order in sync so a local pass means
 # CI passes.
 api-test:
     #!/usr/bin/env bash
+    set -x
     set -euo pipefail
     ./tests/api/run.sh
     ./tests/webdav/run.sh
+    ./tests/webdav-drive-root/run.sh
     ./tests/oidc/run.sh
     if which litmus >/dev/null 2>/dev/null
     then

@@ -302,6 +302,97 @@ jsonpath "$.blobs_deleted" exists
 jsonpath "$.bytes_freed" exists
 
 
+# ─────────────────────────────────────────────────────────────
+# Step 11 — Pre-flight quota gate on MOVE and COPY.
+#
+#           Silent gap before 2026-07-06:
+#           `move_file_with_perms` / `move_folder_with_perms`
+#           / `copy_file_with_perms` / `copy_folder_tree_with_perms`
+#           never called `check_drive_quota` on the destination.
+#           A user could bypass a tight drive's cap by uploading
+#           to their unlimited personal drive first and MOVE-ing
+#           (or COPY-ing) into the tight drive afterwards.
+#
+#           Fix landed in the service layer, so both REST + WebDAV +
+#           NC WebDAV surfaces got the check for free. This step
+#           locks in the 507 shape on the REST path:
+#
+#             a) MOVE a 5 MiB file from unlimited → tight → 507.
+#             b) COPY a 5 MiB file from unlimited → tight → 507.
+#             c) Sanity — same MOVE targeted at unlimited still 200.
+# ─────────────────────────────────────────────────────────────
+
+# Capture the 5 MiB file id currently living in the unlimited drive
+# (uploaded at Step 7). We'll try to relocate it into the 100-byte
+# tight drive.
+GET {{base_url}}/api/files?folder_id={{unlimited_root_id}}
+Authorization: Bearer {{owner_token}}
+
+HTTP 200
+[Captures]
+big_file_id: jsonpath "$[0].id"
+
+
+# 11a — MOVE 5 MiB file into the tight (100-byte quota) drive.
+#       Refused at the service pre-check: 5_242_880 + 32 > 100.
+PUT {{base_url}}/api/files/{{big_file_id}}/move
+Authorization: Bearer {{owner_token}}
+Content-Type: application/json
+{
+  "folder_id": "{{tight_root_id}}"
+}
+
+HTTP 507
+
+
+# 11b — COPY same file into tight drive. Same refusal shape as MOVE
+#       — COPY creates a NEW file row that counts against
+#       `drives.used_bytes` even when blob dedup means no new bytes
+#       hit the store. Batch endpoint lives under `/api/batch/…`,
+#       not `/api/files/…`.
+POST {{base_url}}/api/batch/files/copy
+Authorization: Bearer {{owner_token}}
+Content-Type: application/json
+{
+  "file_ids": ["{{big_file_id}}"],
+  "target_folder_id": "{{tight_root_id}}"
+}
+
+# Batch envelope: 200 all-ok, 206 partial, 400 all-failed. Our
+# single-item batch has one quota-refused item → 400 with the
+# failure in the `.failed[]` array (per `BatchOperationResponse`).
+HTTP 400
+[Asserts]
+jsonpath "$.stats.failed"      == 1
+jsonpath "$.stats.successful"  == 0
+jsonpath "$.failed[0].id"      == "{{big_file_id}}"
+jsonpath "$.failed[0].error"   exists
+
+
+# 11c — Sanity: the file MOVE isn't universally broken. Targeting
+#       the unlimited drive's own root succeeds (it's already
+#       there, but MOVE is idempotent for same-parent — service
+#       returns 200 without re-doing storage work).
+PUT {{base_url}}/api/files/{{big_file_id}}/move
+Authorization: Bearer {{owner_token}}
+Content-Type: application/json
+{
+  "folder_id": "{{unlimited_root_id}}"
+}
+
+HTTP 200
+
+
+# `used_bytes` on the tight drive is unchanged — the two refused
+# operations above never wrote anything.
+GET {{base_url}}/api/drives
+Authorization: Bearer {{owner_token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$[?(@.id=='{{tight_drive_id}}')].used_bytes" == 32
+
+
 # No cleanup tail here — `tests/api/storage_cleanup_check.sh` enumerates
 # every drive via `GET /api/admin/drives` and drains+deletes any that
 # isn't admin's default. This keeps individual Hurl tests focused on

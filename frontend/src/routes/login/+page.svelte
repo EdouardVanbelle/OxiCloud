@@ -107,7 +107,7 @@
 				);
 				return;
 			}
-			session.user = data.user;
+			session.setUser(data.user);
 			await goto(resolve(redirectTarget), { replaceState: true });
 		} catch (err) {
 			error = err instanceof Error ? err.message : t('auth.login_error', 'Error logging in');
@@ -203,7 +203,7 @@
 		if (oidcCode) {
 			const user = await exchangeOidcCode(oidcCode);
 			if (user) {
-				session.user = user;
+				session.setUser(user);
 				await goto(resolve(redirectTarget), { replaceState: true });
 				return;
 			}
@@ -214,7 +214,7 @@
 		try {
 			const me = await fetchMe();
 			if (me) {
-				session.user = me;
+				session.setUser(me);
 				await goto(resolve(redirectTarget), { replaceState: true });
 				return;
 			}

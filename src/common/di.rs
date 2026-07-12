@@ -50,13 +50,13 @@ use crate::application::ports::video_frame_ports::VideoFramePort;
 use crate::application::services::app_password_service::AppPasswordService;
 use crate::application::services::blob_lifecycle_service::BlobLifecycleService;
 use crate::application::services::calendar_service::CalendarService;
+use crate::application::services::contact_service::ContactService;
 use crate::application::services::device_auth_service::DeviceAuthService;
 use crate::application::services::file_lifecycle_service::FileLifecycleService;
 use crate::application::services::music_service::MusicService;
 use crate::application::services::storage_usage_service::StorageUsageService;
 use crate::application::services::wopi_lock_service::WopiLockService;
 use crate::application::services::wopi_token_service::WopiTokenService;
-use crate::infrastructure::adapters::contact_storage_adapter::ContactStorageAdapter;
 use crate::infrastructure::repositories::AppPasswordPgRepository;
 use crate::infrastructure::repositories::DeviceCodePgRepository;
 use crate::infrastructure::repositories::pg::{
@@ -536,7 +536,12 @@ impl AppServiceFactory {
             // drive repo every other policy uses. Wired here so
             // `move_folder_with_perms` can enforce
             // `forbid_cross_drive_move` without a separate construction path.
-            .with_drive_repo(drive_repo.clone()),
+            .with_drive_repo(drive_repo.clone())
+            // Destination-drive quota pre-check on cross-drive folder
+            // MOVE. Reuses the `check_drive_quota` the upload path
+            // already runs. Without this, a Move that would push the
+            // destination past its cap succeeds silently.
+            .with_storage_usage(storage_usage.clone()),
         );
 
         // Built before the upload/management services so the plugin lifecycle
@@ -618,7 +623,10 @@ impl AppServiceFactory {
             // drive repo every other policy uses. Wired here so
             // `move_file_with_perms` can enforce `forbid_cross_drive_move`
             // without a separate construction path.
-            .with_drive_repo(drive_repo.clone());
+            .with_drive_repo(drive_repo.clone())
+            // Destination-drive quota pre-check on cross-drive file
+            // MOVE. Same rationale as the folder side above.
+            .with_storage_usage(storage_usage.clone());
             if let Some(hook) = resource_access_hook.clone() {
                 svc = svc.with_resource_access_hook(hook);
             }
@@ -889,30 +897,49 @@ impl AppServiceFactory {
         Some(service)
     }
 
-    /// Creates the favorites service (requires database)
-    pub fn create_favorites_service(&self, db_pool: &Arc<PgPool>) -> Arc<FavoritesService> {
+    /// Creates the favorites service (requires database + authz engine
+    /// for the Read gate on `add_to_favorites` — see the post-Drive
+    /// AuthZ audit).
+    pub fn create_favorites_service(
+        &self,
+        db_pool: &Arc<PgPool>,
+        authorization: &Arc<PgAclEngine>,
+    ) -> Arc<FavoritesService> {
         let repo = Arc::new(
             crate::infrastructure::repositories::pg::FavoritesPgRepository::new(db_pool.clone()),
         );
-        let service = Arc::new(FavoritesService::new(repo));
+        let service = Arc::new(FavoritesService::new(repo, authorization.clone()));
         tracing::info!("Favorites service initialized");
         service
     }
 
-    /// Creates the recent items service (requires database)
-    pub fn create_recent_service(&self, db_pool: &Arc<PgPool>) -> Arc<RecentService> {
+    /// Creates the recent items service (requires database + authz
+    /// engine for the Read gate on `record_item_access` — see the
+    /// post-Drive AuthZ audit).
+    pub fn create_recent_service(
+        &self,
+        db_pool: &Arc<PgPool>,
+        authorization: &Arc<PgAclEngine>,
+    ) -> Arc<RecentService> {
         let repo = Arc::new(
             crate::infrastructure::repositories::pg::RecentItemsPgRepository::new(db_pool.clone()),
         );
         let service = Arc::new(RecentService::new(
-            repo, 50, // Maximum recent items per user
+            repo,
+            authorization.clone(),
+            50, // Maximum recent items per user
         ));
         tracing::info!("Recent items service initialized");
         service
     }
 
     /// Creates the Places (photo map) service. Reuses the existing file-read
-    /// repository — the data is the caller's own geotagged photos.
+    /// repository — the data is the caller's Photos-scope geotagged photos
+    /// (§15: default personal drive + drives with
+    /// `include_in_photo_index = true` AND caller has Read).
+    /// Group-membership expansion is inline in the SQL via
+    /// `storage.caller_group_ids`, so the service needs no AuthZ engine
+    /// handle.
     pub fn create_places_service(
         &self,
         file_read: &Arc<FileBlobReadRepository>,
@@ -1156,31 +1183,6 @@ impl AppServiceFactory {
         let pool = Arc::new(pools.primary);
         let maintenance_pool = Arc::new(pools.maintenance);
 
-        // Recent service + recording hook are built up-front so the
-        // hook can be threaded into `create_application_services` below.
-        // The file services hold the hook directly so every authorised
-        // `_with_perms` read/write fires into `auth.user_recent_files`
-        // without per-handler wiring. Reordering vs the legacy in-block
-        // creation (further down) is safe: `create_recent_service` only
-        // needs `pool`, which is already in scope.
-        //
-        // The back-edge `recent_service_eager.set_resource_access_hook`
-        // closes the loop so the clear/remove handlers can drop the
-        // hook's in-memory throttle entries — without it a freshly
-        // cleared Recent list refuses to re-record the same file for a
-        // full TTL window, surfacing as "I cleared, opened the file,
-        // and Recent is still empty" (caught by tests/api/recent.hurl
-        // step 8).
-        let recent_service_eager = self.create_recent_service(&pool);
-        let resource_access_hook: Arc<
-            dyn crate::application::ports::resource_access_hook::ResourceAccessHook,
-        > = Arc::new(
-            crate::infrastructure::services::recent_recording_hook::RecentRecordingHook::new(
-                recent_service_eager.clone(),
-            ),
-        );
-        recent_service_eager.set_resource_access_hook(resource_access_hook.clone());
-
         // 1. Core services (PgPool needed for DedupService index)
         let core = self.create_core_services(&pool, &maintenance_pool).await?;
 
@@ -1191,6 +1193,10 @@ impl AppServiceFactory {
         // because services hold an Arc<PgAclEngine> for ReBAC checks.
         // SubjectGroupPgRepository is constructed here too so the engine can
         // expand a user's transitive group set on cache misses.
+        //
+        // Moved above the eager recent-service build so `create_recent_service`
+        // can receive an `Arc<PgAclEngine>` — the Read gate on
+        // `record_item_access` (post-Drive AuthZ audit fix) needs it.
         let subject_group_repo = Arc::new(
             crate::infrastructure::repositories::pg::SubjectGroupPgRepository::new(pool.clone()),
         );
@@ -1200,6 +1206,29 @@ impl AppServiceFactory {
             repos.file_read_repository.clone(),
             subject_group_repo.clone(),
         );
+
+        // Recent service + recording hook are built up-front so the
+        // hook can be threaded into `create_application_services` below.
+        // The file services hold the hook directly so every authorised
+        // `_with_perms` read/write fires into `auth.user_recent_files`
+        // without per-handler wiring.
+        //
+        // The back-edge `recent_service_eager.set_resource_access_hook`
+        // closes the loop so the clear/remove handlers can drop the
+        // hook's in-memory throttle entries — without it a freshly
+        // cleared Recent list refuses to re-record the same file for a
+        // full TTL window, surfacing as "I cleared, opened the file,
+        // and Recent is still empty" (caught by tests/api/recent.hurl
+        // step 8).
+        let recent_service_eager = self.create_recent_service(&pool, &authorization);
+        let resource_access_hook: Arc<
+            dyn crate::application::ports::resource_access_hook::ResourceAccessHook,
+        > = Arc::new(
+            crate::infrastructure::services::recent_recording_hook::RecentRecordingHook::new(
+                recent_service_eager.clone(),
+            ),
+        );
+        recent_service_eager.set_resource_access_hook(resource_access_hook.clone());
 
         // Drive repository — needed both by the lifecycle hook (when auth
         // is enabled) and by `GET /api/drives` on the final `AppState`,
@@ -1274,7 +1303,7 @@ impl AppServiceFactory {
         > = None;
 
         {
-            let favs = self.create_favorites_service(&pool);
+            let favs = self.create_favorites_service(&pool, &authorization);
             favorites_service = Some(favs.clone());
             apps.favorites_service = Some(favs);
 
@@ -1529,7 +1558,6 @@ impl AppServiceFactory {
             people_service,
             storage_usage_service,
             calendar_service: None,
-            contact_service: None,
             calendar_use_case: None,
             addressbook_use_case: None,
             contact_use_case: None,
@@ -1800,6 +1828,7 @@ impl AppServiceFactory {
             let calendar_service = Arc::new(
                 crate::application::services::calendar_service::CalendarService::new(
                     calendar_storage,
+                    authorization.clone(),
                 ),
             );
             app_state.calendar_use_case = Some(calendar_service as Arc<CalendarService>);
@@ -1816,15 +1845,23 @@ impl AppServiceFactory {
                     pool.clone(),
                 ),
             );
+            // Post-Round-3: symmetric with CalendarService/CalendarStorageAdapter.
+            //   * ContactStorageAdapter → pure ContactStoragePort impl
+            //     (raw PG storage, no ACL, no sharing).
+            //   * ContactService → gates every call through the
+            //     AuthorizationEngine, then delegates through the port.
+            //     Owns both AddressBookUseCase + ContactUseCase impls.
             let contact_storage = Arc::new(
                 crate::infrastructure::adapters::contact_storage_adapter::ContactStorageAdapter::new(
                     address_book_repo,
                     contact_repo,
                     group_repo,
-                )
+                ),
             );
-            app_state.addressbook_use_case = Some(contact_storage.clone());
-            app_state.contact_use_case = Some(contact_storage);
+            let contact_service =
+                Arc::new(ContactService::new(contact_storage, authorization.clone()));
+            app_state.addressbook_use_case = Some(contact_service.clone());
+            app_state.contact_use_case = Some(contact_service);
 
             tracing::info!("CalDAV and CardDAV services initialized with PostgreSQL repositories");
         }
@@ -1844,7 +1881,7 @@ impl AppServiceFactory {
                     audio_metadata_repo,
                 ),
             );
-            let music_svc = Arc::new(MusicService::new(music_storage));
+            let music_svc = Arc::new(MusicService::new(music_storage, authorization.clone()));
             app_state.music_service = Some(music_svc);
             tracing::info!("Music service initialized");
         }
@@ -1993,10 +2030,9 @@ pub struct AppState {
     pub people_service: Option<Arc<PeopleService>>,
     pub storage_usage_service: Option<Arc<StorageUsageService>>,
     pub calendar_service: Option<Arc<CalendarService>>,
-    pub contact_service: Option<Arc<ContactStorageAdapter>>,
     pub calendar_use_case: Option<Arc<CalendarService>>,
-    pub addressbook_use_case: Option<Arc<ContactStorageAdapter>>,
-    pub contact_use_case: Option<Arc<ContactStorageAdapter>>,
+    pub addressbook_use_case: Option<Arc<ContactService>>,
+    pub contact_use_case: Option<Arc<ContactService>>,
     pub music_service: Option<Arc<MusicService>>,
     pub wopi_token_service:
         Option<Arc<crate::application::services::wopi_token_service::WopiTokenService>>,

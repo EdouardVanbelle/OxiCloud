@@ -283,20 +283,10 @@ impl SearchService {
             return Vec::new();
         };
 
-        // Resolve the caller's accessible drive set via the engine
-        // (handles group-mediated drive grants) + the repo lookup.
-        let caller = Subject::User(user_id);
-        let (subject_types, subject_ids) = match authz.expand_subject_for_listing(caller).await {
-            Ok(pair) => pair,
-            Err(e) => {
-                tracing::warn!("Content-index: subject expansion failed — degrading to empty: {e}");
-                return Vec::new();
-            }
-        };
-        let accessible_drives: Vec<Uuid> = match drive_repo
-            .list_for_subjects(&subject_types, &subject_ids)
-            .await
-        {
+        // Resolve the caller's accessible drive set. Group-mediated
+        // grants are honoured inline by `storage.caller_group_ids` on
+        // the SQL side, so no Rust-side subject expansion here.
+        let accessible_drives: Vec<Uuid> = match drive_repo.list_readable_by(user_id).await {
             Ok(drives) => drives.into_iter().map(|d| d.drive.id).collect(),
             Err(e) => {
                 tracing::warn!("Content-index: drive lookup failed — degrading to empty: {e}");
@@ -338,7 +328,11 @@ impl SearchService {
                 }
             };
             match authz
-                .check(caller, Permission::Read, Resource::File(file_uuid))
+                .check(
+                    Subject::User(user_id),
+                    Permission::Read,
+                    Resource::File(file_uuid),
+                )
                 .await
             {
                 Ok(true) => verified.push(hit),

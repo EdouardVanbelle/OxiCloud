@@ -61,6 +61,11 @@
 	import { formatBytes } from '$lib/utils/format';
 	import { formatDate, iconNameFromClass, fileIconKindClass } from '$lib/utils/display';
 	import { gridColumns } from '$lib/utils/grid';
+	import {
+		canThumbnailClientSide,
+		preloadPdf,
+		queueGenerate as queueThumbnailGenerate
+	} from '$lib/utils/thumbnail';
 
 	// File preview and the WOPI editor are heavy and only appear on demand, so
 	// their modules load the first time the user opens one (see the effects that
@@ -731,7 +736,11 @@
 	 */
 	function canThumbnail(file: FileItem): boolean {
 		const m = file.mime_type ?? '';
-		return m.startsWith('image/') || m.startsWith('video/');
+		// PDF joins image/video: the client-side generator ported from
+		// the legacy vanilla frontend renders PDFs via pdf.js on the
+		// `<img onerror>` fallback path. Without this the img never
+		// mounts for PDFs and the fallback never fires.
+		return m.startsWith('image/') || m.startsWith('video/') || m === 'application/pdf';
 	}
 
 	// ── Multi-select + batch ────────────────────────────────────────────────
@@ -1431,10 +1440,21 @@
 	const SKELETON = [0, 1, 2, 3, 4, 5, 6, 7];
 
 	// Reload whenever the route path changes.
+	//
+	// `load()` reads several reactive signals in its sync phase
+	// (session.isExternalUser, session.homeFolderId, plus whatever
+	// its awaited callees touch). Naively calling `void load()` here
+	// tracks all of those as dependencies of this effect — and
+	// `session.loadHomeFolder()`'s own writes to `homeFolderId`
+	// during its resolution then re-trigger the effect, firing a
+	// second and third `load()` before the first has settled. Wrap
+	// in `untrack` so the ONLY dependency is `pathSegments` (route
+	// change is the sole legitimate re-trigger).
 	$effect(() => {
-		// reference pathSegments so the effect re-runs on navigation
 		void pathSegments;
-		void load();
+		untrack(() => {
+			void load();
+		});
 	});
 
 	// The command palette's "Upload files" action navigates here then dispatches
@@ -1797,7 +1817,9 @@
 		<div class="grid-meta">
 			<span class="grid-meta__date">{relativeTimeAgo(folder.modified_at)}</span>
 		</div>
-		<div class="owner-cell">{ownerLabel(folder.owner_id, session.user?.id ?? null)}</div>
+		<div class="owner-cell">
+			{ownerLabel(folder.created_by, session.user?.id ?? null)}
+		</div>
 		<div class="type-cell">{t('files.file_types.folder', 'Folder')}</div>
 		<div class="size-cell">—</div>
 		<div class="date-cell">{formatDate(folder.modified_at)}</div>
@@ -1905,7 +1927,20 @@
 						src={fileThumbnailUrl(file.id)}
 						alt=""
 						loading="lazy"
-						onerror={(e) => ((e.currentTarget as HTMLImageElement).style.display = 'none')}
+						onerror={(e) => {
+							// Server-side thumbnail is missing (404) — try client-side
+							// generation for image / PDF / video and PUT the result
+							// back so the next viewer gets the server thumbnail.
+							// Ported from the legacy static/js/features/thumbnail.js.
+							const img = e.currentTarget as HTMLImageElement;
+							img.style.display = 'none';
+							if (!canThumbnailClientSide(file)) return;
+							if (file.mime_type === 'application/pdf') preloadPdf();
+							void queueThumbnailGenerate(file, (dataUrl) => {
+								img.src = dataUrl;
+								img.style.display = '';
+							});
+						}}
 					/>
 				{/if}
 			</div>
@@ -1927,7 +1962,9 @@
 			<span class="grid-meta__date">{relativeTimeAgo(file.modified_at)}</span>
 			{#if file.size != null}<span class="grid-meta__size">{formatBytes(file.size)}</span>{/if}
 		</div>
-		<div class="owner-cell">{ownerLabel(file.owner_id, session.user?.id ?? null)}</div>
+		<div class="owner-cell">
+			{ownerLabel(file.created_by, session.user?.id ?? null)}
+		</div>
 		<div class="type-cell">{typeLabel(file.category)}</div>
 		<div class="size-cell">{file.size != null ? formatBytes(file.size) : ''}</div>
 		<div class="date-cell">{formatDate(file.modified_at)}</div>

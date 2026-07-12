@@ -32,6 +32,14 @@ const MAX_LOCK_TIMEOUT_SECS: u64 = 86_400; // 24 hours
 pub struct LockEntry {
     pub info: LockInfo,
     pub path: String,
+    /// The user who acquired the lock. `None` for entries seeded by
+    /// unit tests or refresh paths that don't carry a caller (the
+    /// refresh flow rebuilds from the existing entry without a new
+    /// caller context, so we preserve whatever was there). RFC 4918
+    /// §9.11's "MUST be requested by the owner" rule for UNLOCK is
+    /// enforced by comparing this against the caller in
+    /// `handle_unlock`.
+    pub caller_user_id: Option<uuid::Uuid>,
 }
 
 /// Per-entry expiration policy for the `by_path` cache.
@@ -110,7 +118,12 @@ impl WebDavLockStore {
     /// - The existing lock is exclusive (blocks any new lock), or
     /// - The new lock is exclusive and any lock already exists (RFC 4918 §7.8).
     #[allow(clippy::result_large_err)]
-    pub fn acquire(&self, path: &str, info: LockInfo) -> Result<LockEntry, LockEntry> {
+    pub fn acquire(
+        &self,
+        path: &str,
+        info: LockInfo,
+        caller_user_id: Option<uuid::Uuid>,
+    ) -> Result<LockEntry, LockEntry> {
         if let Some(existing) = self.by_path.get(path) {
             // Exclusive existing lock → blocks everything.
             // New exclusive lock → blocked by any existing lock (shared or exclusive).
@@ -123,6 +136,7 @@ impl WebDavLockStore {
             let entry = LockEntry {
                 info,
                 path: path.to_owned(),
+                caller_user_id,
             };
             self.by_token
                 .insert(entry.info.token.clone(), path.to_owned());
@@ -132,6 +146,7 @@ impl WebDavLockStore {
         let entry = LockEntry {
             info,
             path: path.to_owned(),
+            caller_user_id,
         };
 
         // `LockExpiry` derives the TTL from `entry.info.timeout` on insert —
@@ -254,6 +269,7 @@ mod tests {
         LockEntry {
             info: lock_info(token, timeout, LockScope::Exclusive),
             path: "/file.txt".to_owned(),
+            caller_user_id: None,
         }
     }
 
@@ -305,7 +321,7 @@ mod tests {
         let store = WebDavLockStore::new(16);
         let info = lock_info("urn:token-1", Some("Second-600"), LockScope::Exclusive);
 
-        let acquired = store.acquire("/a.txt", info).expect("acquire");
+        let acquired = store.acquire("/a.txt", info, None).expect("acquire");
         assert_eq!(acquired.info.token, "urn:token-1");
 
         // Resolvable by both indexes.
@@ -332,12 +348,14 @@ mod tests {
             .acquire(
                 "/a.txt",
                 lock_info("urn:token-1", Some("Second-600"), LockScope::Exclusive),
+                None,
             )
             .expect("first acquire");
 
         let conflict = store.acquire(
             "/a.txt",
             lock_info("urn:token-2", Some("Second-600"), LockScope::Exclusive),
+            None,
         );
         assert!(conflict.is_err());
         // The original holder is returned so the caller can report it.
@@ -351,6 +369,7 @@ mod tests {
             .acquire(
                 "/a.txt",
                 lock_info("urn:token-1", Some("Infinite"), LockScope::Exclusive),
+                None,
             )
             .expect("acquire");
 

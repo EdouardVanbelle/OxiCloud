@@ -9,7 +9,8 @@
 	import { renameFolder } from '$lib/api/endpoints/folders';
 	import { errorToast } from '$lib/utils/errors';
 	import { ui } from '$lib/stores/ui.svelte';
-	import type { Drive, DriveMember, DriveRole } from '$lib/api/types';
+	import type { Drive, DriveMember, DriveRole, DrivePoliciesPartial } from '$lib/api/types';
+	import PolicyList from '$lib/components/PolicyList.svelte';
 	import ShareDialog from '$lib/components/ShareDialog.svelte';
 	import UserVignette from '$lib/components/UserVignette.svelte';
 	import Icon from '$lib/icons/Icon.svelte';
@@ -17,6 +18,7 @@
 	import { drives as drivesStore, driveIcon } from '$lib/stores/drives.svelte';
 	import { formatDate } from '$lib/utils/display';
 	import { formatBytes } from '$lib/utils/format';
+	import { readAllPolicies } from '$lib/utils/drivePolicies';
 
 	const uuid = $derived(page.params.uuid ?? '');
 	const drive = $derived<Drive | null>(drivesStore.findById(uuid));
@@ -179,10 +181,15 @@
 		return Math.min(100, (drive.used_bytes / drive.quota_bytes) * 100);
 	});
 
-	// Drive policies are OxiCloud-admin-only post-D5 — owners can no
-	// longer mutate them, so this page no longer surfaces them at all
-	// (the admin panel hosts the policy editor). See
-	// `docs/plan/drive.md` §8.
+	// Drive policies are OxiCloud-admin-only for mutation (§8), but
+	// visible read-only here so members understand what rules apply to
+	// the drive they're on. The admin's "Manage policies" modal on
+	// `/admin` is the only editor. `readAllPolicies` normalises the raw
+	// JSONB bag into a `Required<DrivePoliciesPartial>` — unknown keys
+	// (or missing ones) resolve to `false`.
+	const drivePoliciesView = $derived<Required<DrivePoliciesPartial>>(
+		readAllPolicies((drive?.policies ?? {}) as Record<string, unknown>)
+	);
 
 	onMount(() => {
 		void drivesStore.load();
@@ -386,6 +393,26 @@
 			{/if}
 		</div>
 
+		<!-- Policies card — read-only summary of the current drive rules.
+		     Content is dense (seven toggle rows), so the whole card folds
+		     into a native `<details>` disclosure. Closed by default; the
+		     admin-only mutation surface still lives on `/admin`. -->
+		<details class="card policies-card">
+			<summary class="policies-card__summary">
+				<h2><Icon name="shield-alt" /> {t('drive.policies', 'Policies')}</h2>
+				<span class="policies-card__caret" aria-hidden="true">
+					<Icon name="chevron-down" />
+				</span>
+			</summary>
+			<p class="muted">
+				{t(
+					'drive.policies_help',
+					"Rules an OxiCloud admin has set for this drive. Only admins can change them; you're seeing the current state."
+				)}
+			</p>
+			<PolicyList values={drivePoliciesView} readonly testIdPrefix="drive-policy" />
+		</details>
+
 		{#if canDelete}
 			<!-- Danger zone: drive delete (D3b). Only rendered for Owners on
 			     non-default drives. Backend enforces the empty-drive rule —
@@ -460,6 +487,49 @@
 		margin: 0 0 1rem;
 		font-size: 1.05rem;
 		color: var(--color-text-heading);
+	}
+
+	/* Policies card is a `<details>` disclosure — the summary bar carries
+	   the h2 title on the left and a chevron on the right that rotates
+	   when the section opens. Native `<details>` handles the interaction
+	   (click / keyboard / accessible affordance) — no Svelte state
+	   needed. */
+	.policies-card__summary {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 1rem;
+		cursor: pointer;
+		list-style: none;
+	}
+
+	.policies-card__summary::-webkit-details-marker {
+		/* Chrome/Safari: hide the default triangle so our chevron is the
+		   only disclosure affordance. Firefox uses `list-style: none`
+		   above. */
+		display: none;
+	}
+
+	.policies-card__summary h2 {
+		margin: 0;
+	}
+
+	.policies-card__caret {
+		color: var(--color-text-muted);
+		transition: transform 150ms ease;
+	}
+
+	details[open] > .policies-card__summary .policies-card__caret {
+		transform: rotate(180deg);
+	}
+
+	/* When closed the summary is the entire card content, so we drop the
+	   card's default bottom padding. When open the help paragraph +
+	   policy list need breathing room from the summary — restore the
+	   spacing by nudging the first child. */
+	details.policies-card > .muted {
+		margin-top: 1rem;
+		margin-bottom: 0.75rem;
 	}
 
 	.info-grid {

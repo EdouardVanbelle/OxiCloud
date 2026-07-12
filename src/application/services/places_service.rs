@@ -9,10 +9,12 @@ use crate::infrastructure::repositories::pg::FileBlobReadRepository;
 /// "Places" use case: the caller's geotagged photos aggregated into map
 /// clusters.
 ///
-/// Strictly user-scoped — the repository filters `WHERE fi.user_id = $1`, so,
-/// like [`RecentService`](super::recent_service::RecentService) and the photos
-/// timeline, it needs no `AuthorizationEngine` check: the `caller_id`
-/// parameter *is* the access scope.
+/// Post-§15 the surface follows the Photos scope: drives where the
+/// caller has Read AND `policies.include_in_photo_index = true`
+/// (default personal drives materialise the flag at creation).
+/// Group-membership expansion is handled inline by
+/// `storage.caller_group_ids(caller)` inside the repo's SQL, so this
+/// service is a thin coordinate-math wrapper — no engine dependency.
 pub struct PlacesService {
     file_read: Arc<FileBlobReadRepository>,
 }
@@ -30,7 +32,8 @@ impl PlacesService {
         360.0 / (2_f64.powi(z) * 4.0)
     }
 
-    /// Clustered geotagged photos for `caller_id` within `bounds`.
+    /// Clustered geotagged photos in the caller's Photos-scope drive set,
+    /// within `bounds`.
     pub async fn clusters(
         &self,
         caller_id: Uuid,

@@ -1131,7 +1131,7 @@
 	}
 
 	.btn-action--danger {
-		color: var(--color-danger-text);
+		color: var(--color-danger-alt);
 	}
 
 	button[type='submit'] {

@@ -367,12 +367,14 @@ async fn handle_assemble(
     let chroot = session.require_chroot()?;
     let drive_id = chroot.drive_id;
 
-    // TODO(D1): read the caller's default-drive root folder name from
-    // `drives.root_folder_id` instead of hardcoding "Personal". The
-    // constant is correct for every default personal drive provisioned
-    // by the D0 lifecycle hook, but secondary drives (M2 backfill from
-    // SQL-created sibling root folders) keep their original name.
-    let internal_path = format!("Personal/{}", dest_subpath.trim_matches('/'));
+    // Route through `nc_to_internal_path(chroot, …)` so the write
+    // lands under the caller's actual default-drive root (not the
+    // literal "Personal" folder). Post-D3 chroot resolution puts the
+    // correct FolderDto — including the drive's real root name — on
+    // the NcSession; secondary drives with SQL-provisioned sibling
+    // root names now work.
+    let internal_path =
+        crate::interfaces::nextcloud::webdav_handler::nc_to_internal_path(chroot, &dest_subpath)?;
 
     let filename = filename_from_path(&dest_subpath).to_string();
     let ingested = ingest_stream_to_cas(
@@ -393,7 +395,7 @@ async fn handle_assemble(
 
     let etag: Option<String> = if existing.is_ok() {
         let dto = upload_service
-            .update_file_streaming(
+            .update_file_streaming_with_perms(
                 &internal_path,
                 drive_id,
                 ingested.stored(),
@@ -412,7 +414,8 @@ async fn handle_assemble(
             Some((p, n)) => (p, n),
             None => ("", dest_subpath.as_str()),
         };
-        let parent_internal = format!("Personal/{}", parent_sub.trim_matches('/'));
+        let parent_internal =
+            crate::interfaces::nextcloud::webdav_handler::nc_to_internal_path(chroot, parent_sub)?;
         let parent_internal = parent_internal.trim_end_matches('/');
 
         use crate::application::ports::folder_ports::FolderUseCase;

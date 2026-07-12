@@ -1106,6 +1106,10 @@
       "forbid_cross_drive_move_help": "Block moving files or folders out to another drive. Does not stop download + re-upload.",
       "forbid_owner_role_change": "Lock Owner roster",
       "forbid_owner_role_change_help": "Only admin can add, remove, or demote drive Owners while this is on.",
+      "include_in_photo_index": "Include in Photos",
+      "include_in_photo_index_help": "Show image and video files from this drive in the Photos timeline and on the Places map. Default personal drives are opted in automatically; turn on for shared drives that genuinely hold photos (e.g. \"Family Photos\").",
+      "include_in_music_index": "Include in Music",
+      "include_in_music_index_help": "Include audio files from this drive in the Music library. Default personal drives are opted in automatically; turn on for shared drives that genuinely hold a music collection (e.g. \"Family Music\", \"Band Collaboration\").",
       "implied_by_forbid_sharing": "Already enforced by Forbid per-resource sharing."
     }
   },

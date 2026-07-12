@@ -42,6 +42,16 @@ pub struct FileUploadService {
     /// `(file_id, blob_hash, content_type)`; the recording side needs the
     /// `caller_id` the service already has in hand.
     resource_access_hook: Option<Arc<dyn ResourceAccessHook>>,
+    /// ReBAC engine — enforces `Permission::Update` on
+    /// overwrite-existing and `Permission::Create` on new-file paths
+    /// inside `update_file_streaming_with_perms`. Optional at the
+    /// struct level for the minimal test constructors (`new`,
+    /// `new_with_read`) but the WebDAV/NC/WOPI put paths refuse
+    /// (fail-closed internal error) if this isn't wired. Set by
+    /// either `with_instant_upload` or `with_authorization` — both
+    /// stash the same Arc so DI callers wiring instant upload get
+    /// the streaming gate for free.
+    authorization: Option<Arc<PgAclEngine>>,
     /// Dependencies of the instant-upload path
     /// (`create_file_from_owned_blob_with_perms`); `None` in minimal test
     /// wiring.
@@ -66,6 +76,7 @@ impl FileUploadService {
             content_cache: None,
             file_lifecycle_hook: None,
             resource_access_hook: None,
+            authorization: None,
             instant_upload: None,
         }
     }
@@ -82,18 +93,34 @@ impl FileUploadService {
             content_cache: None,
             file_lifecycle_hook: None,
             resource_access_hook: None,
+            authorization: None,
             instant_upload: None,
         }
     }
 
+    /// Wires the authorization engine used by
+    /// `update_file_streaming_with_perms` on the WebDAV / NC / WOPI
+    /// PUT path. Independent of `with_instant_upload` so callers can
+    /// enable the streaming gate without also opting into the
+    /// dedup-instant-upload check (test wiring, minimal deployments).
+    pub fn with_authorization(mut self, authz: Arc<PgAclEngine>) -> Self {
+        self.authorization = Some(authz);
+        self
+    }
+
     /// Wires the authorization engine, dedup index and quota service that
     /// power the instant-upload path.
+    ///
+    /// Also stashes the `authz` handle in `self.authorization` so
+    /// DI callers wiring instant upload get the streaming-put gate
+    /// for free — a single `Arc` clone, no behavioural coupling.
     pub fn with_instant_upload(
         mut self,
         authz: Arc<PgAclEngine>,
         dedup: Arc<DedupService>,
         quota: Arc<StorageUsageService>,
     ) -> Self {
+        self.authorization = Some(authz.clone());
         self.instant_upload = Some(InstantUploadDeps {
             authz,
             dedup,
@@ -296,7 +323,6 @@ impl FileUploadService {
             parts.folder_id,
             parts.created_at,
             updated_at as u64,
-            parts.owner_id,
             new_hash,
         )
         .map_err(|e| DomainError::internal_error("FileUpload", format!("rebuild entity: {e}")))?;
@@ -317,19 +343,22 @@ impl FileUploadService {
     /// Incremental (`+size`, O(1)) and fire-and-forget on a background task, so
     /// it adds neither latency nor a `SUM(size)` over the user's whole library
     /// to the upload path (the previous full recompute was O(N) per upload,
-    /// O(N²) for a bulk upload). Keyed by the file's `owner_id`; drift — e.g.
-    /// deletes, which don't decrement — is reconciled by the periodic sweep. A
-    /// DTO without a resolvable owner is simply left to that sweep.
-    fn maybe_update_storage_usage(&self, file: &FileDto) {
+    /// O(N²) for a bulk upload). Drift — e.g. deletes, which don't decrement —
+    /// is reconciled by the periodic sweep.
+    ///
+    /// Post-D7: `file.owner_id` is now nullable and unpopulated on new
+    /// rows, so the envelope owner comes from `caller_id` (the user who
+    /// just did the upload). The user-side delta is guarded by
+    /// `add_user_storage_usage_delta_if_personal` — it only fires when
+    /// the target drive is `kind='personal'`, so a shared-drive upload
+    /// still doesn't touch any user envelope.
+    fn maybe_update_storage_usage(&self, file: &FileDto, caller_id: Uuid) {
         let Some(storage_service) = &self.storage_usage_service else {
             return;
         };
         let delta = file.size as i64;
 
-        let owner = file
-            .owner_id
-            .as_deref()
-            .and_then(|s| Uuid::parse_str(s).ok());
+        let owner = Some(caller_id);
         let folder = file
             .folder_id
             .as_deref()
@@ -410,7 +439,7 @@ impl FileUploadUseCase for FileUploadService {
             "📡 STREAMING UPLOAD: {} ({} bytes, ID: {})",
             name, blob.size, dto.id
         );
-        self.maybe_update_storage_usage(&dto);
+        self.maybe_update_storage_usage(&dto, caller_id);
         if let Some(hook) = &self.file_lifecycle_hook {
             hook.on_file_created(&dto.id, &dto.content_hash, &dto.mime_type, blob.is_new_blob);
         }
@@ -422,7 +451,16 @@ impl FileUploadUseCase for FileUploadService {
 
     /// Swap the content of the file at `path` to an already-ingested blob,
     /// creating the file when it doesn't exist (WebDAV/NextCloud/WOPI PUT).
-    async fn update_file_streaming(
+    ///
+    /// AuthZ (post-Drive audit Round 2 fix): overwrite path requires
+    /// `Update` on the target file; new-file path requires `Create`
+    /// on the parent folder (or on the drive when writing at drive
+    /// root). Fail-closed if the engine wasn't wired — this method
+    /// is the last line of defence between a Viewer/Commenter drive
+    /// member and cross-tenant PUT. See
+    /// `docs/plan/authz_audit/nextcloud.md` and the sibling native
+    /// `/webdav/*` handler.
+    async fn update_file_streaming_with_perms(
         &self,
         path: &str,
         drive_id: Uuid,
@@ -431,10 +469,33 @@ impl FileUploadUseCase for FileUploadService {
         modified_at: Option<i64>,
         caller_id: Uuid,
     ) -> Result<FileDto, DomainError> {
+        let Some(authz) = &self.authorization else {
+            return Err(DomainError::internal_error(
+                "FileUpload",
+                "update_file_streaming_with_perms called without authorization engine wired",
+            ));
+        };
+
         // Try to find the existing file first
         if let Some(file_read) = &self.file_read
             && let Some(file) = file_read.find_file_by_path(path, drive_id).await?
         {
+            // Overwrite branch — caller must have `Update` on the
+            // target file. Denial routes through `require` → 404
+            // (anti-enum, matches read-side shape). Before the D7
+            // audit this whole branch ran unchecked; Viewer members
+            // of shared drives could PUT freely.
+            let file_uuid = Uuid::parse_str(file.id()).map_err(|_| {
+                DomainError::internal_error("FileUpload", "invalid file id from repository")
+            })?;
+            authz
+                .require(
+                    Subject::User(caller_id),
+                    Permission::Update,
+                    Resource::File(file_uuid),
+                )
+                .await?;
+
             let file_id = file.id().to_string();
             let (new_hash, updated_at) = self
                 .file_write
@@ -464,7 +525,6 @@ impl FileUploadUseCase for FileUploadService {
                 parts.folder_id,
                 parts.created_at,
                 updated_at as u64,
-                parts.owner_id,
                 new_hash,
             )
             .map_err(|e| {
@@ -503,6 +563,32 @@ impl FileUploadUseCase for FileUploadService {
         } else {
             None
         };
+
+        // Create branch — caller must have `Create` on the parent
+        // scope. Two cases:
+        //   * `parent_id.is_some()` → caller needs Create on the
+        //     parent Folder resource.
+        //   * `parent_id.is_none()` → the write lands at the drive
+        //     root (either the path was single-segment, or the
+        //     parent-folder lookup failed). We require Create on
+        //     the Drive itself — bundled with owner/editor/contributor
+        //     role_grants, refused for viewer/commenter.
+        let create_resource = match &parent_id {
+            Some(pid) => {
+                let uuid = Uuid::parse_str(pid).map_err(|_| {
+                    DomainError::internal_error("FileUpload", "invalid parent folder id")
+                })?;
+                Resource::Folder(uuid)
+            }
+            None => Resource::Drive(drive_id),
+        };
+        authz
+            .require(
+                Subject::User(caller_id),
+                Permission::Create,
+                create_resource,
+            )
+            .await?;
 
         let is_new_blob = blob.is_new_blob;
         let created = self

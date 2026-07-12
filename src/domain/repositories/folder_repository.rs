@@ -13,6 +13,17 @@ use crate::domain::entities::folder::Folder;
 use crate::domain::services::path_service::StoragePath;
 use uuid::Uuid;
 
+// NOTE on `caller_role` for the two listing methods below:
+// We deliberately do NOT compute or return the caller's role per row.
+// The frontend already fetches `/api/drives` (which surfaces
+// `caller_role` per drive) and cross-references by `folder.drive_id` —
+// see `MoveDialog.svelte` and the config/drive page. Adding
+// `caller_role` to `FolderDto` would either (a) mean redundant
+// server-side work for a client-side concern the client already
+// handles, or (b) drag folder-level grant cascades into the query
+// which is real cost for a rare edge case. Punted; see
+// `project_caller_role_on_file_folder_dto` memory.
+
 /// Domain port for folder persistence.
 ///
 /// Defines the CRUD and management operations required for
@@ -51,13 +62,20 @@ pub trait FolderRepository: Send + Sync + 'static {
     /// Lists folders within a parent folder
     async fn list_folders(&self, parent_id: Option<&str>) -> Result<Vec<Folder>, DomainError>;
 
-    /// Lists root-level folders owned by a specific user.
-    /// For non-root queries (parent_id is Some), ownership is implicit
-    /// because the parent already belongs to the user.
-    async fn list_folders_by_owner(
+    /// Lists root-level folders the caller can read — scoped through
+    /// drive-membership grants (`role_grants` on `resource_type='drive'`)
+    /// rather than the legacy `folders.user_id` column. Group memberships
+    /// are expanded inline by `storage.caller_group_ids($caller)` in the
+    /// SQL. Closes [[bug-root-folder-listing-legacy-user-id]] — root
+    /// folders admin created for other users but has no role on no
+    /// longer surface in the admin's `GET /api/folders`.
+    ///
+    /// Non-root queries (parent_id != None) go through `list_folders`
+    /// with the parent already permission-checked at the service layer,
+    /// so this method carries no `parent_id` parameter.
+    async fn list_root_folders_for_caller(
         &self,
-        parent_id: Option<&str>,
-        owner_id: Uuid,
+        caller_id: Uuid,
     ) -> Result<Vec<Folder>, DomainError>;
 
     /// Lists folders with pagination
@@ -69,13 +87,12 @@ pub trait FolderRepository: Send + Sync + 'static {
         include_total: bool,
     ) -> Result<(Vec<Folder>, Option<usize>), DomainError>;
 
-    /// Lists folders with pagination, scoped to a specific owner.
-    /// Combines the owner filtering of `list_folders_by_owner` with
-    /// the pagination of `list_folders_paginated`.
-    async fn list_folders_by_owner_paginated(
+    /// Paginated companion to `list_root_folders_for_caller` — same
+    /// drive-scoped predicate, adds LIMIT/OFFSET + optional
+    /// window-function COUNT.
+    async fn list_root_folders_for_caller_paginated(
         &self,
-        parent_id: Option<&str>,
-        owner_id: Uuid,
+        caller_id: Uuid,
         offset: usize,
         limit: usize,
         include_total: bool,
@@ -162,31 +179,35 @@ pub trait FolderRepository: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
-    /// Lists all descendant folders in a subtree (ltree-based).
+    /// Lists all descendant folders in a subtree (ltree-based), scoped
+    /// to drives the caller can read.
     ///
-    /// Returns all folders whose lpath is a descendant of the given folder's
-    /// lpath. Used for recursive search — O(1) SQL via GiST index instead
-    /// of O(N) recursive traversal.
+    /// Returns all folders whose lpath is a descendant of the given
+    /// folder's lpath. Used for recursive search — O(1) SQL via GiST
+    /// index instead of O(N) recursive traversal. Drive-membership
+    /// filtering (including group cascade via `caller_group_ids`) is
+    /// applied inline in the SQL.
     ///
     /// The default implementation returns an empty vec (stubs / mocks).
     async fn list_descendant_folders(
         &self,
         folder_id: &str,
         name_contains: Option<&str>,
-        user_id: Uuid,
+        caller_id: Uuid,
     ) -> Result<Vec<Folder>, DomainError> {
-        let _ = (folder_id, name_contains, user_id);
+        let _ = (folder_id, name_contains, caller_id);
         Ok(Vec::new())
     }
 
-    /// Search folders with SQL-level filtering by name, user, and scope.
+    /// Search folders with SQL-level filtering by name and scope,
+    /// restricted to drives the caller can read.
     ///
     /// - **Non-recursive** (`recursive = false`): searches direct children of
     ///   `parent_id` (or root folders when `None`).
     /// - **Recursive with `parent_id`**: delegates to `list_descendant_folders`
     ///   (ltree GiST-indexed scan).
-    /// - **Recursive without `parent_id`**: searches ALL folders owned by
-    ///   `user_id` with optional name filter in SQL.
+    /// - **Recursive without `parent_id`**: searches ALL folders in drives
+    ///   the caller can read, with optional name filter in SQL.
     ///
     /// The default implementation falls back to `list_folders` + in-memory
     /// filter so that stubs and mocks compile without changes.
@@ -194,13 +215,13 @@ pub trait FolderRepository: Send + Sync + 'static {
         &self,
         parent_id: Option<&str>,
         name_contains: Option<&str>,
-        user_id: Uuid,
+        caller_id: Uuid,
         recursive: bool,
     ) -> Result<Vec<Folder>, DomainError> {
         // Recursive with folder_id → use optimised ltree scan
         if recursive && let Some(fid) = parent_id {
             return self
-                .list_descendant_folders(fid, name_contains, user_id)
+                .list_descendant_folders(fid, name_contains, caller_id)
                 .await;
         }
         // Fallback: load + filter in memory (stubs / mocks)

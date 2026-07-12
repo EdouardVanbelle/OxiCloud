@@ -821,6 +821,10 @@
       "forbid_cross_drive_move_help": "Blockiert das Verschieben von Dateien oder Ordnern in einen anderen Drive. Verhindert kein Herunterladen + erneutes Hochladen.",
       "forbid_owner_role_change": "Eigentümerliste sperren",
       "forbid_owner_role_change_help": "Nur Administratoren können Drive-Eigentümer hinzufügen, entfernen oder zurückstufen, solange diese Regel aktiv ist.",
+      "include_in_photo_index": "In Fotos einschließen",
+      "include_in_photo_index_help": "Bilder und Videos aus diesem Drive im Fotos-Zeitstrahl und auf der Orte-Karte anzeigen. Standardmäßig persönliche Drives sind automatisch enthalten; für freigegebene Drives einschalten, die tatsächlich Fotos enthalten (z. B. „Familienfotos\").",
+      "include_in_music_index": "In Musik einschließen",
+      "include_in_music_index_help": "Audiodateien aus diesem Drive in die Musikbibliothek aufnehmen. Standardmäßig persönliche Drives sind automatisch enthalten; für freigegebene Drives einschalten, die tatsächlich eine Musiksammlung enthalten (z. B. „Familienmusik\", „Bandkooperation\").",
       "implied_by_forbid_sharing": "Bereits durch „Freigabe pro Ressource verbieten\" durchgesetzt."
     }
   },

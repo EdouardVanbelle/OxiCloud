@@ -23,6 +23,19 @@ OUT=tests/fixtures/plugins
 export CARGO_TARGET_DIR="$PWD/$CRATE/target"
 ARTIFACT="$CRATE/target/wasm32-unknown-unknown/release/oxicloud_plugin_hello.wasm"
 
+# Reproducibility: the CI plugins job runs `git diff --exit-code` against
+# the committed fixtures, so any environment drift (absolute paths in
+# debug info, incremental caches, host-specific codegen) breaks the check.
+#   * `--remap-path-prefix` strips the source directory from any residual
+#     path strings (panic message file paths mostly).
+#   * `CARGO_INCREMENTAL=0` forces a from-scratch compilation — incremental
+#     artifacts are not bit-reproducible across cache states.
+# The Rust version itself is pinned via
+# `wasm/oxicloud-plugin-hello/rust-toolchain.toml`; keep it in sync with
+# the CI action tag in `.github/workflows/ci.yml` (`plugins` job).
+export CARGO_INCREMENTAL=0
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$PWD/$CRATE=."
+
 # Needs the wasm32-unknown-unknown target's std. In the devenv this comes from
 # `languages.rust.targets` in devenv.nix; otherwise run
 # `rustup target add wasm32-unknown-unknown`. cargo emits a clear "can't find

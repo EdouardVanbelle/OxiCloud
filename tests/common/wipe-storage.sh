@@ -34,9 +34,10 @@ wipe_storage() {
   fi
 
   # Sanity check: must end in tests/<name>/storage where <name> is
-  # lowercase alphanumeric. Stops `rm -rf` from ever running against
-  # an unexpected expansion of a callerʼs path.
-  if [[ ! "$path" =~ /tests/[a-z0-9]+/storage$ ]]; then
+  # lowercase alphanumeric (hyphens allowed so multi-word runner names
+  # like `webdav-drive-root` pass). Stops `rm -rf` from ever running
+  # against an unexpected expansion of a caller's path.
+  if [[ ! "$path" =~ /tests/[a-z0-9][a-z0-9-]*/storage$ ]]; then
     echo "[wipe_storage] ERROR: '$path' does not match .../tests/<name>/storage — refusing to wipe" >&2
     return 1
   fi

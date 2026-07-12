@@ -472,11 +472,14 @@ impl RecipientNotificationService {
         let kind_key = match resource {
             Resource::Folder(_) => "server.magic_link.email.kind_folder",
             Resource::File(_) => "server.magic_link.email.kind_file",
-            // Drives don't generate share notifications in D0 — drive
-            // sharing lands in D2 and gets its own template key. Fall
-            // back to the folder label so any path that does reach
-            // here produces a readable, if generic, mail body.
-            Resource::Drive(_) => "server.magic_link.email.kind_folder",
+            // Drive / Calendar / AddressBook / Playlist shares don't
+            // produce email notifications through this path. Fall
+            // back to the folder label so any code that does reach
+            // here still produces a readable (if generic) mail body.
+            Resource::Drive(_)
+            | Resource::Calendar(_)
+            | Resource::AddressBook(_)
+            | Resource::Playlist(_) => "server.magic_link.email.kind_folder",
         };
         let kind_label = self.i18n_or(kind_key, &locale, &[]).await;
         // Short form for the subject, long form (with email) for the

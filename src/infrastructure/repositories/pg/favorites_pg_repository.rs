@@ -41,8 +41,7 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
                     WHEN uf.item_type = 'folder' THEN fld.path
                     WHEN uf.item_type = 'file'   THEN COALESCE(pfld.path || '/' || f.name, f.name)
                     ELSE NULL
-                END                                             AS "item_path",
-                COALESCE(f.user_id, fld.user_id)::TEXT         AS "owner_id"
+                END                                             AS "item_path"
             FROM auth.user_favorites uf
             LEFT JOIN storage.files   f   ON uf.item_type = 'file'
                                          AND f.id = uf.item_id::UUID
@@ -82,7 +81,6 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
                     parent_id: row.try_get("parent_id").ok(),
                     modified_at: row.try_get("modified_at").ok(),
                     item_path: row.try_get("item_path").ok(),
-                    owner_id: row.try_get("owner_id").ok(),
                     // Temporary defaults; with_display_fields() computes the real values
                     icon_class: String::new(),
                     icon_special_class: String::new(),
@@ -309,10 +307,18 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
         -1::bigint                       AS size,
         fld.created_at                   AS resource_created_at,
         fld.updated_at                   AS modified_at,
-        fld.user_id                      AS owner_id,
         fld.drive_id                     AS drive_id,
         NULL::text                       AS blob_hash,
-        (fld.user_id = $1::uuid)         AS is_owner,
+        fld.created_by                   AS created_by,
+        EXISTS (
+            SELECT 1 FROM storage.role_grants g
+             WHERE g.resource_type = 'drive'
+               AND g.resource_id   = fld.drive_id
+               AND g.role          = 'owner'
+               AND g.subject_type  = 'user'
+               AND g.subject_id    = $1::uuid
+               AND (g.expires_at IS NULL OR g.expires_at > NOW())
+        )                                AS is_owner,
         uf.created_at                    AS favorited_at,
         fld.path::text                   AS resource_path,
         LOWER(fld.name)                  AS sort_str,
@@ -333,10 +339,18 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
         f.size::bigint,
         f.created_at                     AS resource_created_at,
         f.updated_at                     AS modified_at,
-        f.user_id                        AS owner_id,
         f.drive_id                       AS drive_id,
         f.blob_hash,
-        (f.user_id = $1::uuid)           AS is_owner,
+        f.created_by                     AS created_by,
+        EXISTS (
+            SELECT 1 FROM storage.role_grants g
+             WHERE g.resource_type = 'drive'
+               AND g.resource_id   = f.drive_id
+               AND g.role          = 'owner'
+               AND g.subject_type  = 'user'
+               AND g.subject_id    = $1::uuid
+               AND (g.expires_at IS NULL OR g.expires_at > NOW())
+        )                                AS is_owner,
         uf.created_at                    AS favorited_at,
         COALESCE(pfld.path::text || '/' || f.name, f.name) AS resource_path,
         LOWER(f.name)                    AS sort_str,
@@ -489,7 +503,8 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
         };
 
         let user_join = if need_user_join {
-            "LEFT JOIN auth.users u ON u.id = r.owner_id"
+            // Post-D7: `owner_id` retired; join by `created_by`.
+            "LEFT JOIN auth.users u ON u.id = r.created_by"
         } else {
             ""
         };
@@ -506,7 +521,7 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
 SELECT
     r.resource_type, r.resource_id, r.name, r.parent_id,
     r.mime_type, r.size, r.resource_created_at, r.modified_at,
-    r.owner_id, r.drive_id, r.is_owner, r.favorited_at, r.resource_path,
+    r.drive_id, r.is_owner, r.favorited_at, r.resource_path,
     r.sort_str, r.type_order, r.folder_first{username_col}
 FROM resources r
 {user_join}
@@ -577,7 +592,6 @@ LIMIT $6"
                     size,
                     resource_created_at: row.get("resource_created_at"),
                     modified_at: row.get("modified_at"),
-                    owner_id: row.get("owner_id"),
                     drive_id: row.get("drive_id"),
                     blob_hash: row.try_get("blob_hash").ok(),
                     is_owner: row.try_get("is_owner").unwrap_or(false),

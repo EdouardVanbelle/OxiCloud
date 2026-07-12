@@ -104,7 +104,6 @@ pub struct RecentResourceRow {
     pub size: i64,
     pub resource_created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
-    pub owner_id: Uuid,
     /// Drive that owns this row. Surfaced on the recent listing
     /// so a UI can tell when a recently-accessed item lives in a
     /// different drive than the user's home (post-D6 cross-drive

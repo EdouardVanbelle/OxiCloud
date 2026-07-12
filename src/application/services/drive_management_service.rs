@@ -249,6 +249,20 @@ impl DriveManagementService {
             .set_role(caller_id, subject, role, resource, expires_at)
             .await?;
 
+        // Drop the entire drive-role cache for this drive so the new
+        // grant is visible on the very next `check` — without this, a
+        // caller that gets Owner via `POST /api/drives/{id}/members`
+        // then immediately acts on drive content (WebDAV cross-drive
+        // MOVE, admin-driven cleanup, drive management) hits the
+        // stale "no role for this subject on this drive" entry
+        // seeded at some earlier `check`. TTL rescues eventually,
+        // but the storage_cleanup_check.sh drain pattern hits this
+        // race within a single test-second and fails on `authz.denied`
+        // for admin's cascade to files inside.
+        self.authz
+            .invalidate_drive_role_cache_for_drive(drive_id)
+            .await;
+
         // D6 §11: canonical `drive.member_added` audit event covers
         // every successful membership write (add + role-refresh, since
         // the underlying `set_role` is UPSERT — distinguishing the two
@@ -311,6 +325,15 @@ impl DriveManagementService {
             .await?;
 
         self.authz.clear_role(subject, resource).await?;
+
+        // Mirror of `set_member_role`'s cache invalidation: after
+        // clearing a role we MUST drop the `drive_role_cache` entries
+        // targeting this drive, otherwise the just-removed subject's
+        // former role stays visible until TTL expires. Same anti-drift
+        // reason as the sibling add path above.
+        self.authz
+            .invalidate_drive_role_cache_for_drive(drive_id)
+            .await;
 
         // D6 §11: canonical `drive.member_removed` audit event covers
         // every successful removal (owner-driven or admin bypass).
@@ -448,7 +471,7 @@ impl DriveManagementService {
         &self,
         caller_id: Uuid,
         drive_id: Uuid,
-        partial: crate::domain::entities::drive::DrivePolicies,
+        partial: serde_json::Value,
     ) -> Result<crate::domain::entities::drive::DrivePolicies, DomainError> {
         let merged = self
             .drive_repo
@@ -474,6 +497,8 @@ impl DriveManagementService {
             forbid_public_links = merged.forbid_public_links,
             forbid_cross_drive_move = merged.forbid_cross_drive_move,
             forbid_owner_role_change = merged.forbid_owner_role_change,
+            include_in_photo_index = merged.include_in_photo_index,
+            include_in_music_index = merged.include_in_music_index,
             "📜 drive policies updated",
         );
         Ok(merged)

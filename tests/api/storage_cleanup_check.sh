@@ -150,8 +150,13 @@ while IFS= read -r drive_id; do
 
     while IFS= read -r file_id; do
         [[ -z "$file_id" ]] && continue
-        curl -sf -X DELETE -H "$AUTH" "$base_url/api/files/$file_id" >/dev/null
+        HTTP_STATUS=$(curl -s -H "$AUTH" -o /tmp/del.json -w '%{http_code}' \
+                          -X DELETE "$base_url/api/files/$file_id")
+        if [[ "$HTTP_STATUS" != "204" ]]; then
+            log "FILE DELETE FAILED: file=$file_id drive=$drive_id ($DRIVE_NAME) status=$HTTP_STATUS body=$(cat /tmp/del.json)"
+        fi
     done < <(echo "$CONTENTS" | jq -r '.items[] | select(.resource_type == "file") | .resource.id')
+
 
     # Empty the drive's per-drive trash so D3b's "drive must be empty"
     # guard passes on the delete. `/api/trash/drive/{id}` is the

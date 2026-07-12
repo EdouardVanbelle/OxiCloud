@@ -106,9 +106,12 @@ impl FolderHandler {
         Self::list_folders_scoped(service, None, &auth_user).await
     }
 
-    /// Internal helper: lists folders scoped to the authenticated user.
-    /// Uses `list_folders_for_owner` — the DB query filters by `user_id`,
-    /// so no data from other users ever leaves the database.
+    /// Internal helper: lists folders the authenticated caller can Read.
+    /// Post-PR-B, `list_root_folders_for_caller` scopes via
+    /// drive-membership grants (`role_grants` + group cascade via
+    /// `storage.caller_group_ids`) instead of the legacy `folders.user_id`
+    /// filter, so folders in shared drives the caller belongs to
+    /// surface here too.
     async fn list_folders_scoped(
         service: AppState,
         parent_id: Option<&str>,
@@ -501,7 +504,6 @@ pub async fn list_folder_resources(
                             name: row.name.clone(),
                             path: String::new(), // cleared — share recipients must not see hierarchy
                             parent_id: row.parent_id.map(|u| u.to_string()),
-                            owner_id: Some(row.owner_id.to_string()),
                             drive_id: row.drive_id,
                             created_at: row.created_at.timestamp() as u64,
                             modified_at: row.modified_at.timestamp() as u64,
@@ -550,7 +552,6 @@ pub async fn list_folder_resources(
                             icon_special_class: Arc::from(icon_special_class_for(&row.name, mime)),
                             category: Arc::from(category_for(&row.name, mime)),
                             size_formatted: format_file_size(size_bytes),
-                            owner_id: Some(row.owner_id.to_string()),
                             sort_date: None,
                             content_hash,
                             etag,

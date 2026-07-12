@@ -20,10 +20,13 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::file_ports::{FileRetrievalUseCase, FileUploadUseCase};
 use crate::application::services::wopi_lock_service::WopiLockService;
 use crate::application::services::wopi_token_service::WopiTokenService;
 use crate::domain::repositories::drive_repository::DriveRepository;
+use crate::domain::services::authorization::{Permission, Resource, Subject};
+use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
 use crate::infrastructure::services::wopi_discovery_service::WopiDiscoveryService;
 
 /// Shared state for WOPI handlers.
@@ -64,6 +67,37 @@ pub struct CheckFileInfoResponse {
     pub close_url: String,
 }
 
+/// Enforce that the WOPI caller (`claims.sub`) still has `perm` on the
+/// file at redemption time — not just at token-mint time.
+///
+/// **Why every verb needs this.** WOPI tokens are validated locally
+/// (HMAC over claims), so a token that was legitimately minted stays
+/// verify-able until its TTL. If a grant is revoked after mint, or the
+/// token was minted for view but is used to POST content, the token's
+/// signature alone doesn't catch it. This helper re-checks against the
+/// live authorization engine on every verb — the memory note
+/// `wopi-authz-bypass` calls out the class of bugs this fences.
+///
+/// Returns 404 (anti-enumeration — same shape as "file doesn't exist")
+/// on both bad UUID and authorization denial. The engine emits a
+/// structured `audit` line on denial internally, so ops sees the real
+/// reason without the attacker being able to distinguish "gone" from
+/// "revoked".
+async fn require_wopi_perm(
+    authz: &PgAclEngine,
+    caller_sub: &str,
+    file_id: &str,
+    perm: Permission,
+) -> Result<(uuid::Uuid, uuid::Uuid), StatusCode> {
+    let caller_uuid = uuid::Uuid::parse_str(caller_sub).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let file_uuid = uuid::Uuid::parse_str(file_id).map_err(|_| StatusCode::NOT_FOUND)?;
+    authz
+        .require(Subject::User(caller_uuid), perm, Resource::File(file_uuid))
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok((caller_uuid, file_uuid))
+}
+
 /// GET /wopi/files/{file_id} — CheckFileInfo
 async fn check_file_info(
     Path(file_id): Path<String>,
@@ -80,6 +114,19 @@ async fn check_file_info(
 
     if claims.file_id != file_id {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    // Redemption-time authz: even with a valid token, the caller must
+    // still hold Read on this file. Catches revoked-grant-mid-session.
+    if let Err(status) = require_wopi_perm(
+        state.app_state.authorization.as_ref(),
+        &claims.sub,
+        &file_id,
+        Permission::Read,
+    )
+    .await
+    {
+        return status.into_response();
     }
 
     // Fetch file metadata
@@ -99,16 +146,40 @@ async fn check_file_info(
         .map(|dt| dt.to_rfc3339())
         .unwrap_or_default();
 
+    // `user_can_write` = actual current Update permission ∧ token's
+    // can_write flag. If the caller's Update was revoked since the
+    // token was minted (e.g. their grant was downgraded from Editor
+    // to Viewer), the editor sees the file as read-only and won't
+    // even attempt PutFile. The stricter `require_wopi_perm(Update)`
+    // in put_file is the actual gate; this field is a UI hint.
+    let can_write_now = claims.can_write
+        && state
+            .app_state
+            .authorization
+            .check(
+                Subject::User(uuid::Uuid::parse_str(&claims.sub).unwrap_or(uuid::Uuid::nil())),
+                Permission::Update,
+                Resource::File(uuid::Uuid::parse_str(&file_id).unwrap_or(uuid::Uuid::nil())),
+            )
+            .await
+            .unwrap_or(false);
+
     let response = CheckFileInfoResponse {
         base_file_name: file.name.clone(),
-        owner_id: file.owner_id.clone().unwrap_or_else(|| claims.sub.clone()),
+        // WOPI's `OwnerId` field is required. Post-D7 the DTO no
+        // longer carries `owner_id`; fall back to `created_by`
+        // (§14 provenance) with the requesting user as a final default.
+        owner_id: file
+            .created_by
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| claims.sub.clone()),
         size: file.size,
         user_id: claims.sub.clone(),
         version: file.modified_at.to_string(),
         supports_locks: true,
-        supports_update: claims.can_write,
+        supports_update: can_write_now,
         supports_rename: false,
-        user_can_write: claims.can_write,
+        user_can_write: can_write_now,
         user_friendly_name: claims.username.clone(),
         post_message_origin: state.public_base_url.clone(),
         last_modified_time: last_modified,
@@ -137,6 +208,18 @@ async fn get_file(
 
     if claims.file_id != file_id {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    // Redemption-time authz — see require_wopi_perm docstring.
+    if let Err(status) = require_wopi_perm(
+        state.app_state.authorization.as_ref(),
+        &claims.sub,
+        &file_id,
+        Permission::Read,
+    )
+    .await
+    {
+        return status.into_response();
     }
 
     match state
@@ -176,6 +259,21 @@ async fn put_file(
 
     if claims.file_id != file_id || !claims.can_write {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    // Redemption-time authz: the token says the caller could write when
+    // it was minted, but Update permission may have been revoked since.
+    // Re-check now so a stale write-capable token can't survive a
+    // downgrade / share removal / drive-membership change until its TTL.
+    if let Err(status) = require_wopi_perm(
+        state.app_state.authorization.as_ref(),
+        &claims.sub,
+        &file_id,
+        Permission::Update,
+    )
+    .await
+    {
+        return status.into_response();
     }
 
     // Check lock
@@ -258,7 +356,7 @@ async fn put_file(
         .app_state
         .applications
         .file_upload_service
-        .update_file_streaming(
+        .update_file_streaming_with_perms(
             &file.path,
             drive_id,
             ingested.stored(),
@@ -294,6 +392,22 @@ async fn file_operations(
 
     if claims.file_id != file_id {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    // Every lock op mutates shared state (LOCK / UNLOCK / REFRESH_LOCK
+    // change the lock; GET_LOCK reads it but the read is only useful
+    // to a caller who could subsequently take a write action — so gate
+    // on Update uniformly rather than splitting per-op). A Viewer with
+    // a stale token must not be able to hold or contend for a lock.
+    if let Err(status) = require_wopi_perm(
+        state.app_state.authorization.as_ref(),
+        &claims.sub,
+        &file_id,
+        Permission::Update,
+    )
+    .await
+    {
+        return status.into_response();
     }
 
     let override_header = headers
@@ -368,25 +482,71 @@ pub struct EditorUrlResponse {
     pub access_token_ttl: i64,
 }
 
-/// Determines if `caller_id` can access `file_id` and with what permissions.
+/// Resolve the WOPI mint target: gate on real permissions and derive
+/// the `can_write` flag from the caller's ACTUAL Update rights.
 ///
-/// Uses the SQL-level ownership check (`get_file_owned`) so that files
-/// belonging to other users — or non-existent files — both return `NOT_FOUND`,
-/// avoiding existence-leak oracles.
+/// Prior behaviour used a naive `requested_action != "view"` heuristic
+/// so a Viewer clicking "Edit in Collabora" received a write-capable
+/// token, promoting themselves to Editor for the token's TTL. The
+/// memory note `wopi-authz-bypass` fix #12 calls this out explicitly.
 ///
-/// Returns `(FileDto, can_write)` on success.
+/// Contract:
+///
+/// 1. **Read** is the bar to open the file in any mode. If the caller
+///    has no Read grant, return 404 (anti-enum — same shape as "no such
+///    file").
+/// 2. **Update** determines the returned `can_write` bit — INDEPENDENT
+///    of what the client's `requested_action` said. A Viewer who
+///    requested `action=edit` gets `can_write=false` and Collabora
+///    opens in view mode; the token stays authorised for view-only
+///    ops and put_file will 404 at redemption regardless.
+/// 3. `requested_action == "view"` is respected as a downgrade — an
+///    Editor can explicitly request view mode (co-browsing a doc
+///    without accidentally editing) and get `can_write=false`.
+///
+/// The `PgAclEngine::require`/`check` calls emit structured audit
+/// lines on denial (`authz.denied` event), so a Viewer's "edit"
+/// attempt shows up in the audit stream as a rejected Update check.
 async fn authorize_wopi_access<S: FileRetrievalUseCase>(
+    authz: &PgAclEngine,
     file_retrieval: &S,
     file_id: &str,
     caller_id: uuid::Uuid,
     requested_action: &str,
 ) -> Result<(crate::application::dtos::file_dto::FileDto, bool), StatusCode> {
-    let file = file_retrieval
-        .get_file_with_perms(file_id, caller_id)
+    let file_uuid = uuid::Uuid::parse_str(file_id).map_err(|_| StatusCode::NOT_FOUND)?;
+
+    // Step 1 — Read is required to even open the file.
+    authz
+        .require(
+            Subject::User(caller_id),
+            Permission::Read,
+            Resource::File(file_uuid),
+        )
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
-    // Owner verified — grant write unless explicitly requesting view-only.
-    let can_write = requested_action != "view";
+
+    let file = file_retrieval
+        .get_file(file_id)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    // Step 2 — can_write reflects real Update, not the client's
+    // action-string. `check` returns bool without throwing; failure
+    // just means the caller lacks Update, so we degrade the token to
+    // read-only. Deliberately no `require` here — a Viewer opening
+    // the file is legitimate; only the write claim is suppressed.
+    let has_update = authz
+        .check(
+            Subject::User(caller_id),
+            Permission::Update,
+            Resource::File(file_uuid),
+        )
+        .await
+        .unwrap_or(false);
+
+    // Step 3 — allow explicit view-mode downgrade for Editors.
+    let can_write = has_update && requested_action != "view";
     Ok((file, can_write))
 }
 
@@ -403,6 +563,7 @@ pub async fn get_editor_url(
     let username = &auth_user.username;
     // Verify the caller owns the file (SQL-level check, no existence leak).
     let (file, can_write) = match authorize_wopi_access(
+        state.app_state.authorization.as_ref(),
         state.app_state.applications.file_retrieval_service.as_ref(),
         &params.file_id,
         user_id,
@@ -488,7 +649,8 @@ async fn host_page(
         Ok(u) => u,
         Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
     };
-    let file = match authorize_wopi_access(
+    let (file, can_write_now) = match authorize_wopi_access(
+        state.app_state.authorization.as_ref(),
         state.app_state.applications.file_retrieval_service.as_ref(),
         &file_id,
         caller_uuid,
@@ -496,7 +658,7 @@ async fn host_page(
     )
     .await
     {
-        Ok((f, _)) => f,
+        Ok((f, cw)) => (f, cw),
         Err(status) => return status.into_response(),
     };
 
@@ -513,11 +675,15 @@ async fn host_page(
         _ => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
+    // Use the freshly-computed `can_write_now` (real Update permission
+    // ∧ requested_action) rather than the incoming token's `can_write`
+    // flag. Otherwise a Viewer who somehow reached this host page with
+    // a stale edit-capable token would get another one re-minted.
     let (token, ttl) = match state.token_service.generate_token(
         &file_id,
         &claims.sub,
         &claims.username,
-        claims.can_write,
+        can_write_now,
     ) {
         Ok(t) => t,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),

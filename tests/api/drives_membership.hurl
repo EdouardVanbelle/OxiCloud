@@ -512,6 +512,26 @@ jsonpath "$[*].id"          contains {{team_drive_id}}
 
 
 # ─────────────────────────────────────────────────────────────
+# Step 21b — Upload gate by role (post-Drive AuthZ audit Round 2).
+#            Bob is Editor on team_drive; `POST /api/files/upload`
+#            targeting team_root_folder_id should succeed. This is
+#            the REST-side counterpart of the WebDAV/NC PUT chain
+#            hardened by `update_file_streaming_with_perms`. If
+#            this fails, the whole role-bundle → Permission::Create
+#            wiring is broken.
+# ─────────────────────────────────────────────────────────────
+POST {{base_url}}/api/files/upload
+Authorization: Bearer {{bob_token}}
+[MultipartFormData]
+folder_id: {{team_root_folder_id}}
+file: file,fixtures/hello.txt; text/plain
+
+HTTP 201
+[Captures]
+bob_editor_upload_id: jsonpath "$.id"
+
+
+# ─────────────────────────────────────────────────────────────
 # Step 22 — Higher role wins: Bob now ALSO gets a Viewer direct
 #           grant (would lower his bundle). The collapsed caller_role
 #           must remain Editor (the stronger of his two grants).
@@ -535,6 +555,50 @@ Authorization: Bearer {{bob_token}}
 HTTP 200
 [Asserts]
 jsonpath "$[*].id" contains {{team_drive_id}}
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 22b — Viewer CANNOT upload into a shared drive.
+#            Post-Drive AuthZ audit Round 2: the create branch of
+#            `update_file_streaming_with_perms` requires
+#            `Permission::Create` on the parent folder — bundled
+#            with `owner`/`editor`/`contributor` role_grants only,
+#            NOT with `viewer`. `POST /api/files/upload` shares the
+#            same `save_file_with_blob` gate, so a Viewer probe
+#            must land 404 (anti-enum: same shape as no-such-folder)
+#            + `authz.denied` audit line. Also verify the batch /
+#            overwrite paths refuse — the whole chain from
+#            drive-membership to file write is exercised here.
+# ─────────────────────────────────────────────────────────────
+
+# 22b.i — Fresh file: 404.
+POST {{base_url}}/api/files/upload
+Authorization: Bearer {{bob_token}}
+[MultipartFormData]
+folder_id: {{team_root_folder_id}}
+file: file,fixtures/hello.txt; text/plain
+
+HTTP 404
+
+
+# 22b.ii — Overwrite attempt on the Editor-era upload: still 404.
+#          `save_file_with_blob` catches the duplicate name at the
+#          `Create`-permission check before the upsert races (which
+#          would otherwise 409). The audit shape stays 404.
+POST {{base_url}}/api/files/upload
+Authorization: Bearer {{bob_token}}
+[MultipartFormData]
+folder_id: {{team_root_folder_id}}
+file: file,fixtures/hello.txt; text/plain
+
+HTTP 404
+
+
+# 22b.iii — Alice's Editor-era file is untouched.
+GET {{base_url}}/api/files/{{bob_editor_upload_id}}
+Authorization: Bearer {{alice_token}}
+
+HTTP 200
 
 
 # =============================================================
@@ -845,10 +909,17 @@ HTTP 409
 
 
 # 30c — Clear the lingering content (the Editor-created folder from
-#       Step 27). Delete via the regular folder endpoint so the row
-#       lands in trash, not the live tree; `is_empty` excludes
-#       trashed rows so a populated trash bin is allowed.
+#       Step 27 and the Editor-era file from Step 21b). Delete via
+#       the regular endpoints so rows land in trash, not the live
+#       tree; `is_empty` excludes trashed rows so a populated trash
+#       bin is allowed.
 DELETE {{base_url}}/api/folders/{{editor_created_folder_id}}
+Authorization: Bearer {{alice_token}}
+
+HTTP 204
+
+
+DELETE {{base_url}}/api/files/{{bob_editor_upload_id}}
 Authorization: Bearer {{alice_token}}
 
 HTTP 204

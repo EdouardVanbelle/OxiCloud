@@ -145,10 +145,6 @@ impl FileReadPort for StubFileReadPort {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<File, DomainError>> + Send>>, DomainError> {
         Ok(Box::pin(futures::stream::empty()))
     }
-
-    async fn get_file_for_owner(&self, _id: &str, _owner_id: Uuid) -> Result<File, DomainError> {
-        Ok(File::default())
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -274,10 +270,9 @@ impl FolderRepository for StubFolderStoragePort {
         Ok(Vec::new())
     }
 
-    async fn list_folders_by_owner(
+    async fn list_root_folders_for_caller(
         &self,
-        _parent_id: Option<&str>,
-        _owner_id: Uuid,
+        _caller_id: Uuid,
     ) -> Result<Vec<Folder>, DomainError> {
         Ok(Vec::new())
     }
@@ -292,10 +287,9 @@ impl FolderRepository for StubFolderStoragePort {
         Ok((Vec::new(), Some(0)))
     }
 
-    async fn list_folders_by_owner_paginated(
+    async fn list_root_folders_for_caller_paginated(
         &self,
-        _parent_id: Option<&str>,
-        _owner_id: Uuid,
+        _caller_id: Uuid,
         _offset: usize,
         _limit: usize,
         _include_total: bool,
@@ -506,7 +500,7 @@ impl FileUploadUseCase for StubFileUploadUseCase {
         Ok(FileDto::default())
     }
 
-    async fn update_file_streaming(
+    async fn update_file_streaming_with_perms(
         &self,
         _path: &str,
         _drive_id: Uuid,

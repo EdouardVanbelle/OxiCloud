@@ -8,6 +8,8 @@
 //! materialized path column), so no recursive CTEs or N+1 queries are needed.
 
 /// Row shape returned by media-file queries (avoids `clippy::type_complexity`).
+/// Post-D7-step-6: `storage.files.user_id` dropped, so it's no
+/// longer projected.
 type MediaFileRow = (
     String,         // id
     String,         // name
@@ -18,7 +20,6 @@ type MediaFileRow = (
     i64,            // created_at
     i64,            // updated_at
     String,         // blob_hash
-    Option<Uuid>,   // user_id
     Option<Uuid>,   // created_by (§14 provenance)
     Option<Uuid>,   // updated_by (§14 provenance)
     i64,            // sort_date
@@ -43,10 +44,44 @@ use crate::domain::services::path_service::StoragePath;
 use crate::infrastructure::services::dedup_service::DedupService;
 use uuid::Uuid;
 
+/// SQL `EXISTS (…)` predicate — true when the caller (bound to `$1`) has
+/// any active `role_grants` on the drive owning `fi` (the aliased file
+/// row). Group memberships (direct + transitive) are expanded inline via
+/// `storage.caller_group_ids($1)` (recursive; see migration
+/// `20260901000002_caller_group_ids_function.sql`).
+///
+/// Used by every drive-scoped file search query in this repo:
+/// - `search_files_paginated`
+/// - `search_files_in_subtree`
+///
+/// **Alias contract**: queries splicing this in MUST alias
+/// `storage.files` as `fi`. `$1` is reserved for `caller_id`; other bind
+/// params start at `$2`.
+///
+/// This mirrors — but is intentionally not shared with — the folder
+/// variant in `folder_db_repository.rs` (aliased `fo.drive_id`) and the
+/// drive-listing shapes in `drive_pg_repository`/`list_media_files`.
+/// When the grant model changes, update all sites in parallel.
+const CALLER_CAN_READ_DRIVE: &str = "EXISTS (\
+        SELECT 1 \
+          FROM storage.role_grants g \
+         WHERE g.resource_type = 'drive' \
+           AND g.resource_id   = fi.drive_id \
+           AND (g.expires_at IS NULL OR g.expires_at > NOW()) \
+           AND ( \
+                 (g.subject_type = 'user'  AND g.subject_id = $1) \
+              OR (g.subject_type = 'group' AND g.subject_id IN \
+                      (SELECT storage.caller_group_ids($1))) \
+               ) \
+    )";
+
 /// Type alias for file metadata rows from SQL queries.
 /// Fields: id, name, folder_id, folder_path, size, mime_type,
-/// created_at, updated_at, blob_hash, user_id, created_by, updated_by.
+/// created_at, updated_at, blob_hash, created_by, updated_by.
 /// `created_by` / `updated_by` are the §14 provenance columns.
+/// Post-D7-step-6: `storage.files.user_id` dropped, so it's no
+/// longer part of the tuple; `row_to_file` populates the entity's
+/// legacy `user_id` field with `None`.
 type FileRow = (
     String,
     String,
@@ -57,7 +92,6 @@ type FileRow = (
     i64,
     i64,
     String,
-    Option<Uuid>,
     Option<Uuid>,
     Option<Uuid>,
 );
@@ -200,7 +234,7 @@ impl FileBlobReadRepository {
         &self,
         ids: &[String],
         criteria: &SearchCriteriaDto,
-        user_id: Uuid,
+        caller_id: Uuid,
     ) -> Result<Vec<File>, DomainError> {
         // Index hits are externally produced strings — parse defensively.
         let uuid_ids: Vec<Uuid> = ids.iter().filter_map(|id| id.parse().ok()).collect();
@@ -208,9 +242,15 @@ impl FileBlobReadRepository {
             return Ok(Vec::new());
         }
 
+        // Post-PR-B: drive-membership scoping via
+        // [`CALLER_CAN_READ_DRIVE`] (bound to `$1`) replaces the legacy
+        // `fi.user_id = $caller` predicate. Group grants are honoured
+        // inline through `storage.caller_group_ids`.
+        //
+        // Bind order: $1 = caller_id, $2 = ids array, $3.. = criteria.
         let mut conditions: Vec<String> = vec![
-            "fi.id = ANY($1)".to_string(),
-            "fi.user_id = $2".to_string(),
+            CALLER_CAN_READ_DRIVE.to_string(),
+            "fi.id = ANY($2)".to_string(),
             "fi.is_trashed = false".to_string(),
         ];
         let mut bind_idx = 2u32;
@@ -234,7 +274,7 @@ impl FileBlobReadRepository {
                     EXTRACT(EPOCH FROM fi.created_at)::bigint, \
                     EXTRACT(EPOCH FROM fi.updated_at)::bigint, \
                     fi.blob_hash, \
-                    fi.user_id, \
+                    \
                     fi.created_by, fi.updated_by \
                FROM storage.files fi \
                LEFT JOIN storage.folders fo ON fo.id = fi.folder_id \
@@ -242,8 +282,8 @@ impl FileBlobReadRepository {
         );
 
         let mut query = sqlx::query_as::<_, FileRow>(&sql)
-            .bind(uuid_ids)
-            .bind(user_id);
+            .bind(caller_id)
+            .bind(uuid_ids);
         if let Some(folder_id) = criteria.folder_id.as_deref() {
             query = query.bind(folder_id);
         }
@@ -255,10 +295,8 @@ impl FileBlobReadRepository {
 
         rows.into_iter()
             .map(
-                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub)| {
-                    Self::row_to_file(
-                        id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub,
-                    )
+                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)| {
+                    Self::row_to_file(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)
                 },
             )
             .collect::<Result<Vec<_>, _>>()
@@ -286,7 +324,7 @@ impl FileBlobReadRepository {
                     EXTRACT(EPOCH FROM fi.created_at)::bigint, \
                     EXTRACT(EPOCH FROM fi.updated_at)::bigint, \
                     fi.blob_hash, \
-                    fi.user_id, \
+                    \
                     fi.created_by, fi.updated_by \
                FROM storage.files fi \
                LEFT JOIN storage.folders fo ON fo.id = fi.folder_id \
@@ -301,10 +339,8 @@ impl FileBlobReadRepository {
 
         rows.into_iter()
             .map(
-                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub)| {
-                    Self::row_to_file(
-                        id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub,
-                    )
+                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)| {
+                    Self::row_to_file(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)
                 },
             )
             .collect::<Result<Vec<_>, _>>()
@@ -314,20 +350,6 @@ impl FileBlobReadRepository {
                     format!("get_files_by_ids mapping: {e}"),
                 )
             })
-    }
-
-    /// Returns the user_id (owner) for a given file ID.
-    /// Mirrors `FolderDbRepository::get_folder_user_id`.
-    /// Used by the AuthorizationEngine for owner short-circuit.
-    pub async fn get_file_user_id(&self, file_id: &str) -> Result<uuid::Uuid, DomainError> {
-        sqlx::query_scalar::<_, uuid::Uuid>("SELECT user_id FROM storage.files WHERE id = $1::uuid")
-            .bind(file_id)
-            .fetch_optional(self.pool.as_ref())
-            .await
-            .map_err(|e| {
-                DomainError::internal_error("FileBlobRead", format!("user_id lookup: {e}"))
-            })?
-            .ok_or_else(|| DomainError::not_found("File", file_id))
     }
 
     /// Returns `drive_id` for a given file. Drives the permission-floor
@@ -386,7 +408,6 @@ impl FileBlobReadRepository {
         created_at: i64,
         modified_at: i64,
         blob_hash: String,
-        owner_id: Option<Uuid>,
         created_by: Option<Uuid>,
         updated_by: Option<Uuid>,
     ) -> Result<File, DomainError> {
@@ -400,7 +421,6 @@ impl FileBlobReadRepository {
             folder_id,
             created_at as u64,
             modified_at as u64,
-            owner_id,
             blob_hash,
             created_by,
             updated_by,
@@ -445,12 +465,32 @@ impl FileBlobReadRepository {
     ///
     /// Uses the denormalised `media_sort_date` column (synced from
     /// `file_metadata.captured_at` by trigger) so no JOIN with
-    /// `file_metadata` is needed.  The partial index
-    /// `idx_files_media_timeline` covers the full query: filter + ORDER BY
-    /// in a single Index Scan — O(LIMIT) not O(N).
+    /// `file_metadata` is needed.  The partial covering index
+    /// `idx_files_media_timeline_by_drive` (migration 20260901000001)
+    /// keys on `(drive_id, media_sort_date DESC)` filtered on non-trashed
+    /// image/video rows — Postgres does one IndexScan per in-scope
+    /// drive_id already ordered by capture date, so LIMIT stops the scan
+    /// early. Same O(LIMIT) shape as the pre-D7 `user_id`-keyed hot path.
+    ///
+    /// Scope (`docs/plan/drive.md` §15): drives with
+    /// `policies.include_in_photo_index = true` where the caller has a
+    /// direct grant (`subject_type = 'user'`) OR a grant on a group they
+    /// belong to transitively. Group membership is expanded inline by the
+    /// `storage.caller_group_ids(caller)` SQL function (migration
+    /// `20260901000002_caller_group_ids_function.sql`) — no ceremony at
+    /// the handler layer, no cross-space ambiguity from the earlier
+    /// parallel-arrays pattern.
+    ///
+    /// Default personal drives always match because the flag is
+    /// materialised to `true` at drive creation (see
+    /// `DriveRepository::create_personal_drive_atomic` + the backfill
+    /// migration `20260901000000_default_personal_photo_music_flags.sql`)
+    /// — no per-kind carve-out needed. Non-default drives (secondary
+    /// personals, shared drives) surface here only after their owner
+    /// flips the flag on via the admin "Manage policies" modal.
     pub async fn list_media_files(
         &self,
-        owner_id: Uuid,
+        caller_id: Uuid,
         before: Option<i64>,
         limit: i64,
     ) -> Result<(Vec<File>, Vec<i64>, Vec<(Option<i32>, Option<i32>)>), DomainError> {
@@ -461,14 +501,27 @@ impl FileBlobReadRepository {
                    EXTRACT(EPOCH FROM fi.created_at)::bigint,
                    EXTRACT(EPOCH FROM fi.updated_at)::bigint,
                    fi.blob_hash,
-                   fi.user_id,
+
                    fi.created_by, fi.updated_by,
                    EXTRACT(EPOCH FROM fi.media_sort_date)::bigint AS sort_date,
                    fm.width, fm.height
               FROM storage.files fi
               LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
               LEFT JOIN storage.file_metadata fm ON fm.file_id = fi.id
-             WHERE fi.user_id = $1
+             WHERE fi.drive_id IN (
+                     SELECT d.id
+                       FROM storage.drives d
+                       JOIN storage.role_grants g
+                         ON g.resource_type = 'drive'
+                        AND g.resource_id   = d.id
+                      WHERE (
+                              (g.subject_type = 'user'  AND g.subject_id = $1)
+                           OR (g.subject_type = 'group' AND g.subject_id IN
+                                   (SELECT storage.caller_group_ids($1)))
+                            )
+                        AND (g.expires_at IS NULL OR g.expires_at > NOW())
+                        AND (d.policies->>'include_in_photo_index')::boolean = true
+                   )
                AND NOT fi.is_trashed
                AND (fi.mime_type LIKE 'image/%' OR fi.mime_type LIKE 'video/%')
                AND ($2::bigint IS NULL
@@ -477,7 +530,7 @@ impl FileBlobReadRepository {
              LIMIT $3
             "#,
         )
-        .bind(owner_id)
+        .bind(caller_id)
         .bind(before)
         .bind(limit)
         .fetch_all(self.pool.as_ref())
@@ -488,9 +541,9 @@ impl FileBlobReadRepository {
         let mut sort_dates = Vec::with_capacity(rows.len());
         let mut dims = Vec::with_capacity(rows.len());
 
-        for (id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub, sd, w, h) in rows {
+        for (id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub, sd, w, h) in rows {
             files.push(Self::row_to_file(
-                id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub,
+                id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub,
             )?);
             sort_dates.push(sd);
             dims.push((w, h));
@@ -500,12 +553,20 @@ impl FileBlobReadRepository {
     }
 
     /// Aggregate the caller's geotagged photos into grid cells of side `cell`
-    /// (degrees) within `bounds`. Plain SQL (no PostGIS), scoped to `user_id`.
-    /// Returns one cluster per non-empty cell with its centroid, photo count
-    /// and a representative photo id (for the cluster thumbnail).
+    /// (degrees) within `bounds`. Plain SQL (no PostGIS).
+    ///
+    /// Scope: same `include_in_photo_index` predicate as
+    /// `list_media_files` (§15). Places is the map view over the same
+    /// content set the Photos timeline shows, so the two surfaces MUST
+    /// agree on drive scope. Group membership is expanded inline by
+    /// `storage.caller_group_ids(caller)`.
+    ///
+    /// This query is a per-cell aggregate (group by rounded lat/lng
+    /// bucket) rather than an ORDER BY / LIMIT hot path — the plain
+    /// `idx_files_drive_id` is sufficient to seek by drive.
     pub async fn list_geo_clusters(
         &self,
-        user_id: Uuid,
+        caller_id: Uuid,
         bounds: GeoBounds,
         cell: f64,
     ) -> Result<Vec<GeoCluster>, DomainError> {
@@ -517,7 +578,20 @@ impl FileBlobReadRepository {
                    min(fm.file_id::text) AS sample_id
               FROM storage.file_metadata fm
               JOIN storage.files fi ON fi.id = fm.file_id
-             WHERE fi.user_id = $1
+             WHERE fi.drive_id IN (
+                     SELECT d.id
+                       FROM storage.drives d
+                       JOIN storage.role_grants g
+                         ON g.resource_type = 'drive'
+                        AND g.resource_id   = d.id
+                      WHERE (
+                              (g.subject_type = 'user'  AND g.subject_id = $1)
+                           OR (g.subject_type = 'group' AND g.subject_id IN
+                                   (SELECT storage.caller_group_ids($1)))
+                            )
+                        AND (g.expires_at IS NULL OR g.expires_at > NOW())
+                        AND (d.policies->>'include_in_photo_index')::boolean = true
+                   )
                AND NOT fi.is_trashed
                AND fm.latitude IS NOT NULL
                AND fm.longitude IS NOT NULL
@@ -526,7 +600,7 @@ impl FileBlobReadRepository {
              GROUP BY round(fm.longitude / $6), round(fm.latitude / $6)
             "#,
         )
-        .bind(user_id)
+        .bind(caller_id)
         .bind(bounds.west)
         .bind(bounds.east)
         .bind(bounds.south)
@@ -564,7 +638,6 @@ impl FileReadPort for FileBlobReadRepository {
                 i64,            // created_at
                 i64,            // updated_at
                 String,         // blob_hash
-                Option<Uuid>,   // user_id (owner)
                 Option<Uuid>,   // created_by (§14)
                 Option<Uuid>,   // updated_by (§14)
             ),
@@ -575,7 +648,6 @@ impl FileReadPort for FileBlobReadRepository {
                    EXTRACT(EPOCH FROM fi.created_at)::bigint,
                    EXTRACT(EPOCH FROM fi.updated_at)::bigint,
                    fi.blob_hash,
-                   fi.user_id,
                    fi.created_by, fi.updated_by
               FROM storage.files fi
               LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
@@ -593,7 +665,7 @@ impl FileReadPort for FileBlobReadRepository {
         self.hash_cache.insert(id.to_string(), row.8.clone());
 
         Self::row_to_file(
-            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11,
+            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
         )
     }
 
@@ -613,7 +685,6 @@ impl FileReadPort for FileBlobReadRepository {
                 i64,
                 i64,
                 String,
-                Option<Uuid>,
                 Option<Uuid>, // created_by (§14)
                 Option<Uuid>, // updated_by (§14)
             ),
@@ -624,7 +695,6 @@ impl FileReadPort for FileBlobReadRepository {
                    EXTRACT(EPOCH FROM fi.created_at)::bigint,
                    EXTRACT(EPOCH FROM fi.updated_at)::bigint,
                    fi.blob_hash,
-                   fi.user_id,
                    fi.created_by, fi.updated_by
               FROM storage.files fi
               LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
@@ -639,55 +709,7 @@ impl FileReadPort for FileBlobReadRepository {
 
         self.hash_cache.insert(id.to_string(), row.8.clone());
         Self::row_to_file(
-            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11,
-        )
-    }
-
-    async fn get_file_for_owner(&self, id: &str, owner_id: Uuid) -> Result<File, DomainError> {
-        let row = sqlx::query_as::<
-            _,
-            (
-                String,         // id
-                String,         // name
-                Option<String>, // folder_id
-                Option<String>, // folder path
-                i64,            // size
-                String,         // mime_type
-                i64,            // created_at
-                i64,            // updated_at
-                String,         // blob_hash
-                Option<Uuid>,   // user_id (owner)
-                Option<Uuid>,   // created_by (§14)
-                Option<Uuid>,   // updated_by (§14)
-            ),
-        >(
-            r#"
-            SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
-                   fi.size, fi.mime_type,
-                   EXTRACT(EPOCH FROM fi.created_at)::bigint,
-                   EXTRACT(EPOCH FROM fi.updated_at)::bigint,
-                   fi.blob_hash,
-                   fi.user_id,
-                   fi.created_by, fi.updated_by
-              FROM storage.files fi
-              LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
-             WHERE fi.id = $1::uuid
-               AND fi.user_id = $2
-               AND NOT fi.is_trashed
-            "#,
-        )
-        .bind(id)
-        .bind(owner_id)
-        .fetch_optional(self.pool.as_ref())
-        .await
-        .map_err(|e| DomainError::internal_error("FileBlobRead", format!("get_for_owner: {e}")))?
-        // Return NotFound (not Forbidden) to avoid leaking file existence
-        .ok_or_else(|| DomainError::not_found("File", id))?;
-
-        self.hash_cache.insert(id.to_string(), row.8.clone());
-
-        Self::row_to_file(
-            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11,
+            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
         )
     }
 
@@ -701,7 +723,7 @@ impl FileReadPort for FileBlobReadRepository {
                        EXTRACT(EPOCH FROM fi.created_at)::bigint,
                        EXTRACT(EPOCH FROM fi.updated_at)::bigint,
                        fi.blob_hash,
-                       fi.user_id,
+
                    fi.created_by, fi.updated_by
                   FROM storage.files fi
                   LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
@@ -720,7 +742,7 @@ impl FileReadPort for FileBlobReadRepository {
                        EXTRACT(EPOCH FROM fi.created_at)::bigint,
                        EXTRACT(EPOCH FROM fi.updated_at)::bigint,
                        fi.blob_hash,
-                       fi.user_id,
+
                    fi.created_by, fi.updated_by
                   FROM storage.files fi
                   LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
@@ -735,72 +757,8 @@ impl FileReadPort for FileBlobReadRepository {
 
         rows.into_iter()
             .map(
-                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub)| {
-                    Self::row_to_file(
-                        id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub,
-                    )
-                },
-            )
-            .collect()
-    }
-
-    /// User-scoped file listing — adds `AND fi.user_id = $2` to prevent
-    /// cross-user data leakage in the REST API (`list_files_query`).
-    async fn list_files_for_owner(
-        &self,
-        folder_id: Option<&str>,
-        owner_id: Uuid,
-    ) -> Result<Vec<File>, DomainError> {
-        let rows: Vec<FileRow> = if let Some(fid) = folder_id {
-            sqlx::query_as(
-                r#"
-                SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
-                       fi.size, fi.mime_type,
-                       EXTRACT(EPOCH FROM fi.created_at)::bigint,
-                       EXTRACT(EPOCH FROM fi.updated_at)::bigint,
-                       fi.blob_hash,
-                       fi.user_id,
-                   fi.created_by, fi.updated_by
-                  FROM storage.files fi
-                  LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
-                 WHERE fi.folder_id = $1::uuid AND NOT fi.is_trashed
-                   AND fi.user_id = $2
-                 ORDER BY fi.name
-                "#,
-            )
-            .bind(fid)
-            .bind(owner_id)
-            .fetch_all(self.pool.as_ref())
-            .await
-        } else {
-            sqlx::query_as(
-                r#"
-                SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
-                       fi.size, fi.mime_type,
-                       EXTRACT(EPOCH FROM fi.created_at)::bigint,
-                       EXTRACT(EPOCH FROM fi.updated_at)::bigint,
-                       fi.blob_hash,
-                       fi.user_id,
-                   fi.created_by, fi.updated_by
-                  FROM storage.files fi
-                  LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
-                 WHERE fi.folder_id IS NULL AND NOT fi.is_trashed
-                   AND fi.user_id = $1
-                 ORDER BY fi.name
-                "#,
-            )
-            .bind(owner_id)
-            .fetch_all(self.pool.as_ref())
-            .await
-        }
-        .map_err(|e| DomainError::internal_error("FileBlobRead", format!("list_for_owner: {e}")))?;
-
-        rows.into_iter()
-            .map(
-                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub)| {
-                    Self::row_to_file(
-                        id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub,
-                    )
+                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)| {
+                    Self::row_to_file(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)
                 },
             )
             .collect()
@@ -829,7 +787,7 @@ impl FileReadPort for FileBlobReadRepository {
                        EXTRACT(EPOCH FROM fi.created_at)::bigint,
                        EXTRACT(EPOCH FROM fi.updated_at)::bigint,
                        fi.blob_hash,
-                       fi.user_id,
+
                    fi.created_by, fi.updated_by
                   FROM storage.files fi
                   LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
@@ -851,7 +809,7 @@ impl FileReadPort for FileBlobReadRepository {
                        EXTRACT(EPOCH FROM fi.created_at)::bigint,
                        EXTRACT(EPOCH FROM fi.updated_at)::bigint,
                        fi.blob_hash,
-                       fi.user_id,
+
                    fi.created_by, fi.updated_by
                   FROM storage.files fi
                   LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
@@ -869,82 +827,8 @@ impl FileReadPort for FileBlobReadRepository {
 
         rows.into_iter()
             .map(
-                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub)| {
-                    Self::row_to_file(
-                        id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub,
-                    )
-                },
-            )
-            .collect()
-    }
-
-    /// User-scoped paginated file listing — adds `AND fi.user_id = $4` to
-    /// prevent cross-user data leakage in WebDAV PROPFIND.
-    async fn list_files_batch_for_owner(
-        &self,
-        folder_id: Option<&str>,
-        owner_id: Uuid,
-        offset: i64,
-        limit: i64,
-    ) -> Result<Vec<File>, DomainError> {
-        let rows: Vec<FileRow> = if let Some(fid) = folder_id {
-            sqlx::query_as(
-                r#"
-                SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
-                       fi.size, fi.mime_type,
-                       EXTRACT(EPOCH FROM fi.created_at)::bigint,
-                       EXTRACT(EPOCH FROM fi.updated_at)::bigint,
-                       fi.blob_hash,
-                       fi.user_id,
-                   fi.created_by, fi.updated_by
-                  FROM storage.files fi
-                  LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
-                 WHERE fi.folder_id = $1::uuid AND NOT fi.is_trashed
-                   AND fi.user_id = $4
-                 ORDER BY fi.name
-                 LIMIT $2 OFFSET $3
-                "#,
-            )
-            .bind(fid)
-            .bind(limit)
-            .bind(offset)
-            .bind(owner_id)
-            .fetch_all(self.pool.as_ref())
-            .await
-        } else {
-            sqlx::query_as(
-                r#"
-                SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
-                       fi.size, fi.mime_type,
-                       EXTRACT(EPOCH FROM fi.created_at)::bigint,
-                       EXTRACT(EPOCH FROM fi.updated_at)::bigint,
-                       fi.blob_hash,
-                       fi.user_id,
-                   fi.created_by, fi.updated_by
-                  FROM storage.files fi
-                  LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
-                 WHERE fi.folder_id IS NULL AND NOT fi.is_trashed
-                   AND fi.user_id = $3
-                 ORDER BY fi.name
-                 LIMIT $1 OFFSET $2
-                "#,
-            )
-            .bind(limit)
-            .bind(offset)
-            .bind(owner_id)
-            .fetch_all(self.pool.as_ref())
-            .await
-        }
-        .map_err(|e| {
-            DomainError::internal_error("FileBlobRead", format!("list_batch_for_owner: {e}"))
-        })?;
-
-        rows.into_iter()
-            .map(
-                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub)| {
-                    Self::row_to_file(
-                        id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub,
-                    )
+                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)| {
+                    Self::row_to_file(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)
                 },
             )
             .collect()
@@ -1094,7 +978,6 @@ impl FileReadPort for FileBlobReadRepository {
                     i64,
                     i64,
                     String,
-                    Option<Uuid>,
                     Option<Uuid>, // created_by (§14)
                     Option<Uuid>, // updated_by (§14)
                 ),
@@ -1105,8 +988,7 @@ impl FileReadPort for FileBlobReadRepository {
                        EXTRACT(EPOCH FROM fi.created_at)::bigint,
                        EXTRACT(EPOCH FROM fi.updated_at)::bigint,
                        fi.blob_hash,
-                       fi.user_id,
-                   fi.created_by, fi.updated_by
+                       fi.created_by, fi.updated_by
                   FROM storage.files fi
                   LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
                  WHERE fi.name = $1 AND fi.folder_id IS NULL
@@ -1134,7 +1016,6 @@ impl FileReadPort for FileBlobReadRepository {
                     i64,
                     i64,
                     String,
-                    Option<Uuid>,
                     Option<Uuid>, // created_by (§14)
                     Option<Uuid>, // updated_by (§14)
                 ),
@@ -1145,8 +1026,7 @@ impl FileReadPort for FileBlobReadRepository {
                        EXTRACT(EPOCH FROM fi.created_at)::bigint,
                        EXTRACT(EPOCH FROM fi.updated_at)::bigint,
                        fi.blob_hash,
-                       fi.user_id,
-                   fi.created_by, fi.updated_by
+                       fi.created_by, fi.updated_by
                   FROM storage.files fi
                   JOIN storage.folders fo ON fo.id = fi.folder_id
                  WHERE fo.path = $1 AND fi.name = $2
@@ -1163,7 +1043,7 @@ impl FileReadPort for FileBlobReadRepository {
 
         match row {
             Some(r) => Ok(Some(Self::row_to_file(
-                r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7, r.8, r.9, r.10, r.11,
+                r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7, r.8, r.9, r.10,
             )?)),
             None => Ok(None),
         }
@@ -1183,8 +1063,8 @@ impl FileReadPort for FileBlobReadRepository {
         let stream = async_stream::try_stream! {
             let mut row_stream = sqlx::query_as::<_, (
                 String, String, Option<String>, Option<String>,
-                i64, String, i64, i64, String, Option<Uuid>,
-                Option<Uuid>, Option<Uuid>,
+                i64, String, i64, i64, String,
+                Option<Uuid>, Option<Uuid>, // created_by, updated_by (§14)
             )>(
                 r#"
                 SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
@@ -1192,8 +1072,7 @@ impl FileReadPort for FileBlobReadRepository {
                        EXTRACT(EPOCH FROM fi.created_at)::bigint,
                        EXTRACT(EPOCH FROM fi.updated_at)::bigint,
                        fi.blob_hash,
-                       fi.user_id,
-                   fi.created_by, fi.updated_by
+                       fi.created_by, fi.updated_by
                   FROM storage.files fi
                   JOIN storage.folders fo ON fo.id = fi.folder_id
                  WHERE fo.lpath <@ (SELECT lpath FROM storage.folders WHERE id = $1::uuid)
@@ -1207,9 +1086,9 @@ impl FileReadPort for FileBlobReadRepository {
             while let Some(row) = row_stream.try_next().await.map_err(|e| {
                 DomainError::internal_error("FileBlobRead", format!("subtree stream: {e}"))
             })? {
-                let (id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub) = row;
+                let (id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub) = row;
                 let file = FileBlobReadRepository::row_to_file(
-                    id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub,
+                    id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub,
                 )?;
                 yield file;
             }
@@ -1223,11 +1102,15 @@ impl FileReadPort for FileBlobReadRepository {
     /// Uses `COUNT(*) OVER()` window function to return the total matching
     /// count alongside the paginated rows in a **single query** — no separate
     /// COUNT round-trip.
+    ///
+    /// Post-PR-B: scoped by drive-membership (via [`CALLER_CAN_READ_DRIVE`])
+    /// rather than the legacy `fi.user_id = $caller` predicate. Group
+    /// grants are honoured inline through `storage.caller_group_ids`.
     async fn search_files_paginated(
         &self,
         folder_id: Option<&str>,
         criteria: &SearchCriteriaDto,
-        user_id: Uuid,
+        caller_id: Uuid,
     ) -> Result<(Vec<File>, usize), DomainError> {
         let offset = criteria.offset as i64;
         let limit = criteria.limit as i64;
@@ -1245,10 +1128,10 @@ impl FileReadPort for FileBlobReadRepository {
 
         // ── Build dynamic WHERE + bind indices ───────────────────────────
         let mut conditions: Vec<String> = vec![
-            "fi.user_id = $1".to_string(),
+            CALLER_CAN_READ_DRIVE.to_string(),
             "fi.is_trashed = false".to_string(),
         ];
-        let mut bind_idx = 1u32; // $1 = user_id
+        let mut bind_idx = 1u32; // $1 = caller_id
 
         if folder_id.is_some() {
             bind_idx += 1;
@@ -1272,7 +1155,7 @@ impl FileReadPort for FileBlobReadRepository {
                     EXTRACT(EPOCH FROM fi.created_at)::bigint, \
                     EXTRACT(EPOCH FROM fi.updated_at)::bigint, \
                     fi.blob_hash, \
-                    fi.user_id, \
+                    \
                     fi.created_by, fi.updated_by, \
                     COUNT(*) OVER() AS total_count \
                FROM storage.files fi \
@@ -1295,13 +1178,12 @@ impl FileReadPort for FileBlobReadRepository {
                 i64,
                 i64,
                 String,
-                Option<Uuid>,
                 Option<Uuid>, // created_by (§14)
                 Option<Uuid>, // updated_by (§14)
-                i64,
+                i64,          // total_count
             ),
         >(&sql)
-        .bind(user_id);
+        .bind(caller_id);
 
         if let Some(fid) = folder_id {
             query = query.bind(fid);
@@ -1320,15 +1202,13 @@ impl FileReadPort for FileBlobReadRepository {
             .map_err(|e| DomainError::internal_error("FileBlobRead", format!("search: {e}")))?;
 
         // total_count is the same in every row; 0 when result set is empty.
-        let total_count = rows.first().map_or(0, |r| r.12) as usize;
+        let total_count = rows.first().map_or(0, |r| r.11) as usize;
 
         let files = rows
             .into_iter()
             .map(
-                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub, _total)| {
-                    Self::row_to_file(
-                        id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub,
-                    )
+                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub, _total)| {
+                    Self::row_to_file(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)
                 },
             )
             .collect::<Result<Vec<_>, _>>()
@@ -1346,16 +1226,20 @@ impl FileReadPort for FileBlobReadRepository {
     ///
     /// Uses `COUNT(*) OVER()` to return the total count alongside the
     /// paginated rows — no separate COUNT round-trip.
+    ///
+    /// Post-PR-B: scoped by drive-membership (via [`CALLER_CAN_READ_DRIVE`])
+    /// rather than the legacy `fi.user_id = $caller` predicate — same
+    /// group-cascade semantics as `search_files_paginated`.
     async fn search_files_in_subtree(
         &self,
         root_folder_id: Option<&str>,
         criteria: &SearchCriteriaDto,
-        user_id: Uuid,
+        caller_id: Uuid,
     ) -> Result<(Vec<File>, usize), DomainError> {
         // When no root folder specified, delegate to existing paginated search
         let root_id = match root_folder_id {
             None => {
-                return self.search_files_paginated(None, criteria, user_id).await;
+                return self.search_files_paginated(None, criteria, caller_id).await;
             }
             Some(id) => id,
         };
@@ -1376,10 +1260,10 @@ impl FileReadPort for FileBlobReadRepository {
 
         // ── Build dynamic WHERE clauses ──
         let mut conditions = Vec::new();
-        let mut bind_idx = 2u32; // $1 = user_id, $2 = root_folder_id
+        let mut bind_idx = 2u32; // $1 = caller_id, $2 = root_folder_id
 
         conditions.push("fi.is_trashed = false".to_string());
-        conditions.push("fi.user_id = $1".to_string());
+        conditions.push(CALLER_CAN_READ_DRIVE.to_string());
         conditions.push(
             "fo.lpath <@ (SELECT lpath FROM storage.folders WHERE id = $2::uuid)".to_string(),
         );
@@ -1403,7 +1287,7 @@ impl FileReadPort for FileBlobReadRepository {
                     EXTRACT(EPOCH FROM fi.created_at)::bigint, \
                     EXTRACT(EPOCH FROM fi.updated_at)::bigint, \
                     fi.blob_hash, \
-                    fi.user_id, \
+                    \
                     fi.created_by, fi.updated_by, \
                     COUNT(*) OVER() AS total_count \
                FROM storage.files fi \
@@ -1426,13 +1310,12 @@ impl FileReadPort for FileBlobReadRepository {
                 i64,
                 i64,
                 String,
-                Option<Uuid>,
                 Option<Uuid>, // created_by (§14)
                 Option<Uuid>, // updated_by (§14)
-                i64,
+                i64,          // total_count
             ),
         >(&sql)
-        .bind(user_id)
+        .bind(caller_id)
         .bind(root_id);
 
         if let Some(name) = &criteria.name_contains
@@ -1449,15 +1332,13 @@ impl FileReadPort for FileBlobReadRepository {
             DomainError::internal_error("FileBlobRead", format!("subtree search: {e}"))
         })?;
 
-        let total_count = rows.first().map_or(0, |r| r.12) as usize;
+        let total_count = rows.first().map_or(0, |r| r.11) as usize;
 
         let files = rows
             .into_iter()
             .map(
-                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub, _total)| {
-                    Self::row_to_file(
-                        id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub,
-                    )
+                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub, _total)| {
+                    Self::row_to_file(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)
                 },
             )
             .collect::<Result<Vec<_>, _>>()
@@ -1473,10 +1354,10 @@ impl FileReadPort for FileBlobReadRepository {
         &self,
         folder_id: Option<&str>,
         criteria: &SearchCriteriaDto,
-        user_id: Uuid,
+        caller_id: Uuid,
     ) -> Result<usize, DomainError> {
         let (_, count) = self
-            .search_files_paginated(folder_id, criteria, user_id)
+            .search_files_paginated(folder_id, criteria, caller_id)
             .await?;
         Ok(count)
     }
@@ -1499,7 +1380,7 @@ impl FileReadPort for FileBlobReadRepository {
                        EXTRACT(EPOCH FROM fi.created_at)::bigint,
                        EXTRACT(EPOCH FROM fi.updated_at)::bigint,
                        fi.blob_hash,
-                       fi.user_id,
+
                    fi.created_by, fi.updated_by
                   FROM storage.files fi
                   LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
@@ -1529,7 +1410,7 @@ impl FileReadPort for FileBlobReadRepository {
                        EXTRACT(EPOCH FROM fi.created_at)::bigint,
                        EXTRACT(EPOCH FROM fi.updated_at)::bigint,
                        fi.blob_hash,
-                       fi.user_id,
+
                    fi.created_by, fi.updated_by
                   FROM storage.files fi
                   LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
@@ -1555,10 +1436,8 @@ impl FileReadPort for FileBlobReadRepository {
 
         rows.into_iter()
             .map(
-                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub)| {
-                    Self::row_to_file(
-                        id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, cb, ub,
-                    )
+                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)| {
+                    Self::row_to_file(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)
                 },
             )
             .collect()

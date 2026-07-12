@@ -75,7 +75,12 @@ pub trait FileUploadUseCase: Send + Sync + 'static {
     /// `updated_by` column reflects the principal that performed the
     /// PUT — not the file's existing owner (D2 shared drives let
     /// non-owners overwrite content).
-    async fn update_file_streaming(
+    /// `_with_perms` suffix (AGENTS.md AuthZ convention): the
+    /// implementation calls `authz.require(caller, Update, File(id))`
+    /// on the overwrite branch and `authz.require(caller, Create,
+    /// Folder|Drive(id))` on the new-file branch. Handlers just plumb
+    /// `caller_id` through — no protocol-layer authz.
+    async fn update_file_streaming_with_perms(
         &self,
         path: &str,
         drive_id: Uuid,
@@ -241,23 +246,21 @@ pub trait FileRetrievalUseCase: Send + Sync + 'static {
             .collect())
     }
 
-    /// Like [`list_files_batch`], but scoped to a specific owner.
+    /// Like [`list_files_batch`], but scoped to a specific caller.
     ///
-    /// Used by streaming WebDAV PROPFIND so that each user only sees their
-    /// own files, even in shared folder_id namespaces.
+    /// Used by streaming WebDAV PROPFIND. Post-D7 the concrete
+    /// implementation in `FileRetrievalService` uses drive-membership
+    /// grants; this default falls back to the unscoped listing (the
+    /// caller passes through `owner_id` for interface parity but the
+    /// stub can't apply a real filter without a repo lookup).
     async fn list_files_batch_with_perms(
         &self,
         folder_id: Option<&str>,
-        owner_id: Uuid,
+        _owner_id: Uuid,
         offset: i64,
         limit: i64,
     ) -> Result<Vec<FileDto>, DomainError> {
-        let all = self.list_files_batch(folder_id, offset, limit).await?;
-        let owner_str = owner_id.to_string();
-        Ok(all
-            .into_iter()
-            .filter(|f| f.owner_id.as_deref().is_some_and(|o| o == owner_str))
-            .collect())
+        self.list_files_batch(folder_id, offset, limit).await
     }
 }
 

@@ -48,10 +48,6 @@ pub struct FolderDto {
     /// Parent folder ID
     pub parent_id: Option<String>,
 
-    /// Owner user ID (scopes visibility per user)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub owner_id: Option<String>,
-
     /// Drive that owns this folder. The scope axis for path-based
     /// lookups across REST / WebDAV / NextCloud / CalDAV / CardDAV.
     /// Post-D0 `storage.folders.drive_id` is `NOT NULL`; stub /
@@ -111,7 +107,6 @@ impl From<Folder> for FolderDto {
             name: folder.name().to_string(),
             path: folder.path_string().to_string(),
             parent_id: folder.parent_id().map(String::from),
-            owner_id: folder.owner_id().map(|u| u.to_string()),
             drive_id: folder.drive_id(),
             created_at: folder.created_at(),
             modified_at: folder.modified_at(),
@@ -147,9 +142,8 @@ impl FolderDto {
     ///
     /// Used when a folder is returned to a share recipient: `path` reveals the
     /// full folder hierarchy above the shared folder which the recipient may
-    /// not have access to.  `parent_id` and `owner_id` are intentionally kept
-    /// — the former is needed for sub-folder navigation (covered by the
-    /// cascade grant), and the latter is harmless metadata.
+    /// not have access to.  `parent_id` is intentionally kept — it's needed
+    /// for sub-folder navigation (covered by the cascade grant).
     #[must_use]
     pub fn without_hierarchy_info(self) -> Self {
         Self {
@@ -165,7 +159,6 @@ impl FolderDto {
             name: "stub-folder".to_string(),
             path: "/stub/path".to_string(),
             parent_id: None,
-            owner_id: None,
             drive_id: Uuid::nil(),
             created_at: 0,
             modified_at: 0,
@@ -205,7 +198,6 @@ pub struct FolderResourceRow {
     pub size: i64,
     pub created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
-    pub owner_id: Uuid,
     /// Drive that owns this row. Same column as
     /// `storage.folders.drive_id` / `storage.files.drive_id`. Surfaced
     /// on the listing so a UI can tell when a child lives in a

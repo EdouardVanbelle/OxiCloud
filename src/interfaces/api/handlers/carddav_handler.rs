@@ -33,8 +33,8 @@ use crate::application::adapters::webdav_adapter::{PropFindRequest, PropFindType
 use crate::application::dtos::address_book_dto::{CreateAddressBookDto, UpdateAddressBookDto};
 use crate::application::dtos::contact_dto::CreateContactVCardDto;
 use crate::application::ports::carddav_ports::{AddressBookUseCase, ContactUseCase};
+use crate::application::services::contact_service::ContactService;
 use crate::common::di::AppState;
-use crate::infrastructure::adapters::contact_storage_adapter::ContactStorageAdapter;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::{AuthUser, CurrentUser};
 
@@ -177,7 +177,7 @@ fn extract_user(req: &Request<Body>) -> Result<AuthUser, AppError> {
         .ok_or_else(|| AppError::unauthorized("Authentication required"))
 }
 
-fn get_addressbook_service(state: &AppState) -> Result<&Arc<ContactStorageAdapter>, AppError> {
+fn get_addressbook_service(state: &AppState) -> Result<&Arc<ContactService>, AppError> {
     state.addressbook_use_case.as_ref().ok_or_else(|| {
         AppError::new(
             StatusCode::NOT_IMPLEMENTED,
@@ -187,7 +187,7 @@ fn get_addressbook_service(state: &AppState) -> Result<&Arc<ContactStorageAdapte
     })
 }
 
-fn get_contact_service(state: &AppState) -> Result<&Arc<ContactStorageAdapter>, AppError> {
+fn get_contact_service(state: &AppState) -> Result<&Arc<ContactService>, AppError> {
     state.contact_use_case.as_ref().ok_or_else(|| {
         AppError::new(
             StatusCode::NOT_IMPLEMENTED,

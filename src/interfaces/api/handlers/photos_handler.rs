@@ -63,13 +63,13 @@ pub async fn list_photos(
     headers: HeaderMap,
     Query(params): Query<PhotosQueryParams>,
 ) -> impl IntoResponse {
-    let user_id = auth_user.id;
+    let caller_id = auth_user.id;
     let limit = params.limit.unwrap_or(200).clamp(1, 500);
 
     let file_read = &state.repositories.file_read_repository;
 
     match file_read
-        .list_media_files(user_id, params.before, limit)
+        .list_media_files(caller_id, params.before, limit)
         .await
     {
         Ok((files, sort_dates, dims)) => {

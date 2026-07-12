@@ -52,7 +52,7 @@ pub struct DriveWithRootName {
     /// of the root folder via JOIN at read time.
     pub root_folder_name: String,
     /// Highest role the calling user holds on this drive (direct OR
-    /// group-mediated). Populated by `list_for_subjects` (which already
+    /// group-mediated). Populated by `list_readable_by` (which already
     /// JOINs `role_grants` for accessibility, so the role is in scope at
     /// query time). `None` for repo methods called without a caller
     /// context (`get_by_id`, `get_by_ids`, `find_default_for_user`,
@@ -164,17 +164,17 @@ pub trait DriveRepository: Send + Sync + 'static {
     }
 
     /// List drives the caller can read, resolved via `role_grants` for
-    /// `resource_type='drive'`. The caller's group memberships are
-    /// expanded by the engine's `subject_match_set`; that expanded set
-    /// is what this method's `subject_ids` argument carries.
+    /// `resource_type='drive'`. Group memberships (direct + transitive)
+    /// are expanded inline by the `storage.caller_group_ids(caller)`
+    /// SQL function — callers pass only the caller's uuid, no
+    /// expansion ceremony.
     ///
     /// Returns rows in a stable order: default drive first (if any),
     /// then by display name. The `/api/drives` handler relies on that
     /// order for the picker UI without a follow-up sort.
-    async fn list_for_subjects(
+    async fn list_readable_by(
         &self,
-        subject_types: &[&str],
-        subject_ids: &[Uuid],
+        caller_id: Uuid,
     ) -> Result<Vec<DriveWithRootName>, DriveRepositoryError>;
 
     /// `true` when the drive holds no live (non-trashed) folders other
@@ -193,7 +193,7 @@ pub trait DriveRepository: Send + Sync + 'static {
     /// List every drive on the system, regardless of caller membership.
     ///
     /// Used by the admin panel's `GET /api/admin/drives`. Distinct from
-    /// `list_for_subjects` (which filters by `role_grants`) because an
+    /// `list_readable_by` (which filters by `role_grants`) because an
     /// admin who creates a shared drive for someone else has no grant
     /// on it — but still needs to see, audit, and manage it. The HTTP
     /// gate (admin-only middleware) is what makes the unrestricted
@@ -256,10 +256,18 @@ pub trait DriveRepository: Send + Sync + 'static {
     ///
     /// Caller is responsible for the `Manage` permission check; this
     /// method does not re-verify.
+    ///
+    /// `partial` is a raw JSON object carrying **only** the keys the
+    /// caller wants to change — the repo passes it verbatim to the
+    /// `policies || $partial` JSONB merge. Using the typed
+    /// `DrivePolicies` here would serialise every field (including
+    /// unset ones as `false`) and clobber other flags on the row;
+    /// keeping the merge on the raw `Value` preserves the
+    /// partial-update semantic the handler documents.
     async fn update_policies(
         &self,
         drive_id: Uuid,
-        partial: &crate::domain::entities::drive::DrivePolicies,
+        partial: &serde_json::Value,
     ) -> Result<crate::domain::entities::drive::DrivePolicies, DriveRepositoryError>;
 }
 

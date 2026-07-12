@@ -48,23 +48,7 @@ pub async fn list_drives(
 ) -> impl IntoResponse {
     let caller_id = auth_user.id;
 
-    let (subject_types, subject_ids) = match state
-        .authorization
-        .expand_subject_for_listing(Subject::User(caller_id))
-        .await
-    {
-        Ok(pair) => pair,
-        Err(e) => {
-            error!("list_drives: subject expansion failed: {e}");
-            return AppError::from(e).into_response();
-        }
-    };
-
-    match state
-        .drive_repo
-        .list_for_subjects(&subject_types, &subject_ids)
-        .await
-    {
+    match state.drive_repo.list_readable_by(caller_id).await {
         Ok(drives) => {
             let dtos: Vec<DriveDto> = drives.into_iter().map(DriveDto::from).collect();
             (StatusCode::OK, Json(dtos)).into_response()
@@ -416,6 +400,10 @@ pub struct UpdateDrivePoliciesDto {
     pub forbid_cross_drive_move: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forbid_owner_role_change: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_in_photo_index: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_in_music_index: Option<bool>,
 }
 
 /// `PATCH /api/drives/{id}/policies` — **OxiCloud-admin only** policy
@@ -494,18 +482,22 @@ pub async fn update_drive_policies(
             serde_json::Value::Bool(v),
         );
     }
+    if let Some(v) = dto.include_in_photo_index {
+        partial_obj.insert("include_in_photo_index".into(), serde_json::Value::Bool(v));
+    }
+    if let Some(v) = dto.include_in_music_index {
+        partial_obj.insert("include_in_music_index".into(), serde_json::Value::Bool(v));
+    }
+    // Pass the raw JSON straight through so the JSONB `||` merge in
+    // the repo only touches keys the caller supplied. Round-tripping
+    // via `DrivePolicies` (which has `#[serde(default)]`) would
+    // silently fill every omitted field with `false` — the merge
+    // would then clobber every unmentioned policy on the row.
     let partial_value = serde_json::Value::Object(partial_obj);
-    let partial: crate::domain::entities::drive::DrivePolicies =
-        match serde_json::from_value(partial_value) {
-            Ok(p) => p,
-            Err(e) => {
-                return AppError::bad_request(format!("invalid policy body: {e}")).into_response();
-            }
-        };
 
     match state
         .drive_management_service
-        .update_policies(auth_user.id, drive_id, partial)
+        .update_policies(auth_user.id, drive_id, partial_value)
         .await
     {
         Ok(merged) => (StatusCode::OK, axum::Json(merged)).into_response(),

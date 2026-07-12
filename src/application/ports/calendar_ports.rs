@@ -25,38 +25,11 @@ pub trait CalendarStoragePort: Send + Sync + 'static {
         &self,
         owner_id: Uuid,
     ) -> Result<Vec<CalendarDto>, DomainError>;
-    async fn list_calendars_shared_with_user(
-        &self,
-        user_id: Uuid,
-    ) -> Result<Vec<CalendarDto>, DomainError>;
     async fn list_public_calendars(
         &self,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<CalendarDto>, DomainError>;
-    async fn check_calendar_access(
-        &self,
-        calendar_id: &str,
-        user_id: Uuid,
-    ) -> Result<bool, DomainError>;
-
-    // Calendar sharing
-    async fn share_calendar(
-        &self,
-        calendar_id: &str,
-        user_id: Uuid,
-        access_level: &str,
-    ) -> Result<(), DomainError>;
-    async fn remove_calendar_sharing(
-        &self,
-        calendar_id: &str,
-        user_id: Uuid,
-    ) -> Result<(), DomainError>;
-    async fn get_calendar_shares(
-        &self,
-        calendar_id: &str,
-    ) -> Result<Vec<(String, String)>, DomainError>;
-
     // Calendar properties
     async fn set_calendar_property(
         &self,
@@ -146,32 +119,11 @@ pub trait CalendarUseCase: Send + Sync + 'static {
         user_id: Uuid,
     ) -> Result<CalendarDto, DomainError>;
     async fn list_my_calendars(&self, user_id: Uuid) -> Result<Vec<CalendarDto>, DomainError>;
-    async fn list_shared_calendars(&self, user_id: Uuid) -> Result<Vec<CalendarDto>, DomainError>;
     async fn list_public_calendars(
         &self,
         limit: Option<i64>,
         offset: Option<i64>,
     ) -> Result<Vec<CalendarDto>, DomainError>;
-
-    // Calendar sharing
-    async fn share_calendar(
-        &self,
-        calendar_id: &str,
-        target_user_id: Uuid,
-        access_level: &str,
-        caller_user_id: Uuid,
-    ) -> Result<(), DomainError>;
-    async fn remove_calendar_sharing(
-        &self,
-        calendar_id: &str,
-        target_user_id: Uuid,
-        caller_user_id: Uuid,
-    ) -> Result<(), DomainError>;
-    async fn get_calendar_shares(
-        &self,
-        calendar_id: &str,
-        user_id: Uuid,
-    ) -> Result<Vec<(String, String)>, DomainError>;
 
     // Event operations
     async fn create_event(

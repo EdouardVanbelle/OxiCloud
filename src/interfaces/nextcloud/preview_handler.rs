@@ -11,11 +11,14 @@ use axum::{
 use serde::Deserialize;
 use std::sync::Arc;
 
+use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::file_ports::FileRetrievalUseCase;
 use crate::application::ports::storage_ports::FileReadPort;
 use crate::application::ports::thumbnail_ports::{ThumbnailFormat, ThumbnailPort, ThumbnailSize};
 use crate::common::di::AppState;
+use crate::domain::services::authorization::{Permission, Resource, Subject};
 use crate::interfaces::middleware::auth::AuthUser;
+use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
 pub struct PreviewParams {
@@ -89,9 +92,28 @@ pub async fn handle_preview(
         }
     };
 
-    // Verify the authenticated user owns this file
-    let user_id_str = user.id.to_string();
-    if file.owner_id.as_deref() != Some(user_id_str.as_str()) {
+    // Verify the authenticated user can Read this file. Anti-enum: any
+    // AuthZ denial surfaces as 404 (same shape as "unknown file" above),
+    // and the engine emits an `authz.denied` audit line internally.
+    let file_uuid = match Uuid::parse_str(&file.id) {
+        Ok(u) => u,
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from("File not found"))
+                .unwrap();
+        }
+    };
+    if state
+        .authorization
+        .require(
+            Subject::User(user.id),
+            Permission::Read,
+            Resource::File(file_uuid),
+        )
+        .await
+        .is_err()
+    {
         return Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(Body::from("File not found"))

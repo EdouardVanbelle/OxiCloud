@@ -323,7 +323,20 @@ grep -q 'g8-doomed' <<< "$BODY" \
     || fail "K1: g8-doomed.txt not in trashbin PROPFIND"
 grep -q '<nc:trashbin-original-location>' <<< "$BODY" \
     || fail "K1: trashbin response missing <nc:trashbin-original-location>"
-pass "K1: trashbin shows g8-doomed.txt with original-location"
+
+# Post-D3 (secondary/shared drive support): the `original-location`
+# value is drive-relative — the emitter strips the drive-root segment
+# from the internal `storage.folders.path` (`"Personal/g8-doomed.txt"`
+# for a file at the default drive root) so NC clients see
+# `"g8-doomed.txt"` regardless of what the drive's root is named.
+# Regression guard: the pre-D3 code hardcoded `strip_prefix("Personal/")`
+# — a bug that would silently break secondary drives. Assert the
+# stripped shape (no leading `Personal/`, no leading `/`, no drive
+# segment).
+grep -q '<nc:trashbin-original-location>g8-doomed\.txt</nc:trashbin-original-location>' <<< "$BODY" \
+    || fail "K1: original-location not drive-relative (expected 'g8-doomed.txt', got: $(grep -o '<nc:trashbin-original-location>[^<]*</nc:trashbin-original-location>' <<< "$BODY"))"
+
+pass "K1: trashbin shows g8-doomed.txt with drive-relative original-location"
 
 # Extract the trashed item id (last segment of the href).
 # Trashbin hrefs are `/remote.php/dav/trashbin/{user}/trash/{uuid}`

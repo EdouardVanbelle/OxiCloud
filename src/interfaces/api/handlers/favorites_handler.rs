@@ -6,7 +6,7 @@ use axum::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::info;
 use utoipa::ToSchema;
 
 use crate::application::dtos::display_helpers::{
@@ -66,7 +66,8 @@ pub async fn add_favorite(
             Json(serde_json::json!({
                 "error": "Item type must be 'file' or 'folder'"
             })),
-        );
+        )
+            .into_response();
     }
 
     match favorites_service
@@ -81,16 +82,14 @@ pub async fn add_favorite(
                     "message": "Item added to favorites"
                 })),
             )
+                .into_response()
         }
-        Err(err) => {
-            error!("Error adding to favorites: {}", err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to add to favorites"
-                })),
-            )
-        }
+        // Route through AppError so the `DomainError::kind` maps to the
+        // right status code (NotFound → 404 anti-enum for the pre-write
+        // authz gate, InvalidInput → 400 for a malformed UUID, etc.).
+        // A hardcoded 500 here would mask the 404 the Round 1 AuthZ
+        // fix relies on.
+        Err(err) => AppError::from(err).into_response(),
     }
 }
 
@@ -129,6 +128,7 @@ pub async fn remove_favorite(
                         "message": "Item removed from favorites"
                     })),
                 )
+                    .into_response()
             } else {
                 info!("Item {} '{}' was not in favorites", item_type, item_id);
                 (
@@ -137,17 +137,12 @@ pub async fn remove_favorite(
                         "message": "Item was not in favorites"
                     })),
                 )
+                    .into_response()
             }
         }
-        Err(err) => {
-            error!("Error removing from favorites: {}", err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to remove from favorites"
-                })),
-            )
-        }
+        // Same rationale as `add_favorite` — preserve DomainError→HTTP
+        // status mapping instead of collapsing every error to 500.
+        Err(err) => AppError::from(err).into_response(),
     }
 }
 
@@ -215,7 +210,6 @@ pub async fn list_favorites_resources(
                             name: row.name.clone(),
                             path,
                             parent_id: row.parent_id.map(|u| u.to_string()),
-                            owner_id: Some(row.owner_id.to_string()),
                             drive_id: row.drive_id,
                             created_at: row.resource_created_at.timestamp() as u64,
                             modified_at: row.modified_at.timestamp() as u64,
@@ -265,7 +259,6 @@ pub async fn list_favorites_resources(
                             )),
                             category: std::sync::Arc::from(category_for(&row.name, mime)),
                             size_formatted: format_file_size(size_bytes),
-                            owner_id: Some(row.owner_id.to_string()),
                             sort_date: None,
                             content_hash,
                             etag,
@@ -349,15 +342,10 @@ pub async fn batch_add_favorites(
             );
             (StatusCode::OK, Json(serde_json::json!(result))).into_response()
         }
-        Err(err) => {
-            error!("Error in batch add favorites: {}", err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to batch add favorites"
-                })),
-            )
-                .into_response()
-        }
+        // Preserve DomainError→HTTP status mapping — the Round 1
+        // AuthZ fix relies on a per-item NotFound propagating out
+        // of the batch. A hardcoded 500 would mask the 404 that
+        // signals a cross-tenant probe.
+        Err(err) => AppError::from(err).into_response(),
     }
 }

@@ -54,10 +54,6 @@ pub struct FileDto {
     /// Human-readable formatted size (e.g. "3.27 MB")
     pub size_formatted: String,
 
-    /// Owner user ID (omitted from JSON when None)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub owner_id: Option<String>,
-
     /// Sort date for Photos timeline — COALESCE(EXIF captured_at, created_at).
     /// Only populated by the /api/photos endpoint.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -102,7 +98,7 @@ impl From<File> for FileDto {
         let content_hash = file.content_hash().to_string();
 
         // Consume the entity by moving all fields — zero heap allocations
-        // for id, name, path, folder_id, owner_id (previously 5× .to_string()).
+        // for id, name, path, folder_id (previously 4× .to_string()).
         let parts = file.into_parts();
 
         let icon_class = Arc::from(icon_class_for(&parts.name, &parts.mime_type));
@@ -124,7 +120,6 @@ impl From<File> for FileDto {
             icon_special_class,
             category,
             size_formatted,
-            owner_id: parts.owner_id.map(|u| u.to_string()),
             sort_date: None,
             content_hash,
             etag,
@@ -157,9 +152,8 @@ impl FileDto {
     ///
     /// Used when a file is returned to a share recipient: `path` reveals the
     /// full folder hierarchy above the file which the recipient may not have
-    /// access to.  `folder_id` and `owner_id` are intentionally kept — the
-    /// former is needed for sub-folder navigation (covered by the cascade
-    /// grant), and the latter is harmless metadata.
+    /// access to.  `folder_id` is intentionally kept — it's needed for
+    /// sub-folder navigation (covered by the cascade grant).
     #[must_use]
     pub fn without_hierarchy_info(self) -> Self {
         Self {
@@ -183,7 +177,6 @@ impl FileDto {
             icon_special_class: Arc::from(""),
             category: Arc::from("Document"),
             size_formatted: "0 Bytes".to_string(),
-            owner_id: None,
             content_hash: String::new(),
             etag: String::new(),
             sort_date: None,

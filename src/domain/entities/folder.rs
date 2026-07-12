@@ -25,10 +25,6 @@ pub struct Folder {
     /// Parent folder ID (None if it's a root folder)
     parent_id: Option<String>,
 
-    /// Owner user ID — scopes folder visibility per user.
-    /// `None` only for legacy/stub folders; real folders always have an owner.
-    owner_id: Option<Uuid>,
-
     /// Drive that owns this folder. Post-D0 every `storage.folders` row
     /// has `drive_id NOT NULL` (M3 migration). Path-based lookups scope
     /// by this axis (not by `user_id`, which is dropped in D7).
@@ -76,7 +72,6 @@ impl Default for Folder {
             storage_path: StoragePath::from_string("/"),
             path_string: "/".to_string(),
             parent_id: None,
-            owner_id: None,
             drive_id: Uuid::nil(),
             created_at: 0,
             modified_at: 0,
@@ -88,26 +83,20 @@ impl Default for Folder {
 }
 
 impl Folder {
-    /// Creates a new folder with validation
+    /// Creates a new folder with validation.
+    ///
+    /// In-memory constructor: callers that don't supply a `drive_id`
+    /// are by definition stub/legacy paths (tests, pre-D0 fixtures,
+    /// DTO round-trips). Real DB-backed folders flow through
+    /// [`Folder::with_timestamps_and_tree`] which propagates the
+    /// drive scope and §14 provenance from the row.
     pub fn new(
         id: String,
         name: String,
         storage_path: StoragePath,
         parent_id: Option<String>,
     ) -> FolderResult<Self> {
-        Self::new_with_owner(id, name, storage_path, parent_id, None)
-    }
-
-    /// Creates a new folder with validation and an explicit owner.
-    pub fn new_with_owner(
-        id: String,
-        name: String,
-        storage_path: StoragePath,
-        parent_id: Option<String>,
-        owner_id: Option<Uuid>,
-    ) -> FolderResult<Self> {
         let name = normalize_storage_name(&name);
-        // Validate folder name
         if let Err(reason) = validate_storage_name(&name) {
             return Err(FolderError::InvalidFolderName(format!("{name}: {reason}")));
         }
@@ -117,7 +106,6 @@ impl Folder {
             .unwrap_or_default()
             .as_secs();
 
-        // Store the path string for serialization compatibility
         let path_string = storage_path.to_string();
 
         Ok(Self {
@@ -126,17 +114,10 @@ impl Folder {
             storage_path,
             path_string,
             parent_id,
-            owner_id,
-            // In-memory constructor: callers that don't supply a
-            // drive_id are by definition stub/legacy paths (tests,
-            // pre-D0 fixtures, DTO round-trips). Real DB-backed
-            // folders flow through `with_timestamps_and_tree`.
             drive_id: Uuid::nil(),
             created_at: now,
             modified_at: now,
             tree_modified_at: now,
-            // Provenance is unknown for in-memory construction; the DB
-            // reconstruction path supplies real values.
             created_by: None,
             updated_by: None,
         })
@@ -160,34 +141,6 @@ impl Folder {
             name,
             storage_path,
             parent_id,
-            None,
-            Uuid::nil(),
-            created_at,
-            modified_at,
-            modified_at,
-        )
-    }
-
-    /// Creates a folder with specific timestamps and owner (legacy
-    /// constructor — `tree_modified_at` defaults to `modified_at`).
-    /// Prefer [`Folder::with_timestamps_and_tree`] for DB reconstruction
-    /// so the rollup ETag reflects descendant activity, not just this
-    /// row's own metadata.
-    pub fn with_timestamps_and_owner(
-        id: String,
-        name: String,
-        storage_path: StoragePath,
-        parent_id: Option<String>,
-        owner_id: Option<Uuid>,
-        created_at: u64,
-        modified_at: u64,
-    ) -> FolderResult<Self> {
-        Self::with_timestamps_and_tree(
-            id,
-            name,
-            storage_path,
-            parent_id,
-            owner_id,
             Uuid::nil(),
             created_at,
             modified_at,
@@ -209,7 +162,6 @@ impl Folder {
         name: String,
         storage_path: StoragePath,
         parent_id: Option<String>,
-        owner_id: Option<Uuid>,
         drive_id: Uuid,
         created_at: u64,
         modified_at: u64,
@@ -220,7 +172,6 @@ impl Folder {
             name,
             storage_path,
             parent_id,
-            owner_id,
             drive_id,
             created_at,
             modified_at,
@@ -239,7 +190,6 @@ impl Folder {
         name: String,
         storage_path: StoragePath,
         parent_id: Option<String>,
-        owner_id: Option<Uuid>,
         drive_id: Uuid,
         created_at: u64,
         modified_at: u64,
@@ -260,7 +210,6 @@ impl Folder {
             storage_path,
             path_string,
             parent_id,
-            owner_id,
             drive_id,
             created_at,
             modified_at,
@@ -297,10 +246,6 @@ impl Folder {
 
     pub fn modified_at(&self) -> u64 {
         self.modified_at
-    }
-
-    pub fn owner_id(&self) -> Option<Uuid> {
-        self.owner_id
     }
 
     /// Drive that owns this folder. Path-based lookups scope by
@@ -412,7 +357,6 @@ impl Folder {
             storage_path,
             path_string: path,
             parent_id,
-            owner_id: None,
             // DTO round-trips lose drive_id (FolderDto carries it,
             // but the legacy `from_dto` signature predates this
             // change). Callers that need real scoping must reload
@@ -460,7 +404,6 @@ impl Folder {
             storage_path: new_storage_path,
             path_string: new_path_string,
             parent_id: self.parent_id.clone(),
-            owner_id: self.owner_id,
             drive_id: self.drive_id,
             created_at: self.created_at,
             modified_at: now,
@@ -501,7 +444,6 @@ impl Folder {
             storage_path: new_storage_path,
             path_string: new_path_string,
             parent_id,
-            owner_id: self.owner_id,
             drive_id: self.drive_id,
             created_at: self.created_at,
             modified_at: now,
@@ -593,7 +535,6 @@ mod tests {
             "folder".to_string(),
             StoragePath::from_string("/folder"),
             None,
-            None,
             Uuid::nil(),
             1_000,
             2_000,
@@ -615,7 +556,6 @@ mod tests {
             "a".to_string(),
             StoragePath::from_string("/a"),
             None,
-            None,
             Uuid::nil(),
             0,
             0,
@@ -626,7 +566,6 @@ mod tests {
             "bbbbbbbbbbbbbbbbZZZZZZZZ".to_string(),
             "b".to_string(),
             StoragePath::from_string("/b"),
-            None,
             None,
             Uuid::nil(),
             0,
@@ -650,7 +589,6 @@ mod tests {
             "folder".to_string(),
             StoragePath::from_string("/folder"),
             None,
-            None,
             Uuid::nil(),
             1_000,
             2_000,
@@ -661,7 +599,6 @@ mod tests {
             "abcd1234efgh5678ZZZZZZZZ".to_string(),
             "folder".to_string(),
             StoragePath::from_string("/folder"),
-            None,
             None,
             Uuid::nil(),
             1_000,

@@ -5,7 +5,7 @@ use axum::{
     response::IntoResponse,
 };
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::info;
 
 use crate::application::dtos::display_helpers::{
     category_for, format_file_size, icon_class_for, icon_special_class_for,
@@ -70,16 +70,10 @@ pub async fn record_item_access(
             )
                 .into_response()
         }
-        Err(err) => {
-            error!("Error recording access in recents: {}", err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to record access"
-                })),
-            )
-                .into_response()
-        }
+        // Preserve DomainError→HTTP status mapping — the Round 1
+        // AuthZ fix relies on the NotFound from `authz.require`
+        // propagating as 404 (anti-enum), not being masked as 500.
+        Err(err) => AppError::from(err).into_response(),
     }
 }
 
@@ -130,16 +124,9 @@ pub async fn remove_from_recent(
                     .into_response()
             }
         }
-        Err(err) => {
-            error!("Error removing from recents: {}", err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to remove from recents"
-                })),
-            )
-                .into_response()
-        }
+        // Same rationale as `record_item_access` — preserve the
+        // DomainError→HTTP mapping instead of collapsing to 500.
+        Err(err) => AppError::from(err).into_response(),
     }
 }
 
@@ -170,16 +157,9 @@ pub async fn clear_recent_items(
             )
                 .into_response()
         }
-        Err(err) => {
-            error!("Error clearing recent items: {}", err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to clear recent items"
-                })),
-            )
-                .into_response()
-        }
+        // Same rationale as `record_item_access` — preserve the
+        // DomainError→HTTP mapping instead of collapsing to 500.
+        Err(err) => AppError::from(err).into_response(),
     }
 }
 
@@ -246,7 +226,6 @@ pub async fn list_recent_resources(
                             name: row.name.clone(),
                             path,
                             parent_id: row.parent_id.map(|u| u.to_string()),
-                            owner_id: Some(row.owner_id.to_string()),
                             drive_id: row.drive_id,
                             created_at: row.resource_created_at.timestamp() as u64,
                             modified_at: row.modified_at.timestamp() as u64,
@@ -294,7 +273,6 @@ pub async fn list_recent_resources(
                             )),
                             category: std::sync::Arc::from(category_for(&row.name, mime)),
                             size_formatted: format_file_size(size_bytes),
-                            owner_id: Some(row.owner_id.to_string()),
                             sort_date: None,
                             content_hash,
                             etag,

@@ -422,13 +422,17 @@ pub async fn handle_search(
 
     let mut entries: Vec<serde_json::Value> = Vec::new();
 
-    // Map file results
-    // TODO(D1): drop the hardcoded "Personal/" prefix and read the
-    // caller's default-drive root folder name from `drives.root_folder_id`
-    // instead. Correct for D0-provisioned default drives; secondary
-    // drives keep their original root name.
+    // Map file results.
+    //
+    // `strip_drive_root_segment` handles both default and secondary
+    // drives — post-D0 the first path segment is the drive's root
+    // folder name (`"Personal"` for D0-provisioned defaults, the
+    // original sibling-root name for M2 backfilled secondaries).
+    // Read-scope is upstream in `state.applications.search_service`;
+    // this handler only formats display paths.
     for file in &results.files {
-        let display_path = file.path.strip_prefix("Personal/").unwrap_or(&file.path);
+        let display_path =
+            crate::interfaces::nextcloud::webdav_handler::strip_drive_root_segment(&file.path);
         let display_path = format!("/{}", display_path);
 
         let numeric_id = file_id_map.get(&file.id).copied();
@@ -452,12 +456,10 @@ pub async fn handle_search(
         }));
     }
 
-    // Map folder results — same TODO(D1) as above.
+    // Map folder results — same drive-agnostic strip as above.
     for folder in &results.folders {
-        let display_path = folder
-            .path
-            .strip_prefix("Personal/")
-            .unwrap_or(&folder.path);
+        let display_path =
+            crate::interfaces::nextcloud::webdav_handler::strip_drive_root_segment(&folder.path);
         let display_path = format!("/{}", display_path);
 
         entries.push(json!({

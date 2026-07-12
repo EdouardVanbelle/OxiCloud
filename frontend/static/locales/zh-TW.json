@@ -804,6 +804,10 @@
       "forbid_cross_drive_move_help": "封鎖將檔案或資料夾移動到另一個 Drive。並不阻止下載後再上傳。",
       "forbid_owner_role_change": "鎖定擁有者名單",
       "forbid_owner_role_change_help": "此項啟用時，僅管理員可新增、移除或降級 Drive 擁有者。",
+      "include_in_photo_index": "包含於照片中",
+      "include_in_photo_index_help": "在照片時間軸與地點地圖中顯示此 Drive 的圖像與影片檔案。預設個人 Drive 會自動包含；針對真正含有照片的共享 Drive（例如「家庭照片」），請開啟此選項。",
+      "include_in_music_index": "包含於音樂中",
+      "include_in_music_index_help": "將此 Drive 的音訊檔案包含於音樂媒體庫。預設個人 Drive 會自動包含；針對真正含有音樂收藏的共享 Drive（例如「家庭音樂」、「樂團協作」），請開啟此選項。",
       "implied_by_forbid_sharing": "已由「禁止以資源為單位的分享」強制執行。"
     }
   },

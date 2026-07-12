@@ -42,7 +42,10 @@
 	const entries = $derived(
 		raw.map((it): ResourceEntry => {
 			const isFile = it.resource_type === 'file';
-			const ownerId = it.resource.owner_id ?? null;
+			// §14 provenance: Recent's mental model is "who touched this
+			// recently", so `updated_by` (the last mutator) is the right
+			// signal — distinct from Favorites/Files which use `created_by`.
+			const ownerId = it.resource.updated_by ?? null;
 			return {
 				id: it.resource.id,
 				name: it.resource.name,
@@ -118,7 +121,7 @@
 			});
 			raw = reset ? page.items : [...raw, ...page.items];
 			cursor = page.next_cursor;
-			void owners.resolve(page.items.map((i) => i.resource.owner_id));
+			void owners.resolve(page.items.map((i) => i.resource.updated_by));
 		} catch (e) {
 			console.error('recent: load error', e);
 			error = t('errors_loadFailed', 'Failed to load items');

@@ -9,10 +9,12 @@ use crate::application::dtos::favorites_dto::{
     BatchFavoritesResult, BatchFavoritesStats, FavoriteItemDto, FavoriteResourceRow,
     FavoritesCursor,
 };
+use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::favorites_ports::{FavoritesRepositoryPort, FavoritesUseCase};
-use crate::common::errors::{DomainError, ErrorKind, Result};
-use crate::domain::services::authorization::ResourceKind;
+use crate::common::errors::Result;
+use crate::domain::services::authorization::{Permission, Resource, ResourceKind, Subject};
 use crate::infrastructure::repositories::pg::FavoritesPgRepository;
+use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
 
 /// Implementation of the FavoritesUseCase for managing user favorites.
 ///
@@ -20,12 +22,22 @@ use crate::infrastructure::repositories::pg::FavoritesPgRepository;
 /// accessing the database directly, following hexagonal architecture.
 pub struct FavoritesService {
     repo: Arc<FavoritesPgRepository>,
+    /// ReBAC engine — enforces `Permission::Read` on the referenced
+    /// file/folder before enrolling it into a user's favorites.
+    /// Without this gate the write path is an information oracle:
+    /// listing endpoints JOIN back to `storage.files/folders` and
+    /// return name/mime/size/drive_id for any UUID the caller was
+    /// able to enroll. See `docs/plan/authz_audit/rest_storage.md`.
+    authorization: Arc<PgAclEngine>,
 }
 
 impl FavoritesService {
     /// Create a new FavoritesService with the given repository port
-    pub fn new(repo: Arc<FavoritesPgRepository>) -> Self {
-        Self { repo }
+    pub fn new(repo: Arc<FavoritesPgRepository>, authorization: Arc<PgAclEngine>) -> Self {
+        Self {
+            repo,
+            authorization,
+        }
     }
 
     /// Subset of `(item_id, item_type)` pairs the user has favorited — used to
@@ -60,13 +72,15 @@ impl FavoritesUseCase for FavoritesService {
             item_type, item_id, user_id
         );
 
-        if item_type != "file" && item_type != "folder" {
-            return Err(DomainError::new(
-                ErrorKind::InvalidInput,
-                "Favorites",
-                "Item type must be 'file' or 'folder'",
-            ));
-        }
+        // AuthZ pre-write: caller must have Read on the referenced
+        // resource. Denial routes through `require` → NotFound
+        // (anti-enum, matches the listing shape) + `authz.denied`
+        // audit line. Without this gate the write path was an
+        // information oracle over the whole tenant.
+        let resource = Resource::parse(item_type, item_id)?;
+        self.authorization
+            .require(Subject::User(user_id), Permission::Read, resource)
+            .await?;
 
         self.repo.add_favorite(user_id, item_id, item_type).await?;
         info!(
@@ -125,18 +139,17 @@ impl FavoritesUseCase for FavoritesService {
             user_id
         );
 
-        // Validate all item types
+        // AuthZ pre-write: caller must have Read on every referenced
+        // resource. Fail the whole batch on the first denial so the
+        // response shape doesn't tell an attacker which items were
+        // valid (partial success would leak the same oracle we
+        // closed on the single-item path). See
+        // `docs/plan/authz_audit/rest_storage.md`.
         for (item_id, item_type) in items {
-            if item_type != "file" && item_type != "folder" {
-                return Err(DomainError::new(
-                    ErrorKind::InvalidInput,
-                    "Favorites",
-                    format!(
-                        "Item type must be 'file' or 'folder' for item '{}'",
-                        item_id
-                    ),
-                ));
-            }
+            let resource = Resource::parse(item_type, item_id)?;
+            self.authorization
+                .require(Subject::User(user_id), Permission::Read, resource)
+                .await?;
         }
 
         let requested = items.len();

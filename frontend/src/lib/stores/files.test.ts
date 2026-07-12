@@ -30,7 +30,7 @@ it('shows the owner as "Me" for the current user and a short id otherwise', () =
 it('persists the view mode and toggles selection', () => {
 	files.setViewMode('list');
 	expect(files.viewMode).toBe('list');
-	expect(localStorage.getItem('oxicloud_view_mode')).toBe('list');
+	expect(localStorage.getItem('oxi-view-mode')).toBe('list');
 	files.setViewMode('grid');
 	expect(files.viewMode).toBe('grid');
 

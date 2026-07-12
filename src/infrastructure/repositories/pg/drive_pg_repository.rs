@@ -3,7 +3,7 @@
 //! The repo deals only with the `storage.drives` table itself. Drive
 //! membership lives in `storage.role_grants` (`resource_type='drive'`)
 //! and is queried through the engine's existing grant paths;
-//! `list_for_subjects` below resolves `role_grants` → `storage.drives`
+//! `list_readable_by` below resolves `role_grants` → `storage.drives`
 //! via a single join.
 //!
 //! See `migrations/20260802000000_drives_schema_additive.sql` for the
@@ -75,7 +75,7 @@ impl DrivePgRepository {
     /// is declared owner→viewer (strongest→weakest), so `MIN` picks the
     /// strongest of the caller's grants on the drive (direct +
     /// group-mediated collapsed by GROUP BY). Used only by
-    /// `list_for_subjects`.
+    /// `list_readable_by`.
     fn row_to_drive_with_name_and_role(
         row: &sqlx::postgres::PgRow,
     ) -> Result<DriveWithRootName, DriveRepositoryError> {
@@ -116,11 +116,22 @@ impl DriveRepository for DrivePgRepository {
             .map_err(|e| Self::map_sqlx_err("create_personal_drive_atomic.begin", e))?;
 
         // 1. Drive row (root_folder_id NULL — populated in step 3).
+        //
+        // Default personal drives are seeded with `include_in_photo_index`
+        // + `include_in_music_index` = true so the Photos / Music
+        // predicates (§15) can be a single positive rule keyed off the
+        // JSONB flag — no per-kind carve-out needed at query time. Any
+        // future admin PATCH toggling either flag off shows a confirm
+        // dialog in the UI (unusual action; empties the user's Photos
+        // timeline / Music library).
         let drive_id: Uuid = sqlx::query_scalar(
             r#"
             INSERT INTO storage.drives
                 (kind, default_for_user, quota_bytes, policies)
-            VALUES ('personal', $1, $2, '{}'::jsonb)
+            VALUES (
+                'personal', $1, $2,
+                '{"include_in_photo_index": true, "include_in_music_index": true}'::jsonb
+            )
             RETURNING id
             "#,
         )
@@ -132,11 +143,16 @@ impl DriveRepository for DrivePgRepository {
 
         // 2. Root folder. `parent_id IS NULL` makes it a root in the
         //    drive; `drive_id` closes the FK in this direction.
+        //
+        //    Post-D7: `user_id` omitted from the INSERT column list —
+        //    the column is nullable and no longer written to on new
+        //    rows. `created_by` / `updated_by` bind to the owner
+        //    (§14 provenance).
         let folder_id: Uuid = sqlx::query_scalar(
             r#"
             INSERT INTO storage.folders
-                (name, parent_id, user_id, drive_id, created_by, updated_by)
-            VALUES ('Personal', NULL, $1, $2, $1, $1)
+                (name, parent_id, drive_id, created_by, updated_by)
+            VALUES ('Personal', NULL, $2, $1, $1)
             RETURNING id
             "#,
         )
@@ -233,14 +249,14 @@ impl DriveRepository for DrivePgRepository {
         .await
         .map_err(|e| Self::map_sqlx_err("create_shared_drive_atomic.drive", e))?;
 
-        // 2. Root folder. The folder's `user_id` carries the admin (legacy
-        //    column still NOT NULL during the dual-write window — D7
-        //    drops it once `drive_id` is the canonical ownership signal).
+        // 2. Root folder. Post-D7: `user_id` omitted — the column is
+        //    nullable and unused on new rows. `created_by` / `updated_by`
+        //    bind to `granted_by` (§14 provenance).
         let folder_id: Uuid = sqlx::query_scalar(
             r#"
             INSERT INTO storage.folders
-                (name, parent_id, user_id, drive_id, created_by, updated_by)
-            VALUES ($1, NULL, $2, $3, $2, $2)
+                (name, parent_id, drive_id, created_by, updated_by)
+            VALUES ($1, NULL, $3, $2, $2)
             RETURNING id
             "#,
         )
@@ -452,13 +468,15 @@ impl DriveRepository for DrivePgRepository {
         Self::row_to_drive_with_name(&row)
     }
 
-    async fn list_for_subjects(
+    async fn list_readable_by(
         &self,
-        subject_types: &[&str],
-        subject_ids: &[Uuid],
+        caller_id: Uuid,
     ) -> Result<Vec<DriveWithRootName>, DriveRepositoryError> {
         // Joining role_grants → drives → folders returns every drive the
-        // expanded subject set can read, paired with its display name.
+        // caller can read, paired with its display name. Group
+        // memberships (direct + transitive) are expanded inline by
+        // `storage.caller_group_ids($caller)` — no Rust-side ceremony.
+        //
         // ORDER BY puts default drives first (so the picker UI doesn't
         // need a follow-up sort), then alphabetical by name. GROUP BY
         // collapses duplicate role_grants on the same drive (direct +
@@ -470,8 +488,6 @@ impl DriveRepository for DrivePgRepository {
         // weakest), so MIN returns the strongest. Cast `::text` matches
         // the codebase convention for reading enum columns into Rust
         // (see `pg_acl_engine.rs`); `Role::parse` handles the trip back.
-        // Collapses direct + group-mediated grants on the same drive
-        // into one row alongside the existing GROUP BY.
         let rows = sqlx::query(
             r#"
             SELECT d.id, d.kind, d.default_for_user, d.root_folder_id,
@@ -484,8 +500,11 @@ impl DriveRepository for DrivePgRepository {
               JOIN storage.role_grants g
                 ON g.resource_type = 'drive'
                AND g.resource_id   = d.id
-             WHERE g.subject_type = ANY($1)
-               AND g.subject_id   = ANY($2)
+             WHERE (
+                     (g.subject_type = 'user'  AND g.subject_id = $1)
+                  OR (g.subject_type = 'group' AND g.subject_id IN
+                          (SELECT storage.caller_group_ids($1)))
+                   )
                AND (g.expires_at IS NULL OR g.expires_at > NOW())
              GROUP BY d.id, d.kind, d.default_for_user, d.root_folder_id,
                       d.quota_bytes, d.used_bytes, d.policies,
@@ -494,16 +513,10 @@ impl DriveRepository for DrivePgRepository {
                       LOWER(f.name) ASC
             "#,
         )
-        .bind(
-            subject_types
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>(),
-        )
-        .bind(subject_ids)
+        .bind(caller_id)
         .fetch_all(self.pool.as_ref())
         .await
-        .map_err(|e| Self::map_sqlx_err("list_for_subjects", e))?;
+        .map_err(|e| Self::map_sqlx_err("list_readable_by", e))?;
 
         rows.iter()
             .map(Self::row_to_drive_with_name_and_role)
@@ -636,16 +649,17 @@ impl DriveRepository for DrivePgRepository {
     async fn update_policies(
         &self,
         drive_id: Uuid,
-        partial: &crate::domain::entities::drive::DrivePolicies,
+        partial: &serde_json::Value,
     ) -> Result<crate::domain::entities::drive::DrivePolicies, DriveRepositoryError> {
         // JSONB-level merge (`||`) keeps unknown keys already on disk —
         // the column remains the canonical bag (see
         // `DrivePolicies::from_value` — typed read is lenient, untyped
-        // write is preserving). RETURNING surfaces the post-merge bag so
-        // the audit log shows what the row actually carries afterwards.
-        let partial_json = serde_json::to_value(partial).map_err(|e| {
-            DriveRepositoryError::StorageError(format!("serialise partial policies: {e}"))
-        })?;
+        // write is preserving). The caller passes a raw `Value` with
+        // ONLY the keys it wants to change (never a full `DrivePolicies`
+        // round-trip, which would serialise all-false defaults into the
+        // merge and clobber other flags). RETURNING surfaces the
+        // post-merge bag so the audit log shows what the row actually
+        // carries afterwards.
         let row: Option<(serde_json::Value,)> = sqlx::query_as(
             "UPDATE storage.drives \
                 SET policies   = policies || $2, \
@@ -654,7 +668,7 @@ impl DriveRepository for DrivePgRepository {
               RETURNING policies",
         )
         .bind(drive_id)
-        .bind(&partial_json)
+        .bind(partial)
         .fetch_optional(self.pool.as_ref())
         .await
         .map_err(|e| Self::map_sqlx_err("update_policies", e))?;

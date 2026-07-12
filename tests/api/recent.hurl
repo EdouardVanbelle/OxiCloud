@@ -187,3 +187,67 @@ DELETE {{base_url}}/api/recent/clear
 Authorization: Bearer {{token}}
 
 HTTP 200
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 10 — Cross-tenant regression (post-Drive AuthZ audit,
+#           Round 1 HIGH). Before this fix, `POST /api/recent/…`
+#           accepted any UUID and the listing endpoint JOINed back
+#           to storage.files/folders (name/mime/size/drive_id) — a
+#           metadata oracle over the whole tenant. Now the write
+#           path calls `authz.require(Read, …)`; unauthorised
+#           callers get 404 (anti-enum) + `authz.denied` audit line.
+#           See `docs/plan/authz_audit/rest_storage.md`.
+# ─────────────────────────────────────────────────────────────
+
+# Re-discover a folder id so the attacker has TWO targets to probe
+# (file + folder). Same test1 folder as favorites.hurl.
+GET {{base_url}}/api/folders/{{home_folder_id}}/resources?resource_types=folder
+Authorization: Bearer {{token}}
+
+HTTP 200
+[Captures]
+test1_id: jsonpath "$.items[0].resource.id"
+
+
+# Create/lookup the attacker. Idempotent: `HTTP *` accepts either
+# 201 (first run) or 409 (subsequent runs). Login below is the real
+# precondition.
+POST {{base_url}}/api/admin/users
+Authorization: Bearer {{token}}
+Content-Type: application/json
+{ "username": "rec_mallory", "password": "RecMalloryPassword1!", "email": "rec_mallory@example.com", "role": "user" }
+
+HTTP *
+
+
+POST {{base_url}}/api/auth/login
+Content-Type: application/json
+{ "username": "rec_mallory", "password": "RecMalloryPassword1!" }
+
+HTTP 200
+[Captures]
+mallory_token: jsonpath "$.access_token"
+
+
+# Step 10a — Record admin's file into mallory's recent: 404.
+POST {{base_url}}/api/recent/file/{{file_id}}
+Authorization: Bearer {{mallory_token}}
+
+HTTP 404
+
+
+# Step 10b — Same for admin's folder: 404.
+POST {{base_url}}/api/recent/folder/{{test1_id}}
+Authorization: Bearer {{mallory_token}}
+
+HTTP 404
+
+
+# Step 10c — Mallory's recent list stays empty.
+GET {{base_url}}/api/recent/resources
+Authorization: Bearer {{mallory_token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$.items" count == 0

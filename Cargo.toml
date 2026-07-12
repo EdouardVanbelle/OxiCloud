@@ -1,6 +1,6 @@
 [package]
 name = "oxicloud"
-version = "0.8.0"
+version = "0.8.2"
 edition = "2024"
 default-run = "oxicloud"
 
@@ -34,7 +34,7 @@ sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio", "tls-rustls
 jsonwebtoken = { version = "10.4.0", features = ["rust_crypto"] }
 argon2 = "0.5.3"
 rand_core = { version = "0.6", features = ["std", "getrandom"] }
-quick-xml = "0.39.4"
+quick-xml = "0.41.0"
 dotenvy = "0.15.7"
 moka = { version = "0.12.15", features = ["future", "sync"] }
 http-range-header = "0.4"
@@ -209,7 +209,6 @@ required-features = ["bench"]
 lto = "thin"
 codegen-units = 1
 opt-level = 3
-panic = "abort"
 strip = true
 
 [profile.dev]

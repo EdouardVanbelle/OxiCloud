@@ -78,12 +78,24 @@ pub enum Resource {
     /// membership and policy bag. Added in D0; membership lives in
     /// `storage.role_grants` (no separate `drive_members` table).
     Drive(Uuid),
-    // Reserved for future use:
-    // Calendar(Uuid),
-    // Reserved for future use:
-    // AddressBook(Uuid),
-    // Reserved for future use:
-    // Playlist(Uuid),
+    /// A CalDAV calendar. Membership + sharing lives in
+    /// `storage.role_grants` with `resource_type='calendar'` —
+    /// replaces the pre-Round-3 dedicated `caldav.calendar_shares`
+    /// table and the `check_calendar_access` bespoke helper. No
+    /// cascade parent (calendars are top-level per user); the engine
+    /// resolves directly against `role_grants` on the resource.
+    Calendar(Uuid),
+    /// A CardDAV address book. Same shape as `Calendar` —
+    /// `storage.role_grants` with `resource_type='address_book'`
+    /// replaces `carddav.address_book_shares` and the
+    /// `check_address_book_access` bespoke helper.
+    AddressBook(Uuid),
+    /// A music playlist. Same shape as `Calendar`/`AddressBook` —
+    /// `storage.role_grants` with `resource_type='playlist'` replaces
+    /// the pre-Round-3 dedicated `music.playlist_shares` table and the
+    /// bespoke `user_has_access` / `user_can_write` helpers on
+    /// `MusicStorageAdapter`.
+    Playlist(Uuid),
 }
 
 impl Resource {
@@ -92,18 +104,20 @@ impl Resource {
             Resource::Folder(_) => "folder",
             Resource::File(_) => "file",
             Resource::Drive(_) => "drive",
-            //Resource::Calendar(_) => "calendar",
-            //Resource::AddressBook(_) => "adressbook",
-            //Resource::Playlist(_) => "playlist",
+            Resource::Calendar(_) => "calendar",
+            Resource::AddressBook(_) => "address_book",
+            Resource::Playlist(_) => "playlist",
         }
     }
 
     pub fn id(&self) -> Uuid {
         match self {
-            Resource::Folder(id) | Resource::File(id) | Resource::Drive(id) => *id,
-            //| Resource::Calendar(id)
-            //| Resource::AddressBook(id)
-            //| Resource::Playlist(id)
+            Resource::Folder(id)
+            | Resource::File(id)
+            | Resource::Drive(id)
+            | Resource::Calendar(id)
+            | Resource::AddressBook(id)
+            | Resource::Playlist(id) => *id,
         }
     }
 
@@ -112,11 +126,39 @@ impl Resource {
             "folder" => Some(Resource::Folder(id)),
             "file" => Some(Resource::File(id)),
             "drive" => Some(Resource::Drive(id)),
-            //"calendar" => Some(Resource::Calendar(id)),
-            //"adressbook" => Some(Resource::AddressBook(id)),
-            //"playlist" => Some(Resource::Playlist(id)),
+            "calendar" => Some(Resource::Calendar(id)),
+            "address_book" => Some(Resource::AddressBook(id)),
+            "playlist" => Some(Resource::Playlist(id)),
             _ => None,
         }
+    }
+
+    /// Parse `(item_type, item_id)` from an API-facing pair of strings
+    /// (favorites, recent, batch endpoints all take this shape).
+    /// Combines UUID parse + type mapping so callers stay one-line and
+    /// error shapes are identical across surfaces. Returns
+    /// `DomainError::new(InvalidInput, …)` on malformed input; callers
+    /// that need the anti-enum 404 shape do that separately by feeding
+    /// the parsed `Resource` into `authz.require(...)`.
+    pub fn parse(
+        item_type: &str,
+        item_id: &str,
+    ) -> Result<Self, crate::common::errors::DomainError> {
+        use crate::common::errors::{DomainError, ErrorKind};
+        let uuid = Uuid::parse_str(item_id).map_err(|_| {
+            DomainError::new(
+                ErrorKind::InvalidInput,
+                "Resource",
+                format!("Invalid item UUID '{item_id}'"),
+            )
+        })?;
+        Self::from_parts(item_type, uuid).ok_or_else(|| {
+            DomainError::new(
+                ErrorKind::InvalidInput,
+                "Resource",
+                format!("Unsupported item type '{item_type}'"),
+            )
+        })
     }
 }
 
@@ -508,11 +550,16 @@ mod tests {
     #[test]
     fn resource_roundtrip() {
         let id = Uuid::new_v4();
-        for r in [Resource::Folder(id), Resource::File(id)] {
+        for r in [
+            Resource::Folder(id),
+            Resource::File(id),
+            Resource::Calendar(id),
+            Resource::AddressBook(id),
+            Resource::Playlist(id),
+        ] {
             let back = Resource::from_parts(r.type_str(), r.id()).unwrap();
             assert_eq!(r, back);
         }
-        assert!(Resource::from_parts("calendar", id).is_none());
     }
 
     #[test]

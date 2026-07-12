@@ -18,7 +18,7 @@
 	type Crumb = { id?: string; name: string };
 	type ViewMode = 'grid' | 'list';
 
-	const VIEW_KEY = 'oxicloud_share_view';
+	const VIEW_KEY = 'oxi-share-view';
 	const token = $derived(page.params.token ?? '');
 
 	let view = $state<State>('loading');

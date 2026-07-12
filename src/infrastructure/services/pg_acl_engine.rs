@@ -283,6 +283,62 @@ impl PgAclEngine {
         }
     }
 
+    /// Drop the `owner_cache` entry for `resource`. Called after any
+    /// operation that changes which drive a file/folder belongs to —
+    /// the pre-D6 comment on `owner_cache` ("a resource's owner is
+    /// immutable") stopped being true when cross-drive MOVE landed.
+    ///
+    /// Without this call, admin (or any other role holder) on the
+    /// destination drive gets `authz.denied` when acting on the moved
+    /// resource: the cached (stale) `Resource → src_drive_id` lookup
+    /// steers the drive-role precheck at `check_inner` toward the
+    /// SOURCE drive where the caller has no role, and the fallback
+    /// per-resource cascade doesn't cover drive-level grants. TTL
+    /// backstops eventually (5 min), but every write path that MOVEs
+    /// content across drives MUST invalidate here so authz observes
+    /// the new drive on the next check.
+    pub async fn invalidate_owner_cache_for_resource(&self, resource: Resource) {
+        self.owner_cache.invalidate(&resource).await;
+    }
+
+    /// Bulk cousin of [`Self::invalidate_owner_cache_for_resource`] —
+    /// clears the entire `owner_cache`. Called by folder cross-drive
+    /// MOVE where the moved subtree's descendants each carry their
+    /// own stale entry, and we don't (yet) walk the subtree to
+    /// invalidate them individually. The cache repopulates lazily on
+    /// next access; the overhead is a single JOIN per file/folder
+    /// touched in the following minute or two, versus a stale-authz
+    /// bug that returned `NotFound` for legitimate Delete.
+    pub async fn invalidate_owner_cache_all(&self) {
+        self.owner_cache.invalidate_all();
+    }
+
+    /// Sibling of [`Self::invalidate_drive_role_cache_for_drive`] keyed by
+    /// subject rather than drive. Used by the user-deleted lifecycle hook
+    /// to reap every cached "user X → drive Y = role R" entry after the
+    /// user row (and its DB-cascade-cleared role_grants) is gone. Without
+    /// this call the entry lingers until TTL; in practice auth rejection
+    /// on the deleted user's tokens fires first, but leaving stale
+    /// authorisation rows in the cache is poor hygiene and would surface
+    /// as an issue if a session survived (e.g. long-lived Basic Auth via
+    /// app password) or if a same-uuid user were ever recreated.
+    pub async fn invalidate_drive_role_cache_for_subject(&self, subject: Subject) {
+        if let Err(err) = self
+            .drive_role_cache
+            .invalidate_entries_if(move |key, _v| key.0 == subject)
+        {
+            tracing::error!(
+                target: "oxicloud::authz",
+                event = "authz.cache_invalidation_failed",
+                cache = "drive_role_cache",
+                subject = ?subject,
+                error = %err,
+                "drive_role_cache cannot be bulk-invalidated by subject — \
+                 cache builder is missing support_invalidation_closures()",
+            );
+        }
+    }
+
     /// Expand a user subject into the set of subject UUIDs that should match
     /// in `access_grants`: the user's own UUID, every group the user is
     /// transitively a member of, and (for internal users only) the implicit
@@ -377,10 +433,15 @@ impl PgAclEngine {
 
     /// Public wrapper around `subject_match_set` for callers that need
     /// the expanded `(subject_types, subject_ids)` pair without invoking
-    /// the engine's full `check`/`require` pipeline. Used by
-    /// `GET /api/drives` (and future drive-aware listing surfaces) to
-    /// ask the `DriveRepository` for every drive the caller can read,
-    /// reusing the engine's cached group-expansion logic.
+    /// the engine's full `check`/`require` pipeline.
+    ///
+    /// **Retained for legacy callers only** — new listing queries embed
+    /// the `storage.caller_group_ids` PostgreSQL function inline (see
+    /// migration `20260901000002_caller_group_ids_function.sql`) and
+    /// take a bare `caller_id: Uuid` instead of the pre-expanded arrays.
+    /// The engine's Moka cache still backs the fast path for per-request
+    /// AuthZ decisions (`check_inner`, `drive_role_cache`) where the
+    /// same subject is looked up repeatedly.
     pub async fn expand_subject_for_listing(
         &self,
         subject: Subject,
@@ -418,11 +479,23 @@ impl PgAclEngine {
     /// Returns the `drive_id` for a File / Folder. Drives don't have a parent
     /// drive — this returns `NotFound` for `Resource::Drive` and the caller
     /// must not invoke it on Drive resources.
+    ///
+    /// `Resource::Calendar`, `Resource::AddressBook` and
+    /// `Resource::Playlist` are top-level per user with no drive
+    /// ancestor; they also return `NotFound` and the engine
+    /// short-circuits to a direct `role_grants` lookup (no drive
+    /// precheck applies).
     async fn drive_of(&self, resource: Resource) -> Result<Uuid, DomainError> {
         match resource {
             Resource::Folder(id) => self.folder_repo.get_folder_drive_id(&id.to_string()).await,
             Resource::File(id) => self.file_repo.get_file_drive_id(&id.to_string()).await,
-            Resource::Drive(_) => Err(DomainError::not_found("Drive", resource.id().to_string())),
+            Resource::Drive(_)
+            | Resource::Calendar(_)
+            | Resource::AddressBook(_)
+            | Resource::Playlist(_) => Err(DomainError::not_found(
+                resource.type_str(),
+                resource.id().to_string(),
+            )),
         }
     }
 
@@ -458,6 +531,49 @@ impl PgAclEngine {
     /// permission — see `roles_implying()`.
     ///
     /// Uses the GiST index on `storage.folders.lpath` for O(log N) cascade.
+    /// Direct grant lookup with no cascade — used for top-level
+    /// resources whose ACL lives entirely on their own row
+    /// (`Resource::Calendar`, `Resource::AddressBook`). Same
+    /// role-array + subject-set shape as the cascade helpers so a
+    /// caller's group memberships still resolve, but no ltree /
+    /// folder ancestry / drive precheck applies. Calendars and
+    /// address books have no parent to inherit from.
+    async fn direct_grant_exists(
+        &self,
+        subject_types: &[&str],
+        subject_ids: &[Uuid],
+        permission: Permission,
+        resource_type: &'static str,
+        resource_id: Uuid,
+        counters: &QueryCounters,
+    ) -> Result<bool, DomainError> {
+        counters.sql_queries.fetch_add(1, Ordering::Relaxed);
+        let roles = Self::roles_implying_strings(permission);
+        let exists: Option<i32> = sqlx::query_scalar(
+            r#"
+            SELECT 1
+              FROM storage.role_grants g
+             WHERE g.subject_type  = ANY($1)
+               AND g.subject_id    = ANY($2)
+               AND g.role          = ANY($3::storage.grant_role[])
+               AND g.resource_type = $4
+               AND g.resource_id   = $5
+               AND (g.expires_at IS NULL OR g.expires_at > NOW())
+             LIMIT 1
+            "#,
+        )
+        .bind(subject_types)
+        .bind(subject_ids)
+        .bind(&roles)
+        .bind(resource_type)
+        .bind(resource_id)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(|e| DomainError::internal_error("PgAcl", format!("direct grant: {e}")))?;
+
+        Ok(exists.is_some())
+    }
+
     async fn folder_cascade_grant_exists(
         &self,
         subject_types: &[&str],
@@ -757,6 +873,52 @@ impl PgAclEngine {
                     .caller_role_on_drive_cached(subject, id, counters)
                     .await?
                     .is_some_and(|r| r.expand().contains(&permission)))
+            }
+            // Top-level resources with no cascade parent — the ACL
+            // lives entirely on their own `role_grants` rows. Owner is
+            // an explicit grant seeded at MKCALENDAR / address-book
+            // create time (Round 3 phase 2 migration), so the common
+            // "owner accessing their own calendar" case is one SQL
+            // round-trip — no drive_role_cache short-circuit (no
+            // drive), no cascade.
+            Resource::Calendar(id) => {
+                let (subject_types, subject_ids) =
+                    self.subject_match_set(subject, counters).await?;
+                self.direct_grant_exists(
+                    &subject_types,
+                    &subject_ids,
+                    permission,
+                    "calendar",
+                    id,
+                    counters,
+                )
+                .await
+            }
+            Resource::AddressBook(id) => {
+                let (subject_types, subject_ids) =
+                    self.subject_match_set(subject, counters).await?;
+                self.direct_grant_exists(
+                    &subject_types,
+                    &subject_ids,
+                    permission,
+                    "address_book",
+                    id,
+                    counters,
+                )
+                .await
+            }
+            Resource::Playlist(id) => {
+                let (subject_types, subject_ids) =
+                    self.subject_match_set(subject, counters).await?;
+                self.direct_grant_exists(
+                    &subject_types,
+                    &subject_ids,
+                    permission,
+                    "playlist",
+                    id,
+                    counters,
+                )
+                .await
             }
         }
     }
@@ -2094,8 +2256,19 @@ impl UserLifecycleHook for AuthzCacheLifecycleHook {
         _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ) -> Result<(), DomainError> {
         // No DB writes here — just memory invalidation. `_tx` is
-        // intentionally ignored.
+        // intentionally ignored. The DB cascade
+        // (`trg_cleanup_role_grants_user`) already dropped every
+        // role_grants row for this subject; we mirror that cleanup on
+        // both authz caches:
+        //   1. `user_groups_cache` — recomputed group expansion.
+        //   2. `drive_role_cache` — cached "user X → drive Y = role R"
+        //      entries seeded by prior authz checks. Without this
+        //      the deleted user's role stays visible in-process for
+        //      up to the cache TTL (~30 s).
         self.engine.invalidate_user_groups_cache(user.id()).await;
+        self.engine
+            .invalidate_drive_role_cache_for_subject(Subject::User(user.id()))
+            .await;
         Ok(())
     }
 }

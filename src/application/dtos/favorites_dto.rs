@@ -55,11 +55,6 @@ pub struct FavoriteItemDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub item_path: Option<String>,
 
-    /// UUID of the file/folder's actual owner (may differ from `user_id` when
-    /// the item was shared and then favourited by another user).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub owner_id: Option<String>,
-
     // ── Pre-computed display fields ──
     /// FontAwesome icon CSS class (e.g. "fas fa-file-image", "fas fa-folder")
     pub icon_class: String,
@@ -124,7 +119,6 @@ pub struct FavoriteResourceRow {
     pub size: i64,
     pub resource_created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
-    pub owner_id: Uuid,
     /// Drive that owns this row. Surfaced on the favorites listing
     /// so a UI can tell when a favorited item lives in a different
     /// drive than the user's home (post-D6 cross-drive moves +

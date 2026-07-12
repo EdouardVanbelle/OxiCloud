@@ -19,8 +19,8 @@ use crate::application::dtos::contact_dto::{
 use crate::application::dtos::user_dto::UserDto;
 use crate::application::ports::carddav_ports::{AddressBookUseCase, ContactUseCase};
 use crate::application::services::auth_application_service::AuthApplicationService;
+use crate::application::services::contact_service::ContactService;
 use crate::domain::errors::ErrorKind;
-use crate::infrastructure::adapters::contact_storage_adapter::ContactStorageAdapter;
 use crate::interfaces::middleware::auth::AuthUser;
 
 const SYSTEM_BOOK_ID: &str = "system";
@@ -28,7 +28,7 @@ const SYSTEM_BOOK_ID: &str = "system";
 /// Combined state for the contacts REST API.
 #[derive(Clone)]
 pub struct ContactsApiState {
-    pub contact_service: Arc<ContactStorageAdapter>,
+    pub contact_service: Arc<ContactService>,
     pub auth_service: Option<Arc<AuthApplicationService>>,
     /// When false, the virtual "system" address book (OxiCloud users) is hidden.
     pub expose_system_users: bool,

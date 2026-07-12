@@ -61,7 +61,10 @@ impl PluginLifecycleHook {
 
             dispatch.dispatch(PluginEvent {
                 name: EVENT_FILE_UPLOADED,
-                user_id: dto.owner_id,
+                // Post-D7 the wire DTO no longer carries `owner_id`;
+                // §14 `created_by` provenance is the equivalent signal
+                // (who put the file in the system).
+                user_id: dto.created_by.map(|u| u.to_string()),
                 invocation_id: Uuid::new_v4().to_string(),
                 payload: serde_json::json!({
                     "path": dto.path,

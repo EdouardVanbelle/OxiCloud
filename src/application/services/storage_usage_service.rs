@@ -213,6 +213,47 @@ impl StorageUsageService {
         Ok(())
     }
 
+    /// Return the size in bytes of a single non-trashed file. `None`
+    /// if the file is trashed or absent. Used by cross-drive MOVE to
+    /// know how many bytes will land on the destination drive so the
+    /// pre-move `check_drive_quota` call can fire.
+    pub async fn file_bytes(&self, file_id: Uuid) -> Result<Option<i64>, DomainError> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT size::bigint FROM storage.files WHERE id = $1 AND NOT is_trashed",
+        )
+        .bind(file_id)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(|e| DomainError::internal_error("StorageUsage", format!("file_bytes: {e}")))?;
+        Ok(row.map(|(s,)| s))
+    }
+
+    /// Sum the sizes of every non-trashed file whose parent folder is
+    /// `folder_id` itself or a descendant of it via the `lpath` ltree.
+    /// Used by cross-drive MOVE to know how many bytes would land on
+    /// the destination drive — necessary for the pre-move
+    /// `check_drive_quota` call.
+    ///
+    /// Returns 0 for an empty subtree AND for a non-existent
+    /// `folder_id` (the JOIN silently drops); callers that need to
+    /// distinguish those two cases must probe the folder separately.
+    pub async fn folder_subtree_bytes(&self, folder_id: Uuid) -> Result<i64, DomainError> {
+        let (bytes,): (Option<i64>,) = sqlx::query_as(
+            "SELECT COALESCE(SUM(f.size), 0)::bigint
+               FROM storage.files f
+               JOIN storage.folders fo ON fo.id = f.folder_id
+              WHERE fo.lpath <@ (SELECT lpath FROM storage.folders WHERE id = $1)
+                AND NOT f.is_trashed",
+        )
+        .bind(folder_id)
+        .fetch_one(self.pool.as_ref())
+        .await
+        .map_err(|e| {
+            DomainError::internal_error("StorageUsage", format!("folder_subtree_bytes: {e}"))
+        })?;
+        Ok(bytes.unwrap_or(0))
+    }
+
     /// Same as [`Self::add_drive_storage_usage_delta`] but resolves
     /// the drive id from a parent folder id in a single statement.
     /// Avoids a separate `SELECT drive_id FROM storage.folders` round

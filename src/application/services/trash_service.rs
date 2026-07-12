@@ -786,13 +786,9 @@ impl TrashService {
     /// keeps the two HTTP surfaces semantically consistent and avoids
     /// duplicating the subject-expansion plumbing.
     async fn drives_with_delete_for(&self, user_id: Uuid) -> Result<Vec<Uuid>> {
-        let (subject_types, subject_ids) = self
-            .authz
-            .expand_subject_for_listing(Subject::User(user_id))
-            .await?;
         let drives = self
             .drive_repo
-            .list_for_subjects(&subject_types, &subject_ids)
+            .list_readable_by(user_id)
             .await
             .map_err(|e| {
                 DomainError::internal_error(
@@ -900,15 +896,7 @@ impl TrashService {
         // D2b: scope by drives the caller can read (resolved through
         // role_grants on resource_type='drive', including group-mediated
         // grants). Empty set → empty page without a SQL round-trip.
-        let (subject_types, subject_ids) = self
-            .authz
-            .expand_subject_for_listing(Subject::User(user_id))
-            .await?;
-        let drive_ids: Vec<Uuid> = match self
-            .drive_repo
-            .list_for_subjects(&subject_types, &subject_ids)
-            .await
-        {
+        let drive_ids: Vec<Uuid> = match self.drive_repo.list_readable_by(user_id).await {
             Ok(drives) => drives.into_iter().map(|d| d.drive.id).collect(),
             Err(e) => {
                 return Err(DomainError::internal_error(
@@ -974,7 +962,6 @@ fn row_to_item_dto(row: TrashResourceRow) -> TrashResourceItemDto {
             name: row.name.clone(),
             path,
             parent_id: row.parent_id.map(|u| u.to_string()),
-            owner_id: Some(row.owner_id.to_string()),
             // D2b: the trash listing query now SELECTs `drive_id` (the
             // unified view exposes it). Surfaced so per-drive grouping
             // in the `/trash` UI doesn't need an extra lookup per row.
@@ -1025,7 +1012,6 @@ fn row_to_item_dto(row: TrashResourceRow) -> TrashResourceItemDto {
             icon_special_class: std::sync::Arc::from(icon_special_class_for(&row.name, mime)),
             category: std::sync::Arc::from(category_for(&row.name, mime)),
             size_formatted: format_file_size(size_bytes),
-            owner_id: Some(row.owner_id.to_string()),
             sort_date: None,
             content_hash,
             etag,

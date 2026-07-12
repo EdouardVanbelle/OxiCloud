@@ -61,16 +61,3 @@ pub struct UpdateAddressBookDto {
     pub is_public: Option<bool>,
     pub user_id: String, // Current user making the update
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ShareAddressBookDto {
-    pub address_book_id: String,
-    pub user_id: String,
-    pub can_write: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UnshareAddressBookDto {
-    pub address_book_id: String,
-    pub user_id: String,
-}

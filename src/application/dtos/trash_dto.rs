@@ -60,7 +60,6 @@ pub struct TrashResourceRow {
     pub size: i64,
     pub resource_created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
-    pub owner_id: Uuid,
     /// Drive the trashed item belongs to. Surfaced verbatim on the wire
     /// (`TrashResourceItemDto.drive_id`) so the `/trash` UI can group by
     /// drive without an extra lookup per row. D2b: filtering by drive is

@@ -821,6 +821,10 @@
       "forbid_cross_drive_move_help": "Blokkeert het verplaatsen van bestanden of mappen naar een andere Drive. Voorkomt geen downloaden + opnieuw uploaden.",
       "forbid_owner_role_change": "Eigenaarsoverzicht vergrendelen",
       "forbid_owner_role_change_help": "Alleen de beheerder kan Drive-eigenaren toevoegen, verwijderen of degraderen zolang dit aanstaat.",
+      "include_in_photo_index": "Opnemen in Foto's",
+      "include_in_photo_index_help": "Toon afbeeldings- en videobestanden uit deze Drive in de Foto's-tijdlijn en op de Plaatsen-kaart. Standaard persoonlijke Drives zijn automatisch opgenomen; schakel dit in voor gedeelde Drives die daadwerkelijk foto's bevatten (bv. «Gezinsfoto's»).",
+      "include_in_music_index": "Opnemen in Muziek",
+      "include_in_music_index_help": "Neem audiobestanden uit deze Drive op in de Muziekbibliotheek. Standaard persoonlijke Drives zijn automatisch opgenomen; schakel dit in voor gedeelde Drives die daadwerkelijk een muziekcollectie bevatten (bv. «Gezinsmuziek», «Bandsamenwerking»).",
       "implied_by_forbid_sharing": "Al afgedwongen door «Per-resource delen verbieden»."
     }
   },

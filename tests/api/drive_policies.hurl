@@ -472,6 +472,67 @@ HTTP 201
 
 
 # ─────────────────────────────────────────────────────────────
+# Step 10c — partial-merge regression guard.
+#
+# The `PATCH /api/drives/{id}/policies` handler documents that
+# omitting a field means "leave it alone", not "set it to false".
+# Prior implementation round-tripped the wire body through the
+# typed `DrivePolicies` struct (which has `#[serde(default)]`, so
+# every omitted field defaults to `false`) and then serialised the
+# whole struct into the JSONB `||` merge — silently clobbering
+# every unmentioned flag back to `false`. This step exercises
+# multi-flag interaction so that regression can't creep back:
+#
+#   1. Set `forbid_sharing = true`, assert the bag.
+#   2. In a SEPARATE PATCH, set only `forbid_public_links = true`.
+#   3. Assert `forbid_sharing` STILL reads `true` in the response
+#      — proving the merge honoured "leave omitted keys alone".
+#
+# Reset both back to false at the end so the shared-drive steps
+# below start from a clean state.
+# ─────────────────────────────────────────────────────────────
+PATCH {{base_url}}/api/drives/{{personal_drive_id}}/policies
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{
+  "forbid_sharing": true
+}
+
+HTTP 200
+[Asserts]
+jsonpath "$.forbid_sharing"      == true
+jsonpath "$.forbid_public_links" == false
+
+PATCH {{base_url}}/api/drives/{{personal_drive_id}}/policies
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{
+  "forbid_public_links": true
+}
+
+HTTP 200
+[Asserts]
+# The load-bearing assertion — `forbid_sharing` must NOT have been
+# clobbered by the omitted-key regression.
+jsonpath "$.forbid_sharing"      == true
+jsonpath "$.forbid_public_links" == true
+
+# Reset both.
+PATCH {{base_url}}/api/drives/{{personal_drive_id}}/policies
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{
+  "forbid_sharing":      false,
+  "forbid_public_links": false
+}
+
+HTTP 200
+[Asserts]
+jsonpath "$.forbid_sharing"      == false
+jsonpath "$.forbid_public_links" == false
+
+
+# ─────────────────────────────────────────────────────────────
 # Step 11 — `forbid_external_sharing` on a SHARED drive, via
 #           `POST /api/drives/{id}/members`.
 #
@@ -816,6 +877,113 @@ Content-Type: application/json
 }
 
 HTTP 200
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 11d — `include_in_photo_index` scope opt-in (§15).
+#
+# Default personal drives are seeded with the flag = true by the
+# `PersonalDriveLifecycleHook` + backfill migration
+# (20260901000000_default_personal_photo_music_flags.sql). Non-
+# default drives (shared, secondary personals) start opted-out
+# and only surface in `/api/photos` after an admin flips the
+# flag on via PATCH.
+#
+# Coverage:
+#   a. Upload a PNG into dp_owner's default Personal drive →
+#      surfaces in `/api/photos` (default-personal auto-opted in).
+#   b. Upload a PNG into the shared drive → does NOT surface
+#      (flag omitted).
+#   c. Admin flips `include_in_photo_index=true` on the shared
+#      drive → the shared-drive PNG surfaces in `/api/photos`.
+#
+# `/api/photos` returns a flat array of PhotoDto — each carries
+# the file's `id`. Assertions use `jsonpath "$[*].id" contains
+# "…"` to sidestep the single-match filter quirks
+# (feedback_hurl_jsonpath_filter_empty).
+# ─────────────────────────────────────────────────────────────
+POST {{base_url}}/api/files/upload
+Authorization: Bearer {{owner_token}}
+[MultipartFormData]
+folder_id: {{personal_root_id}}
+file: file,fixtures/blue-image.png; image/png
+
+HTTP 201
+[Captures]
+personal_photo_id: jsonpath "$.id"
+
+
+# Baseline — personal-drive photo is visible in the timeline.
+GET {{base_url}}/api/photos
+Authorization: Bearer {{owner_token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$[*].id" contains "{{personal_photo_id}}"
+
+
+# Upload a PNG into the SHARED drive's root. dp_owner is Owner
+# on the shared drive from earlier steps, so Create passes.
+POST {{base_url}}/api/files/upload
+Authorization: Bearer {{owner_token}}
+[MultipartFormData]
+folder_id: {{shared_root_id}}
+file: file,fixtures/red-image.png; image/png
+
+HTTP 201
+[Captures]
+shared_photo_id: jsonpath "$.id"
+
+
+# Shared drive is NOT opted-in yet — the shared photo must be
+# absent from `/api/photos`. The personal photo stays visible.
+GET {{base_url}}/api/photos
+Authorization: Bearer {{owner_token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$[*].id" not contains "{{shared_photo_id}}"
+jsonpath "$[*].id" contains "{{personal_photo_id}}"
+
+
+# Flip `include_in_photo_index=true` on the shared drive.
+PATCH {{base_url}}/api/drives/{{shared_drive_id}}/policies
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{
+  "include_in_photo_index": true
+}
+
+HTTP 200
+[Asserts]
+jsonpath "$.include_in_photo_index" == true
+
+
+# Shared-drive photo now surfaces in `/api/photos`. Personal
+# photo remains visible — no regression on the always-in-scope
+# default drive.
+GET {{base_url}}/api/photos
+Authorization: Bearer {{owner_token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$[*].id" contains "{{shared_photo_id}}"
+jsonpath "$[*].id" contains "{{personal_photo_id}}"
+
+
+# Cleanup — both photos so the shared-drive delete below finds
+# an empty drive. The personal-drive photo cascade-deletes with
+# dp_owner in Step 12; we still remove it here so the delete
+# path is exercised explicitly (deletes don't affect the flag).
+DELETE {{base_url}}/api/files/{{shared_photo_id}}
+Authorization: Bearer {{owner_token}}
+
+HTTP 204
+
+DELETE {{base_url}}/api/files/{{personal_photo_id}}
+Authorization: Bearer {{owner_token}}
+
+HTTP 204
 
 
 # Cleanup the shared drive: empty (no content was added) → delete

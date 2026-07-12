@@ -21,19 +21,22 @@ use crate::domain::services::authorization::ResourceKind;
 use crate::domain::services::path_service::StoragePath;
 
 /// Type alias for folder metadata rows from SQL queries.
-/// Tuple order: id, name, path, parent_id, user_id, drive_id,
-/// created_at, modified_at, tree_modified_at, created_by, updated_by.
+/// Tuple order: id, name, path, parent_id, drive_id, created_at,
+/// modified_at, tree_modified_at, created_by, updated_by.
 /// The trailing `tree_modified_at` feeds [`Folder::etag`] — every
 /// SELECT here must include `EXTRACT(EPOCH FROM tree_modified_at)::bigint`.
 /// `drive_id` is the post-D0 `NOT NULL` scope axis for path-based
 /// lookups. `created_by` / `updated_by` are the §14 provenance
 /// columns, nullable because the FK is `ON DELETE SET NULL`.
+///
+/// Post-D7-step-6: `storage.folders.user_id` dropped, so the tuple
+/// no longer carries it. The domain entity's `user_id` field is
+/// populated with `None` at `row_to_folder` construction.
 type FolderRow = (
     String,
     String,
     String,
     Option<String>,
-    Uuid,
     Uuid,
     i64,
     i64,
@@ -43,13 +46,13 @@ type FolderRow = (
 );
 
 /// Type alias for paginated folder rows (includes total_count as
-/// the last element after the §14 provenance columns).
+/// the last element after the §14 provenance columns). Same
+/// column set as [`FolderRow`] plus the trailing count.
 type FolderRowPaginated = (
     String,
     String,
     String,
     Option<String>,
-    Uuid,
     Uuid,
     i64,
     i64,
@@ -59,21 +62,38 @@ type FolderRowPaginated = (
     i64,
 );
 
-/// Type alias for folder rows with optional user_id.
-/// Includes the §14 provenance columns `created_by` / `updated_by`.
-type FolderRowOptUser = (
-    String,
-    String,
-    String,
-    Option<String>,
-    Option<Uuid>,
-    Uuid,
-    i64,
-    i64,
-    i64,
-    Option<Uuid>,
-    Option<Uuid>,
-);
+/// SQL `EXISTS (…)` predicate — true when the caller (bound to `$1`) has
+/// any active `role_grants` on the drive owning `fo` (the aliased folder
+/// row). Group memberships (direct + transitive) are expanded inline via
+/// `storage.caller_group_ids($1)` (recursive; see migration
+/// `20260901000002_caller_group_ids_function.sql`).
+///
+/// Used by every drive-scoped folder query in this repo:
+/// - `list_root_folders_for_caller` / `_paginated`
+/// - `search_folders` (all three branches)
+/// - `list_descendant_folders`
+///
+/// **Alias contract**: queries splicing this in MUST alias
+/// `storage.folders` as `fo`. `$1` is reserved for `caller_id`; other
+/// bind params start at `$2`.
+///
+/// This mirrors — but is not shared with — the drive-membership shape in
+/// `drive_pg_repository::list_readable_by` (uses `JOIN` on `d.id`) and
+/// the media-scoping subqueries in `file_blob_read_repository` (use
+/// `IN (SELECT d.id …)` with the `include_in_photo_index` policy
+/// filter). When the grant model changes, update all sites in parallel.
+const CALLER_CAN_READ_DRIVE: &str = "EXISTS (\
+        SELECT 1 \
+          FROM storage.role_grants g \
+         WHERE g.resource_type = 'drive' \
+           AND g.resource_id   = fo.drive_id \
+           AND (g.expires_at IS NULL OR g.expires_at > NOW()) \
+           AND ( \
+                 (g.subject_type = 'user'  AND g.subject_id = $1) \
+              OR (g.subject_type = 'group' AND g.subject_id IN \
+                      (SELECT storage.caller_group_ids($1))) \
+               ) \
+    )";
 
 /// PostgreSQL-backed folder repository.
 ///
@@ -115,7 +135,6 @@ impl FolderDbRepository {
         name: String,
         path: String,
         parent_id: Option<String>,
-        user_id: Option<Uuid>,
         drive_id: Uuid,
         created_at: i64,
         modified_at: i64,
@@ -129,7 +148,6 @@ impl FolderDbRepository {
             name,
             storage_path,
             parent_id,
-            user_id,
             drive_id,
             created_at as u64,
             modified_at as u64,
@@ -153,7 +171,7 @@ impl FolderDbRepository {
 
         let rows = sqlx::query_as::<_, FolderRow>(
             r#"
-            SELECT id::text, name, path, parent_id::text, user_id, drive_id,
+            SELECT id::text, name, path, parent_id::text, drive_id,
                    EXTRACT(EPOCH FROM created_at)::bigint,
                    EXTRACT(EPOCH FROM updated_at)::bigint,
                    EXTRACT(EPOCH FROM tree_modified_at)::bigint,
@@ -168,9 +186,7 @@ impl FolderDbRepository {
         .map_err(|e| DomainError::internal_error("FolderDb", format!("get_folders_by_ids: {e}")))?;
 
         rows.into_iter()
-            .map(|r| {
-                Self::row_to_folder(r.0, r.1, r.2, r.3, Some(r.4), r.5, r.6, r.7, r.8, r.9, r.10)
-            })
+            .map(|r| Self::row_to_folder(r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7, r.8, r.9))
             .collect()
     }
 }
@@ -182,13 +198,19 @@ impl FolderRepository for FolderDbRepository {
         parent_id: Option<String>,
         caller_id: Uuid,
     ) -> Result<Folder, DomainError> {
-        // Derive (user_id, drive_id) from parent folder in one round-trip.
-        // Root-level folders require the caller to have set up the home
-        // drive beforehand (done during user registration via the
-        // lifecycle hook).
-        let (user_id, drive_id): (Uuid, Uuid) = if let Some(ref pid) = parent_id {
-            sqlx::query_as::<_, (Uuid, Uuid)>(
-                "SELECT user_id, drive_id FROM storage.folders WHERE id = $1::uuid",
+        // Derive `drive_id` from the parent folder. Root-level folders
+        // are reserved for the atomic drive-creation transaction in
+        // `DrivePgRepository::create_personal_drive_atomic` (see
+        // `docs/plan/drive.md` §3) — the no-orphan-root-folder trigger
+        // enforces this at the DB level.
+        //
+        // Post-D7: only `drive_id` is fetched from the parent. The
+        // legacy `user_id` column is no longer written to on new rows
+        // (migration `20260902000000_files_folders_user_id_nullable.sql`);
+        // provenance flows through `created_by` / `updated_by` (§14).
+        let drive_id: Uuid = if let Some(ref pid) = parent_id {
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT drive_id FROM storage.folders WHERE id = $1::uuid",
             )
             .bind(pid)
             .fetch_optional(self.pool())
@@ -205,20 +227,20 @@ impl FolderRepository for FolderDbRepository {
             ));
         };
 
-        // D0 dual-write: drive_id alongside user_id (drops in D7); plus
-        // §14 provenance — `created_by` / `updated_by` bind to the caller
-        // ($5), NOT to the parent folder's `user_id`. Pre-D2 they're
-        // silently equivalent (only the parent's owner can write); the
-        // distinction matters once shared drives let an Editor mutate
-        // a folder owned by someone else.
+        // Post-D7: no `user_id` in the INSERT column list — the column
+        // is nullable and copied rows / new rows leave it NULL.
+        // `created_by` / `updated_by` carry §14 provenance (both bind to
+        // the caller — pre-D2 that's silently the parent's owner too,
+        // but the distinction matters once shared drives let an Editor
+        // mutate a folder owned by someone else).
         //
-        // RETURNING also surfaces the two provenance columns so the
-        // built entity / DTO carries fresh values without a re-read.
+        // RETURNING surfaces the two provenance columns so the built
+        // entity / DTO carries fresh values without a re-read.
         let row = sqlx::query_as::<_, (String, String, i64, i64, i64, Option<Uuid>, Option<Uuid>)>(
             r#"
             INSERT INTO storage.folders
-                (name, parent_id, user_id, drive_id, created_by, updated_by)
-            VALUES ($1, $2::uuid, $3, $4, $5, $5)
+                (name, parent_id, drive_id, created_by, updated_by)
+            VALUES ($1, $2::uuid, $3, $4, $4)
             RETURNING id::text,
                       path,
                       EXTRACT(EPOCH FROM created_at)::bigint,
@@ -230,7 +252,6 @@ impl FolderRepository for FolderDbRepository {
         )
         .bind(&name)
         .bind(&parent_id)
-        .bind(user_id)
         .bind(drive_id)
         .bind(caller_id)
         .fetch_one(self.pool())
@@ -248,25 +269,16 @@ impl FolderRepository for FolderDbRepository {
         })?;
 
         Self::row_to_folder(
-            row.0,
-            name,
-            row.1,
-            parent_id,
-            Some(user_id),
-            drive_id,
-            row.2,
-            row.3,
-            row.4,
+            row.0, name, row.1, parent_id, drive_id, row.2, row.3, row.4,
             // Fresh from RETURNING — caller_id was bound to both columns.
-            row.5,
-            row.6,
+            row.5, row.6,
         )
     }
 
     async fn get_folder(&self, id: &str) -> Result<Folder, DomainError> {
         let row = sqlx::query_as::<_, FolderRow>(
             r#"
-            SELECT id::text, name, path, parent_id::text, user_id, drive_id,
+            SELECT id::text, name, path, parent_id::text, drive_id,
                    EXTRACT(EPOCH FROM created_at)::bigint,
                    EXTRACT(EPOCH FROM updated_at)::bigint,
                    EXTRACT(EPOCH FROM tree_modified_at)::bigint,
@@ -282,17 +294,7 @@ impl FolderRepository for FolderDbRepository {
         .ok_or_else(|| DomainError::not_found("Folder", id))?;
 
         Self::row_to_folder(
-            row.0,
-            row.1,
-            row.2,
-            row.3,
-            Some(row.4),
-            row.5,
-            row.6,
-            row.7,
-            row.8,
-            row.9,
-            row.10,
+            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9,
         )
     }
 
@@ -318,7 +320,7 @@ impl FolderRepository for FolderDbRepository {
         // wrapper scoping post-D0).
         let row = sqlx::query_as::<_, FolderRow>(
             r#"
-            SELECT id::text, name, path, parent_id::text, user_id, drive_id,
+            SELECT id::text, name, path, parent_id::text, drive_id,
                    EXTRACT(EPOCH FROM created_at)::bigint,
                    EXTRACT(EPOCH FROM updated_at)::bigint,
                        EXTRACT(EPOCH FROM tree_modified_at)::bigint,
@@ -335,17 +337,7 @@ impl FolderRepository for FolderDbRepository {
         .ok_or_else(|| DomainError::not_found("Folder", lookup))?;
 
         Self::row_to_folder(
-            row.0,
-            row.1,
-            row.2,
-            row.3,
-            Some(row.4),
-            row.5,
-            row.6,
-            row.7,
-            row.8,
-            row.9,
-            row.10,
+            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9,
         )
     }
 
@@ -354,7 +346,7 @@ impl FolderRepository for FolderDbRepository {
         let rows: Vec<FolderRow> = if let Some(pid) = parent_id {
             sqlx::query_as(
                 r#"
-                SELECT id::text, name, path, parent_id::text, user_id, drive_id,
+                SELECT id::text, name, path, parent_id::text, drive_id,
                        EXTRACT(EPOCH FROM created_at)::bigint,
                        EXTRACT(EPOCH FROM updated_at)::bigint,
                        EXTRACT(EPOCH FROM tree_modified_at)::bigint,
@@ -370,7 +362,7 @@ impl FolderRepository for FolderDbRepository {
         } else {
             sqlx::query_as(
                 r#"
-                SELECT id::text, name, path, parent_id::text, user_id, drive_id,
+                SELECT id::text, name, path, parent_id::text, drive_id,
                        EXTRACT(EPOCH FROM created_at)::bigint,
                        EXTRACT(EPOCH FROM updated_at)::bigint,
                        EXTRACT(EPOCH FROM tree_modified_at)::bigint,
@@ -386,57 +378,56 @@ impl FolderRepository for FolderDbRepository {
         .map_err(|e| DomainError::internal_error("FolderDb", format!("list: {e}")))?;
 
         rows.into_iter()
-            .map(|(id, name, path, pid, uid, did, ca, ma, tma, cb, ub)| {
-                Self::row_to_folder(id, name, path, pid, Some(uid), did, ca, ma, tma, cb, ub)
+            .map(|(id, name, path, pid, did, ca, ma, tma, cb, ub)| {
+                Self::row_to_folder(id, name, path, pid, did, ca, ma, tma, cb, ub)
             })
             .collect()
     }
 
-    #[allow(clippy::type_complexity)]
-    async fn list_folders_by_owner(
+    async fn list_root_folders_for_caller(
         &self,
-        parent_id: Option<&str>,
-        owner_id: Uuid,
+        caller_id: Uuid,
     ) -> Result<Vec<Folder>, DomainError> {
-        let rows: Vec<FolderRow> = if let Some(pid) = parent_id {
-            sqlx::query_as(
-                r#"
-                SELECT id::text, name, path, parent_id::text, user_id, drive_id,
-                       EXTRACT(EPOCH FROM created_at)::bigint,
-                       EXTRACT(EPOCH FROM updated_at)::bigint,
-                       EXTRACT(EPOCH FROM tree_modified_at)::bigint,
-                         created_by, updated_by
-                  FROM storage.folders
-                 WHERE parent_id = $1::uuid AND user_id = $2 AND NOT is_trashed
-                 ORDER BY name
-                "#,
-            )
-            .bind(pid)
-            .bind(owner_id)
+        // Drive-scoped root-folder listing: return every root folder
+        // whose drive the caller has any role_grant on. Group
+        // memberships (direct + transitive) resolve inline via
+        // `storage.caller_group_ids($1)`.
+        //
+        // Closes `bug_root_folder_listing_legacy_user_id`: pre-D7 this
+        // query filtered on `folders.user_id = $caller`, which returned
+        // rows admin had created for other users' drives without ever
+        // getting a role on them. The drive-membership predicate below
+        // makes the "admin's own listing" correct without a separate
+        // filter.
+        //
+        // `caller_role` is NOT surfaced here — see the memory
+        // `project_caller_role_on_file_folder_dto` and the note at the
+        // top of `folder_repository.rs`. Frontend cross-references
+        // `/api/drives::caller_role` via `folder.drive_id`.
+        let sql = format!(
+            "SELECT fo.id::text, fo.name, fo.path, fo.parent_id::text, \
+                    fo.drive_id, \
+                    EXTRACT(EPOCH FROM fo.created_at)::bigint, \
+                    EXTRACT(EPOCH FROM fo.updated_at)::bigint, \
+                    EXTRACT(EPOCH FROM fo.tree_modified_at)::bigint, \
+                    fo.created_by, fo.updated_by \
+               FROM storage.folders fo \
+              WHERE fo.parent_id IS NULL \
+                AND NOT fo.is_trashed \
+                AND {CALLER_CAN_READ_DRIVE} \
+              ORDER BY fo.name"
+        );
+        let rows: Vec<FolderRow> = sqlx::query_as(&sql)
+            .bind(caller_id)
             .fetch_all(self.pool())
             .await
-        } else {
-            sqlx::query_as(
-                r#"
-                SELECT id::text, name, path, parent_id::text, user_id, drive_id,
-                       EXTRACT(EPOCH FROM created_at)::bigint,
-                       EXTRACT(EPOCH FROM updated_at)::bigint,
-                       EXTRACT(EPOCH FROM tree_modified_at)::bigint,
-                         created_by, updated_by
-                  FROM storage.folders
-                 WHERE parent_id IS NULL AND user_id = $1 AND NOT is_trashed
-                 ORDER BY name
-                "#,
-            )
-            .bind(owner_id)
-            .fetch_all(self.pool())
-            .await
-        }
-        .map_err(|e| DomainError::internal_error("FolderDb", format!("list_by_owner: {e}")))?;
+            .map_err(|e| {
+                DomainError::internal_error("FolderDb", format!("list_root_folders: {e}"))
+            })?;
 
         rows.into_iter()
-            .map(|(id, name, path, pid, uid, did, ca, ma, tma, cb, ub)| {
-                Self::row_to_folder(id, name, path, pid, Some(uid), did, ca, ma, tma, cb, ub)
+            .map(|(id, name, path, pid, did, ca, ma, tma, cb, ub)| {
+                Self::row_to_folder(id, name, path, pid, did, ca, ma, tma, cb, ub)
             })
             .collect()
     }
@@ -455,7 +446,7 @@ impl FolderRepository for FolderDbRepository {
         let rows: Vec<FolderRowPaginated> = if let Some(pid) = parent_id {
             sqlx::query_as(
                 r#"
-                SELECT id::text, name, path, parent_id::text, user_id, drive_id,
+                SELECT id::text, name, path, parent_id::text, drive_id,
                        EXTRACT(EPOCH FROM created_at)::bigint,
                        EXTRACT(EPOCH FROM updated_at)::bigint,
                        EXTRACT(EPOCH FROM tree_modified_at)::bigint,
@@ -475,7 +466,7 @@ impl FolderRepository for FolderDbRepository {
         } else {
             sqlx::query_as(
                 r#"
-                SELECT id::text, name, path, parent_id::text, user_id, drive_id,
+                SELECT id::text, name, path, parent_id::text, drive_id,
                        EXTRACT(EPOCH FROM created_at)::bigint,
                        EXTRACT(EPOCH FROM updated_at)::bigint,
                        EXTRACT(EPOCH FROM tree_modified_at)::bigint,
@@ -496,90 +487,67 @@ impl FolderRepository for FolderDbRepository {
 
         // total_count is identical in every row; 0 when the result set is empty.
         let total = if include_total {
-            Some(rows.first().map_or(0, |r| r.11) as usize)
+            Some(rows.first().map_or(0, |r| r.10) as usize)
         } else {
             None
         };
 
         let folders: Result<Vec<Folder>, DomainError> = rows
             .into_iter()
-            .map(
-                |(id, name, path, pid, uid, did, ca, ma, tma, cb, ub, _total)| {
-                    Self::row_to_folder(id, name, path, pid, Some(uid), did, ca, ma, tma, cb, ub)
-                },
-            )
+            .map(|(id, name, path, pid, did, ca, ma, tma, cb, ub, _total)| {
+                Self::row_to_folder(id, name, path, pid, did, ca, ma, tma, cb, ub)
+            })
             .collect();
         Ok((folders?, total))
     }
 
-    /// Paginated folder listing filtered by owner — single query with
-    /// `COUNT(*) OVER()` to avoid a separate COUNT round-trip.
-    #[allow(clippy::type_complexity)]
-    async fn list_folders_by_owner_paginated(
+    /// Paginated companion to `list_root_folders_for_caller` — same
+    /// drive-membership predicate, adds LIMIT/OFFSET and an optional
+    /// window-function COUNT so total pages can be surfaced without a
+    /// second round-trip.
+    async fn list_root_folders_for_caller_paginated(
         &self,
-        parent_id: Option<&str>,
-        owner_id: Uuid,
+        caller_id: Uuid,
         offset: usize,
         limit: usize,
         include_total: bool,
     ) -> Result<(Vec<Folder>, Option<usize>), DomainError> {
-        let rows: Vec<FolderRowPaginated> = if let Some(pid) = parent_id {
-            sqlx::query_as(
-                r#"
-                SELECT id::text, name, path, parent_id::text, user_id, drive_id,
-                       EXTRACT(EPOCH FROM created_at)::bigint,
-                       EXTRACT(EPOCH FROM updated_at)::bigint,
-                       EXTRACT(EPOCH FROM tree_modified_at)::bigint,
-                       created_by, updated_by,
-                       COUNT(*) OVER() AS total_count
-                  FROM storage.folders
-                 WHERE parent_id = $1::uuid AND user_id = $2 AND NOT is_trashed
-                 ORDER BY name
-                 LIMIT $3 OFFSET $4
-                "#,
-            )
-            .bind(pid)
-            .bind(owner_id)
+        let sql = format!(
+            "SELECT fo.id::text, fo.name, fo.path, fo.parent_id::text, \
+                    fo.drive_id, \
+                    EXTRACT(EPOCH FROM fo.created_at)::bigint, \
+                    EXTRACT(EPOCH FROM fo.updated_at)::bigint, \
+                    EXTRACT(EPOCH FROM fo.tree_modified_at)::bigint, \
+                    fo.created_by, fo.updated_by, \
+                    COUNT(*) OVER() AS total_count \
+               FROM storage.folders fo \
+              WHERE fo.parent_id IS NULL \
+                AND NOT fo.is_trashed \
+                AND {CALLER_CAN_READ_DRIVE} \
+              ORDER BY fo.name \
+              LIMIT $2 OFFSET $3"
+        );
+        let rows: Vec<FolderRowPaginated> = sqlx::query_as(&sql)
+            .bind(caller_id)
             .bind(limit as i64)
             .bind(offset as i64)
             .fetch_all(self.pool())
             .await
-        } else {
-            sqlx::query_as(
-                r#"
-                SELECT id::text, name, path, parent_id::text, user_id, drive_id,
-                       EXTRACT(EPOCH FROM created_at)::bigint,
-                       EXTRACT(EPOCH FROM updated_at)::bigint,
-                       EXTRACT(EPOCH FROM tree_modified_at)::bigint,
-                       created_by, updated_by,
-                       COUNT(*) OVER() AS total_count
-                  FROM storage.folders
-                 WHERE parent_id IS NULL AND user_id = $1 AND NOT is_trashed
-                 ORDER BY name
-                 LIMIT $2 OFFSET $3
-                "#,
-            )
-            .bind(owner_id)
-            .bind(limit as i64)
-            .bind(offset as i64)
-            .fetch_all(self.pool())
-            .await
-        }
-        .map_err(|e| DomainError::internal_error("FolderDb", format!("paginate_by_owner: {e}")))?;
+            .map_err(|e| {
+                DomainError::internal_error("FolderDb", format!("list_root_folders_paginated: {e}"))
+            })?;
 
         let total = if include_total {
-            Some(rows.first().map_or(0, |r| r.11) as usize)
+            Some(rows.first().map_or(0, |r| r.10) as usize)
         } else {
             None
         };
 
         let folders: Result<Vec<Folder>, DomainError> = rows
             .into_iter()
-            .map(
-                |(id, name, path, pid, uid, did, ca, ma, tma, cb, ub, _total)| {
-                    Self::row_to_folder(id, name, path, pid, Some(uid), did, ca, ma, tma, cb, ub)
-                },
-            )
+            .map(|(id, name, path, pid, did, ca, ma, tma, cb, ub, _total)| {
+                Self::row_to_folder(id, name, path, pid, did, ca, ma, tma, cb, ub)
+            })
             .collect();
         Ok((folders?, total))
     }
@@ -607,7 +575,7 @@ impl FolderRepository for FolderDbRepository {
                 UPDATE storage.folders
                    SET name = $1, updated_at = NOW(), updated_by = $3
                  WHERE id = $2::uuid AND NOT is_trashed
-                RETURNING id::text, name, path, parent_id::text, user_id, drive_id,
+                RETURNING id::text, name, path, parent_id::text, drive_id,
                           EXTRACT(EPOCH FROM created_at)::bigint,
                           EXTRACT(EPOCH FROM updated_at)::bigint,
                            EXTRACT(EPOCH FROM tree_modified_at)::bigint,
@@ -631,17 +599,7 @@ impl FolderRepository for FolderDbRepository {
         .ok_or_else(|| DomainError::not_found("Folder", id))?;
 
         Self::row_to_folder(
-            row.0,
-            row.1,
-            row.2,
-            row.3,
-            Some(row.4),
-            row.5,
-            row.6,
-            row.7,
-            row.8,
-            row.9,
-            row.10,
+            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9,
         )
     }
 
@@ -678,7 +636,7 @@ impl FolderRepository for FolderDbRepository {
                        updated_at = NOW(),
                        updated_by = $3
                  WHERE f.id = $2::uuid AND NOT f.is_trashed
-                RETURNING f.id::text, f.name, f.path, f.parent_id::text, f.user_id, f.drive_id,
+                RETURNING f.id::text, f.name, f.path, f.parent_id::text, f.drive_id,
                           EXTRACT(EPOCH FROM f.created_at)::bigint,
                           EXTRACT(EPOCH FROM f.updated_at)::bigint,
                           EXTRACT(EPOCH FROM f.tree_modified_at)::bigint,
@@ -695,17 +653,7 @@ impl FolderRepository for FolderDbRepository {
         .ok_or_else(|| DomainError::not_found("Folder", id))?;
 
         Self::row_to_folder(
-            row.0,
-            row.1,
-            row.2,
-            row.3,
-            Some(row.4),
-            row.5,
-            row.6,
-            row.7,
-            row.8,
-            row.9,
-            row.10,
+            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9,
         )
     }
 
@@ -988,7 +936,7 @@ impl FolderRepository for FolderDbRepository {
     #[allow(clippy::type_complexity)]
     async fn list_subtree_folders(&self, folder_id: &str) -> Result<Vec<Folder>, DomainError> {
         let sql = "SELECT fo.id::text, fo.name, fo.path, fo.parent_id::text, \
-                          fo.user_id, fo.drive_id, \
+                          fo.drive_id, \
                           EXTRACT(EPOCH FROM fo.created_at)::bigint, \
                           EXTRACT(EPOCH FROM fo.updated_at)::bigint, \
                           EXTRACT(EPOCH FROM fo.tree_modified_at)::bigint, \
@@ -998,7 +946,7 @@ impl FolderRepository for FolderDbRepository {
                       AND fo.lpath <@ (SELECT lpath FROM storage.folders WHERE id = $1::uuid) \
                     ORDER BY fo.path";
 
-        let rows: Vec<FolderRowOptUser> = sqlx::query_as(sql)
+        let rows: Vec<FolderRow> = sqlx::query_as(sql)
             .bind(folder_id)
             .fetch_all(self.pool())
             .await
@@ -1007,8 +955,8 @@ impl FolderRepository for FolderDbRepository {
             })?;
 
         rows.into_iter()
-            .map(|(id, name, path, pid, uid, did, ca, ma, tma, cb, ub)| {
-                Self::row_to_folder(id, name, path, pid, uid, did, ca, ma, tma, cb, ub)
+            .map(|(id, name, path, pid, did, ca, ma, tma, cb, ub)| {
+                Self::row_to_folder(id, name, path, pid, did, ca, ma, tma, cb, ub)
             })
             .collect()
     }
@@ -1018,19 +966,22 @@ impl FolderRepository for FolderDbRepository {
     ///
     /// - Non-recursive: `WHERE parent_id = $1 AND user_id = $2 [AND LIKE]`
     /// - Recursive + folder_id: delegates to `list_descendant_folders`
-    /// - Recursive + no folder_id: `WHERE user_id = $1 [AND LIKE]`
+    /// - Recursive + no folder_id: drive-scoped `EXISTS role_grants` [AND LIKE]
+    ///
+    /// Post-PR-B: filters by drive-membership grants inline (via
+    /// `caller_group_ids`) instead of `user_id = $caller`.
     #[allow(clippy::type_complexity)]
     async fn search_folders(
         &self,
         parent_id: Option<&str>,
         name_contains: Option<&str>,
-        user_id: Uuid,
+        caller_id: Uuid,
         recursive: bool,
     ) -> Result<Vec<Folder>, DomainError> {
         // Recursive with folder scope → existing optimised ltree scan
         if recursive && let Some(fid) = parent_id {
             return self
-                .list_descendant_folders(fid, name_contains, user_id)
+                .list_descendant_folders(fid, name_contains, caller_id)
                 .await;
         }
 
@@ -1049,30 +1000,30 @@ impl FolderRepository for FolderDbRepository {
         };
 
         if recursive {
-            // Recursive, no folder scope → ALL user folders
+            // Recursive, no folder scope → ALL folders in caller's readable drives
             let sql = format!(
                 "SELECT fo.id::text, fo.name, fo.path, fo.parent_id::text, \
-                        fo.user_id, fo.drive_id, \
+                        fo.drive_id, \
                         EXTRACT(EPOCH FROM fo.created_at)::bigint, \
                         EXTRACT(EPOCH FROM fo.updated_at)::bigint, \
                           EXTRACT(EPOCH FROM fo.tree_modified_at)::bigint, \
                       fo.created_by, fo.updated_by \
                    FROM storage.folders fo \
-                  WHERE fo.user_id = $1 \
+                  WHERE {CALLER_CAN_READ_DRIVE} \
                     AND fo.is_trashed = false \
                     {name_clause} \
                   ORDER BY fo.name"
             );
 
-            let rows: Vec<FolderRowOptUser> = if let Some(ref pattern) = name_pattern {
+            let rows: Vec<FolderRow> = if let Some(ref pattern) = name_pattern {
                 sqlx::query_as(&sql)
-                    .bind(user_id)
+                    .bind(caller_id)
                     .bind(pattern)
                     .fetch_all(self.pool())
                     .await
             } else {
                 sqlx::query_as(&sql)
-                    .bind(user_id)
+                    .bind(caller_id)
                     .fetch_all(self.pool())
                     .await
             }
@@ -1080,96 +1031,100 @@ impl FolderRepository for FolderDbRepository {
 
             return rows
                 .into_iter()
-                .map(|(id, name, path, pid, uid, did, ca, ma, tma, cb, ub)| {
-                    Self::row_to_folder(id, name, path, pid, uid, did, ca, ma, tma, cb, ub)
+                .map(|(id, name, path, pid, did, ca, ma, tma, cb, ub)| {
+                    Self::row_to_folder(id, name, path, pid, did, ca, ma, tma, cb, ub)
                 })
                 .collect();
         }
 
-        // Non-recursive: direct children of parent_id, filtered by user
+        // Non-recursive: direct children of parent_id, restricted to drives
+        // the caller can read (parent_id already establishes the subtree).
         let sql = if parent_id.is_some() {
             format!(
                 "SELECT fo.id::text, fo.name, fo.path, fo.parent_id::text, \
-                        fo.user_id, fo.drive_id, \
+                        fo.drive_id, \
                         EXTRACT(EPOCH FROM fo.created_at)::bigint, \
                         EXTRACT(EPOCH FROM fo.updated_at)::bigint, \
                           EXTRACT(EPOCH FROM fo.tree_modified_at)::bigint, \
                       fo.created_by, fo.updated_by \
                    FROM storage.folders fo \
-                  WHERE fo.parent_id = $1::uuid \
-                    AND fo.user_id = $2 \
+                  WHERE fo.parent_id = $2::uuid \
+                    AND {CALLER_CAN_READ_DRIVE} \
                     AND fo.is_trashed = false \
                     {name_clause} \
                   ORDER BY fo.name"
             )
         } else {
-            // Root folders: parent_id IS NULL, reindex params ($1=user_id, $2=pattern)
+            // Root folders: parent_id IS NULL, params ($1=caller_id, $2=pattern)
             let name_clause_root = match name_contains {
                 Some(name) if name.len() >= 3 => " AND fo.name ILIKE $2",
                 _ => "",
             };
             format!(
                 "SELECT fo.id::text, fo.name, fo.path, fo.parent_id::text, \
-                        fo.user_id, fo.drive_id, \
+                        fo.drive_id, \
                         EXTRACT(EPOCH FROM fo.created_at)::bigint, \
                         EXTRACT(EPOCH FROM fo.updated_at)::bigint, \
                           EXTRACT(EPOCH FROM fo.tree_modified_at)::bigint, \
                       fo.created_by, fo.updated_by \
                    FROM storage.folders fo \
                   WHERE fo.parent_id IS NULL \
-                    AND fo.user_id = $1 \
+                    AND {CALLER_CAN_READ_DRIVE} \
                     AND fo.is_trashed = false \
                     {name_clause_root} \
                   ORDER BY fo.name"
             )
         };
 
-        let rows: Vec<FolderRowOptUser> = if let Some(pid) = parent_id {
+        let rows: Vec<FolderRow> = if let Some(pid) = parent_id {
             if let Some(ref pattern) = name_pattern {
                 sqlx::query_as(&sql)
+                    .bind(caller_id)
                     .bind(pid)
-                    .bind(user_id)
                     .bind(pattern)
                     .fetch_all(self.pool())
                     .await
             } else {
                 sqlx::query_as(&sql)
+                    .bind(caller_id)
                     .bind(pid)
-                    .bind(user_id)
                     .fetch_all(self.pool())
                     .await
             }
         } else if let Some(ref pattern) = name_pattern {
             sqlx::query_as(&sql)
-                .bind(user_id)
+                .bind(caller_id)
                 .bind(pattern)
                 .fetch_all(self.pool())
                 .await
         } else {
             sqlx::query_as(&sql)
-                .bind(user_id)
+                .bind(caller_id)
                 .fetch_all(self.pool())
                 .await
         }
         .map_err(|e| DomainError::internal_error("FolderDb", format!("search_folders: {e}")))?;
 
         rows.into_iter()
-            .map(|(id, name, path, pid, uid, did, ca, ma, tma, cb, ub)| {
-                Self::row_to_folder(id, name, path, pid, uid, did, ca, ma, tma, cb, ub)
+            .map(|(id, name, path, pid, did, ca, ma, tma, cb, ub)| {
+                Self::row_to_folder(id, name, path, pid, did, ca, ma, tma, cb, ub)
             })
             .collect()
     }
 
-    /// Lists all descendant folders in a subtree using ltree GiST index.
+    /// Lists all descendant folders in a subtree using ltree GiST index,
+    /// scoped to drives the caller can read.
     ///
     /// Single SQL query: `fo.lpath <@ (root's lpath)` fetches the entire
-    /// subtree in one indexed scan. Optional name filter is pushed to SQL.
+    /// subtree in one indexed scan. Post-PR-B: drive-membership filter
+    /// inline via `caller_group_ids`, replacing the legacy
+    /// `fo.user_id = $caller` predicate.
     #[allow(clippy::type_complexity)]
     async fn list_descendant_folders(
         &self,
         folder_id: &str,
         name_contains: Option<&str>,
-        user_id: Uuid,
+        caller_id: Uuid,
     ) -> Result<Vec<Folder>, DomainError> {
         let (where_extra, name_pattern) = match name_contains {
             Some(name) if name.len() >= 3 => {
@@ -1180,13 +1135,13 @@ impl FolderRepository for FolderDbRepository {
 
         let sql = format!(
             "SELECT fo.id::text, fo.name, fo.path, fo.parent_id::text, \
-                    fo.user_id, fo.drive_id, \
+                    fo.drive_id, \
                     EXTRACT(EPOCH FROM fo.created_at)::bigint, \
                     EXTRACT(EPOCH FROM fo.updated_at)::bigint, \
-                          EXTRACT(EPOCH FROM fo.tree_modified_at)::bigint, \
-                  fo.created_by, fo.updated_by \
+                    EXTRACT(EPOCH FROM fo.tree_modified_at)::bigint, \
+                    fo.created_by, fo.updated_by \
                FROM storage.folders fo \
-              WHERE fo.user_id = $1 \
+              WHERE {CALLER_CAN_READ_DRIVE} \
                 AND fo.is_trashed = false \
                 AND fo.lpath <@ (SELECT lpath FROM storage.folders WHERE id = $2::uuid) \
                 AND fo.id != $2::uuid \
@@ -1194,16 +1149,16 @@ impl FolderRepository for FolderDbRepository {
               ORDER BY fo.name"
         );
 
-        let rows: Vec<FolderRowOptUser> = if let Some(ref pattern) = name_pattern {
+        let rows: Vec<FolderRow> = if let Some(ref pattern) = name_pattern {
             sqlx::query_as(&sql)
-                .bind(user_id)
+                .bind(caller_id)
                 .bind(folder_id)
                 .bind(pattern)
                 .fetch_all(self.pool())
                 .await
         } else {
             sqlx::query_as(&sql)
-                .bind(user_id)
+                .bind(caller_id)
                 .bind(folder_id)
                 .fetch_all(self.pool())
                 .await
@@ -1211,8 +1166,8 @@ impl FolderRepository for FolderDbRepository {
         .map_err(|e| DomainError::internal_error("FolderDb", format!("descendant search: {e}")))?;
 
         rows.into_iter()
-            .map(|(id, name, path, pid, uid, did, ca, ma, tma, cb, ub)| {
-                Self::row_to_folder(id, name, path, pid, uid, did, ca, ma, tma, cb, ub)
+            .map(|(id, name, path, pid, did, ca, ma, tma, cb, ub)| {
+                Self::row_to_folder(id, name, path, pid, did, ca, ma, tma, cb, ub)
             })
             .collect()
     }
@@ -1230,7 +1185,7 @@ impl FolderRepository for FolderDbRepository {
         let rows: Vec<FolderRow> = if let Some(pid) = parent_id {
             sqlx::query_as(
                 r#"
-                SELECT id::text, name, path, parent_id::text, user_id, drive_id,
+                SELECT id::text, name, path, parent_id::text, drive_id,
                        EXTRACT(EPOCH FROM created_at)::bigint,
                        EXTRACT(EPOCH FROM updated_at)::bigint,
                        EXTRACT(EPOCH FROM tree_modified_at)::bigint,
@@ -1257,7 +1212,7 @@ impl FolderRepository for FolderDbRepository {
         } else {
             sqlx::query_as(
                 r#"
-                SELECT id::text, name, path, parent_id::text, user_id, drive_id,
+                SELECT id::text, name, path, parent_id::text, drive_id,
                        EXTRACT(EPOCH FROM created_at)::bigint,
                        EXTRACT(EPOCH FROM updated_at)::bigint,
                        EXTRACT(EPOCH FROM tree_modified_at)::bigint,
@@ -1284,8 +1239,8 @@ impl FolderRepository for FolderDbRepository {
         .map_err(|e| DomainError::internal_error("FolderDb", format!("suggest: {e}")))?;
 
         rows.into_iter()
-            .map(|(id, name, path, pid, uid, did, ca, ma, tma, cb, ub)| {
-                Self::row_to_folder(id, name, path, pid, Some(uid), did, ca, ma, tma, cb, ub)
+            .map(|(id, name, path, pid, did, ca, ma, tma, cb, ub)| {
+                Self::row_to_folder(id, name, path, pid, did, ca, ma, tma, cb, ub)
             })
             .collect()
     }
@@ -1359,16 +1314,6 @@ impl FolderRepository for FolderDbRepository {
 // ── Extra helpers for blob-storage bootstrap ──
 
 impl FolderDbRepository {
-    /// Returns user_id for a given folder. Used by file repositories.
-    pub async fn get_folder_user_id(&self, folder_id: &str) -> Result<Uuid, DomainError> {
-        sqlx::query_scalar::<_, Uuid>("SELECT user_id FROM storage.folders WHERE id = $1::uuid")
-            .bind(folder_id)
-            .fetch_optional(self.pool())
-            .await
-            .map_err(|e| DomainError::internal_error("FolderDb", format!("user_id lookup: {e}")))?
-            .ok_or_else(|| DomainError::not_found("Folder", folder_id))
-    }
-
     /// Returns `drive_id` for a given folder. Drives the new permission-floor
     /// short-circuit in `PgAclEngine::check_inner` (a caller with any role
     /// on the folder's drive automatically passes the check — drive
@@ -1380,22 +1325,6 @@ impl FolderDbRepository {
             .await
             .map_err(|e| DomainError::internal_error("FolderDb", format!("drive_id lookup: {e}")))?
             .ok_or_else(|| DomainError::not_found("Folder", folder_id))
-    }
-
-    /// Verifies that `folder_id` is owned by `owner_id`.
-    ///
-    /// Returns `DomainError::not_found(...)` for both "folder missing" and
-    /// "folder owned by someone else" — same error to avoid leaking the
-    /// existence of resources belonging to other users.
-    pub async fn verify_owner(&self, folder_id: &str, owner_id: Uuid) -> Result<(), DomainError> {
-        let actual = self.get_folder_user_id(folder_id).await?;
-        if actual != owner_id {
-            return Err(DomainError::not_found(
-                "Folder",
-                "Target folder not found or access denied",
-            ));
-        }
-        Ok(())
     }
 
     /// Cursor-paginated combined listing of sub-folders and files inside
@@ -1434,7 +1363,6 @@ impl FolderDbRepository {
                 -1::bigint                AS size,
                 f.created_at,
                 f.updated_at              AS modified_at,
-                f.user_id,
                 f.drive_id,
                 NULL::text                AS blob_hash,
                 LOWER(f.name)             AS sort_str,
@@ -1454,7 +1382,6 @@ impl FolderDbRepository {
                 fm.size::bigint,
                 fm.created_at,
                 fm.updated_at             AS modified_at,
-                fm.user_id,
                 fm.drive_id,
                 fm.blob_hash,
                 LOWER(fm.name)            AS sort_str,
@@ -1580,7 +1507,7 @@ impl FolderDbRepository {
         let sql = format!(
             "WITH resources AS ({cte_inner}) \
              SELECT resource_type, id, name, folder_id, mime_type, size, \
-                    created_at, modified_at, user_id, drive_id, blob_hash, \
+                    created_at, modified_at, drive_id, blob_hash, \
                     sort_str, type_order, folder_first \
              FROM resources \
              {where_clause} \
@@ -1589,7 +1516,7 @@ impl FolderDbRepository {
         );
 
         // Row: (resource_type, id, name, folder_id, mime_type, size,
-        //        created_at, modified_at, user_id, drive_id, blob_hash,
+        //        created_at, modified_at, drive_id, blob_hash,
         //        sort_str, type_order, folder_first)
         type Row = (
             String,
@@ -1600,8 +1527,7 @@ impl FolderDbRepository {
             i64,
             chrono::DateTime<chrono::Utc>,
             chrono::DateTime<chrono::Utc>,
-            Uuid,
-            Uuid,
+            Uuid, // drive_id
             Option<String>,
             String,
             i64,
@@ -1632,12 +1558,11 @@ impl FolderDbRepository {
                 size: r.5,
                 created_at: r.6,
                 modified_at: r.7,
-                owner_id: r.8,
-                drive_id: r.9,
-                blob_hash: r.10,
-                sort_str: r.11,
-                type_order: r.12,
-                folder_first: r.13,
+                drive_id: r.8,
+                blob_hash: r.9,
+                sort_str: r.10,
+                type_order: r.11,
+                folder_first: r.12,
             })
             .collect())
     }

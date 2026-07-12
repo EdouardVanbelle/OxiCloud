@@ -123,26 +123,45 @@ impl TrashRepository for TrashDbRepository {
     }
 
     async fn get_trash_items(&self, user_id: &Uuid) -> Result<Vec<TrashedItem>> {
-        let rows =
-            sqlx::query_as::<_, (Uuid, String, String, Uuid, Option<DateTime<Utc>>, String)>(
-                r#"
-            SELECT t.id, t.name, t.item_type, t.user_id, t.trashed_at,
+        // Post-D7: the `WHERE t.user_id = $1` filter is gone — the
+        // `user_id` column was dropped from `storage.{files,folders}`
+        // and the view no longer projects it. Scope is drive-membership
+        // via role_grants; group memberships expand inline through
+        // `storage.caller_group_ids`. Same predicate shape as
+        // `list_root_folders_for_caller` / the file listings.
+        //
+        // Legacy method — the paginated `list_resources_paged` is the
+        // modern shape and takes explicit drive_ids from the service
+        // layer.
+        let rows = sqlx::query_as::<_, (Uuid, String, String, Option<DateTime<Utc>>, String)>(
+            r#"
+            SELECT t.id, t.name, t.item_type, t.trashed_at,
                    COALESCE(p.path || '/' || t.name, t.name) AS original_path
               FROM storage.trash_items t
               LEFT JOIN storage.folders p ON p.id = t.original_parent_id
-             WHERE t.user_id = $1
+             WHERE EXISTS (
+                     SELECT 1 FROM storage.role_grants g
+                      WHERE g.resource_type = 'drive'
+                        AND g.resource_id   = t.drive_id
+                        AND (g.expires_at IS NULL OR g.expires_at > NOW())
+                        AND (
+                              (g.subject_type = 'user'  AND g.subject_id = $1)
+                           OR (g.subject_type = 'group' AND g.subject_id IN
+                                   (SELECT storage.caller_group_ids($1)))
+                            )
+                   )
              ORDER BY t.trashed_at DESC
             "#,
-            )
-            .bind(user_id)
-            .fetch_all(self.pool.as_ref())
-            .await
-            .map_err(|e| DomainError::internal_error("TrashDb", format!("list: {e}")))?;
+        )
+        .bind(user_id)
+        .fetch_all(self.pool.as_ref())
+        .await
+        .map_err(|e| DomainError::internal_error("TrashDb", format!("list: {e}")))?;
 
         Ok(rows
             .into_iter()
-            .map(|(id, name, item_type, uid, trashed_at, path)| {
-                self.row_to_trashed_item(id, name, item_type, uid, trashed_at, path)
+            .map(|(id, name, item_type, trashed_at, path)| {
+                self.row_to_trashed_item(id, name, item_type, *user_id, trashed_at, path)
             })
             .collect())
     }
@@ -153,9 +172,16 @@ impl TrashRepository for TrashDbRepository {
         // …)` in the service callers (`restore_item`, `delete_permanently`).
         // The drive precheck in `pg_acl_engine` then resolves Owner-on-drive
         // → Delete-permission for items in shared drives.
-        let row = sqlx::query_as::<_, (Uuid, String, String, Uuid, Option<DateTime<Utc>>, String)>(
+        //
+        // Post-D7: `t.user_id` no longer exists — the column is dropped
+        // from `storage.{files,folders}` and no longer projected by the
+        // view. The entity's `user_id` field is still non-optional;
+        // synthesize `Uuid::nil()`. AuthZ decisions don't consult this
+        // field — they've already resolved the caller's role on the
+        // target's drive.
+        let row = sqlx::query_as::<_, (Uuid, String, String, Option<DateTime<Utc>>, String)>(
             r#"
-            SELECT t.id, t.name, t.item_type, t.user_id, t.trashed_at,
+            SELECT t.id, t.name, t.item_type, t.trashed_at,
                    COALESCE(p.path || '/' || t.name, t.name) AS original_path
               FROM storage.trash_items t
               LEFT JOIN storage.folders p ON p.id = t.original_parent_id
@@ -167,8 +193,8 @@ impl TrashRepository for TrashDbRepository {
         .await
         .map_err(|e| DomainError::internal_error("TrashDb", format!("get: {e}")))?;
 
-        Ok(row.map(|(id, name, item_type, uid, trashed_at, path)| {
-            self.row_to_trashed_item(id, name, item_type, uid, trashed_at, path)
+        Ok(row.map(|(id, name, item_type, trashed_at, path)| {
+            self.row_to_trashed_item(id, name, item_type, Uuid::nil(), trashed_at, path)
         }))
     }
 
@@ -313,7 +339,6 @@ impl TrashDbRepository {
         -1::bigint                                           AS size,
         fld.created_at                                       AS resource_created_at,
         fld.updated_at                                       AS modified_at,
-        fld.user_id                                          AS owner_id,
         fld.drive_id                                         AS drive_id,
         NULL::text                                           AS blob_hash,
         fld.trashed_at                                       AS trashed_at,
@@ -340,7 +365,6 @@ impl TrashDbRepository {
         f.size::bigint                                       AS size,
         f.created_at                                         AS resource_created_at,
         f.updated_at                                         AS modified_at,
-        f.user_id                                            AS owner_id,
         f.drive_id                                           AS drive_id,
         f.blob_hash,
         f.trashed_at                                         AS trashed_at,
@@ -472,7 +496,7 @@ impl TrashDbRepository {
 SELECT
     r.resource_type, r.resource_id, r.name, r.parent_id,
     r.mime_type, r.size, r.resource_created_at, r.modified_at,
-    r.owner_id, r.drive_id, r.trashed_at, r.deletion_date, r.resource_path,
+    r.drive_id, r.trashed_at, r.deletion_date, r.resource_path,
     r.sort_str, r.type_order, r.folder_first
 FROM resources r
 {keyset}
@@ -529,7 +553,6 @@ LIMIT $6"
                     size,
                     resource_created_at: row.get("resource_created_at"),
                     modified_at: row.get("modified_at"),
-                    owner_id: row.get("owner_id"),
                     drive_id: row.get("drive_id"),
                     blob_hash: row.try_get("blob_hash").ok(),
                     trashed_at,

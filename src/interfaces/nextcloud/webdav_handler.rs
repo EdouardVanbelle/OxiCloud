@@ -17,6 +17,7 @@ use crate::application::adapters::webdav_adapter::{
     PropFindRequest, PropPatchOp, QualifiedName, WebDavAdapter, is_protected_property,
 };
 use crate::application::dtos::pagination::PaginationRequestDto;
+use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::favorites_ports::FavoritesUseCase;
 use crate::application::ports::file_ports::{
     FileManagementUseCase, FileRetrievalUseCase, FileUploadUseCase,
@@ -25,6 +26,8 @@ use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::common::di::AppState;
 use crate::common::mime_detect::filename_from_path;
+use crate::domain::services::authorization::{Permission, Resource, Subject};
+use crate::infrastructure::services::path_resolver_service::ResolvedResource;
 use crate::infrastructure::services::webdav_dead_property_store::ResourceRef;
 use crate::interfaces::api::handlers::webdav_handler::{
     PROPFIND_BATCH_SIZE, file_dead_props, folder_dead_props, streamed_file_dead_props,
@@ -80,6 +83,78 @@ pub fn nc_to_internal_path(chroot: &FolderDto, subpath: &str) -> Result<String, 
     }
 
     Ok(format!("{}/{}", chroot.path, subpath))
+}
+
+/// Strip the caller's chroot prefix from an internal
+/// `storage.folders.path` so the DAV subpath surfaced to the NC
+/// client is chroot-relative. Handles multi-segment chroots
+/// correctly (e.g. a future `"Personal/folderA/subfolder"` chroot
+/// against an item at `"Personal/folderA/subfolder/file.txt"`
+/// returns `"file.txt"`, not `"folderA/subfolder/file.txt"`).
+///
+/// Returns `None` when the path is NOT inside the chroot. Callers
+/// should skip such items from the response (they belong to a
+/// different drive or the caller's read scope has drifted) — do NOT
+/// fall back to a naive segment strip, which would surface a
+/// misleading display path.
+///
+/// **Defensive but not an AuthZ boundary.** Every current caller
+/// reaches items through a `_with_perms` method upstream that
+/// already gates Read; this helper is the display-string layer
+/// that also serves as a "does this item belong under the chroot"
+/// sanity check.
+pub fn strip_chroot_prefix<'a>(chroot: &FolderDto, internal_path: &'a str) -> Option<&'a str> {
+    // Normalize both sides: `FolderDto.path` comes from
+    // `StoragePath::to_string()` which prepends a leading `/`
+    // (e.g. `"/Personal"`), but DB-side paths coming from
+    // `storage.folders.path` (composed by the `compute_folder_path`
+    // trigger) never have a leading slash. Trim both so `"/Personal"`
+    // vs `"Personal/g9-tree"` matches the intended prefix.
+    let root = chroot.path.trim_matches('/');
+    if root.is_empty() {
+        // Guard against a mis-set chroot with an empty root path —
+        // stripping "" from anything would return the whole path.
+        return None;
+    }
+    let path = internal_path.trim_start_matches('/');
+    let rest = path.strip_prefix(root)?;
+    // Reject a partial prefix match — a chroot of "Personal" must
+    // not match an item at "PersonalSecrets/…".
+    match rest.strip_prefix('/') {
+        Some(subpath) => Some(subpath),
+        // Item path equals the chroot exactly — the chroot itself
+        // (i.e. a folder) is not a legitimate response item, so
+        // treat as an empty subpath.
+        None if rest.is_empty() => Some(""),
+        None => None,
+    }
+}
+
+/// Naive fallback: strip the first path segment from an internal
+/// `storage.folders.path`. Post-D0 every path starts with its drive's
+/// root folder name (single segment), so for the current schema this
+/// gives the drive-relative subpath.
+///
+/// Use this ONLY when the caller doesn't have a chroot in scope
+/// (e.g. OCS unified search, whose results legitimately span every
+/// drive the caller has Read on — no single chroot covers them all).
+/// Every path-scoped NC handler that DOES have `session` in scope
+/// should prefer [`strip_chroot_prefix`] — it validates the item
+/// belongs under the chroot instead of trusting the schema
+/// invariant, and it survives a future composed chroot like
+/// `"Personal/folderA/subfolder"`.
+///
+/// **Not an AuthZ boundary.** Same caveat as `strip_chroot_prefix`
+/// — AuthZ is enforced upstream via `_with_perms` methods; this
+/// helper only formats display strings.
+///
+/// Returns `""` when the path is a single segment (i.e. the drive
+/// root itself, which is never a legitimate item target).
+pub fn strip_drive_root_segment(internal_path: &str) -> &str {
+    match internal_path.split_once('/') {
+        Some((_root, rest)) => rest,
+        None => "",
+    }
 }
 
 /// Build the Nextcloud DAV href for a **collection** (folder). Always
@@ -235,76 +310,124 @@ async fn handle_propfind(
 
     let internal_path = nc_to_internal_path(chroot, subpath)?;
 
-    let folder_service = &state.applications.folder_service;
-    let file_service = &state.applications.file_retrieval_service;
-
-    // Try to resolve as folder first.
-    let folder_result = folder_service
-        .get_folder_by_path(&internal_path, chroot.drive_id)
-        .await;
-
-    if let Ok(folder) = folder_result {
-        // It's a folder — stream the multistatus: children are fetched in
-        // pages and serialized chunk by chunk, so memory stays O(batch)
-        // regardless of how many entries the folder holds.
-        //
-        // Multi-drive POC: the hrefs in the response must echo the
-        // wire form (`{user}~{drive}`) the client requested, so we
-        // pass `url_user` (not `user.username`) as the streaming
-        // function's username arg. Refining the owner-id usages
-        // back to the canonical username is deferred to the
-        // NcSession commit.
-        return Ok(build_nc_streaming_propfind(
-            state.clone(),
-            folder,
-            depth,
-            user.id,
-            url_user.to_string(),
-            subpath.to_string(),
-        ));
-    }
-
-    // Not a folder — try as a file.
-    let file_result = file_service
-        .get_file_by_path(&internal_path, chroot.drive_id)
-        .await;
-    if let Ok(file) = file_result {
-        // Batch-check favorites for this single file.
-        let favorite_ids = if let Some(fav_svc) = state.favorites_service.as_ref() {
-            let items: Vec<(&str, &str)> = vec![(&file.id, "file")];
-            fav_svc
-                .batch_check_favorites(user.id, &items)
-                .await
-                .unwrap_or_default()
-        } else {
-            HashSet::new()
-        };
-
-        let nc = state.nextcloud.as_ref();
-        let file_id_svc = nc.map(|n| &n.file_ids);
-        let dead_props = file_dead_props(&state, &file).await;
-
-        let mut buf = Vec::new();
-        write_nc_file_multistatus(
-            &mut buf,
-            &file,
-            url_user,
-            &user.username,
-            subpath,
-            file_id_svc,
-            (&favorite_ids, &dead_props),
-        )
+    // Single-query path resolution (drive-scoped) — same shared
+    // resolver as native `/webdav/…`. Post-D7 the resolver is not
+    // owner-scoped, so we `authz.require(Read, …)` on the returned
+    // resource explicitly before emitting the multistatus.
+    let resolved = nc_resolve_or_fallback(&state, &internal_path, chroot.drive_id)
         .await
-        .map_err(|e| AppError::internal_error(format!("XML generation failed: {}", e)))?;
+        .ok_or_else(|| AppError::not_found("Resource not found"))?;
 
-        return Ok(Response::builder()
-            .status(StatusCode::MULTI_STATUS)
-            .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
-            .body(Body::from(buf))
-            .unwrap());
+    match resolved {
+        ResolvedResource::Folder(folder) => {
+            let folder_uuid = Uuid::parse_str(&folder.id)
+                .map_err(|_| AppError::not_found("Resource not found"))?;
+            state
+                .authorization
+                .require(
+                    Subject::User(user.id),
+                    Permission::Read,
+                    Resource::Folder(folder_uuid),
+                )
+                .await?;
+
+            // It's a folder — stream the multistatus: children are fetched in
+            // pages and serialized chunk by chunk, so memory stays O(batch)
+            // regardless of how many entries the folder holds.
+            //
+            // Multi-drive POC: the hrefs in the response must echo the
+            // wire form (`{user}~{drive}`) the client requested, so we
+            // pass `url_user` (not `user.username`) as the streaming
+            // function's username arg. Refining the owner-id usages
+            // back to the canonical username is deferred to the
+            // NcSession commit.
+            Ok(build_nc_streaming_propfind(
+                state.clone(),
+                folder,
+                depth,
+                user.id,
+                url_user.to_string(),
+                subpath.to_string(),
+            ))
+        }
+        ResolvedResource::File(file) => {
+            let file_uuid =
+                Uuid::parse_str(&file.id).map_err(|_| AppError::not_found("Resource not found"))?;
+            state
+                .authorization
+                .require(
+                    Subject::User(user.id),
+                    Permission::Read,
+                    Resource::File(file_uuid),
+                )
+                .await?;
+
+            // Batch-check favorites for this single file.
+            let favorite_ids = if let Some(fav_svc) = state.favorites_service.as_ref() {
+                let items: Vec<(&str, &str)> = vec![(&file.id, "file")];
+                fav_svc
+                    .batch_check_favorites(user.id, &items)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                HashSet::new()
+            };
+
+            let nc = state.nextcloud.as_ref();
+            let file_id_svc = nc.map(|n| &n.file_ids);
+
+            let dead_props = file_dead_props(&state, &file).await;
+
+            let mut buf = Vec::new();
+            write_nc_file_multistatus(
+                &mut buf,
+                &file,
+                url_user,
+                &user.username,
+                subpath,
+                file_id_svc,
+                (&favorite_ids, &dead_props),
+            )
+            .await
+            .map_err(|e| AppError::internal_error(format!("XML generation failed: {}", e)))?;
+
+            Ok(Response::builder()
+                .status(StatusCode::MULTI_STATUS)
+                .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
+                .body(Body::from(buf))
+                .unwrap())
+        }
     }
+}
 
-    Err(AppError::not_found("Resource not found"))
+/// NC-surface path resolution: try the single-query resolver, fall back
+/// to the double-query `get_*_by_path` pair when the resolver isn't
+/// configured. Same shape and drive-scope as the native surface —
+/// callers `authz.require(…)` on the returned resource.
+async fn nc_resolve_or_fallback(
+    state: &Arc<AppState>,
+    internal_path: &str,
+    drive_id: Uuid,
+) -> Option<ResolvedResource> {
+    if let Some(resolver) = &state.path_resolver
+        && let Ok(r) = resolver
+            .resolve_path_in_drive(internal_path, drive_id)
+            .await
+    {
+        return Some(r);
+    }
+    let folder_service = &state.applications.folder_service;
+    if let Ok(folder) = folder_service
+        .get_folder_by_path(internal_path, drive_id)
+        .await
+    {
+        return Some(ResolvedResource::Folder(folder));
+    }
+    let file_service = &state.applications.file_retrieval_service;
+    if let Ok(file) = file_service.get_file_by_path(internal_path, drive_id).await {
+        return Some(ResolvedResource::File(file));
+    }
+    None
 }
 
 // ──────────────────── GET ────────────────────
@@ -325,27 +448,50 @@ async fn handle_get(
             .unwrap());
     }
 
+    let user = &session.user;
     let internal_path = nc_to_internal_path(chroot, subpath)?;
     let file_service = &state.applications.file_retrieval_service;
-    let folder_service = &state.applications.folder_service;
 
-    // Check if path is a folder first (NC clients use GET as existence check)
-    if folder_service
-        .get_folder_by_path(&internal_path, chroot.drive_id)
+    // Single-query path resolution. NC clients use GET on a folder as
+    // an existence probe (returns 200 empty); file GETs serve content.
+    // Post-D7 the resolver is drive-scoped, so both branches
+    // `authz.require(Read, …)` before responding.
+    let resolved = nc_resolve_or_fallback(&state, &internal_path, chroot.drive_id)
         .await
-        .is_ok()
-    {
-        return Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header("DAV", "1, 3")
-            .body(Body::empty())
-            .unwrap());
-    }
+        .ok_or_else(|| AppError::not_found("File not found"))?;
 
-    let file = file_service
-        .get_file_by_path(&internal_path, chroot.drive_id)
-        .await
-        .map_err(|_| AppError::not_found("File not found"))?;
+    let file = match resolved {
+        ResolvedResource::Folder(folder) => {
+            let folder_uuid =
+                Uuid::parse_str(&folder.id).map_err(|_| AppError::not_found("File not found"))?;
+            state
+                .authorization
+                .require(
+                    Subject::User(user.id),
+                    Permission::Read,
+                    Resource::Folder(folder_uuid),
+                )
+                .await?;
+            return Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header("DAV", "1, 3")
+                .body(Body::empty())
+                .unwrap());
+        }
+        ResolvedResource::File(f) => {
+            let file_uuid =
+                Uuid::parse_str(&f.id).map_err(|_| AppError::not_found("File not found"))?;
+            state
+                .authorization
+                .require(
+                    Subject::User(user.id),
+                    Permission::Read,
+                    Resource::File(file_uuid),
+                )
+                .await?;
+            f
+        }
+    };
 
     // ETag comes from `FileDto::etag` (populated from `File::etag()`
     // in the `From<File>` impl) — single source of truth, so GET,
@@ -412,27 +558,47 @@ async fn handle_head(
             .unwrap());
     }
 
+    let user = &session.user;
     let internal_path = nc_to_internal_path(chroot, subpath)?;
-    let file_service = &state.applications.file_retrieval_service;
-    let folder_service = &state.applications.folder_service;
 
-    // Check if path is a folder (NC clients use HEAD as existence check)
-    if folder_service
-        .get_folder_by_path(&internal_path, chroot.drive_id)
+    // Single-query path resolution. Both branches `authz.require(Read, …)`
+    // on the returned resource before responding.
+    let resolved = nc_resolve_or_fallback(&state, &internal_path, chroot.drive_id)
         .await
-        .is_ok()
-    {
-        return Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header("DAV", "1, 3")
-            .body(Body::empty())
-            .unwrap());
-    }
+        .ok_or_else(|| AppError::not_found("File not found"))?;
 
-    let file = file_service
-        .get_file_by_path(&internal_path, chroot.drive_id)
-        .await
-        .map_err(|_| AppError::not_found("File not found"))?;
+    let file = match resolved {
+        ResolvedResource::Folder(folder) => {
+            let folder_uuid =
+                Uuid::parse_str(&folder.id).map_err(|_| AppError::not_found("File not found"))?;
+            state
+                .authorization
+                .require(
+                    Subject::User(user.id),
+                    Permission::Read,
+                    Resource::Folder(folder_uuid),
+                )
+                .await?;
+            return Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header("DAV", "1, 3")
+                .body(Body::empty())
+                .unwrap());
+        }
+        ResolvedResource::File(f) => {
+            let file_uuid =
+                Uuid::parse_str(&f.id).map_err(|_| AppError::not_found("File not found"))?;
+            state
+                .authorization
+                .require(
+                    Subject::User(user.id),
+                    Permission::Read,
+                    Resource::File(file_uuid),
+                )
+                .await?;
+            f
+        }
+    };
 
     let modified_at =
         chrono::DateTime::<Utc>::from_timestamp(timestamp_to_i64(file.modified_at), 0)
@@ -496,25 +662,38 @@ async fn handle_proppatch(
     // silently no-opping on a nonexistent path would be a foot-gun —
     // matches the native `/webdav/` handler's contract.
     let internal_path = nc_to_internal_path(chroot, subpath)?;
-    let file_service = &state.applications.file_retrieval_service;
-    let folder_service = &state.applications.folder_service;
-    let (resource_ref, item_id, item_type, is_collection) = if let Ok(file) = file_service
-        .get_file_by_path(&internal_path, chroot.drive_id)
-        .await
-    {
-        let id = Uuid::parse_str(&file.id)
-            .map_err(|e| AppError::internal_error(format!("File id is not a UUID: {e}")))?;
-        (ResourceRef::File(id), file.id, "file", false)
-    } else if let Ok(folder) = folder_service
-        .get_folder_by_path(&internal_path, chroot.drive_id)
-        .await
-    {
-        let id = Uuid::parse_str(&folder.id)
-            .map_err(|e| AppError::internal_error(format!("Folder id is not a UUID: {e}")))?;
-        (ResourceRef::Folder(id), folder.id, "folder", true)
-    } else {
-        return Err(AppError::not_found("Resource not found"));
-    };
+    // Single-query path resolution — PROPPATCH may target either a
+    // folder or a file. Post-D7 the resolver is drive-scoped, so we
+    // `authz.require(Read, …)` on the returned resource before
+    // reading its type. The favorite mutation below itself doesn't
+    // require additional authz (favorites are per-user; the caller can
+    // favourite any resource they can see).
+    let (resource_ref, item_id, item_type, is_collection) =
+        match nc_resolve_or_fallback(&state, &internal_path, chroot.drive_id).await {
+            Some(ResolvedResource::File(file)) => {
+                let id = Uuid::parse_str(&file.id)
+                    .map_err(|_| AppError::not_found("Resource not found"))?;
+                state
+                    .authorization
+                    .require(Subject::User(user.id), Permission::Read, Resource::File(id))
+                    .await?;
+                (ResourceRef::File(id), file.id, "file", false)
+            }
+            Some(ResolvedResource::Folder(folder)) => {
+                let id = Uuid::parse_str(&folder.id)
+                    .map_err(|_| AppError::not_found("Resource not found"))?;
+                state
+                    .authorization
+                    .require(
+                        Subject::User(user.id),
+                        Permission::Read,
+                        Resource::Folder(id),
+                    )
+                    .await?;
+                (ResourceRef::Folder(id), folder.id, "folder", true)
+            }
+            None => return Err(AppError::not_found("Resource not found")),
+        };
 
     let ops = WebDavAdapter::parse_proppatch(body_bytes.reader())
         .map_err(|e| AppError::bad_request(format!("Failed to parse PROPPATCH request: {}", e)))?;
@@ -745,7 +924,7 @@ async fn handle_put(
     // Single streaming path — handles both update and create internally,
     // swapping the file row onto the already-ingested blob.
     let stored = upload_service
-        .update_file_streaming(
+        .update_file_streaming_with_perms(
             &internal_path,
             chroot.drive_id,
             ingested.stored(),
@@ -865,74 +1044,79 @@ async fn handle_delete(
     let chroot = session.require_chroot()?;
     let internal_path = nc_to_internal_path(chroot, subpath)?;
     let folder_service = &state.applications.folder_service;
-    let file_service = &state.applications.file_retrieval_service;
 
-    // Prefer soft-delete (move to trash) when trash service is available.
-    // This is what Nextcloud clients expect — items appear in the trashbin.
-    if let Some(trash_svc) = state.trash_service.as_ref() {
-        if let Ok(folder) = folder_service
-            .get_folder_by_path(&internal_path, chroot.drive_id)
-            .await
-        {
-            trash_svc
-                .move_to_trash(&folder.id, "folder", user.id)
-                .await
-                .map_err(|e| AppError::internal_error(format!("Failed to trash folder: {}", e)))?;
-            return Ok(Response::builder()
-                .status(StatusCode::NO_CONTENT)
-                .body(Body::empty())
-                .unwrap());
-        }
-        if let Ok(file) = file_service
-            .get_file_by_path(&internal_path, chroot.drive_id)
-            .await
-        {
-            trash_svc
-                .move_to_trash(&file.id, "file", user.id)
-                .await
-                .map_err(|e| AppError::internal_error(format!("Failed to trash file: {}", e)))?;
-            return Ok(Response::builder()
-                .status(StatusCode::NO_CONTENT)
-                .body(Body::empty())
-                .unwrap());
-        }
-        return Err(AppError::not_found("Resource not found"));
-    }
-
-    // Fallback: hard delete when trash service is not available.
-    let file_mgmt = &state.applications.file_management_service;
-
-    if let Ok(folder) = folder_service
-        .get_folder_by_path(&internal_path, chroot.drive_id)
+    // Single-query path resolution. Post-D7 the resolver is drive-scoped,
+    // so we `authz.require(Read, …)` on the returned resource before
+    // dispatching. The actual delete is authorised as `Permission::Delete`
+    // inside the downstream service (`trash_svc.move_to_trash` /
+    // `delete_folder_with_perms` / `delete_file_with_perms` all take
+    // `caller_id`).
+    let resolved = nc_resolve_or_fallback(&state, &internal_path, chroot.drive_id)
         .await
-    {
-        folder_service
-            .delete_folder_with_perms(&folder.id, user.id)
-            .await
-            .map_err(|e| AppError::internal_error(format!("Failed to delete folder: {}", e)))?;
+        .ok_or_else(|| AppError::not_found("Resource not found"))?;
 
-        return Ok(Response::builder()
-            .status(StatusCode::NO_CONTENT)
-            .body(Body::empty())
-            .unwrap());
+    match resolved {
+        ResolvedResource::Folder(folder) => {
+            let folder_uuid = Uuid::parse_str(&folder.id)
+                .map_err(|_| AppError::not_found("Resource not found"))?;
+            state
+                .authorization
+                .require(
+                    Subject::User(user.id),
+                    Permission::Read,
+                    Resource::Folder(folder_uuid),
+                )
+                .await?;
+            if let Some(trash_svc) = state.trash_service.as_ref() {
+                trash_svc
+                    .move_to_trash(&folder.id, "folder", user.id)
+                    .await
+                    .map_err(|e| {
+                        AppError::internal_error(format!("Failed to trash folder: {}", e))
+                    })?;
+            } else {
+                folder_service
+                    .delete_folder_with_perms(&folder.id, user.id)
+                    .await
+                    .map_err(|e| {
+                        AppError::internal_error(format!("Failed to delete folder: {}", e))
+                    })?;
+            }
+        }
+        ResolvedResource::File(file) => {
+            let file_uuid =
+                Uuid::parse_str(&file.id).map_err(|_| AppError::not_found("Resource not found"))?;
+            state
+                .authorization
+                .require(
+                    Subject::User(user.id),
+                    Permission::Read,
+                    Resource::File(file_uuid),
+                )
+                .await?;
+            if let Some(trash_svc) = state.trash_service.as_ref() {
+                trash_svc
+                    .move_to_trash(&file.id, "file", user.id)
+                    .await
+                    .map_err(|e| {
+                        AppError::internal_error(format!("Failed to trash file: {}", e))
+                    })?;
+            } else {
+                let file_mgmt = &state.applications.file_management_service;
+                file_mgmt
+                    .delete_file_with_perms(&file.id, user.id)
+                    .await
+                    .map_err(|e| {
+                        AppError::internal_error(format!("Failed to delete file: {}", e))
+                    })?;
+            }
+        }
     }
 
-    if let Ok(file) = file_service
-        .get_file_by_path(&internal_path, chroot.drive_id)
-        .await
-    {
-        file_mgmt
-            .delete_file_with_perms(&file.id, user.id)
-            .await
-            .map_err(|e| AppError::internal_error(format!("Failed to delete file: {}", e)))?;
-
-        return Ok(Response::builder()
-            .status(StatusCode::NO_CONTENT)
-            .body(Body::empty())
-            .unwrap());
-    }
-
-    Err(AppError::not_found("Resource not found"))
+    Ok(Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .body(Body::empty())
+        .unwrap())
 }
 
 // ──────────────────── MOVE ────────────────────
@@ -980,21 +1164,18 @@ async fn handle_move(
     let file_mgmt = &state.applications.file_management_service;
 
     // ── Destination-collision precondition (RFC 4918 §9.9.4) ──────────
-    // Resolved once up-front so the file/folder branches below don't
-    // each have to repeat the check. `dest_existed_before` becomes the
-    // 204-vs-201 selector at response time.
+    // Single-query probe via the shared resolver — the destination is
+    // either a file, a folder, or absent. `dest_existed_before`
+    // becomes the 204-vs-201 selector at response time. Post-D7 the
+    // resolver is drive-scoped; on the overwrite path we
+    // `authz.require(Read, …)` explicitly and the downstream delete
+    // enforces `Permission::Delete`.
     let dest_internal_precheck = nc_to_internal_path(chroot, &dest_subpath)?;
-    let dest_existing_file = file_service
-        .get_file_by_path(&dest_internal_precheck, chroot.drive_id)
-        .await
-        .ok();
-    let dest_existing_folder = folder_service
-        .get_folder_by_path(&dest_internal_precheck, chroot.drive_id)
-        .await
-        .ok();
-    let dest_existed_before = dest_existing_file.is_some() || dest_existing_folder.is_some();
+    let dest_existing =
+        nc_resolve_or_fallback(&state, &dest_internal_precheck, chroot.drive_id).await;
+    let dest_existed_before = dest_existing.is_some();
 
-    if dest_existed_before {
+    if let Some(existing) = dest_existing {
         if overwrite_forbidden {
             return Ok(Response::builder()
                 .status(StatusCode::PRECONDITION_FAILED)
@@ -1005,23 +1186,51 @@ async fn handle_move(
         // then proceed with the move. Trashing is fine: per RFC the source
         // resource appears at the destination URI; what happens to the
         // overwritten one is up to the server.
-        if let Some(existing_file) = &dest_existing_file {
-            file_mgmt
-                .delete_and_cleanup_with_perms(&existing_file.id, user.id)
-                .await
-                .map_err(|e| {
-                    AppError::internal_error(format!("Failed to overwrite destination file: {}", e))
+        match existing {
+            ResolvedResource::File(existing_file) => {
+                let file_uuid = Uuid::parse_str(&existing_file.id).map_err(|_| {
+                    AppError::internal_error("Failed to overwrite destination file")
                 })?;
-        } else if let Some(existing_folder) = &dest_existing_folder {
-            folder_service
-                .delete_folder_with_perms(&existing_folder.id, user.id)
-                .await
-                .map_err(|e| {
-                    AppError::internal_error(format!(
-                        "Failed to overwrite destination folder: {}",
-                        e
-                    ))
+                state
+                    .authorization
+                    .require(
+                        Subject::User(user.id),
+                        Permission::Read,
+                        Resource::File(file_uuid),
+                    )
+                    .await?;
+                file_mgmt
+                    .delete_and_cleanup_with_perms(&existing_file.id, user.id)
+                    .await
+                    .map_err(|e| {
+                        AppError::internal_error(format!(
+                            "Failed to overwrite destination file: {}",
+                            e
+                        ))
+                    })?;
+            }
+            ResolvedResource::Folder(existing_folder) => {
+                let folder_uuid = Uuid::parse_str(&existing_folder.id).map_err(|_| {
+                    AppError::internal_error("Failed to overwrite destination folder")
                 })?;
+                state
+                    .authorization
+                    .require(
+                        Subject::User(user.id),
+                        Permission::Read,
+                        Resource::Folder(folder_uuid),
+                    )
+                    .await?;
+                folder_service
+                    .delete_folder_with_perms(&existing_folder.id, user.id)
+                    .await
+                    .map_err(|e| {
+                        AppError::internal_error(format!(
+                            "Failed to overwrite destination folder: {}",
+                            e
+                        ))
+                    })?;
+            }
         }
     }
 
@@ -1681,7 +1890,6 @@ mod tests {
             name: path.rsplit('/').next().unwrap_or("").to_string(),
             path: path.to_string(),
             parent_id: None,
-            owner_id: None,
             // Test stub — path mapper doesn't read drive_id.
             drive_id: uuid::Uuid::nil(),
             created_at: 0,
@@ -1742,6 +1950,92 @@ mod tests {
             nc_to_internal_path(&chroot, "report.pdf").unwrap(),
             "My Folder - alice/ext/report.pdf"
         );
+    }
+
+    // ── strip_chroot_prefix ──
+    //
+    // Regression guard for the "chroot.path has a leading slash from
+    // StoragePath::to_string() but DB-side original_path doesn't" trap
+    // that broke the NC trashbin PROPFIND after Round 2 rolled out.
+    // Also pins the composed-chroot behaviour Ed asked about.
+
+    #[test]
+    fn strip_chroot_prefix_default_drive_root() {
+        // FolderDto.path carries a leading slash (StoragePath Display);
+        // DB paths do not. Both must normalise to the same prefix.
+        let chroot = stub_folder("/Personal");
+        assert_eq!(
+            strip_chroot_prefix(&chroot, "Personal/g9-tree"),
+            Some("g9-tree")
+        );
+    }
+
+    #[test]
+    fn strip_chroot_prefix_deep_path() {
+        let chroot = stub_folder("/Personal");
+        assert_eq!(
+            strip_chroot_prefix(&chroot, "Personal/inner/deep.txt"),
+            Some("inner/deep.txt")
+        );
+    }
+
+    #[test]
+    fn strip_chroot_prefix_out_of_chroot_returns_none() {
+        // Items on a different drive (whose root isn't "Personal")
+        // must NOT be surfaced under the caller's chroot.
+        let chroot = stub_folder("/Personal");
+        assert_eq!(strip_chroot_prefix(&chroot, "team-drive/report.pdf"), None);
+    }
+
+    #[test]
+    fn strip_chroot_prefix_rejects_partial_prefix_match() {
+        // "Personal" is a prefix substring of "PersonalSecrets" but
+        // NOT a path-segment prefix — must reject.
+        let chroot = stub_folder("/Personal");
+        assert_eq!(
+            strip_chroot_prefix(&chroot, "PersonalSecrets/foo.txt"),
+            None
+        );
+    }
+
+    #[test]
+    fn strip_chroot_prefix_composed_chroot() {
+        // The future composed-chroot case Ed raised: chroot points at
+        // a subfolder inside a drive. The strip must remove the ENTIRE
+        // composed prefix, not just the first segment.
+        let chroot = stub_folder("/Personal/folderA/subfolder");
+        assert_eq!(
+            strip_chroot_prefix(&chroot, "Personal/folderA/subfolder/foo.txt"),
+            Some("foo.txt")
+        );
+    }
+
+    #[test]
+    fn strip_chroot_prefix_composed_chroot_sibling_leaks_blocked() {
+        // Same composed chroot, but the item lives in a sibling
+        // subfolder — must be rejected, not naively strip 1 segment.
+        let chroot = stub_folder("/Personal/folderA/subfolder");
+        assert_eq!(
+            strip_chroot_prefix(&chroot, "Personal/folderA/other/foo.txt"),
+            None
+        );
+    }
+
+    #[test]
+    fn strip_chroot_prefix_chroot_root_itself() {
+        // Item path equals chroot exactly — legitimate for a PROPFIND
+        // Depth:0 on the chroot itself. Subpath is empty.
+        let chroot = stub_folder("/Personal");
+        assert_eq!(strip_chroot_prefix(&chroot, "Personal"), Some(""));
+    }
+
+    #[test]
+    fn strip_chroot_prefix_empty_chroot_returns_none() {
+        // Defensive: a mis-set chroot with an empty path must not
+        // strip anything (stripping "" from any path would return
+        // the whole path — a silent leak).
+        let chroot = stub_folder("/");
+        assert_eq!(strip_chroot_prefix(&chroot, "Personal/foo.txt"), None);
     }
 
     // ── nc_href ──

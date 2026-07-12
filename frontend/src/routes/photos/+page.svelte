@@ -37,8 +37,8 @@
 
 	type GroupMode = 'day' | 'month' | 'year';
 	type LayoutMode = 'square' | 'justified';
-	const GROUP_KEY = 'oxicloud-photos-group';
-	const LAYOUT_KEY = 'oxicloud-photos-layout';
+	const GROUP_KEY = 'oxi-photos-group';
+	const LAYOUT_KEY = 'oxi-photos-layout';
 	let groupMode = $state<GroupMode>('month');
 	let layoutMode = $state<LayoutMode>('square');
 	const selected = useSelection();
