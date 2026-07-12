@@ -1,9 +1,12 @@
 use sqlx::PgPool;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::application::ports::blob_storage_ports::BlobStorageBackend;
+use crate::application::ports::storage_ports::StorageUsagePort;
 use crate::common::config::StorageBackendType;
+use crate::domain::repositories::drive_repository::DriveRepository;
 use crate::infrastructure::db::DbPools;
 
 use crate::application::services::admin_settings_service::AdminSettingsService;
@@ -2133,6 +2136,48 @@ pub struct AppState {
 }
 
 // All AppState construction is done via struct literal in build_app_state().
+
+impl AppState {
+    /// Drive-aware RFC 4331 quota resolution — shared by the native and
+    /// NextCloud-compatible WebDAV PROPFIND handlers so both surfaces
+    /// report the same numbers for the same drive.
+    ///
+    /// - `drive_id == Uuid::nil()`: synthetic drive-listing pseudo-root —
+    ///   no single drive, so the account envelope is the only defensible
+    ///   answer.
+    /// - Personal drives carry no quota of their own (`Drive::quota_bytes`
+    ///   is NULL post-migration) — the account envelope in `auth.users`
+    ///   caps them.
+    /// - Shared drives carry their own finite quota on `storage.drives` —
+    ///   report that, not the owner's unrelated personal envelope.
+    ///
+    /// `available` is `None` for unlimited accounts/drives (quota <= 0 or
+    /// unset) — RFC 4331 §3 lets a server omit `quota-available-bytes`
+    /// rather than disclose a made-up value. Any lookup failure (quota
+    /// subsystem disabled, drive gone) is treated the same way: quota is
+    /// silently omitted rather than failing the whole PROPFIND.
+    pub async fn resolve_webdav_quota(
+        &self,
+        user_id: Uuid,
+        drive_id: Uuid,
+    ) -> Option<(i64, Option<i64>)> {
+        let storage_svc = self.storage_usage_service.as_ref()?;
+
+        if drive_id.is_nil() {
+            let (used, quota) = storage_svc.get_user_storage_info(user_id).await.ok()?;
+            return Some((used, (quota > 0).then(|| (quota - used).max(0))));
+        }
+
+        let drive = self.drive_repo.get_by_id(drive_id).await.ok()?.drive;
+        if drive.is_personal() {
+            let (used, quota) = storage_svc.get_user_storage_info(user_id).await.ok()?;
+            Some((used, (quota > 0).then(|| (quota - used).max(0))))
+        } else {
+            let used = drive.used_bytes;
+            Some((used, drive.quota_bytes.map(|q| (q - used).max(0))))
+        }
+    }
+}
 
 /// Builds the authorization engine. Today this only constructs `PgAclEngine`;
 /// the `OXICLOUD_AUTHZ_ENGINE` env var is reserved for future alternate

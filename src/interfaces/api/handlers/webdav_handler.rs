@@ -346,33 +346,6 @@ async fn resolve_webdav_scope_or_405(
     }
 }
 
-/// Resolve `(used_bytes, available_bytes)` for RFC 4331 quota properties.
-///
-/// `None` when the quota subsystem is disabled (`storage_usage_service` is
-/// only wired up behind its feature flag) or the lookup fails — callers
-/// treat that as "quota properties aren't known", not an error, since
-/// PROPFIND must still succeed for the rest of the response. Quota is
-/// account-wide, not per-folder, so this is resolved once per PROPFIND
-/// request and reused for every folder entry in the response.
-///
-/// `available_bytes` is itself `None` for unlimited accounts (quota <= 0):
-/// RFC 4331 §3 says a server MAY omit `quota-available-bytes` when there's
-/// no enforced/finite quota rather than disclose a made-up value, so
-/// callers drop the property (404 propstat) instead of reporting a
-/// sentinel like `i64::MAX`. `quota-used-bytes` is unaffected — it's a real
-/// measured value regardless of whether a limit exists.
-async fn resolve_quota(state: &Arc<AppState>, user_id: Uuid) -> Option<(i64, Option<i64>)> {
-    let storage_svc = state.storage_usage_service.as_ref()?;
-    let (used, quota_bytes) = storage_svc.get_user_storage_info(user_id).await.ok()?;
-    // Quota <= 0 means unlimited (see `StorageUsageService::check_storage_quota`).
-    let available = if quota_bytes <= 0 {
-        None
-    } else {
-        Some((quota_bytes - used).max(0))
-    };
-    Some((used, available))
-}
-
 fn join_drive_path(root_name: &str, subpath: &str) -> String {
     let subpath = subpath.trim_start_matches('/').trim_end_matches('/');
     if subpath.is_empty() {
@@ -584,7 +557,7 @@ async fn handle_propfind(
                 created_by: None,
                 updated_by: None,
             };
-            let quota = resolve_quota(&state, user.id).await;
+            let quota = state.resolve_webdav_quota(user.id, Uuid::nil()).await;
             return build_streaming_propfind_response(
                 root_folder,
                 None, // folder_id = None → root children (drive-root folders)
@@ -624,7 +597,7 @@ async fn handle_propfind(
                     )
                     .await?;
                 let folder_id = folder.id.clone();
-                let quota = resolve_quota(&state, user.id).await;
+                let quota = state.resolve_webdav_quota(user.id, drive_id).await;
                 return build_streaming_propfind_response(
                     folder,
                     Some(folder_id),
@@ -690,7 +663,7 @@ async fn handle_propfind(
                 )
                 .await?;
             let folder_id = folder.id.clone();
-            let quota = resolve_quota(&state, user.id).await;
+            let quota = state.resolve_webdav_quota(user.id, drive_id).await;
             return build_streaming_propfind_response(
                 folder,
                 Some(folder_id),
