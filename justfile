@@ -130,13 +130,17 @@ db-down:
 # point the UI/UX workflow uses; delegates to `front-design`.
 frontend-check: front-design
 
-# end-to-end Playwright tests
-front-test:
-    cd tests/e2e && npm test
-
-# update images snapshots
-front-test-update-snapshot:
-    cd tests/e2e && npm test -- --update-snapshots=all
+# End-to-end Playwright — SvelteKit SPA suite (tests/e2e/spa/).
+# Default target for all e2e work since the frontend migration.
+# Depends on `fe-build-e2e`: the runner serves `./static-dist/`, so
+# the built assets have to be current with `COVERAGE=1 VITE_E2E=1`
+# instrumentation or the SPA-side data-testids won't exist. Server
+# stdout/stderr is captured at `tests/e2e/server-startup.log`;
+# `tail -F` it in another terminal to see the cold-start progress
+# (webServer boot can take minutes on a cold cargo cache and the
+# `list` reporter prints nothing until the first test runs).
+front-test: fe-build-e2e
+    cd tests/e2e && npm run test:coverage
 
 # Records against a throwaway container stack (its own Postgres + the OxiCloud
 # SPA). Each starting point is a file in tests/e2e/scenarios/codegen/ that sets
@@ -212,10 +216,20 @@ fe-dev:
 fe-build:
     cd frontend && npm run build
 
-# build the SPA for e2e — keeps the `data-testid` tile hooks the release build
-# strips. Use before running the legacy webServer e2e flow against this binary.
+# Build the SPA with e2e instrumentation for the Playwright coverage
+# suite. Both env vars are load-bearing:
+#   * VITE_E2E=1  — keeps the `data-testid` tile hooks the release
+#                   build strips, so `page.getByTestId(filename)` and
+#                   the drop-zone / preferences selectors work.
+#   * COVERAGE=1  — Istanbul-instruments the SPA so per-test
+#                   `window.__coverage__` lands in `.nyc_output/`
+#                   (see `playwright.coverage.config.ts`). Missing
+#                   this makes the runner start but the coverage
+#                   report empty.
+# Called automatically by `front-test`; run manually if you're
+# invoking Playwright directly.
 fe-build-e2e:
-    cd frontend && VITE_E2E=1 npm run build
+    cd frontend && COVERAGE=1 VITE_E2E=1 npm run build
 
 # svelte-check + eslint + stylelint + prettier
 fe-check:
