@@ -353,16 +353,24 @@ impl FileUploadService {
     /// the target drive is `kind='personal'`, so a shared-drive upload
     /// still doesn't touch any user envelope.
     fn maybe_update_storage_usage(&self, file: &FileDto, caller_id: Uuid) {
+        self.apply_storage_usage_delta(file.size as i64, &file.folder_id, caller_id);
+    }
+
+    /// Same as [`Self::maybe_update_storage_usage`] but takes an explicit
+    /// `delta` instead of assuming "whole file size" — the overwrite path
+    /// (`update_file_streaming_with_perms`) needs `new_size - old_size`,
+    /// not the new size added a second time on top of what the old
+    /// content already contributed.
+    fn apply_storage_usage_delta(&self, delta: i64, folder_id: &Option<String>, caller_id: Uuid) {
         let Some(storage_service) = &self.storage_usage_service else {
             return;
         };
-        let delta = file.size as i64;
+        if delta == 0 {
+            return;
+        }
 
         let owner = Some(caller_id);
-        let folder = file
-            .folder_id
-            .as_deref()
-            .and_then(|s| Uuid::parse_str(s).ok());
+        let folder = folder_id.as_deref().and_then(|s| Uuid::parse_str(s).ok());
 
         // Per-user delta — only when the target drive is `kind='personal'`.
         // The user envelope (`auth.users.storage_quota_bytes`) caps the SUM
@@ -496,6 +504,7 @@ impl FileUploadUseCase for FileUploadService {
                 )
                 .await?;
 
+            let old_size = file.size();
             let file_id = file.id().to_string();
             let (new_hash, updated_at) = self
                 .file_write
@@ -531,6 +540,11 @@ impl FileUploadUseCase for FileUploadService {
                 DomainError::internal_error("FileUpload", format!("rebuild entity: {e}"))
             })?;
             let dto = FileDto::from(updated);
+            self.apply_storage_usage_delta(
+                blob.size as i64 - old_size as i64,
+                &dto.folder_id,
+                caller_id,
+            );
             if let Some(hook) = &self.file_lifecycle_hook {
                 hook.on_file_updated(&file_id, &dto.content_hash, content_type);
             }
@@ -603,6 +617,7 @@ impl FileUploadUseCase for FileUploadService {
             )
             .await?;
         let dto = FileDto::from(created);
+        self.maybe_update_storage_usage(&dto, caller_id);
         if let Some(hook) = &self.file_lifecycle_hook {
             hook.on_file_created(&dto.id, &dto.content_hash, content_type, is_new_blob);
         }

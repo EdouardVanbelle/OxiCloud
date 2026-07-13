@@ -120,8 +120,10 @@ ncq_root_folder_id: jsonpath "$.root_folder_id"
 # ─────────────────────────────────────────────────────────────
 PROPFIND {{base_url}}/remote.php/dav/files/{{ncq_nc_username}}~{{ncq_root_folder_id}}/
 Depth: 0
+[Options]
+variable: ncq_composite_user={{ncq_nc_username}}~{{ncq_root_folder_id}}
 [BasicAuth]
-{{ncq_nc_username}}~{{ncq_root_folder_id}}: {{ncq_nc_password}}
+{{ncq_composite_user}}: {{ncq_nc_password}}
 
 HTTP 207
 [Asserts]
@@ -135,8 +137,10 @@ xpath "number(//*[local-name()='quota-available-bytes'])" == 500
 # ─────────────────────────────────────────────────────────────
 PUT {{base_url}}/remote.php/dav/files/{{ncq_nc_username}}~{{ncq_root_folder_id}}/quota-probe.txt
 Content-Type: text/plain
+[Options]
+variable: ncq_composite_user={{ncq_nc_username}}~{{ncq_root_folder_id}}
 [BasicAuth]
-{{ncq_nc_username}}~{{ncq_root_folder_id}}: {{ncq_nc_password}}
+{{ncq_composite_user}}: {{ncq_nc_password}}
 ```
 32-byte-ish payload for nc
 ```
@@ -144,10 +148,18 @@ Content-Type: text/plain
 HTTP 201
 
 
+# The drive-usage bump is fire-and-forget on a tokio task (see
+# `file_upload_service.rs::maybe_update_storage_usage`), so retry
+# until `used_bytes` catches up — same shape as `drive_quota.hurl`
+# Step 5.
 PROPFIND {{base_url}}/remote.php/dav/files/{{ncq_nc_username}}~{{ncq_root_folder_id}}/
 Depth: 0
+[Options]
+variable: ncq_composite_user={{ncq_nc_username}}~{{ncq_root_folder_id}}
+retry: 10
+retry-interval: 200ms
 [BasicAuth]
-{{ncq_nc_username}}~{{ncq_root_folder_id}}: {{ncq_nc_password}}
+{{ncq_composite_user}}: {{ncq_nc_password}}
 
 HTTP 207
 [Asserts]

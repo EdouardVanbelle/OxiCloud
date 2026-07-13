@@ -203,10 +203,18 @@ Content-Type: text/plain
 HTTP 201
 
 
+# The drive-usage bump is fire-and-forget on a tokio task (see
+# `file_upload_service.rs::maybe_update_storage_usage`), so the SQL
+# UPDATE may not have landed yet when the PUT above returned. Retry
+# the PROPFIND until `used_bytes` catches up — same shape as
+# `drive_quota.hurl` Step 5.
 PROPFIND {{base_url}}/webdav/@drive/{{wq_drive_id}}/
 Authorization: Bearer {{wq_owner_token}}
 Depth: 0
 Content-Type: application/xml; charset=utf-8
+[Options]
+retry: 10
+retry-interval: 200ms
 ```
 <?xml version="1.0" encoding="utf-8"?>
 <D:propfind xmlns:D="DAV:">
