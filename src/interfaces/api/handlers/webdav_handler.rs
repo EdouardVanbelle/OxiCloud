@@ -18,7 +18,7 @@ use quick_xml::Writer;
 use uuid::Uuid;
 
 use crate::application::adapters::webdav_adapter::{
-    LockInfo, PropFindRequest, PropPatchOp, QualifiedName, WebDavAdapter,
+    LockInfo, PropFindRequest, PropPatchOp, QualifiedName, WebDavAdapter, is_protected_property,
 };
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
@@ -980,6 +980,12 @@ async fn handle_proppatch(
     let mut results: Vec<(&QualifiedName, bool)> = Vec::new();
     for op in &ops {
         match op {
+            PropPatchOp::Set(pv) if is_protected_property(&pv.name) => {
+                results.push((&pv.name, false));
+            }
+            PropPatchOp::Remove(name) if is_protected_property(name) => {
+                results.push((name, false));
+            }
             PropPatchOp::Set(pv) => {
                 dead_props
                     .set(resource_ref, pv.name.clone(), pv.value.clone())
@@ -1334,7 +1340,11 @@ async fn resolve_or_legacy(
 /// the dead-prop lookup is broken; surfacing a 500 here would mask the
 /// resource entirely from sync clients. The legacy path-keyed lookup
 /// behaved the same way (`.unwrap_or_default()`); we preserve it.
-async fn file_dead_props(
+///
+/// `pub(crate)` — also reused by the NextCloud-compatible PROPFIND
+/// handler (`interfaces::nextcloud::webdav_handler`), which needs the
+/// same lenient fetch for its own response writers.
+pub(crate) async fn file_dead_props(
     state: &Arc<AppState>,
     file: &FileDto,
 ) -> Vec<(QualifiedName, Option<String>)> {
@@ -1349,8 +1359,9 @@ async fn file_dead_props(
 }
 
 /// Same shape as `file_dead_props` but for folder rows. Used by the
-/// streaming PROPFIND walker.
-async fn folder_dead_props(
+/// streaming PROPFIND walker (and, via `pub(crate)`, by the NextCloud
+/// handler's own streaming walker).
+pub(crate) async fn folder_dead_props(
     store: &DeadPropertyStore,
     folder: &FolderDto,
 ) -> Vec<(QualifiedName, Option<String>)> {
@@ -1366,7 +1377,7 @@ async fn folder_dead_props(
 /// File-leaf variant for the streaming walker (takes a `&DeadPropertyStore`
 /// rather than the full `&Arc<AppState>` so it can be called from inside
 /// the async-stream future without cloning state).
-async fn streamed_file_dead_props(
+pub(crate) async fn streamed_file_dead_props(
     store: &DeadPropertyStore,
     file: &FileDto,
 ) -> Vec<(QualifiedName, Option<String>)> {

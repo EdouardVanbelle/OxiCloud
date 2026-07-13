@@ -21,6 +21,7 @@ use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::ports::inbound::SearchUseCase;
 use crate::common::di::AppState;
 use crate::domain::entities::file::File;
+use crate::interfaces::api::handlers::webdav_handler::{file_dead_props, folder_dead_props};
 use crate::interfaces::errors::AppError;
 use crate::interfaces::nextcloud::webdav_handler::{
     batch_resolve_ids, format_oc_id, nc_href, write_file_response, write_folder_response,
@@ -178,14 +179,15 @@ async fn handle_filter_files(
             let href = nc_href(url_user, subpath);
             let fid = file_id_map.get(&file.id).copied();
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
+            let dead = file_dead_props(&state, file).await;
             write_file_response(
                 &mut xml,
                 file,
                 &href,
-                fid,
-                oc_id.as_deref(),
+                (fid, oc_id.as_deref()),
                 &user.username,
                 &favorite_ids,
+                &dead,
             )
             .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
         }
@@ -203,14 +205,15 @@ async fn handle_filter_files(
             let href = format!("{}/", nc_href(url_user, subpath));
             let fid = folder_id_map.get(&folder.id).copied();
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
+            let dead = folder_dead_props(&state.webdav_dead_props, folder).await;
             write_folder_response(
                 &mut xml,
                 folder,
                 &href,
-                fid,
-                oc_id.as_deref(),
+                (fid, oc_id.as_deref()),
                 &user.username,
                 &favorite_ids,
+                &dead,
             )
             .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
         }
@@ -308,14 +311,15 @@ async fn handle_search(
             let href = nc_href(url_user, subpath);
             let fid = file_id_map.get(&file.id).copied();
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
+            let dead = file_dead_props(&state, file).await;
             write_file_response(
                 &mut xml,
                 file,
                 &href,
-                fid,
-                oc_id.as_deref(),
+                (fid, oc_id.as_deref()),
                 &user.username,
                 &favorite_ids,
+                &dead,
             )
             .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
         }
@@ -334,14 +338,15 @@ async fn handle_search(
             let href = format!("{}/", nc_href(url_user, subpath));
             let fid = folder_id_map.get(&folder.id).copied();
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
+            let dead = folder_dead_props(&state.webdav_dead_props, folder).await;
             write_folder_response(
                 &mut xml,
                 folder,
                 &href,
-                fid,
-                oc_id.as_deref(),
+                (fid, oc_id.as_deref()),
                 &user.username,
                 &favorite_ids,
+                &dead,
             )
             .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
         }

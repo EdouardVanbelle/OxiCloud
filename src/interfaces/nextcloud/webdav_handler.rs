@@ -13,7 +13,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::application::adapters::webdav_adapter::{PropFindRequest, WebDavAdapter};
+use crate::application::adapters::webdav_adapter::{
+    PropFindRequest, PropPatchOp, QualifiedName, WebDavAdapter, is_protected_property,
+};
 use crate::application::dtos::pagination::PaginationRequestDto;
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::favorites_ports::FavoritesUseCase;
@@ -26,7 +28,10 @@ use crate::common::di::AppState;
 use crate::common::mime_detect::filename_from_path;
 use crate::domain::services::authorization::{Permission, Resource, Subject};
 use crate::infrastructure::services::path_resolver_service::ResolvedResource;
-use crate::interfaces::api::handlers::webdav_handler::PROPFIND_BATCH_SIZE;
+use crate::infrastructure::services::webdav_dead_property_store::ResourceRef;
+use crate::interfaces::api::handlers::webdav_handler::{
+    PROPFIND_BATCH_SIZE, file_dead_props, folder_dead_props, streamed_file_dead_props,
+};
 use crate::interfaces::errors::AppError;
 use crate::interfaces::range_requests::{not_modified_response, range_response};
 use crate::interfaces::upload_ingest::ingest_body_to_cas;
@@ -371,6 +376,8 @@ async fn handle_propfind(
             let nc = state.nextcloud.as_ref();
             let file_id_svc = nc.map(|n| &n.file_ids);
 
+            let dead_props = file_dead_props(&state, &file).await;
+
             let mut buf = Vec::new();
             write_nc_file_multistatus(
                 &mut buf,
@@ -379,7 +386,7 @@ async fn handle_propfind(
                 &user.username,
                 subpath,
                 file_id_svc,
-                &favorite_ids,
+                (&favorite_ids, &dead_props),
             )
             .await
             .map_err(|e| AppError::internal_error(format!("XML generation failed: {}", e)))?;
@@ -620,6 +627,12 @@ async fn handle_head(
 
 // ──────────────────── PROPPATCH ────────────────────
 
+/// The `oc:favorite` element is live server state routed through the
+/// favorites service, not a dead property — every other
+/// namespace/local-name pair PROPPATCH sends is stored verbatim via
+/// `DeadPropertyStore`.
+const OC_FAVORITE_NS: &str = "http://owncloud.org/ns";
+
 async fn handle_proppatch(
     state: Arc<AppState>,
     req: Request<Body>,
@@ -633,169 +646,137 @@ async fn handle_proppatch(
         .await
         .map_err(|e| AppError::bad_request(format!("Failed to read body: {}", e)))?;
 
-    let body_str = String::from_utf8_lossy(&body_bytes);
-
-    // Resolve the target resource once — needed for two things:
-    //  1. Applying the oc:favorite mutation when the PROPPATCH body
-    //     carries one (`item_type` distinguishes file vs folder rows
-    //     in the favorites table).
-    //  2. Picking the right `<d:href>` shape in the multi-status
+    // Resolve the target resource — needed for three things:
+    //  1. The dead-property store key is the resource id (folder_id
+    //     XOR file_id), so we need a `ResourceRef`.
+    //  2. Applying the oc:favorite mutation (`item_type` distinguishes
+    //     file vs folder rows in the favorites table).
+    //  3. Picking the right `<d:href>` shape in the multi-status
     //     response: collection (folder) hrefs MUST end in `/` per
     //     RFC 4918 §5.2 — see `nc_collection_href` for the full
-    //     reasoning. Without this distinction the NC desktop client
-    //     parser aborted on PROPFIND; PROPPATCH would hit the same
-    //     wall the moment the user favourited a folder.
+    //     reasoning.
     //
-    // When the resource is missing we tolerate it for the no-op
-    // PROPPATCH path (no favorite directive in the body) — matches
-    // the prior behaviour. A PROPPATCH that *does* try to set
-    // favorite on a missing resource still returns NotFound.
+    // A missing resource is now always a 404: unlike the previous
+    // favorite-only implementation (which merely re-declared success
+    // without doing anything), this handler performs real writes, so
+    // silently no-opping on a nonexistent path would be a foot-gun —
+    // matches the native `/webdav/` handler's contract.
     let internal_path = nc_to_internal_path(chroot, subpath)?;
-
     // Single-query path resolution — PROPPATCH may target either a
     // folder or a file. Post-D7 the resolver is drive-scoped, so we
     // `authz.require(Read, …)` on the returned resource before
     // reading its type. The favorite mutation below itself doesn't
     // require additional authz (favorites are per-user; the caller can
     // favourite any resource they can see).
-    let resource = match nc_resolve_or_fallback(&state, &internal_path, chroot.drive_id).await {
-        Some(ResolvedResource::File(f)) => {
-            let file_uuid =
-                Uuid::parse_str(&f.id).map_err(|_| AppError::not_found("Resource not found"))?;
-            state
-                .authorization
-                .require(
-                    Subject::User(user.id),
-                    Permission::Read,
-                    Resource::File(file_uuid),
-                )
-                .await?;
-            Some((f.id, "file"))
-        }
-        Some(ResolvedResource::Folder(folder)) => {
-            let folder_uuid = Uuid::parse_str(&folder.id)
-                .map_err(|_| AppError::not_found("Resource not found"))?;
-            state
-                .authorization
-                .require(
-                    Subject::User(user.id),
-                    Permission::Read,
-                    Resource::Folder(folder_uuid),
-                )
-                .await?;
-            Some((folder.id, "folder"))
-        }
-        None => None,
-    };
-    let is_collection = matches!(resource, Some((_, "folder")));
-
-    // Parse oc:favorite value from PROPPATCH XML.
-    let favorite_value = parse_proppatch_favorite(&body_str);
-
-    if let Some(value) = favorite_value {
-        let Some((item_id, item_type)) = resource else {
-            return Err(AppError::not_found("Resource not found"));
+    let (resource_ref, item_id, item_type, is_collection) =
+        match nc_resolve_or_fallback(&state, &internal_path, chroot.drive_id).await {
+            Some(ResolvedResource::File(file)) => {
+                let id = Uuid::parse_str(&file.id)
+                    .map_err(|_| AppError::not_found("Resource not found"))?;
+                state
+                    .authorization
+                    .require(Subject::User(user.id), Permission::Read, Resource::File(id))
+                    .await?;
+                (ResourceRef::File(id), file.id, "file", false)
+            }
+            Some(ResolvedResource::Folder(folder)) => {
+                let id = Uuid::parse_str(&folder.id)
+                    .map_err(|_| AppError::not_found("Resource not found"))?;
+                state
+                    .authorization
+                    .require(
+                        Subject::User(user.id),
+                        Permission::Read,
+                        Resource::Folder(id),
+                    )
+                    .await?;
+                (ResourceRef::Folder(id), folder.id, "folder", true)
+            }
+            None => return Err(AppError::not_found("Resource not found")),
         };
 
-        if let Some(fav_svc) = state.favorites_service.as_ref() {
-            if value == 1 {
-                fav_svc
-                    .add_to_favorites(user.id, &item_id, item_type)
+    let ops = WebDavAdapter::parse_proppatch(body_bytes.reader())
+        .map_err(|e| AppError::bad_request(format!("Failed to parse PROPPATCH request: {}", e)))?;
+
+    let dead_props = &state.webdav_dead_props;
+    let mut results: Vec<(&QualifiedName, bool)> = Vec::new();
+    for op in &ops {
+        let is_favorite =
+            |name: &QualifiedName| name.namespace == OC_FAVORITE_NS && name.name == "favorite";
+        match op {
+            PropPatchOp::Set(pv) if is_favorite(&pv.name) => {
+                if let Some(fav_svc) = state.favorites_service.as_ref() {
+                    if pv.value.as_deref().map(str::trim) == Some("1") {
+                        fav_svc
+                            .add_to_favorites(user.id, &item_id, item_type)
+                            .await
+                            .map_err(|e| {
+                                AppError::internal_error(format!("Failed to add favorite: {e}"))
+                            })?;
+                    } else {
+                        fav_svc
+                            .remove_from_favorites(user.id, &item_id, item_type)
+                            .await
+                            .map_err(|e| {
+                                AppError::internal_error(format!("Failed to remove favorite: {e}"))
+                            })?;
+                    }
+                }
+                results.push((&pv.name, true));
+            }
+            PropPatchOp::Remove(name) if is_favorite(name) => {
+                if let Some(fav_svc) = state.favorites_service.as_ref() {
+                    fav_svc
+                        .remove_from_favorites(user.id, &item_id, item_type)
+                        .await
+                        .map_err(|e| {
+                            AppError::internal_error(format!("Failed to remove favorite: {e}"))
+                        })?;
+                }
+                results.push((name, true));
+            }
+            PropPatchOp::Set(pv) if is_protected_property(&pv.name) => {
+                results.push((&pv.name, false));
+            }
+            PropPatchOp::Remove(name) if is_protected_property(name) => {
+                results.push((name, false));
+            }
+            PropPatchOp::Set(pv) => {
+                dead_props
+                    .set(resource_ref, pv.name.clone(), pv.value.clone())
                     .await
                     .map_err(|e| {
-                        AppError::internal_error(format!("Failed to add favorite: {}", e))
+                        AppError::internal_error(format!("Failed to store dead property: {e}"))
                     })?;
-            } else {
-                fav_svc
-                    .remove_from_favorites(user.id, &item_id, item_type)
-                    .await
-                    .map_err(|e| {
-                        AppError::internal_error(format!("Failed to remove favorite: {}", e))
-                    })?;
+                results.push((&pv.name, true));
+            }
+            PropPatchOp::Remove(name) => {
+                dead_props.remove(resource_ref, name).await.map_err(|e| {
+                    AppError::internal_error(format!("Failed to remove dead property: {e}"))
+                })?;
+                results.push((name, true));
             }
         }
     }
 
-    // Return 207 Multi-Status with success response using quick_xml
-    // for safe escaping. Collection vs file href chosen by resource
-    // type to satisfy the RFC 4918 §5.2 trailing-slash invariant —
-    // see the comment block at the top of this function.
+    // Collection vs file href chosen by resource type to satisfy the
+    // RFC 4918 §5.2 trailing-slash invariant — see the comment block
+    // at the top of this function.
     let href = if is_collection {
         nc_collection_href(url_user, subpath)
     } else {
         nc_href(url_user, subpath)
     };
-    let mut buf = Vec::new();
-    {
-        let mut xml = Writer::new(&mut buf);
-        xml.write_event(Event::Text(BytesText::new(
-            "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
-        )))
-        .map_err(|e| AppError::internal_error(format!("XML write failed: {}", e)))?;
-
-        let mut ms = BytesStart::new("d:multistatus");
-        ms.push_attribute(("xmlns:d", "DAV:"));
-        ms.push_attribute(("xmlns:oc", "http://owncloud.org/ns"));
-        xml.write_event(Event::Start(ms))
-            .map_err(|e| AppError::internal_error(format!("XML: {}", e)))?;
-
-        xml.write_event(Event::Start(BytesStart::new("d:response")))
-            .map_err(|e| AppError::internal_error(format!("XML: {}", e)))?;
-        write_text_element(&mut xml, "d:href", &href)
-            .map_err(|e| AppError::internal_error(format!("XML: {}", e)))?;
-        xml.write_event(Event::Start(BytesStart::new("d:propstat")))
-            .map_err(|e| AppError::internal_error(format!("XML: {}", e)))?;
-        xml.write_event(Event::Start(BytesStart::new("d:prop")))
-            .map_err(|e| AppError::internal_error(format!("XML: {}", e)))?;
-        xml.write_event(Event::Empty(BytesStart::new("oc:favorite")))
-            .map_err(|e| AppError::internal_error(format!("XML: {}", e)))?;
-        xml.write_event(Event::End(BytesEnd::new("d:prop")))
-            .map_err(|e| AppError::internal_error(format!("XML: {}", e)))?;
-        write_text_element(&mut xml, "d:status", "HTTP/1.1 200 OK")
-            .map_err(|e| AppError::internal_error(format!("XML: {}", e)))?;
-        xml.write_event(Event::End(BytesEnd::new("d:propstat")))
-            .map_err(|e| AppError::internal_error(format!("XML: {}", e)))?;
-        xml.write_event(Event::End(BytesEnd::new("d:response")))
-            .map_err(|e| AppError::internal_error(format!("XML: {}", e)))?;
-        xml.write_event(Event::End(BytesEnd::new("d:multistatus")))
-            .map_err(|e| AppError::internal_error(format!("XML: {}", e)))?;
-    }
+    let mut response_body = Vec::new();
+    WebDavAdapter::generate_proppatch_response(&mut response_body, &href, &results).map_err(
+        |e| AppError::internal_error(format!("Failed to generate PROPPATCH response: {}", e)),
+    )?;
 
     Ok(Response::builder()
         .status(StatusCode::MULTI_STATUS)
         .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
-        .body(Body::from(buf))
+        .body(Body::from(response_body))
         .unwrap())
-}
-
-/// Parse the oc:favorite value from a PROPPATCH XML body using quick_xml.
-fn parse_proppatch_favorite(body: &str) -> Option<u8> {
-    use quick_xml::Reader;
-
-    let mut reader = Reader::from_str(body);
-    let mut inside_favorite = false;
-
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(ref e)) => {
-                let local = e.local_name();
-                if local.as_ref() == b"favorite" {
-                    inside_favorite = true;
-                }
-            }
-            Ok(Event::Text(ref e)) if inside_favorite => {
-                let text = e.decode().ok()?;
-                return text.trim().parse::<u8>().ok();
-            }
-            Ok(Event::End(ref e)) if e.local_name().as_ref() == b"favorite" => {
-                inside_favorite = false;
-            }
-            Ok(Event::Eof) => break,
-            Err(_) => break,
-            _ => {}
-        }
-    }
-    None
 }
 
 // ──────────────────── PUT ────────────────────
@@ -1441,6 +1422,10 @@ fn write_nc_multistatus_open<W: std::io::Write>(xml: &mut Writer<W>) -> Result<(
 
 /// Generate the multistatus XML for a single-file PROPFIND. The folder
 /// case streams via [`build_nc_streaming_propfind`] instead.
+///
+/// `extras` bundles `(favorite_ids, dead_props)` — both are per-resource
+/// decorations fetched by the caller — to stay under clippy's
+/// argument-count lint.
 async fn write_nc_file_multistatus<W: std::io::Write>(
     writer: W,
     file: &FileDto,
@@ -1448,8 +1433,9 @@ async fn write_nc_file_multistatus<W: std::io::Write>(
     username: &str,
     subpath: &str,
     file_id_svc: Option<&Arc<NextcloudFileIdService>>,
-    favorite_ids: &HashSet<String>,
+    extras: (&HashSet<String>, &[(QualifiedName, Option<String>)]),
 ) -> Result<(), String> {
+    let (favorite_ids, dead_props) = extras;
     let (file_id_map, _) =
         batch_resolve_ids(file_id_svc, std::slice::from_ref(&file.id), &[]).await;
 
@@ -1468,10 +1454,10 @@ async fn write_nc_file_multistatus<W: std::io::Write>(
         &mut xml,
         file,
         &href,
-        file_id,
-        oc_id.as_deref(),
+        (file_id, oc_id.as_deref()),
         username,
         favorite_ids,
+        dead_props,
     )?;
 
     xml.write_event(Event::End(BytesEnd::new("d:multistatus")))
@@ -1514,6 +1500,7 @@ fn build_nc_streaming_propfind(
         };
         let (_, folder_id_map) =
             batch_resolve_ids(file_id_svc, &[], std::slice::from_ref(&folder.id)).await;
+        let folder_dead = folder_dead_props(&state.webdav_dead_props, &folder).await;
 
         let mut buf = Vec::with_capacity(4096);
         {
@@ -1522,7 +1509,7 @@ fn build_nc_streaming_propfind(
             let href = nc_collection_href(&username, &subpath);
             let fid = folder_id_map.get(&folder.id).copied();
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
-            write_folder_response(&mut xml, &folder, &href, fid, oc_id.as_deref(), &username, &folder_favs)
+            write_folder_response(&mut xml, &folder, &href, (fid, oc_id.as_deref()), &username, &folder_favs, &folder_dead)
                 .map_err(std::io::Error::other)?;
         }
         yield Bytes::from(buf);
@@ -1551,11 +1538,15 @@ fn build_nc_streaming_propfind(
                 };
                 let file_uuids: Vec<String> = batch.iter().map(|f| f.id.clone()).collect();
                 let (file_id_map, _) = batch_resolve_ids(file_id_svc, &file_uuids, &[]).await;
+                let mut file_deads = Vec::with_capacity(batch_len);
+                for file in &batch {
+                    file_deads.push(streamed_file_dead_props(&state.webdav_dead_props, file).await);
+                }
 
                 let mut chunk = Vec::with_capacity(batch_len * 1024);
                 {
                     let mut xml = Writer::new(&mut chunk);
-                    for file in &batch {
+                    for (file, dead) in batch.iter().zip(file_deads.iter()) {
                         let child_sub = if subpath.is_empty() {
                             file.name.clone()
                         } else {
@@ -1564,7 +1555,7 @@ fn build_nc_streaming_propfind(
                         let href = nc_href(&username, &child_sub);
                         let fid = file_id_map.get(&file.id).copied();
                         let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
-                        write_file_response(&mut xml, file, &href, fid, oc_id.as_deref(), &username, &favs)
+                        write_file_response(&mut xml, file, &href, (fid, oc_id.as_deref()), &username, &favs, dead)
                             .map_err(std::io::Error::other)?;
                     }
                 }
@@ -1600,11 +1591,15 @@ fn build_nc_streaming_propfind(
                 };
                 let folder_uuids: Vec<String> = result.items.iter().map(|sf| sf.id.clone()).collect();
                 let (_, sub_id_map) = batch_resolve_ids(file_id_svc, &[], &folder_uuids).await;
+                let mut sub_deads = Vec::with_capacity(result.items.len());
+                for sf in &result.items {
+                    sub_deads.push(folder_dead_props(&state.webdav_dead_props, sf).await);
+                }
 
                 let mut chunk = Vec::with_capacity(result.items.len() * 1024);
                 {
                     let mut xml = Writer::new(&mut chunk);
-                    for sf in &result.items {
+                    for (sf, dead) in result.items.iter().zip(sub_deads.iter()) {
                         let child_sub = if subpath.is_empty() {
                             sf.name.clone()
                         } else {
@@ -1613,7 +1608,7 @@ fn build_nc_streaming_propfind(
                         let href = nc_collection_href(&username, &child_sub);
                         let fid = sub_id_map.get(&sf.id).copied();
                         let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
-                        write_folder_response(&mut xml, sf, &href, fid, oc_id.as_deref(), &username, &favs)
+                        write_folder_response(&mut xml, sf, &href, (fid, oc_id.as_deref()), &username, &favs, dead)
                             .map_err(std::io::Error::other)?;
                     }
                 }
@@ -1648,15 +1643,20 @@ fn build_nc_streaming_propfind(
         .unwrap()
 }
 
+/// `oc_ids` bundles `(file_id, oc_id)` — always fetched and passed
+/// together (`oc_id` is derived from `file_id`) — to stay under
+/// clippy's argument-count lint now that `dead_props` is also threaded
+/// through.
 pub fn write_folder_response<W: std::io::Write>(
     xml: &mut Writer<W>,
     folder: &FolderDto,
     href: &str,
-    file_id: Option<i64>,
-    oc_id: Option<&str>,
+    oc_ids: (Option<i64>, Option<&str>),
     owner: &str,
     favorite_ids: &HashSet<String>,
+    dead_props: &[(QualifiedName, Option<String>)],
 ) -> Result<(), String> {
+    let (file_id, oc_id) = oc_ids;
     xml.write_event(Event::Start(BytesStart::new("d:response")))
         .xml_err()?;
 
@@ -1727,21 +1727,26 @@ pub fn write_folder_response<W: std::io::Write>(
     xml.write_event(Event::End(BytesEnd::new("d:propstat")))
         .xml_err()?;
 
+    WebDavAdapter::write_dead_props_propstat(xml, dead_props).xml_err()?;
+
     xml.write_event(Event::End(BytesEnd::new("d:response")))
         .xml_err()?;
 
     Ok(())
 }
 
+/// See `write_folder_response` for why `(file_id, oc_id)` are bundled
+/// into `oc_ids`.
 pub fn write_file_response<W: std::io::Write>(
     xml: &mut Writer<W>,
     file: &FileDto,
     href: &str,
-    file_id: Option<i64>,
-    oc_id: Option<&str>,
+    oc_ids: (Option<i64>, Option<&str>),
     owner: &str,
     favorite_ids: &HashSet<String>,
+    dead_props: &[(QualifiedName, Option<String>)],
 ) -> Result<(), String> {
+    let (file_id, oc_id) = oc_ids;
     xml.write_event(Event::Start(BytesStart::new("d:response")))
         .xml_err()?;
 
@@ -1815,6 +1820,8 @@ pub fn write_file_response<W: std::io::Write>(
     write_text_element(xml, "d:status", "HTTP/1.1 200 OK")?;
     xml.write_event(Event::End(BytesEnd::new("d:propstat")))
         .xml_err()?;
+
+    WebDavAdapter::write_dead_props_propstat(xml, dead_props).xml_err()?;
 
     xml.write_event(Event::End(BytesEnd::new("d:response")))
         .xml_err()?;

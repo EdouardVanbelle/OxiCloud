@@ -72,6 +72,46 @@ impl std::fmt::Display for QualifiedName {
     }
 }
 
+/// Whether PROPPATCH must refuse to set/remove this property as a dead
+/// property (RFC 4918 §9.2 — server MAY reject a PROPPATCH attempt on a
+/// live property; DeadPropertyStore has no business holding a value that
+/// PROPFIND / REPORT already emit from live server state).
+pub fn is_protected_property(qn: &QualifiedName) -> bool {
+    match qn.namespace.as_str() {
+        // RFC 4918 §15 — the DAV: namespace is server-owned in its
+        // entirety. Any PROPPATCH into it either forges a live
+        // property (dual-emission) or accumulates unread garbage
+        // (silent litter).
+        "DAV:" => true,
+
+        // Every name below appears verbatim in write_folder_response
+        // / write_file_response in the NC handler. Adding a new
+        // live emitter → add its name here.
+        "http://owncloud.org/ns" => matches!(
+            qn.name.as_str(),
+            "favorite"
+                | "fileid"
+                | "id"
+                | "owner-id"
+                | "owner-display-name"
+                | "permissions"
+                | "share-types"
+                | "size"
+        ),
+
+        "http://nextcloud.org/ns" => matches!(
+            qn.name.as_str(),
+            "has-preview" | "is-encrypted" | "mount-type" | "creation_time" | "upload_time"
+        ),
+
+        "http://open-collaboration-services.org/ns" => {
+            matches!(qn.name.as_str(), "share-permissions")
+        }
+
+        _ => false,
+    }
+}
+
 /// PROPFIND request type
 #[derive(Debug, PartialEq)]
 pub enum PropFindType {
@@ -461,7 +501,12 @@ impl WebDavAdapter {
     ///
     /// Written AFTER the live-property propstats inside a `<D:response>`.
     /// Only emitted when `dead_props` is non-empty.
-    fn write_dead_props_propstat<W: Write>(
+    ///
+    /// `pub(crate)` so the NextCloud-compatible handler
+    /// (`interfaces::nextcloud::webdav_handler`) can append the same
+    /// dead-property block to its own bespoke PROPFIND writers instead
+    /// of duplicating this XML shape.
+    pub(crate) fn write_dead_props_propstat<W: Write>(
         xml_writer: &mut Writer<W>,
         dead_props: &[(QualifiedName, Option<String>)],
     ) -> Result<()> {

@@ -105,7 +105,6 @@ FROM base AS builder-cache
 WORKDIR /app
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src src
-COPY static static
 COPY migrations migrations
 COPY templates templates
 COPY --from=frontend /static-dist ./static-dist
