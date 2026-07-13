@@ -351,6 +351,61 @@ jsonpath "$.message" contains "request received"
 
 
 # ─────────────────────────────────────────────────────────────
+# Step 12 — OXICLOUD_REGISTRATION_ALLOWED_EMAIL_DOMAINS gate.
+#
+# `tests/common/server.env` pins the allowlist to
+# `example.com,example.test`. Every legitimate signup above stayed
+# inside that set. Now attempt an off-domain address and assert:
+#
+#   * HTTP 403 (NOT the anti-enumeration 200 — instance-wide policy
+#     is not a per-user oracle; a rejected domain hasn't
+#     established whether a specific address exists).
+#   * `RegistrationDomainNotAllowed` error code so operators and
+#     frontends can distinguish this from other 403 shapes
+#     (`RegistrationDisabled`, `PasswordRegistrationDisabled`).
+#
+# The gate is CASE-INSENSITIVE on the post-`@` part — extra
+# request with mixed case pins that behaviour so a future refactor
+# can't silently regress a lowercase-only match.
+# ─────────────────────────────────────────────────────────────
+POST {{base_url}}/api/auth/register
+Content-Type: application/json
+{
+  "username": "off-domain",
+  "email": "someone@nowhere.invalid",
+  "password": "TestPassword1!"
+}
+
+HTTP 403
+[Asserts]
+# `$.error` carries the human-readable message; the stable
+# machine-readable code lives at `$.error_type` (see
+# `interfaces/errors.rs::ErrorResponse`). Pin `error_type` so a
+# future copy-edit of the message doesn't break the test.
+jsonpath "$.error_type" == "RegistrationDomainNotAllowed"
+
+
+# Case-insensitive matching regression pin: `EXAMPLE.COM` in the
+# post-`@` part is normalised to `example.com` and accepted. Reuse
+# charlie's already-taken email so the request lands on the
+# anti-enum-200 collision path — this way we exercise the domain
+# gate (must pass) without creating a new user that would need
+# cleanup, and pin the "case-insensitive normalization" invariant
+# in one step.
+POST {{base_url}}/api/auth/register
+Content-Type: application/json
+{
+  "username": "case-check",
+  "email": "charlie@EXAMPLE.COM",
+  "password": "TestPassword1!"
+}
+
+HTTP 200
+[Asserts]
+jsonpath "$.message" contains "request received"
+
+
+# ─────────────────────────────────────────────────────────────
 # Cleanup — admin deletes both test users.
 # ─────────────────────────────────────────────────────────────
 DELETE {{base_url}}/api/admin/users/{{charlie_user_id}}

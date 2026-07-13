@@ -470,6 +470,33 @@ pub struct AuthConfig {
     pub hash_parallelism: u32,
     /// Rate limiting / account lockout configuration
     pub rate_limit: RateLimitConfig,
+    /// Allowlist of email domains accepted on the public `POST
+    /// /api/auth/register` endpoint. Empty = no restriction (any
+    /// domain is allowed). Entries are lowercased and trimmed at
+    /// load time; matching is case-insensitive exact-match on the
+    /// post-`@` part of the address.
+    ///
+    /// This is DISTINCT from
+    /// [`MagicLinkConfig::allowed_email_domains`], which gates who
+    /// can be INVITED (email-typed grants + magic-link login for
+    /// existing recipients). This list gates SELF-registration
+    /// only. An operator can, for example, keep public registration
+    /// open to `partner-a.com` and `partner-b.io` while allowing
+    /// invitations to any domain — the two lists are independent.
+    ///
+    /// Example: `["partner-a.com", "partner-b.io"]` — only
+    /// addresses `<anything>@partner-a.com` or
+    /// `<anything>@partner-b.io` can self-register; everything else
+    /// is rejected with 403 `RegistrationDomainNotAllowed`.
+    ///
+    /// Wildcards / subdomain semantics are intentionally out of
+    /// scope (mirroring `MagicLinkConfig::allowed_email_domains`):
+    /// `partner.com` does NOT match `eng.partner.com`. List every
+    /// subdomain explicitly.
+    ///
+    /// Env: `OXICLOUD_REGISTRATION_ALLOWED_EMAIL_DOMAINS` (comma-
+    /// separated).
+    pub registration_allowed_email_domains: Vec<String>,
 }
 
 /// Rate limiting and brute-force protection configuration.
@@ -521,6 +548,7 @@ impl Default for AuthConfig {
             hash_time_cost: 3,
             hash_parallelism: 2,
             rate_limit: RateLimitConfig::default(),
+            registration_allowed_email_domains: Vec::new(),
         }
     }
 }
@@ -1506,6 +1534,20 @@ impl AppConfig {
             && let Ok(val) = v
         {
             config.auth.rate_limit.lockout_duration_secs = val;
+        }
+
+        // Registration email-domain allowlist. Distinct from
+        // `OXICLOUD_EXTERNAL_EMAIL_DOMAINS` (which gates who can be
+        // INVITED via grants + magic link) — this one gates who can
+        // SELF-register via `POST /api/auth/register`. Empty = no
+        // restriction. Same parse shape as the external-domains list:
+        // comma-separated, lowercased, trimmed, empties dropped.
+        if let Ok(v) = env::var("OXICLOUD_REGISTRATION_ALLOWED_EMAIL_DOMAINS") {
+            config.auth.registration_allowed_email_domains = v
+                .split(',')
+                .map(|d| d.trim().to_ascii_lowercase())
+                .filter(|d| !d.is_empty())
+                .collect();
         }
 
         // Feature flags

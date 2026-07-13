@@ -44,6 +44,7 @@ Most runtime variables use the `OXICLOUD_` prefix. A few build-time or allocator
 | `OXICLOUD_HASH_TIME_COST` | `3` | Argon2id iteration count |
 | `OXICLOUD_HASH_PARALLELISM` | `2` | Argon2id parallelism lanes |
 | `OXICLOUD_DISABLE_REGISTRATION` | false | Disable registration of new user accounts |
+| `OXICLOUD_REGISTRATION_ALLOWED_EMAIL_DOMAINS` | — | Comma-separated allowlist of email domains accepted on `POST /api/auth/register` (case-insensitive, exact match on the post-`@` part). Empty = any domain is allowed. **Distinct from `OXICLOUD_EXTERNAL_EMAIL_DOMAINS`**: this one gates SELF-registration (public sign-up), the external list gates INVITATIONS (grants + magic-link to third parties). An operator can lock sign-up to their company domain while leaving invitations open. Subdomains must be listed explicitly. Rejected registrations return 403 `RegistrationDomainNotAllowed` and emit an `audit` line. Example: `mycompany.com,mycompany-eu.com`. |
 
 ### Rate Limiting & Account Lockout
 

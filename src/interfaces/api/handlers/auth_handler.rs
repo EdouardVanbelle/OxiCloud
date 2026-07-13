@@ -153,6 +153,47 @@ pub async fn register(
         ));
     }
 
+    // Operator-configured allowlist of email domains that can
+    // self-register. Empty list = no restriction (any domain accepted).
+    // Distinct from `OXICLOUD_EXTERNAL_EMAIL_DOMAINS`, which gates
+    // magic-link / grant invitations — an operator can leave that
+    // permissive while locking self-registration down, or vice versa.
+    //
+    // Matching mirrors the magic-link list:
+    //   * post-`@` part of the address is extracted and lowercased
+    //   * case-insensitive exact match against the allowlist
+    //   * no wildcard / subdomain expansion (list every domain
+    //     explicitly, per the config docstring)
+    //
+    // Audit-log denials at the `audit` target so operators can spot
+    // enumeration / probe attempts — mirrors the shape used by the
+    // magic-link domain rejection at
+    // `magic_link_invite_service.rs`.
+    let allow_list = &state.core.config.auth.registration_allowed_email_domains;
+    if !allow_list.is_empty() {
+        let domain = dto
+            .email
+            .split('@')
+            .nth(1)
+            .map(|d| d.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        if domain.is_empty() || !allow_list.iter().any(|d| d == &domain) {
+            tracing::info!(
+                target: "audit",
+                event = "auth.register_rejected",
+                reason = "domain_not_allowed",
+                domain = %domain,
+                "👮🏻‍♂️ Public registration refused: email domain not in \
+                 OXICLOUD_REGISTRATION_ALLOWED_EMAIL_DOMAINS"
+            );
+            return Err(AppError::new(
+                StatusCode::FORBIDDEN,
+                "Registration is not open to this email domain.",
+                "RegistrationDomainNotAllowed",
+            ));
+        }
+    }
+
     // Email-only signup requires SMTP. Without it the welcome mail
     // can't be dispatched and the user is stranded with no way to log
     // in. 503 is the right response: instance-wide policy, no per-user
