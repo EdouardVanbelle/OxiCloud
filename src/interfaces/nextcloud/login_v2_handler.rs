@@ -196,7 +196,7 @@ pub async fn handle_login_submit(
     // the common case stays one click. With ≥2 drives we pause the
     // flow, stash the user_id, and render the picker — drive selection
     // resumes the flow via `handle_drive_pick`.
-    let mut drives = match state
+    let drives = match state
         .applications
         .folder_service
         .list_folders_with_perms(None, current_user.id)
@@ -209,6 +209,37 @@ pub async fn handle_login_submit(
         }
     };
 
+    resolve_drive_or_complete(
+        &state,
+        nextcloud,
+        &token,
+        &current_user,
+        "Nextcloud",
+        drives,
+    )
+    .await
+}
+
+/// Shared "multi-drive fork" step used by both the password path
+/// (`handle_login_submit`) and the OIDC path
+/// (`handle_oidc_login_completion`).
+///
+/// - `label` is the app-password label persisted when `complete_flow`
+///   creates the credential. Callers pass a channel-identifying string
+///   (`"Nextcloud"` for password, `"Nextcloud (OIDC)"` for OIDC) so the
+///   audit trail can distinguish provenance without another column.
+/// - `drives` is the caller's pre-fetched drive list — the two callers
+///   already list drives before invoking us (the password path lists
+///   after `verify_credentials`, the OIDC path lists after
+///   `get_user_by_id`), so re-listing here would be a wasted query.
+async fn resolve_drive_or_complete(
+    state: &Arc<AppState>,
+    nextcloud: &crate::common::di::NextcloudServices,
+    token: &str,
+    current_user: &CurrentUser,
+    label: &'static str,
+    mut drives: Vec<crate::application::dtos::folder_dto::FolderDto>,
+) -> Response {
     if drives.len() >= 2 {
         // Reorder so home is at index 0. The picker template ties
         // both the default-checked radio and the "Home" badge to
@@ -236,18 +267,105 @@ pub async fn handle_login_submit(
 
         if !nextcloud
             .login_flow
-            .mark_awaiting_drive(&token, current_user.id)
+            .mark_awaiting_drive(token, current_user.id)
         {
-            // Flow token vanished (TTL?) between password submit and
-            // here — extremely unlikely but treat the same as any
+            // Flow token vanished (TTL?) between auth and here —
+            // extremely unlikely but treat the same as any
             // session-expired case.
             return axum::response::Redirect::to("/nextcloud/error?type=session-expired")
                 .into_response();
         }
-        return render_drive_picker(&token, &drives);
+        // Persist the label so `handle_drive_pick` can pass the correct
+        // provenance string when it later calls `complete_flow`. Set
+        // even for the password path (where label == "Nextcloud") so
+        // the read-back is uniform.
+        nextcloud
+            .login_flow
+            .set_pending_app_password_label(token, label);
+        return render_drive_picker(token, &drives);
     }
 
-    complete_flow(&state, &nextcloud.login_flow, &token, &current_user, None).await
+    complete_flow(
+        state,
+        &nextcloud.login_flow,
+        token,
+        current_user,
+        None,
+        label,
+    )
+    .await
+}
+
+/// Complete an OIDC-authenticated NC Login Flow v2.
+///
+/// Called from the OIDC callback (`auth_handler::oidc_callback`) when
+/// the state carried an `nc_flow_token`. Mirrors the password path's
+/// multi-drive fork exactly — the browser lands on the drive picker
+/// when the user has ≥ 2 drives, or on the success page when they
+/// have one. NC clients pick up credentials via the poll endpoint in
+/// both cases (backchannel), so no `nc://` frontchannel URL is emitted.
+///
+/// Prior to this refactor the OIDC callback minted the app password
+/// inline and completed the flow with the bare username (no `~<uuid>`
+/// marker) — customers with multiple drives had no way to pick a
+/// non-home drive under SSO. Routing through `resolve_drive_or_complete`
+/// fixes that and dedups the branching logic against the password path.
+pub async fn handle_oidc_login_completion(
+    state: &Arc<AppState>,
+    token: &str,
+    user_id: uuid::Uuid,
+    username: &str,
+) -> Response {
+    let nextcloud = match state.nextcloud.as_ref() {
+        Some(nc) => nc,
+        None => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+
+    let auth = match state.auth_service.as_ref() {
+        Some(a) => a,
+        None => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+
+    // Full user record — needed to build the `CurrentUser` the shared
+    // helpers expect (email + role in particular). We already have the
+    // username from the OIDC claims, but not the rest.
+    let user_dto = match auth.auth_application_service.get_user_by_id(user_id).await {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::error!(error = %e, %user_id, user = %username, "OIDC+NC: failed to fetch user by id");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let current_user = CurrentUser {
+        id: user_id,
+        username: username.to_string(),
+        email: user_dto.email.clone(),
+        role: user_dto.role.clone(),
+    };
+
+    let drives = match state
+        .applications
+        .folder_service
+        .list_folders_with_perms(None, current_user.id)
+        .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!(error = %e, user = %current_user.username, "OIDC+NC: failed to list drives");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    resolve_drive_or_complete(
+        state,
+        nextcloud,
+        token,
+        &current_user,
+        "Nextcloud (OIDC)",
+        drives,
+    )
+    .await
 }
 
 /// Render the drive picker page. The form posts to
@@ -299,17 +417,18 @@ async fn complete_flow(
     token: &str,
     user: &CurrentUser,
     drive_id: Option<&str>,
+    // Persisted verbatim as `auth.app_passwords.label`. Callers pass
+    // `"Nextcloud"` for the password path and `"Nextcloud (OIDC)"` for
+    // the OIDC path so operators can distinguish provenance from the
+    // audit log alone.
+    label: &str,
 ) -> Response {
     let nextcloud = match state.nextcloud.as_ref() {
         Some(nc) => nc,
         None => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
 
-    let app_password = match nextcloud
-        .app_passwords
-        .create_nc(user.id, "Nextcloud")
-        .await
-    {
+    let app_password = match nextcloud.app_passwords.create_nc(user.id, label).await {
         Ok((_id, password)) => password,
         Err(e) => {
             tracing::error!(error = %e, user = %user.username, "Login Flow v2: failed to create app password");
@@ -492,7 +611,26 @@ pub async fn handle_drive_pick(
         Some(drive_id.as_str())
     };
 
-    complete_flow(&state, &nextcloud.login_flow, &token, &user, drive_marker).await
+    // Preserved label from the auth step ("Nextcloud" for password
+    // flow, "Nextcloud (OIDC)" for OIDC). Stashed by
+    // `resolve_drive_or_complete` when the picker was rendered; falls
+    // back to `"Nextcloud"` if the stash is missing (defensive — should
+    // never happen post-refactor, but keeps behaviour identical to the
+    // pre-refactor hardcoded label if some future path forgets to set).
+    let label = nextcloud
+        .login_flow
+        .take_pending_app_password_label(&token)
+        .unwrap_or_else(|| "Nextcloud".to_string());
+
+    complete_flow(
+        &state,
+        &nextcloud.login_flow,
+        &token,
+        &user,
+        drive_marker,
+        &label,
+    )
+    .await
 }
 
 /// GET /login/v2/flow/{token}/oidc — Start an OIDC authorization flow that is

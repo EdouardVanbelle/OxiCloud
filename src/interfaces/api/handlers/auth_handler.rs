@@ -944,53 +944,38 @@ pub async fn oidc_callback(
             let frontend_url = config.frontend_url.trim_end_matches('/');
             let redirect_url = format!("{}/login?oidc_code={}", frontend_url, exchange_code);
             tracing::info!("OIDC login successful, redirecting with exchange code");
-            Ok(Redirect::temporary(&redirect_url))
+            Ok(Redirect::temporary(&redirect_url).into_response())
         }
         OidcCallbackResult::NextcloudLogin {
             nc_flow_token,
             user_id,
             username,
         } => {
-            // Nextcloud Login Flow v2, create app password and complete flow
-            let nextcloud = state
-                .nextcloud
-                .as_ref()
-                .ok_or_else(|| AppError::internal_error("Nextcloud services not configured"))?;
-
-            let (_id, app_password) = nextcloud
-                .app_passwords
-                .create_nc(user_id, "Nextcloud (OIDC)")
-                .await
-                .map_err(|e| {
-                    tracing::error!(error = %e, user = %username, "OIDC+NC: failed to create app password");
-                    AppError::from(e)
-                })?;
-
-            let base_url = state.core.config.base_url();
-            let completed =
-                nextcloud
-                    .login_flow
-                    .complete(&nc_flow_token, &username, &base_url, &app_password);
-
-            if completed {
-                tracing::info!(
-                    user = %username,
-                    "OIDC login completed Nextcloud Login Flow v2 successfully"
-                );
-                let nc_url = format!(
-                    "nc://login/server:{}&user:{}&password:{}",
-                    base_url, username, app_password
-                );
-                Ok(Redirect::temporary(&nc_url))
-            } else {
-                tracing::error!(
-                    user = %username,
-                    "OIDC+NC: login flow token expired or not found"
-                );
-                Ok(Redirect::temporary(
-                    "/nextcloud-error.html?type=session-expired",
-                ))
-            }
+            // Hand the browser off to the shared LFv2 completion path.
+            // That path lists the user's drives, renders the picker
+            // when there are ≥ 2, and only completes the flow (via the
+            // poll backchannel) when the user has picked. Prior to
+            // this refactor the OIDC arm minted the app password
+            // inline and completed with the bare username — customers
+            // with multiple drives had no way to pick a non-home
+            // drive under SSO, and the deprecated `nc://` redirect
+            // caused the "Impossible de valider la requête" dialog on
+            // NC clients that had already picked up credentials via
+            // the poll endpoint. Routing through the shared helper
+            // fixes both.
+            tracing::info!(
+                user = %username,
+                "OIDC callback → NC Login Flow v2: handing off to picker/completion path"
+            );
+            Ok(
+                crate::interfaces::nextcloud::login_v2_handler::handle_oidc_login_completion(
+                    &state,
+                    &nc_flow_token,
+                    user_id,
+                    &username,
+                )
+                .await,
+            )
         }
     }
 }
