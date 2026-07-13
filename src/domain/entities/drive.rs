@@ -138,6 +138,12 @@ impl Drive {
     pub fn typed_policies(&self) -> DrivePolicies {
         DrivePolicies::from_value(&self.policies)
     }
+
+    /// `true` if this drive is a personal drive of any kind (default or
+    /// secondary). Encapsulates the kind check at the call site.
+    pub fn is_personal(&self) -> bool {
+        matches!(self.kind, DriveKind::Personal)
+    }
 }
 
 /// Typed mirror of the `policies` JSONB. Five known keys; the JSONB column

@@ -24,6 +24,7 @@ use uuid::Uuid;
 
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::common::errors::DomainError;
+use crate::domain::entities::drive::DriveKind;
 use crate::domain::repositories::drive_repository::{DriveRepository, DriveRepositoryError};
 use crate::domain::repositories::subject_group_repository::SubjectGroupRepository;
 use crate::domain::services::authorization::{Grant, Permission, Resource, Role, Subject};
@@ -556,10 +557,7 @@ impl DriveManagementService {
         let drive = self.drive_repo.get_by_id(drive_id).await.map_err(|e| {
             DomainError::internal_error("Drive", format!("Failed to fetch drive: {e:?}"))
         })?;
-        if matches!(
-            drive.drive.kind,
-            crate::domain::entities::drive::DriveKind::Personal
-        ) {
+        if matches!(drive.drive.kind, DriveKind::Personal) {
             tracing::info!(
                 target: "audit",
                 event = "drive_membership.rejected",
