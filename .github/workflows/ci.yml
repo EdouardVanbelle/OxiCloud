@@ -422,6 +422,54 @@ jobs:
           BUILD_TARGET: release
           LITMUS_TESTS: "basic copymove props locks"
 
+  caldav-test:
+    # CalDAV + CardDAV client-driven suite via python-caldav — the
+    # same library Thunderbird / DAVx⁵ / Radicale / xandikos / davical
+    # test against. Complements the raw-HTTP Hurl coverage in
+    # api-test by proving a real client library round-trips through
+    # OxiCloud's CalDAV/CardDAV surface.
+    #
+    # Runs AFTER litmus so both DAV-family compliance surfaces
+    # (RFC 4918 WebDAV via litmus, RFC 4791 CalDAV + RFC 6352
+    # CardDAV via python-caldav) execute in sequence on the same
+    # pre-built binary. Sharing `needs: build` + `needs: litmus`
+    # means one binary download is enough; running after litmus
+    # rather than in parallel keeps CI runner load predictable.
+    name: CalDAV + CardDAV — python-caldav
+    needs: litmus
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: oxicloud-release
+          path: target/release/
+
+      - name: Set execute bit on pre-built binary
+        run: chmod +x target/release/oxicloud
+
+      - name: Install jq + python3 venv
+        # jq for the /api/setup + /api/auth/login parsing inside
+        # run-pycaldav.sh. python3 ships on ubuntu-latest but
+        # python3-venv is a separate package on Debian-family images.
+        run: sudo apt-get update -q && sudo apt-get install -y jq python3 python3-venv
+
+      - name: Run python-caldav suite
+        run: bash tests/caldav/run-pycaldav.sh
+        env:
+          BUILD_TARGET: release
+
+      - name: Upload server log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: caldav-server-log
+          path: tests/caldav/server.log
+          retention-days: 7
+
   front-test:
     name: Frontend end-to-end tests (via Playwright)
     # ensure that api tests are ok before

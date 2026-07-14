@@ -90,21 +90,29 @@ wipe_storage "$OXICLOUD_STORAGE_PATH"
 BUILD_TARGET="${BUILD_TARGET:-debug}"
 OXICLOUD_BIN="$REPO_ROOT/target/$BUILD_TARGET/oxicloud"
 
-# ALWAYS build — a `cargo check` / `cargo clippy` during development
-# leaves the target/ metadata fresh but NEVER produces or updates the
-# binary at target/<profile>/oxicloud. Skipping the rebuild on
-# "binary already exists" then runs pytest against a stale binary,
-# which manifests as impossible-looking test failures (e.g. "phase 3
-# routing broken" when the binary is from phase 2). Cargo's
-# incremental compile makes this near-free when nothing changed.
-log "Building OxiCloud ($BUILD_TARGET) — incremental compile, fast when up-to-date..."
-case "$BUILD_TARGET" in
-    debug)   (cd "$REPO_ROOT" && cargo build           2>&1 | tail -n 20) || die "cargo build failed" ;;
-    release) (cd "$REPO_ROOT" && cargo build --release 2>&1 | tail -n 20) || die "cargo build --release failed" ;;
-    *)       die "Unsupported BUILD_TARGET='$BUILD_TARGET' (expected 'debug' or 'release')" ;;
-esac
-
-[[ -x "$OXICLOUD_BIN" ]] || die "Build completed but $OXICLOUD_BIN is missing"
+# Use the binary if it's already there — CI downloads a pre-built
+# release artifact and would waste ~5 min recompiling from scratch
+# (empty target cache) if we always rebuilt. Local devs get the
+# fresh-binary guarantee via `just test-caldav`, which runs
+# `cargo build` before invoking this script (see the recipe in
+# justfile).
+#
+# The stale-binary trap this used to guard against (a `cargo check`
+# or `cargo clippy` leaving the on-disk binary behind while source
+# changed) only bites when this script is invoked DIRECTLY without
+# going through the justfile — a rare workflow. Documented on
+# `just test-caldav` for the record.
+if [[ ! -x "$OXICLOUD_BIN" ]]; then
+    log "Building OxiCloud ($BUILD_TARGET) — no pre-built binary at $OXICLOUD_BIN..."
+    case "$BUILD_TARGET" in
+        debug)   (cd "$REPO_ROOT" && cargo build           2>&1 | tail -n 20) || die "cargo build failed" ;;
+        release) (cd "$REPO_ROOT" && cargo build --release 2>&1 | tail -n 20) || die "cargo build --release failed" ;;
+        *)       die "Unsupported BUILD_TARGET='$BUILD_TARGET' (expected 'debug' or 'release')" ;;
+    esac
+    [[ -x "$OXICLOUD_BIN" ]] || die "Build completed but $OXICLOUD_BIN is missing"
+else
+    log "Using pre-built OxiCloud at $OXICLOUD_BIN ($BUILD_TARGET)"
+fi
 
 log "Starting OxiCloud ($BUILD_TARGET) on port $SERVER_PORT..."
 # `--config` pins the env file, suppressing the default `.env` probe so

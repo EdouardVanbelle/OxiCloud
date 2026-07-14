@@ -211,6 +211,13 @@ api-test:
 # Not chained into `api-test` because it needs python3; run explicitly.
 # The orchestrator spawns its own postgres + server on port 8091 so it
 # can run in parallel with api-test/webdav.
+#
+# Runs `cargo build` first so the orchestrator always sees a fresh
+# binary. run-pycaldav.sh itself doesn't rebuild — it uses whatever
+# binary is on disk (CI pattern: pre-built release artifact). Doing
+# the build here in the recipe means local iterative dev never runs
+# pytest against a stale binary from an earlier `cargo check`, while
+# CI still gets to skip the recompile.
 test-caldav:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -218,6 +225,7 @@ test-caldav:
         echo "XXX python3 not found — skipping CalDAV client-driven tests"
         exit 0
     fi
+    cargo build
     ./tests/caldav/run-pycaldav.sh
 
 # ---------------------------------------------------------------------------
