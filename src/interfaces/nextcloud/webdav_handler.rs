@@ -341,6 +341,7 @@ async fn handle_propfind(
             // function's username arg. Refining the owner-id usages
             // back to the canonical username is deferred to the
             // NcSession commit.
+            let quota = state.resolve_webdav_quota(user.id, chroot.drive_id).await;
             Ok(build_nc_streaming_propfind(
                 state.clone(),
                 folder,
@@ -348,6 +349,7 @@ async fn handle_propfind(
                 user.id,
                 url_user.to_string(),
                 subpath.to_string(),
+                quota,
             ))
         }
         ResolvedResource::File(file) => {
@@ -1481,6 +1483,7 @@ fn build_nc_streaming_propfind(
     user_id: Uuid,
     username: String,
     subpath: String,
+    quota: Option<(i64, Option<i64>)>,
 ) -> Response<Body> {
     let stream = async_stream::try_stream! {
         let file_id_svc = state.nextcloud.as_ref().map(|n| &n.file_ids);
@@ -1509,7 +1512,7 @@ fn build_nc_streaming_propfind(
             let href = nc_collection_href(&username, &subpath);
             let fid = folder_id_map.get(&folder.id).copied();
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
-            write_folder_response(&mut xml, &folder, &href, (fid, oc_id.as_deref()), &username, &folder_favs, &folder_dead)
+            write_folder_response(&mut xml, &folder, &href, (fid, oc_id.as_deref()), &username, &folder_favs, quota, &folder_dead)
                 .map_err(std::io::Error::other)?;
         }
         yield Bytes::from(buf);
@@ -1608,7 +1611,7 @@ fn build_nc_streaming_propfind(
                         let href = nc_collection_href(&username, &child_sub);
                         let fid = sub_id_map.get(&sf.id).copied();
                         let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
-                        write_folder_response(&mut xml, sf, &href, (fid, oc_id.as_deref()), &username, &favs, dead)
+                        write_folder_response(&mut xml, sf, &href, (fid, oc_id.as_deref()), &username, &favs, quota, dead)
                             .map_err(std::io::Error::other)?;
                     }
                 }
@@ -1647,6 +1650,7 @@ fn build_nc_streaming_propfind(
 /// together (`oc_id` is derived from `file_id`) — to stay under
 /// clippy's argument-count lint now that `dead_props` is also threaded
 /// through.
+#[allow(clippy::too_many_arguments)]
 pub fn write_folder_response<W: std::io::Write>(
     xml: &mut Writer<W>,
     folder: &FolderDto,
@@ -1654,6 +1658,7 @@ pub fn write_folder_response<W: std::io::Write>(
     oc_ids: (Option<i64>, Option<&str>),
     owner: &str,
     favorite_ids: &HashSet<String>,
+    quota: Option<(i64, Option<i64>)>,
     dead_props: &[(QualifiedName, Option<String>)],
 ) -> Result<(), String> {
     let (file_id, oc_id) = oc_ids;
@@ -1705,6 +1710,16 @@ pub fn write_folder_response<W: std::io::Write>(
     // Numeric share-permissions bitmask: Read=1 + Update=2 + Create=4 + Delete=8 + Share=16 = 31
     write_text_element(xml, "ocs:share-permissions", "31")?;
     write_text_element(xml, "oc:size", "0")?;
+    // RFC 4331 — same account/drive-wide value regardless of which
+    // folder entry is being described, mirroring the native WebDAV
+    // surface's `write_folder_standard_props` (see
+    // `AppState::resolve_webdav_quota`).
+    if let Some((used, available)) = quota {
+        write_text_element(xml, "d:quota-used-bytes", &used.to_string())?;
+        if let Some(avail) = available {
+            write_text_element(xml, "d:quota-available-bytes", &avail.to_string())?;
+        }
+    }
     write_text_element(xml, "oc:owner-id", owner)?;
     write_text_element(xml, "oc:owner-display-name", owner)?;
     write_text_element(xml, "nc:has-preview", "false")?;

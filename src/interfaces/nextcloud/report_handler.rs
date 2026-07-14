@@ -213,6 +213,10 @@ async fn handle_filter_files(
                 (fid, oc_id.as_deref()),
                 &user.username,
                 &favorite_ids,
+                // REPORT results are a flat filter/search listing, not a
+                // PROPFIND on a specific collection — quota isn't
+                // meaningful here (see `AppState::resolve_webdav_quota`).
+                None,
                 &dead,
             )
             .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
@@ -346,6 +350,10 @@ async fn handle_search(
                 (fid, oc_id.as_deref()),
                 &user.username,
                 &favorite_ids,
+                // REPORT results are a flat filter/search listing, not a
+                // PROPFIND on a specific collection — quota isn't
+                // meaningful here (see `AppState::resolve_webdav_quota`).
+                None,
                 &dead,
             )
             .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;

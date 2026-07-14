@@ -430,18 +430,27 @@ impl WebDavAdapter {
         Ok(PropFindRequest { prop_find_type })
     }
 
-    fn folder_prop_is_known(prop: &QualifiedName) -> bool {
-        prop.namespace == "DAV:"
-            && matches!(
-                prop.name.as_str(),
-                "resourcetype"
-                    | "displayname"
-                    | "creationdate"
-                    | "getlastmodified"
-                    | "getetag"
-                    | "getcontentlength"
-                    | "getcontenttype"
-            )
+    /// `quota` reflects whether the caller could resolve the account's
+    /// storage quota for this request (the quota service is optional —
+    /// `OXICLOUD_ENABLE_*` feature flags can disable it) and, independently,
+    /// whether the account has a finite available-bytes figure to report.
+    /// RFC 4331's `quota-used-bytes` / `quota-available-bytes` are each only
+    /// reported as known properties when a value actually exists —
+    /// otherwise they fall through to the standard 404 propstat like any
+    /// other property this server doesn't support. Unlimited accounts have
+    /// `quota-used-bytes` known but `quota-available-bytes` unknown (see
+    /// `resolve_quota` in `webdav_handler.rs`).
+    fn folder_prop_is_known(prop: &QualifiedName, quota: Option<(i64, Option<i64>)>) -> bool {
+        if prop.namespace != "DAV:" {
+            return false;
+        }
+        match prop.name.as_str() {
+            "resourcetype" | "displayname" | "creationdate" | "getlastmodified" | "getetag"
+            | "getcontentlength" | "getcontenttype" => true,
+            "quota-used-bytes" => quota.is_some(),
+            "quota-available-bytes" => quota.is_some_and(|(_, available)| available.is_some()),
+            _ => false,
+        }
     }
 
     fn file_prop_is_known(prop: &QualifiedName) -> bool {
@@ -550,16 +559,25 @@ impl WebDavAdapter {
         folder: &FolderDto,
         request: &PropFindRequest,
         href: &str,
+        quota: Option<(i64, Option<i64>)>,
     ) -> Result<()> {
-        Self::write_folder_response_with_dead_props(xml_writer, folder, request, href, &[])
+        Self::write_folder_response_with_dead_props(xml_writer, folder, request, href, &[], quota)
     }
 
+    /// `quota` is `Some((used_bytes, available_bytes))` for the caller's
+    /// account when the quota subsystem is enabled and reachable —
+    /// `available_bytes` is itself `None` for unlimited accounts, which
+    /// omits `quota-available-bytes` from the response entirely (see
+    /// [`Self::folder_prop_is_known`]). It's the same value regardless of
+    /// which folder is being described (quota is account-wide, not
+    /// per-folder), so callers resolve it once per PROPFIND request.
     fn write_folder_response_with_dead_props<W: Write>(
         xml_writer: &mut Writer<W>,
         folder: &FolderDto,
         request: &PropFindRequest,
         href: &str,
         dead_props: &[(QualifiedName, Option<String>)],
+        quota: Option<(i64, Option<i64>)>,
     ) -> Result<()> {
         xml_writer.write_event(Event::Start(BytesStart::new("D:response")))?;
 
@@ -585,8 +603,9 @@ impl WebDavAdapter {
                 // RFC 4918 §9.2: known props → 200 propstat; unknown → 404 propstat.
                 // Props found in the dead store are returned in the dead 200 propstat,
                 // so exclude them from the 404 propstat to avoid duplicate reporting.
-                let (known, unknown): (Vec<_>, Vec<_>) =
-                    props.iter().partition(|p| Self::folder_prop_is_known(p));
+                let (known, unknown): (Vec<_>, Vec<_>) = props
+                    .iter()
+                    .partition(|p| Self::folder_prop_is_known(p, quota));
                 let truly_unknown: Vec<_> = unknown
                     .into_iter()
                     .filter(|p| !dead_name_set.contains(*p))
@@ -594,7 +613,7 @@ impl WebDavAdapter {
 
                 xml_writer.write_event(Event::Start(BytesStart::new("D:propstat")))?;
                 xml_writer.write_event(Event::Start(BytesStart::new("D:prop")))?;
-                Self::write_folder_requested_props(xml_writer, folder, &known)?;
+                Self::write_folder_requested_props(xml_writer, folder, &known, quota)?;
                 xml_writer.write_event(Event::End(BytesEnd::new("D:prop")))?;
                 xml_writer.write_event(Event::Start(BytesStart::new("D:status")))?;
                 xml_writer.write_event(Event::Text(BytesText::new("HTTP/1.1 200 OK")))?;
@@ -608,10 +627,10 @@ impl WebDavAdapter {
                 xml_writer.write_event(Event::Start(BytesStart::new("D:prop")))?;
                 match other {
                     PropFindType::AllProp => {
-                        Self::write_folder_standard_props(xml_writer, folder)?;
+                        Self::write_folder_standard_props(xml_writer, folder, quota)?;
                     }
                     PropFindType::PropName => {
-                        Self::write_folder_prop_names(xml_writer)?;
+                        Self::write_folder_prop_names(xml_writer, quota)?;
                     }
                     PropFindType::Prop(_) => unreachable!(),
                 }
@@ -720,6 +739,7 @@ impl WebDavAdapter {
     fn write_folder_standard_props<W: Write>(
         xml_writer: &mut Writer<W>,
         folder: &FolderDto,
+        quota: Option<(i64, Option<i64>)>,
     ) -> Result<()> {
         // Resource type (collection)
         xml_writer.write_event(Event::Start(BytesStart::new("D:resourcetype")))?;
@@ -767,6 +787,33 @@ impl WebDavAdapter {
         xml_writer.write_event(Event::Start(BytesStart::new("D:getcontenttype")))?;
         xml_writer.write_event(Event::Text(BytesText::new("httpd/unix-directory")))?;
         xml_writer.write_event(Event::End(BytesEnd::new("D:getcontenttype")))?;
+
+        if let Some((used, available)) = quota {
+            Self::write_quota_props(xml_writer, used, available)?;
+        }
+
+        Ok(())
+    }
+
+    /// Write RFC 4331 `quota-used-bytes` / `quota-available-bytes`. Shared
+    /// by the allprop and named-prop paths so the element shape only
+    /// lives in one place. `available_bytes` is `None` for unlimited
+    /// accounts — RFC 4331 §3 lets a server omit `quota-available-bytes`
+    /// rather than disclose a made-up value, so the element is skipped.
+    fn write_quota_props<W: Write>(
+        xml_writer: &mut Writer<W>,
+        used_bytes: i64,
+        available_bytes: Option<i64>,
+    ) -> Result<()> {
+        xml_writer.write_event(Event::Start(BytesStart::new("D:quota-used-bytes")))?;
+        xml_writer.write_event(Event::Text(BytesText::new(&used_bytes.to_string())))?;
+        xml_writer.write_event(Event::End(BytesEnd::new("D:quota-used-bytes")))?;
+
+        if let Some(available_bytes) = available_bytes {
+            xml_writer.write_event(Event::Start(BytesStart::new("D:quota-available-bytes")))?;
+            xml_writer.write_event(Event::Text(BytesText::new(&available_bytes.to_string())))?;
+            xml_writer.write_event(Event::End(BytesEnd::new("D:quota-available-bytes")))?;
+        }
 
         Ok(())
     }
@@ -825,7 +872,10 @@ impl WebDavAdapter {
     }
 
     /// Write folder property names
-    fn write_folder_prop_names<W: Write>(xml_writer: &mut Writer<W>) -> Result<()> {
+    fn write_folder_prop_names<W: Write>(
+        xml_writer: &mut Writer<W>,
+        quota: Option<(i64, Option<i64>)>,
+    ) -> Result<()> {
         // Write empty property elements for folders
         xml_writer.write_event(Event::Empty(BytesStart::new("D:resourcetype")))?;
         xml_writer.write_event(Event::Empty(BytesStart::new("D:displayname")))?;
@@ -834,6 +884,12 @@ impl WebDavAdapter {
         xml_writer.write_event(Event::Empty(BytesStart::new("D:getetag")))?;
         xml_writer.write_event(Event::Empty(BytesStart::new("D:getcontentlength")))?;
         xml_writer.write_event(Event::Empty(BytesStart::new("D:getcontenttype")))?;
+        if let Some((_, available)) = quota {
+            xml_writer.write_event(Event::Empty(BytesStart::new("D:quota-used-bytes")))?;
+            if available.is_some() {
+                xml_writer.write_event(Event::Empty(BytesStart::new("D:quota-available-bytes")))?;
+            }
+        }
 
         Ok(())
     }
@@ -857,6 +913,7 @@ impl WebDavAdapter {
         xml_writer: &mut Writer<W>,
         folder: &FolderDto,
         props: &[&QualifiedName],
+        quota: Option<(i64, Option<i64>)>,
     ) -> Result<()> {
         for prop in props {
             if prop.namespace == "DAV:" {
@@ -916,6 +973,28 @@ impl WebDavAdapter {
                         xml_writer
                             .write_event(Event::Text(BytesText::new("httpd/unix-directory")))?;
                         xml_writer.write_event(Event::End(BytesEnd::new("D:getcontenttype")))?;
+                    }
+                    "quota-used-bytes" => {
+                        if let Some((used, _)) = quota {
+                            xml_writer
+                                .write_event(Event::Start(BytesStart::new("D:quota-used-bytes")))?;
+                            xml_writer
+                                .write_event(Event::Text(BytesText::new(&used.to_string())))?;
+                            xml_writer
+                                .write_event(Event::End(BytesEnd::new("D:quota-used-bytes")))?;
+                        }
+                    }
+                    "quota-available-bytes" => {
+                        if let Some((_, Some(available))) = quota {
+                            xml_writer.write_event(Event::Start(BytesStart::new(
+                                "D:quota-available-bytes",
+                            )))?;
+                            xml_writer
+                                .write_event(Event::Text(BytesText::new(&available.to_string())))?;
+                            xml_writer.write_event(Event::End(BytesEnd::new(
+                                "D:quota-available-bytes",
+                            )))?;
+                        }
                     }
                     _ => {
                         // Unknown prop — skipped here; caller writes 404 propstat.
@@ -1445,7 +1524,7 @@ impl WebDavAdapter {
         request: &PropFindRequest,
         href: &str,
     ) -> Result<()> {
-        Self::write_folder_response(writer, folder, request, href)
+        Self::write_folder_response(writer, folder, request, href, None)
     }
 
     /// Writes a single `<D:response>` element for a file, including dead properties.
@@ -1465,8 +1544,11 @@ impl WebDavAdapter {
         request: &PropFindRequest,
         href: &str,
         dead_props: &[(QualifiedName, Option<String>)],
+        quota: Option<(i64, Option<i64>)>,
     ) -> Result<()> {
-        Self::write_folder_response_with_dead_props(writer, folder, request, href, dead_props)
+        Self::write_folder_response_with_dead_props(
+            writer, folder, request, href, dead_props, quota,
+        )
     }
 
     /// Writes a file entry including dead (custom) properties.

@@ -557,6 +557,7 @@ async fn handle_propfind(
                 created_by: None,
                 updated_by: None,
             };
+            let quota = state.resolve_webdav_quota(user.id, Uuid::nil()).await;
             return build_streaming_propfind_response(
                 root_folder,
                 None, // folder_id = None → root children (drive-root folders)
@@ -567,6 +568,7 @@ async fn handle_propfind(
                 file_retrieval_service,
                 user.id,
                 state.webdav_dead_props.clone(),
+                quota,
             )
             .await;
         }
@@ -595,6 +597,7 @@ async fn handle_propfind(
                     )
                     .await?;
                 let folder_id = folder.id.clone();
+                let quota = state.resolve_webdav_quota(user.id, drive_id).await;
                 return build_streaming_propfind_response(
                     folder,
                     Some(folder_id),
@@ -605,6 +608,7 @@ async fn handle_propfind(
                     file_retrieval_service,
                     user.id,
                     state.webdav_dead_props.clone(),
+                    quota,
                 )
                 .await;
             }
@@ -659,6 +663,7 @@ async fn handle_propfind(
                 )
                 .await?;
             let folder_id = folder.id.clone();
+            let quota = state.resolve_webdav_quota(user.id, drive_id).await;
             return build_streaming_propfind_response(
                 folder,
                 Some(folder_id),
@@ -669,6 +674,7 @@ async fn handle_propfind(
                 file_retrieval_service,
                 user.id,
                 state.webdav_dead_props.clone(),
+                quota,
             )
             .await;
         }
@@ -732,6 +738,7 @@ async fn build_streaming_propfind_response(
     file_retrieval_service: std::sync::Arc<FileRetrievalService>,
     user_id: Uuid,
     dead_props_store: Arc<DeadPropertyStore>,
+    quota: Option<(i64, Option<i64>)>,
 ) -> Result<Response<Body>, AppError> {
     let depth = depth.to_string();
     let base_href = base_href.to_string();
@@ -752,7 +759,7 @@ async fn build_streaming_propfind_response(
             let mut w = Writer::new(&mut buf);
             WebDavAdapter::write_multistatus_start(&mut w)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
-            WebDavAdapter::write_folder_entry_with_dead_props(&mut w, &folder, &propfind_request, &base_href, &folder_dead)
+            WebDavAdapter::write_folder_entry_with_dead_props(&mut w, &folder, &propfind_request, &base_href, &folder_dead, quota)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
         }
         yield Bytes::from(buf);
@@ -795,7 +802,7 @@ async fn build_streaming_propfind_response(
                     let mut w = Writer::new(&mut chunk);
                     for (subfolder, child_dead) in result.items.iter().zip(subfolder_deads.iter()) {
                         let href = format!("{}{}/", base_href, encode_path_segment(&subfolder.name));
-                        WebDavAdapter::write_folder_entry_with_dead_props(&mut w, subfolder, &propfind_request, &href, child_dead)
+                        WebDavAdapter::write_folder_entry_with_dead_props(&mut w, subfolder, &propfind_request, &href, child_dead, quota)
                             .map_err(|e| std::io::Error::other(e.to_string()))?;
                     }
                 }
