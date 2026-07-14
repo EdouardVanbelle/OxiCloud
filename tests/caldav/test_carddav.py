@@ -12,11 +12,16 @@ Fixtures:
   * `fresh_addressbook` — a brand-new address book per test; yields
     the server-authoritative URL as a string; teardown DELETEs it.
 
-Same emitter-gap caveats as `test_ical_coverage.py`: the server
-regenerates vCard bodies from stored DTO fields on GET, so
-properties beyond FN / N / EMAIL may be silently dropped. Tests
-here split into sanity (must round-trip) vs xfail (documented
-gaps).
+Coverage: the sanity tests cover the FN/N/EMAIL core; the
+extended round-trips (ORG/TITLE/NOTE/TEL/ADR) each pin a
+parser + emitter pair. Any regression that drops a property
+on the round-trip fails the corresponding test.
+
+The CardDAV emitter regenerates vCard bodies from stored DTO
+fields on GET — properties without a DTO field (BDAY, PHOTO,
+categories, custom X-*) still don't survive. Same emitter-gap
+class as `test_ical_coverage.py`; would be closed by serving
+the stored vcard_data verbatim or extending the DTO.
 """
 
 from __future__ import annotations
@@ -25,7 +30,6 @@ import textwrap
 import uuid
 
 import caldav
-import pytest
 
 
 # ─────────────────────────────────────────────────────────────
@@ -187,31 +191,12 @@ def test_addressbook_shows_up_in_propfind(
 
 
 # ─────────────────────────────────────────────────────────────
-# Documented gaps — vCard properties the server currently drops
-# on GET. Same shape as the CalDAV emitter gap: server rebuilds
-# the response body from stored DTO fields; properties not in
-# the DTO surface are silently dropped.
+# Extended round-trips — properties beyond the FN/N/EMAIL core.
+# Each has a parse_vcard branch + a contact_to_vcard emitter
+# branch; loss of any of these on a real-client sync would
+# silently break the corresponding UI slot (job title, phone,
+# address, notes).
 # ─────────────────────────────────────────────────────────────
-
-_TEL_URI_PARSER_BUG_REASON = (
-    "contact_service.rs::parse_vcard splits the TEL line by ':' "
-    "and takes .nth(1) as the number — a URI-form value like "
-    "`TEL;TYPE=cell;VALUE=uri:tel:+15551234567` gets sliced to "
-    "'tel' (the middle segment), losing the actual phone number. "
-    "Real clients (Apple Contacts, DAVx⁵) commonly emit the URI "
-    "form. Fix: split on the FIRST ':' only, or parse the "
-    "parameter list properly. Own fix branch."
-)
-
-_ADR_UNPARSED_REASON = (
-    "contact_service.rs::parse_vcard has NO handler for ADR — the "
-    "structured-address property (RFC 6350 §6.3.1) is silently "
-    "dropped at PUT time. DTO carries an `address: Vec<Address>` "
-    "field the emitter honours; parser just never populates it. "
-    "Fix: extend the match with an ADR branch that splits on ';' "
-    "into (pobox, ext, street, city, region, postal, country) — "
-    "mirror the emitter's format at contact_service.rs::195-ish."
-)
 
 
 def test_vcard_org_and_title_survive_round_trip(
@@ -253,13 +238,16 @@ def test_vcard_note_survives_round_trip(
     assert "KubeCon 2026" in fetched
 
 
-@pytest.mark.xfail(reason=_TEL_URI_PARSER_BUG_REASON, strict=False)
 def test_vcard_tel_uri_form_survives_round_trip(
     dav_client: caldav.DAVClient, fresh_addressbook: str
 ) -> None:
     """TEL (RFC 6350 §6.4.1) with URI-form value + TYPE parameter —
     the shape Apple Contacts / DAVx⁵ send for every phone number.
-    See _TEL_URI_PARSER_BUG_REASON."""
+
+    Passes after fix/carddav-parser-tel-adr: parse_vcard splits on
+    the first `:` (was `split(':').nth(1)`) so `VALUE=uri:tel:...`
+    survives; the `tel:` URI scheme is stripped so the stored
+    number is a bare `+15551234567`."""
     uid = f"cov-tel-{uuid.uuid4().hex[:8]}"
     body = _minimal_vcard(
         uid,
@@ -271,13 +259,16 @@ def test_vcard_tel_uri_form_survives_round_trip(
     assert "+15551234567" in fetched
 
 
-@pytest.mark.xfail(reason=_ADR_UNPARSED_REASON, strict=False)
 def test_vcard_adr_survives_round_trip(
     dav_client: caldav.DAVClient, fresh_addressbook: str
 ) -> None:
     """ADR (RFC 6350 §6.3.1) with structured components. Semicolon
-    is the structured-value separator. See _ADR_UNPARSED_REASON —
-    parser has no ADR branch at all."""
+    is the structured-value separator.
+
+    Passes after fix/carddav-parser-tel-adr: the parser now has an
+    ADR branch that splits the 7-part structured value into
+    (street, city, state, postal_code, country) matching the
+    emitter shape at contact_service.rs::generate_vcard."""
     uid = f"cov-adr-{uuid.uuid4().hex[:8]}"
     body = _minimal_vcard(
         uid,

@@ -27,19 +27,6 @@ import uuid
 from datetime import datetime, timezone
 
 import caldav
-import pytest
-
-
-_TIME_RANGE_PARSER_BUG_REASON = (
-    "caldav_adapter.rs:~105 + ~172 parses time-range start/end as "
-    "RFC 3339 (`2026-01-01T09:30:00Z`), but CalDAV clients send "
-    "iCalendar DATE-TIME (`20260101T093000Z` — RFC 4791 §9.9). "
-    "Parse fails, time_range becomes None, handle_report falls "
-    "through to list_events → returns every event regardless of "
-    "window. Fix: chrono::NaiveDateTime::parse_from_str with "
-    "`%Y%m%dT%H%M%SZ` (RFC 3339 as fallback). Own fix branch, "
-    "e.g. fix/caldav-time-range-parser."
-)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -110,7 +97,6 @@ def _seed_three_events(calendar: caldav.Calendar) -> list[str]:
 # ─────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(reason=_TIME_RANGE_PARSER_BUG_REASON, strict=False)
 def test_calendar_query_time_range_returns_events_in_window(
     fresh_calendar: caldav.Calendar,
 ) -> None:
@@ -149,7 +135,6 @@ def test_calendar_query_time_range_returns_events_in_window(
     )
 
 
-@pytest.mark.xfail(reason=_TIME_RANGE_PARSER_BUG_REASON, strict=False)
 def test_calendar_query_time_range_after_all_events_returns_empty(
     fresh_calendar: caldav.Calendar,
 ) -> None:
@@ -174,7 +159,6 @@ def test_calendar_query_time_range_after_all_events_returns_empty(
     )
 
 
-@pytest.mark.xfail(reason=_TIME_RANGE_PARSER_BUG_REASON, strict=False)
 def test_calendar_query_time_range_before_all_events_returns_empty(
     fresh_calendar: caldav.Calendar,
 ) -> None:
