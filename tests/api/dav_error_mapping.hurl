@@ -205,3 +205,189 @@ HTTP *
 [Asserts]
 status >= 200
 status < 300
+
+
+# ─────────────────────────────────────────────────────────────
+# Cross-user AuthZ mapping (fix/caldav-carddav-error-mapping)
+# ─────────────────────────────────────────────────────────────
+# Regression pin for the second half of the CalDAV/CardDAV
+# error-mapping sweep: EVERY handler used to
+# `map_err(|e| AppError::internal_error(format!("Failed to ...: {}", e)))`,
+# turning a domain-layer `NotFound` (which is what AuthZ returns
+# for anti-enum on denied resources) into a 500 InternalError.
+#
+# Symptom: PROPPATCH / DELETE on a calendar the caller has no
+# permission on returned 500 with the calendar UUID leaked in
+# the body; on-call metrics tripped for benign perm denials.
+#
+# Fix: `.map_err(AppError::from)` — the kind-aware mapping via
+# `From<DomainError> for AppError` routes NotFound → 404.
+#
+# Provision a second user (Alice), have her hit admin's default
+# calendar + address book across the four verbs. Every response
+# MUST be a 4xx client error, NOT a 5xx server error. We don't
+# assert an exact 404 in every case because some paths naturally
+# return 403 or 401 depending on the auth stack; the invariant
+# the fix defends is "never 5xx for a perm denial".
+# ─────────────────────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 8 — Provision + log in Alice (a distinct throwaway user).
+# HTTP * on the create because a re-run inside the same DB will
+# hit 409 Conflict; login is the actual precondition.
+# ─────────────────────────────────────────────────────────────
+POST {{base_url}}/api/admin/users
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{
+  "username": "dav-err-alice",
+  "password": "DavErrAlicePassword1!",
+  "email":    "dav-err-alice@example.com",
+  "role":     "user"
+}
+
+HTTP *
+[Captures]
+alice_id: jsonpath "$.id"
+
+
+POST {{base_url}}/api/auth/login
+Content-Type: application/json
+{
+  "username": "dav-err-alice",
+  "password": "DavErrAlicePassword1!"
+}
+
+HTTP 200
+[Captures]
+alice_token: jsonpath "$.access_token"
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 9 — Alice PROPPATCH on admin's default calendar.
+# Pre-fix: 500 InternalError with "Failed to update calendar:
+# Not Found: Calendar not found: <uuid>" in the body.
+# Post-fix: 4xx (typically 404 anti-enum from `authz.require`).
+# ─────────────────────────────────────────────────────────────
+PROPPATCH {{base_url}}/caldav/{{default_calendar_id}}/
+Authorization: Bearer {{alice_token}}
+Content-Type: application/xml
+```
+<?xml version="1.0" encoding="UTF-8"?>
+<D:propertyupdate xmlns:D="DAV:">
+  <D:set>
+    <D:prop>
+      <D:displayname>hijacked</D:displayname>
+    </D:prop>
+  </D:set>
+</D:propertyupdate>
+```
+
+HTTP *
+[Asserts]
+status >= 400
+status < 500
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 10 — Alice DELETE on admin's default calendar. Same
+# invariant — 4xx, never 5xx.
+# ─────────────────────────────────────────────────────────────
+DELETE {{base_url}}/caldav/{{default_calendar_id}}/
+Authorization: Bearer {{alice_token}}
+
+HTTP *
+[Asserts]
+status >= 400
+status < 500
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 11 — Alice DELETE on the well-formed event Step 4 created
+# in admin's calendar. Pre-fix: 500 on the lookup or delete step.
+# Post-fix: 4xx via NotFound anti-enum.
+# ─────────────────────────────────────────────────────────────
+DELETE {{base_url}}/caldav/{{default_calendar_id}}/dav-error-test-ok.ics
+Authorization: Bearer {{alice_token}}
+
+HTTP *
+[Asserts]
+status >= 400
+status < 500
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 12 — Alice PROPPATCH on admin's default address book.
+# Mirror of Step 9 on the CardDAV side. Pre-fix: 500. Post-fix: 4xx.
+# ─────────────────────────────────────────────────────────────
+PROPPATCH {{base_url}}/carddav/{{default_book_id}}/
+Authorization: Bearer {{alice_token}}
+Content-Type: application/xml
+```
+<?xml version="1.0" encoding="UTF-8"?>
+<D:propertyupdate xmlns:D="DAV:">
+  <D:set>
+    <D:prop>
+      <D:displayname>hijacked</D:displayname>
+    </D:prop>
+  </D:set>
+</D:propertyupdate>
+```
+
+HTTP *
+[Asserts]
+status >= 400
+status < 500
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 13 — Alice DELETE on admin's default address book.
+# ─────────────────────────────────────────────────────────────
+DELETE {{base_url}}/carddav/{{default_book_id}}/
+Authorization: Bearer {{alice_token}}
+
+HTTP *
+[Asserts]
+status >= 400
+status < 500
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 14 — Sanity: admin's own PROPPATCH still succeeds. Guards
+# against a fix that over-corrects and starts denying legitimate
+# writes. `HTTP *` because PROPPATCH multi-status can be 207 or
+# 200 depending on the property set; we assert the negative
+# invariant (no 4xx/5xx).
+# ─────────────────────────────────────────────────────────────
+PROPPATCH {{base_url}}/caldav/{{default_calendar_id}}/
+Authorization: Bearer {{admin_token}}
+Content-Type: application/xml
+```
+<?xml version="1.0" encoding="UTF-8"?>
+<D:propertyupdate xmlns:D="DAV:">
+  <D:set>
+    <D:prop>
+      <D:displayname>Personal (renamed by sanity step)</D:displayname>
+    </D:prop>
+  </D:set>
+</D:propertyupdate>
+```
+
+HTTP *
+[Asserts]
+status >= 200
+status < 400
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 15 — Cleanup: delete Alice so downstream test files don't
+# inherit an extra user (per feedback_hurl_teardown_shared_db —
+# state carries across the run.sh invocation).
+# ─────────────────────────────────────────────────────────────
+DELETE {{base_url}}/api/admin/users/{{alice_id}}
+Authorization: Bearer {{admin_token}}
+
+HTTP *
+[Asserts]
+status < 500

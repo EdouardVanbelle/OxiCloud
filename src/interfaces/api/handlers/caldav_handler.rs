@@ -248,7 +248,7 @@ async fn handle_propfind(
             calendar_service
                 .list_my_calendars(user.id)
                 .await
-                .map_err(|e| AppError::internal_error(format!("Failed to list calendars: {}", e)))?
+                .map_err(AppError::from)?
         };
 
         let base_href = "/caldav/";
@@ -364,9 +364,7 @@ async fn handle_propfind(
                 let calendars = calendar_service
                     .list_my_calendars(user.id)
                     .await
-                    .map_err(|e| {
-                        AppError::internal_error(format!("Failed to list calendars: {}", e))
-                    })?;
+                    .map_err(AppError::from)?;
 
                 let base_href = &format!("/caldav/{}/", first_segment);
                 let mut response_body = Vec::new();
@@ -448,7 +446,7 @@ async fn handle_propfind(
             let event = calendar_service
                 .get_event_by_ical_uid(calendar_id, ical_uid, user.id)
                 .await
-                .map_err(|e| AppError::internal_error(format!("Failed to look up event: {}", e)))?
+                .map_err(AppError::from)?
                 .ok_or_else(|| AppError::not_found(format!("Event not found: {}", ical_uid)))?;
 
             let base_href = &format!("/caldav/{}/", calendar_id);
@@ -505,16 +503,12 @@ async fn handle_report(
                 calendar_service
                     .get_events_in_range(calendar_id, *start, *end, user.id)
                     .await
-                    .map_err(|e| {
-                        AppError::internal_error(format!("Failed to query events: {}", e))
-                    })?
+                    .map_err(AppError::from)?
             } else {
                 calendar_service
                     .list_events(calendar_id, None, None, user.id)
                     .await
-                    .map_err(|e| {
-                        AppError::internal_error(format!("Failed to list events: {}", e))
-                    })?
+                    .map_err(AppError::from)?
             }
         }
         CalDavReportType::CalendarMultiget { hrefs, .. } => {
@@ -529,12 +523,12 @@ async fn handle_report(
             calendar_service
                 .get_events_by_ical_uids(calendar_id, &uids, user.id)
                 .await
-                .map_err(|e| AppError::internal_error(format!("Failed to fetch events: {}", e)))?
+                .map_err(AppError::from)?
         }
         CalDavReportType::SyncCollection { .. } => calendar_service
             .list_events(calendar_id, None, None, user.id)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to list events: {}", e)))?,
+            .map_err(AppError::from)?,
     };
 
     let base_href = &format!("/caldav/{}/", calendar_id);
@@ -729,12 +723,12 @@ async fn handle_get(
         let events = calendar_service
             .list_events(calendar_id, None, None, user.id)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to list events: {}", e)))?;
+            .map_err(AppError::from)?;
 
         let calendar = calendar_service
             .get_calendar(calendar_id, user.id)
             .await
-            .map_err(|e| AppError::not_found(format!("Calendar not found: {}", e)))?;
+            .map_err(AppError::from)?;
 
         let ical = generate_full_calendar_ical(&calendar.name, &events);
 
@@ -752,7 +746,7 @@ async fn handle_get(
         let event = calendar_service
             .get_event_by_ical_uid(calendar_id, ical_uid, user.id)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to look up event: {}", e)))?
+            .map_err(AppError::from)?
             .ok_or_else(|| AppError::not_found(format!("Event not found: {}", ical_uid)))?;
 
         let ical = generate_event_ical(&event);
@@ -845,7 +839,7 @@ async fn handle_delete(
         calendar_service
             .delete_calendar(calendar_id, user.id)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to delete calendar: {}", e)))?;
+            .map_err(AppError::from)?;
     } else {
         let event_file = parts[1];
         let ical_uid = event_file.trim_end_matches(".ics");
@@ -854,13 +848,13 @@ async fn handle_delete(
         let event = calendar_service
             .get_event_by_ical_uid(calendar_id, ical_uid, user.id)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to look up event: {}", e)))?
+            .map_err(AppError::from)?
             .ok_or_else(|| AppError::not_found(format!("Event not found: {}", ical_uid)))?;
 
         calendar_service
             .delete_event(&event.id, user.id)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to delete event: {}", e)))?;
+            .map_err(AppError::from)?;
     }
 
     Ok(Response::builder()
@@ -917,7 +911,7 @@ async fn handle_proppatch(
         calendar_service
             .update_calendar(calendar_id, update, user.id)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to update calendar: {}", e)))?;
+            .map_err(AppError::from)?;
     }
 
     let mut results = Vec::new();
