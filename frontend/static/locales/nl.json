@@ -58,6 +58,8 @@
   "photos": {
     "empty_state": "Nog geen foto's",
     "empty_hint": "Upload afbeeldingen of video's om ze hier te zien",
+    "empty_hidden": "{{n}} foto('s) verborgen door je voorkeur",
+    "empty_hidden_hint": "Schakel \"Verborgen bestanden verbergen\" uit in je profiel om ze te zien.",
     "items_selected": "geselecteerd",
     "view_daily": "Dag",
     "view_monthly": "Maand",
@@ -365,7 +367,15 @@
     "folder": "Map",
     "new_folder": "Nieuwe map",
     "share": "Delen",
-    "view": "Bekijken"
+    "view": "Bekijken",
+    "empty_hidden_title": "{{n}} verborgen item(s) in deze map",
+    "empty_hidden_hint": "Bestanden waarvan de naam met '.' begint, zijn verborgen. Wijzig de instelling om ze te zien.",
+    "show_hidden": "Verborgen bestanden weergeven",
+    "upload_dotfile_hidden": "{{n}} bestand(en) geüpload maar verborgen door je voorkeur.",
+    "rename_dotfile_hidden": "Hernoemd naar \"{{name}}\" — nu verborgen door je voorkeur.",
+    "new_folder_dotfile_hidden": "Map \"{{name}}\" aangemaakt — verborgen door je voorkeur.",
+    "dotfiles_hidden_toast": "Verborgen bestanden verborgen",
+    "dotfiles_shown_toast": "Verborgen bestanden weergegeven"
   },
   "dialogs": {
     "rename_folder": "Map hernoemen",
@@ -570,6 +580,8 @@
     "accessed": "Geopend",
     "empty_state": "Geen recente bestanden",
     "empty_hint": "Bestanden die je opent verschijnen hier",
+    "empty_hidden_state": "{{n}} recent(e) item(s) verborgen door je voorkeur",
+    "empty_hidden_hint": "Schakel \"Verborgen bestanden verbergen\" uit in je profiel om ze te zien.",
     "loadMore": "Meer laden"
   },
   "notifications": {
@@ -879,6 +891,7 @@
     "family_name": "Achternaam",
     "notify_on_share": "Stuur me een e-mail wanneer iemand iets met mij deelt",
     "notify_on_share_hint": "Wanneer uitgevinkt, verschijnen gedeelde items nog steeds in je account — je krijgt er alleen geen e-mail over.",
+    "hide_dotfiles": "Verberg bestanden waarvan de naam begint met een punt (.env, .git, …)",
     "save_profile": "Wijzigingen opslaan",
     "profile_saved": "Profiel bijgewerkt",
     "profile_no_changes": "Geen wijzigingen om op te slaan.",
@@ -999,7 +1012,17 @@
     "notifyRateLimited": "Te veel notificaties voor deze ontvanger — probeer het later opnieuw.",
     "removeAccess": "Toegang verwijderen",
     "resendInvitation": "Uitnodigingsmail opnieuw verzenden",
-    "publicLinks": "Public links"
+    "publicLinks": "Public links",
+    "filter": {
+      "button": "Soorten",
+      "title": "Filteren op soort",
+      "files": "Bestanden",
+      "folders": "Mappen",
+      "drives": "Schijven",
+      "emptyTitle": "Geen gedeelde items komen overeen met het huidige filter",
+      "emptyHint": "Pas het soortfilter aan of stel het opnieuw in op de standaard (Bestanden + Mappen).",
+      "reset": "Filter opnieuw instellen"
+    }
   },
   "sort": {
     "asc": "ascending",
@@ -1129,5 +1152,8 @@
   "view": {
     "grid": "Rasterweergave",
     "list": "Lijstweergave"
+  },
+  "preferences": {
+    "save_failed": "Kon je voorkeur niet opslaan. Probeer het opnieuw."
   }
 }

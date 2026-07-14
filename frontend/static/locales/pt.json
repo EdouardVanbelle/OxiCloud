@@ -58,6 +58,8 @@
   "photos": {
     "empty_state": "Nenhuma foto ainda",
     "empty_hint": "Envie imagens ou vídeos para vê-los aqui",
+    "empty_hidden": "{{n}} foto(s) oculta(s) pela sua preferência",
+    "empty_hidden_hint": "Desative \"Ocultar arquivos ocultos\" no seu perfil para vê-las.",
     "items_selected": "selecionados",
     "view_daily": "Dia",
     "view_monthly": "Mês",
@@ -365,7 +367,15 @@
     "folder": "Pasta",
     "new_folder": "Nova pasta",
     "share": "Compartilhar",
-    "view": "Visualizar"
+    "view": "Visualizar",
+    "empty_hidden_title": "{{n}} item(ns) oculto(s) nesta pasta",
+    "empty_hidden_hint": "Arquivos cujo nome começa com '.' estão ocultos. Altere a configuração para vê-los.",
+    "show_hidden": "Mostrar arquivos ocultos",
+    "upload_dotfile_hidden": "{{n}} arquivo(s) enviado(s) mas oculto(s) pela sua preferência.",
+    "rename_dotfile_hidden": "Renomeado para \"{{name}}\" — agora oculto pela sua preferência.",
+    "new_folder_dotfile_hidden": "Pasta \"{{name}}\" criada — oculta pela sua preferência.",
+    "dotfiles_hidden_toast": "Arquivos ocultos ocultados",
+    "dotfiles_shown_toast": "Arquivos ocultos exibidos"
   },
   "dialogs": {
     "rename_folder": "Renomear pasta",
@@ -570,6 +580,8 @@
     "accessed": "Acessado",
     "empty_state": "Nenhum arquivo recente",
     "empty_hint": "Os arquivos que você abrir aparecerão aqui",
+    "empty_hidden_state": "{{n}} item(ns) recente(s) oculto(s) pela sua preferência",
+    "empty_hidden_hint": "Desative \"Ocultar arquivos ocultos\" no seu perfil para vê-los.",
     "loadMore": "Carregar mais"
   },
   "notifications": {
@@ -879,6 +891,7 @@
     "family_name": "Sobrenome",
     "notify_on_share": "Avisar-me por e-mail quando alguém compartilhar comigo",
     "notify_on_share_hint": "Quando desmarcado, os compartilhamentos continuarão aparecendo na sua conta — você apenas não receberá um e-mail sobre eles.",
+    "hide_dotfiles": "Ocultar arquivos cujo nome começa com um ponto (.env, .git, …)",
     "save_profile": "Salvar alterações",
     "profile_saved": "Perfil atualizado",
     "profile_no_changes": "Sem alterações para salvar.",
@@ -999,7 +1012,17 @@
     "notifyRateLimited": "Demasiadas notificações para este destinatário — tente novamente mais tarde.",
     "removeAccess": "Remover acesso",
     "resendInvitation": "Reenviar e-mail de convite",
-    "publicLinks": "Public links"
+    "publicLinks": "Public links",
+    "filter": {
+      "button": "Tipos",
+      "title": "Filtrar por tipo",
+      "files": "Arquivos",
+      "folders": "Pastas",
+      "drives": "Unidades",
+      "emptyTitle": "Nenhum compartilhamento corresponde ao filtro atual",
+      "emptyHint": "Ajuste o filtro de tipo ou redefina-o para o padrão (Arquivos + Pastas).",
+      "reset": "Redefinir filtro"
+    }
   },
   "sort": {
     "asc": "ascendente",
@@ -1129,5 +1152,8 @@
   "view": {
     "grid": "Visualização em grade",
     "list": "Visualização em lista"
+  },
+  "preferences": {
+    "save_failed": "Não foi possível salvar sua preferência. Tente novamente."
   }
 }

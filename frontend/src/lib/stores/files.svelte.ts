@@ -83,6 +83,13 @@ class FilesStore {
 	currentFolder = $state<string | null>(null);
 	currentFolderInfo = $state<FolderItem | null>(null);
 	breadcrumbPath = $state<Array<{ id: string; name: string }>>([]);
+	// View mode INTENTIONALLY lives here (localStorage) rather than in
+	// the server-side `preferences` bag. See the note in
+	// `preferences.svelte.ts::UiPreferences` for the full rationale —
+	// short version: server persistence broke Playwright test
+	// isolation (favorites.spec's list-view click leaked into every
+	// downstream test's context), and view mode isn't a preference
+	// users have asked to sync across devices.
 	viewMode = $state<ViewMode>(readViewMode());
 	section = $state<Section>('files');
 	isSearchMode = $state(false);

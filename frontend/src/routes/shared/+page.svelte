@@ -52,6 +52,89 @@
 	let groupBy = $state<GroupBy>('items');
 	let reversed = $state(false);
 
+	// ── Kind filter ─────────────────────────────────────────────────────────
+	// Client-side filter over `raw`. The backend endpoint
+	// `GET /api/grants/outgoing/resources` currently emits `file`, `folder`,
+	// and `drive` only. Calendar / contact / playlist grants exist as
+	// backend resource kinds (`ResourceKind::Calendar` etc.) but aren't
+	// aggregated by `list_my_shares` — a separate backend PR will extend
+	// the endpoint, at which point another kind entry is added here.
+	//
+	// Filtering happens after pagination fetch, not inside the request,
+	// so unchecking a kind is instant and doesn't cost a reload. The
+	// pagination cursor is unaffected — Load more still fetches all kinds
+	// and the filter re-applies to the growing list.
+	const KIND_OPTIONS: { key: GrantResourceType; label: string; icon: string }[] = [
+		{ key: 'file', label: t('myshares.filter.files', 'Files'), icon: 'file' },
+		{ key: 'folder', label: t('myshares.filter.folders', 'Folders'), icon: 'folder' },
+		{ key: 'drive', label: t('myshares.filter.drives', 'Drives'), icon: 'hdd' }
+	];
+
+	// Default: files + folders visible, drives hidden. Drives share
+	// less frequently (whole-tree grants) and clutter the list when
+	// what the user wants is a file/folder audit.
+	const DEFAULT_KINDS: Record<GrantResourceType, boolean> = {
+		file: true,
+		folder: true,
+		drive: false
+	};
+
+	// Persist filter selection across sessions on THIS device. Not
+	// stored server-side because the kind filter is a device-local
+	// view choice — a user auditing shared drives on their admin
+	// machine likely has a different filter than what they use to
+	// track files on their laptop. Contrast `preferences.hideDotfiles`
+	// which is per-user + cross-device (JSONB on the user row).
+	//
+	// localStorage key uses the `oxi-*` prefix so it participates in
+	// the switch-account wipe in `localStoragePrefs.ts` — a fresh
+	// login starts with defaults, not the previous user's choice.
+	const STORAGE_KEY = 'oxi-shared-kinds';
+
+	function loadSelectedKinds(): Record<GrantResourceType, boolean> {
+		if (typeof localStorage === 'undefined') return { ...DEFAULT_KINDS };
+		try {
+			const raw = localStorage.getItem(STORAGE_KEY);
+			if (!raw) return { ...DEFAULT_KINDS };
+			const parsed = JSON.parse(raw) as Partial<Record<GrantResourceType, boolean>>;
+			// Merge over DEFAULT_KINDS so a stored record from a build
+			// before some kind existed still yields a full record.
+			// Rejects any junk (non-boolean values) by ignoring them.
+			const merged: Record<GrantResourceType, boolean> = { ...DEFAULT_KINDS };
+			for (const opt of KIND_OPTIONS) {
+				const v = parsed[opt.key];
+				if (typeof v === 'boolean') merged[opt.key] = v;
+			}
+			return merged;
+		} catch {
+			return { ...DEFAULT_KINDS };
+		}
+	}
+
+	function saveSelectedKinds(kinds: Record<GrantResourceType, boolean>): void {
+		if (typeof localStorage === 'undefined') return;
+		try {
+			localStorage.setItem(STORAGE_KEY, JSON.stringify(kinds));
+		} catch {
+			/* quota / private mode — silently skip, filter still works this session */
+		}
+	}
+
+	let selectedKinds = $state<Record<GrantResourceType, boolean>>(loadSelectedKinds());
+	let filterOpen = $state(false);
+
+	function toggleKind(k: GrantResourceType) {
+		selectedKinds[k] = !selectedKinds[k];
+		saveSelectedKinds(selectedKinds);
+	}
+	function resetKinds() {
+		selectedKinds = { ...DEFAULT_KINDS };
+		saveSelectedKinds(selectedKinds);
+	}
+
+	const activeKindCount = $derived(KIND_OPTIONS.filter((k) => selectedKinds[k.key]).length);
+	const filteredRaw = $derived(raw.filter((item) => selectedKinds[item.resource_type]));
+
 	// Edit-sharing dialog
 	let dialogOpen = $state(false);
 	let dialogItem = $state<{ id: string; name: string; kind: GrantResourceType } | null>(null);
@@ -109,7 +192,7 @@
 			}
 			return lane;
 		};
-		for (const item of raw) {
+		for (const item of filteredRaw) {
 			if (groupBy === 'items') {
 				const lane = ensure(`resource:${item.resource.id}`, { kind: 'resource', item });
 				for (const grant of item.grants) lane.rows.push({ grant, item });
@@ -370,12 +453,23 @@
 	}
 
 	const isEmpty = $derived(!loading && raw.length === 0 && !error);
+	// `raw` has data but the kind filter hides all of it — distinct empty
+	// state so we can offer a "reset filter" affordance instead of the
+	// generic "you haven't shared anything" hint.
+	const noMatchesForFilter = $derived(
+		!loading && !error && raw.length > 0 && filteredRaw.length === 0
+	);
 
 	onMount(() => load(true));
 </script>
 
 <svelte:head><title>{t('nav.shared', 'Shared')} · OxiCloud</title></svelte:head>
-<svelte:window onclick={() => menuFor && closeMenu()} />
+<svelte:window
+	onclick={() => {
+		if (menuFor) closeMenu();
+		if (filterOpen) filterOpen = false;
+	}}
+/>
 
 <div class="page-sticky-header">
 	<h1 class="page-title">{t('nav.shared', 'Shared')}</h1>
@@ -386,7 +480,53 @@
 		ongroup={(key) => setGroupBy(key as GroupBy)}
 		ondirection={toggleDirection}
 		showViewToggle={false}
-	/>
+	>
+		{#snippet beforeGroupBy()}
+			<div class="group-by-selector ms-filter" data-testid="shared-filter-menu">
+				<button
+					class="toggle-btn group-by-btn active"
+					title={t('myshares.filter.title', 'Filter by kind')}
+					aria-haspopup="true"
+					aria-expanded={filterOpen}
+					data-testid="shared-filter-btn"
+					onclick={(e) => {
+						e.stopPropagation();
+						filterOpen = !filterOpen;
+					}}
+				>
+					<Icon name="filter" />
+					<span class="group-by-label">
+						{t('myshares.filter.button', 'Kinds')}
+						{#if activeKindCount < KIND_OPTIONS.length}
+							<span class="ms-filter__badge">{activeKindCount}</span>
+						{/if}
+					</span>
+				</button>
+				{#if filterOpen}
+					<div
+						class="group-by-menu"
+						role="menu"
+						tabindex="-1"
+						onclick={(e) => e.stopPropagation()}
+						onkeydown={(e) => e.key === 'Escape' && (filterOpen = false)}
+					>
+						{#each KIND_OPTIONS as k (k.key)}
+							<label class="group-by-option ms-filter__row" class:active={selectedKinds[k.key]}>
+								<input
+									type="checkbox"
+									data-testid={`shared-filter-${k.key}`}
+									checked={selectedKinds[k.key]}
+									onchange={() => toggleKind(k.key)}
+								/>
+								<Icon name={k.icon} />
+								{k.label}
+							</label>
+						{/each}
+					</div>
+				{/if}
+			</div>
+		{/snippet}
+	</ListToolbar>
 </div>
 
 {#if error}
@@ -397,6 +537,20 @@
 		title={t('myshares.emptyStateTitle', "You haven't shared anything yet")}
 		hint={t('myshares.emptyStateDesc', 'Items you share with others will appear here')}
 	/>
+{:else if noMatchesForFilter}
+	<EmptyState
+		icon="filter"
+		title={t('myshares.filter.emptyTitle', 'No shares match the current filter')}
+		hint={t(
+			'myshares.filter.emptyHint',
+			'Adjust the kind filter or reset it to the default (Files + Folders).'
+		)}
+	>
+		<button class="btn btn-secondary" data-testid="shared-filter-reset" onclick={resetKinds}>
+			<Icon name="rotate-left" />
+			{t('myshares.filter.reset', 'Reset filter')}
+		</button>
+	</EmptyState>
 {:else}
 	<div class="ms-lanes">
 		{#each lanes as lane (lane.key)}
@@ -906,5 +1060,39 @@
 
 	.ms-more {
 		margin: var(--space-3) auto 0;
+	}
+
+	/* Kind filter — nested inside ListToolbar's `.view-toggle`, styled
+	   as a sibling of the group-by dropdown. The `.group-by-selector`,
+	   `.group-by-btn`, `.group-by-menu`, `.group-by-option` classes
+	   are inherited from the global `ported/buttons.css` — see the
+	   `beforeGroupBy` snippet in the template. Only the local tweaks
+	   below (checkbox layout + active-count badge) stay page-scoped. */
+
+	.ms-filter__row {
+		cursor: pointer;
+	}
+
+	.ms-filter__row input[type='checkbox'] {
+		margin: 0;
+		cursor: pointer;
+	}
+
+	/* Count of active kinds when the filter is narrower than "all
+	   kinds" — small pill inside the button's label so the button
+	   still reads as a single group-by-style control. */
+	.ms-filter__badge {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 1.25rem;
+		height: 1.1rem;
+		margin-left: var(--space-1);
+		padding: 0 var(--space-1);
+		border-radius: var(--radius-pill, 999px);
+		background: var(--color-accent);
+		color: var(--color-text-light);
+		font-size: var(--text-xs);
+		font-weight: var(--weight-semibold, 600);
 	}
 </style>

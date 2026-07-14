@@ -58,6 +58,8 @@
   "photos": {
     "empty_state": "Aún no hay fotos",
     "empty_hint": "Sube imágenes o videos para verlos aquí",
+    "empty_hidden": "{{n}} foto(s) oculta(s) por tu preferencia",
+    "empty_hidden_hint": "Desactiva \"Ocultar archivos ocultos\" en tu perfil para verlas.",
     "items_selected": "seleccionados",
     "view_daily": "Día",
     "view_monthly": "Mes",
@@ -370,7 +372,15 @@
     "uploaded_saved": "Subida completa — {{mb}} MB deduplicados",
     "uploaded_partial": "{{ok}} subidos, {{failed}} fallaron",
     "uploaded_skipped": "{{ok}} subidos · {{skipped}} omitidos (no son ficheros normales)",
-    "upload_failed": "La subida falló"
+    "upload_failed": "La subida falló",
+    "empty_hidden_title": "{{n}} elemento(s) oculto(s) en esta carpeta",
+    "empty_hidden_hint": "Los archivos cuyo nombre empieza por '.' están ocultos. Cambia la opción para verlos.",
+    "show_hidden": "Mostrar archivos ocultos",
+    "upload_dotfile_hidden": "{{n}} archivo(s) subido(s) pero ocultado(s) por tu preferencia.",
+    "rename_dotfile_hidden": "Renombrado a \"{{name}}\" — ahora oculto por tu preferencia.",
+    "new_folder_dotfile_hidden": "Carpeta \"{{name}}\" creada — oculta por tu preferencia.",
+    "dotfiles_hidden_toast": "Archivos ocultos ocultados",
+    "dotfiles_shown_toast": "Archivos ocultos mostrados"
   },
   "dialogs": {
     "rename_folder": "Renombrar carpeta",
@@ -575,6 +585,8 @@
     "accessed": "Accedido",
     "empty_state": "No hay archivos recientes",
     "empty_hint": "Los archivos que abras aparecerán aquí",
+    "empty_hidden_state": "{{n}} elemento(s) reciente(s) oculto(s) por tu preferencia",
+    "empty_hidden_hint": "Desactiva \"Ocultar archivos ocultos\" en tu perfil para verlos.",
     "loadMore": "Cargar más"
   },
   "notifications": {
@@ -894,6 +906,7 @@
     "family_name": "Apellidos",
     "notify_on_share": "Enviarme un correo cuando alguien comparta conmigo",
     "notify_on_share_hint": "Cuando esté desmarcado, los recursos compartidos seguirán apareciendo en tu cuenta — simplemente no recibirás un correo sobre ellos.",
+    "hide_dotfiles": "Ocultar archivos cuyo nombre empieza por un punto (.env, .git, …)",
     "save_profile": "Guardar cambios",
     "profile_saved": "Perfil actualizado",
     "profile_no_changes": "Sin cambios que guardar.",
@@ -1014,7 +1027,17 @@
     "notifyRateLimited": "Demasiadas notificaciones para este destinatario — inténtalo más tarde.",
     "removeAccess": "Quitar acceso",
     "resendInvitation": "Reenviar correo de invitación",
-    "publicLinks": "Enlaces públicos"
+    "publicLinks": "Enlaces públicos",
+    "filter": {
+      "button": "Tipos",
+      "title": "Filtrar por tipo",
+      "files": "Archivos",
+      "folders": "Carpetas",
+      "drives": "Unidades",
+      "emptyTitle": "Ningún elemento compartido coincide con el filtro actual",
+      "emptyHint": "Ajusta el filtro por tipo o restablécelo al valor predeterminado (Archivos + Carpetas).",
+      "reset": "Restablecer filtro"
+    }
   },
   "sort": {
     "asc": "ascendente",
@@ -1144,5 +1167,8 @@
   "view": {
     "grid": "Vista de cuadrícula",
     "list": "Vista de lista"
+  },
+  "preferences": {
+    "save_failed": "No se pudo guardar tu preferencia. Inténtalo de nuevo."
   }
 }

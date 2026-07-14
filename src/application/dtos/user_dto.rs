@@ -61,6 +61,14 @@ pub struct UserDto {
     /// could never claim the share. Round-trips through `/api/auth/me`
     /// and `PATCH /api/auth/me/profile`.
     pub notify_on_share: bool,
+    /// Opaque UI preferences bag. Cross-device store for pure UI
+    /// toggles (hide dotfiles, view mode, sidebar collapse, …). The
+    /// server never inspects the contents — this DTO field just echoes
+    /// what was PATCHed via `PATCH /api/auth/me/profile`. Shape is a
+    /// JSON object; the frontend defines the keys it cares about (see
+    /// `frontend/src/lib/stores/preferences.svelte.ts`). Always present
+    /// on the wire; empty bag is `{}`, never `null`.
+    pub ui_preferences: serde_json::Value,
 }
 
 impl From<User> for UserDto {
@@ -85,6 +93,7 @@ impl From<User> for UserDto {
             email_verified_at: user.email_verified_at(),
             preferred_locale: user.preferred_locale().map(str::to_string),
             notify_on_share: user.notify_on_share(),
+            ui_preferences: user.ui_preferences().clone(),
         }
     }
 }
@@ -185,6 +194,19 @@ pub struct UpdateProfileDto {
     /// always send.
     #[serde(default)]
     pub notify_on_share: Option<bool>,
+    /// Partial patch into the opaque UI preferences bag. **Must be a
+    /// JSON object.** Applied via a SHALLOW merge on the server:
+    /// keys present here overwrite existing top-level keys; keys not
+    /// present survive. A key value of `null` REMOVES that key from
+    /// the bag (implemented via `jsonb_strip_nulls` after the merge).
+    ///
+    /// Example: current bag `{"a":1,"b":2}`, patch `{"b":3,"c":4}`
+    /// → merged `{"a":1,"b":3,"c":4}`. Patch `{"a":null}` → `{"b":2}`.
+    ///
+    /// Absent → no change to the bag. This is a UI-only surface;
+    /// server never inspects the keys.
+    #[serde(default)]
+    pub ui_preferences: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

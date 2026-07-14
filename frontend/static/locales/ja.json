@@ -58,6 +58,8 @@
   "photos": {
     "empty_state": "写真はまだありません",
     "empty_hint": "画像や動画をアップロードするとここに表示されます",
+    "empty_hidden": "設定により非表示になっている写真が {{n}} 件あります",
+    "empty_hidden_hint": "プロフィールで「非表示ファイルを隠す」をオフにすると表示されます。",
     "items_selected": "件選択中",
     "view_daily": "日",
     "view_monthly": "月",
@@ -365,7 +367,15 @@
     "folder": "フォルダ",
     "new_folder": "新しいフォルダ",
     "share": "共有",
-    "view": "表示"
+    "view": "表示",
+    "empty_hidden_title": "このフォルダに非表示の項目が {{n}} 件あります",
+    "empty_hidden_hint": "名前が '.' で始まるファイルは非表示です。設定を切り替えると表示できます。",
+    "show_hidden": "非表示のファイルを表示",
+    "upload_dotfile_hidden": "{{n}} 個のファイルをアップロードしましたが、設定により非表示になっています。",
+    "rename_dotfile_hidden": "「{{name}}」に名前を変更しました — 設定により非表示になりました。",
+    "new_folder_dotfile_hidden": "フォルダ「{{name}}」を作成しました — 設定により非表示になっています。",
+    "dotfiles_hidden_toast": "非表示ファイルを隠しました",
+    "dotfiles_shown_toast": "非表示ファイルを表示しました"
   },
   "dialogs": {
     "rename_folder": "フォルダ名を変更",
@@ -570,6 +580,8 @@
     "accessed": "アクセス日",
     "empty_state": "最近のファイルはありません",
     "empty_hint": "開いたファイルがここに表示されます",
+    "empty_hidden_state": "設定により非表示になっている最近の項目が {{n}} 件あります",
+    "empty_hidden_hint": "プロフィールで「非表示ファイルを隠す」をオフにすると表示されます。",
     "loadMore": "さらに読み込む"
   },
   "notifications": {
@@ -879,6 +891,7 @@
     "family_name": "姓",
     "notify_on_share": "誰かが共有したときにメールで通知する",
     "notify_on_share_hint": "チェックを外しても、共有はアカウントに表示されますが、メールでの通知は届きません。",
+    "hide_dotfiles": "名前がドットで始まるファイルを非表示にする（.env、.git、…）",
     "save_profile": "変更を保存",
     "profile_saved": "プロフィールを更新しました",
     "profile_no_changes": "保存する変更はありません。",
@@ -999,7 +1012,17 @@
     "notifyRateLimited": "この受信者への通知が多すぎます — しばらくしてから再試行してください。",
     "removeAccess": "アクセスを削除",
     "resendInvitation": "招待メールを再送信",
-    "publicLinks": "Public links"
+    "publicLinks": "Public links",
+    "filter": {
+      "button": "種類",
+      "title": "種類でフィルタ",
+      "files": "ファイル",
+      "folders": "フォルダ",
+      "drives": "ドライブ",
+      "emptyTitle": "現在のフィルタに一致する共有はありません",
+      "emptyHint": "種類フィルタを調整するか、既定 (ファイル + フォルダ) にリセットしてください。",
+      "reset": "フィルタをリセット"
+    }
   },
   "sort": {
     "asc": "ascending",
@@ -1129,5 +1152,8 @@
   "view": {
     "grid": "グリッド表示",
     "list": "リスト表示"
+  },
+  "preferences": {
+    "save_failed": "設定を保存できませんでした。もう一度お試しください。"
   }
 }

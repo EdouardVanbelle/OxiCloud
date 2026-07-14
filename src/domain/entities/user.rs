@@ -107,6 +107,24 @@ pub struct User {
     /// and opts out, subsequent shares from other granters honor the
     /// flag.
     notify_on_share: bool,
+    /// Opaque UI preferences bag (PR — this session). Stored as JSONB
+    /// on `auth.users.ui_preferences`; the server NEVER inspects the
+    /// contents. This is the SPA's cross-device backing store for pure
+    /// UI toggles (hide-dotfiles, view mode, sidebar collapse, …).
+    ///
+    /// Merge semantics live in the repo layer: `PATCH /me/profile` does
+    /// a SHALLOW merge via `ui_preferences || $1::jsonb`, so partial
+    /// writes from one device don't clobber keys set on another.
+    ///
+    /// Load-bearing rule: if a preference EVER becomes something the
+    /// server reads (like `preferred_locale` did), promote it out of
+    /// this bag into a typed column. Keep this field for UI-only
+    /// toggles.
+    ///
+    /// Invariant: always a JSON object (enforced by the schema CHECK
+    /// `users_ui_preferences_is_object`). Empty bag is `{}`, never
+    /// `null` or missing.
+    ui_preferences: serde_json::Value,
 }
 
 impl User {
@@ -205,6 +223,11 @@ impl User {
             // `users_notify_on_share` mirrors this for rows reconstructed
             // from disk without going through `new`.
             notify_on_share: true,
+            // Empty bag on creation. The SPA writes into it via
+            // `PATCH /me/profile { ui_preferences: {...} }` after
+            // login. Never NULL — the DB CHECK enforces JSON object
+            // shape.
+            ui_preferences: serde_json::json!({}),
         })
     }
 
@@ -249,6 +272,7 @@ impl User {
             email_verified_at: None,
             preferred_locale: None,
             notify_on_share: true,
+            ui_preferences: serde_json::json!({}),
         }
     }
 
@@ -274,6 +298,10 @@ impl User {
         email_verified_at: Option<DateTime<Utc>>,
         preferred_locale: Option<String>,
         notify_on_share: bool,
+        // Opaque UI-preferences bag. Callers reading from the DB pass
+        // `row.get("ui_preferences")`; tests that don't care can pass
+        // `serde_json::json!({})`.
+        ui_preferences: serde_json::Value,
     ) -> Self {
         Self {
             id,
@@ -296,6 +324,7 @@ impl User {
             email_verified_at,
             preferred_locale,
             notify_on_share,
+            ui_preferences,
         }
     }
 
@@ -536,6 +565,16 @@ impl User {
         self.updated_at = Utc::now();
     }
 
+    /// Opaque UI preferences bag. Read-only accessor for the DTO
+    /// conversion; mutation goes through the repo's shallow-merge SQL
+    /// (`UserPgRepository::update_ui_preferences`) rather than a
+    /// setter here — the DB is authoritative on the merged state
+    /// because two devices can PATCH concurrently and the merge has
+    /// to happen at write time, not at read time.
+    pub fn ui_preferences(&self) -> &serde_json::Value {
+        &self.ui_preferences
+    }
+
     /// Claim or change the username. Runs the same validation as the
     /// constructor — callers must still ensure uniqueness at the repo
     /// level. Bumps `updated_at`. Used by the post-create profile-edit
@@ -722,6 +761,7 @@ mod tests {
             None,
             None,
             true,
+            serde_json::json!({}),
         )
     }
 

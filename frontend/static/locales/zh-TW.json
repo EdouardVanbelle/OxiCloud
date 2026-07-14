@@ -58,6 +58,8 @@
   "photos": {
     "empty_state": "還沒有照片",
     "empty_hint": "上傳圖片或影片即可在此檢視",
+    "empty_hidden": "根據您的偏好隱藏了 {{n}} 張相片",
+    "empty_hidden_hint": "在個人資料中關閉「隱藏隱藏檔案」即可查看。",
     "items_selected": "已選擇",
     "view_daily": "日",
     "view_monthly": "月",
@@ -365,7 +367,15 @@
     "folder": "資料夾",
     "new_folder": "新建資料夾",
     "share": "分享",
-    "view": "檢視"
+    "view": "檢視",
+    "empty_hidden_title": "此資料夾中有 {{n}} 個隱藏項目",
+    "empty_hidden_hint": "以 '.' 開頭的檔案被隱藏。切換設定即可顯示。",
+    "show_hidden": "顯示隱藏檔案",
+    "upload_dotfile_hidden": "已上傳 {{n}} 個檔案,但已根據您的偏好隱藏。",
+    "rename_dotfile_hidden": "已重新命名為「{{name}}」——現已根據您的偏好隱藏。",
+    "new_folder_dotfile_hidden": "已建立資料夾「{{name}}」——根據您的偏好隱藏。",
+    "dotfiles_hidden_toast": "已隱藏隱藏檔案",
+    "dotfiles_shown_toast": "已顯示隱藏檔案"
   },
   "dialogs": {
     "rename_folder": "重新命名資料夾",
@@ -570,6 +580,8 @@
     "accessed": "訪問於",
     "empty_state": "沒有最近檔案",
     "empty_hint": "您開啟的檔案將顯示在這裡",
+    "empty_hidden_state": "根據您的偏好隱藏了 {{n}} 個最近項目",
+    "empty_hidden_hint": "在個人資料中關閉「隱藏隱藏檔案」即可查看。",
     "loadMore": "載入更多"
   },
   "batch": {
@@ -862,6 +874,7 @@
     "family_name": "姓",
     "notify_on_share": "當有人與我分享時透過電子郵件通知我",
     "notify_on_share_hint": "取消勾選後，分享項目仍會顯示在您的帳戶中 — 只是不會收到相關郵件通知。",
+    "hide_dotfiles": "隱藏名稱以點開頭的檔案（.env、.git 等）",
     "save_profile": "儲存變更",
     "profile_saved": "個人資料已更新",
     "profile_no_changes": "沒有變更可儲存。",
@@ -999,7 +1012,17 @@
     "notifyRateLimited": "對此收件者的通知過多 — 請稍後重試。",
     "removeAccess": "移除存取權限",
     "resendInvitation": "重新傳送邀請郵件",
-    "publicLinks": "Public links"
+    "publicLinks": "Public links",
+    "filter": {
+      "button": "類型",
+      "title": "依類型篩選",
+      "files": "檔案",
+      "folders": "資料夾",
+      "drives": "磁碟機",
+      "emptyTitle": "沒有分享項目符合目前的篩選",
+      "emptyHint": "調整類型篩選或將其重設為預設 (檔案 + 資料夾)。",
+      "reset": "重設篩選"
+    }
   },
   "sort": {
     "asc": "ascending",
@@ -1129,5 +1152,8 @@
   "view": {
     "grid": "網格檢視",
     "list": "列表檢視"
+  },
+  "preferences": {
+    "save_failed": "無法儲存偏好設定。請再試一次。"
   }
 }

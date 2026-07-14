@@ -60,6 +60,8 @@
   "photos": {
     "empty_state": "아직 사진이 없습니다",
     "empty_hint": "이미지나 동영상을 업로드하면 여기에 표시됩니다",
+    "empty_hidden": "설정에 따라 숨겨진 사진 {{n}}개",
+    "empty_hidden_hint": "프로필에서 \"숨겨진 파일 숨기기\"를 끄면 볼 수 있습니다.",
     "items_selected": "개 선택됨",
     "view_daily": "일",
     "view_monthly": "월",
@@ -483,7 +485,15 @@
     "upload_failed": "업로드 실패",
     "uploading": "업로드 중…",
     "uploading_file": "{{name}} 업로드 중…",
-    "uploading_n": "파일 업로드 중 {{done}}/{{total}}…"
+    "uploading_n": "파일 업로드 중 {{done}}/{{total}}…",
+    "empty_hidden_title": "이 폴더에 숨겨진 항목 {{n}}개",
+    "empty_hidden_hint": "이름이 '.' 로 시작하는 파일은 숨겨져 있습니다. 설정을 변경하면 표시됩니다.",
+    "show_hidden": "숨겨진 파일 표시",
+    "upload_dotfile_hidden": "파일 {{n}}개를 업로드했지만 설정에 따라 숨겨졌습니다.",
+    "rename_dotfile_hidden": "\"{{name}}\"(으)로 이름이 변경되었습니다 — 이제 설정에 따라 숨겨졌습니다.",
+    "new_folder_dotfile_hidden": "폴더 \"{{name}}\"을(를) 생성했습니다 — 설정에 따라 숨겨졌습니다.",
+    "dotfiles_hidden_toast": "숨겨진 파일 숨김",
+    "dotfiles_shown_toast": "숨겨진 파일 표시"
   },
   "dialogs": {
     "rename_folder": "폴더 이름 변경",
@@ -703,6 +713,8 @@
     "accessed": "접근일",
     "empty_state": "최근 파일이 없습니다",
     "empty_hint": "열어본 파일이 여기에 표시됩니다",
+    "empty_hidden_state": "설정에 따라 숨겨진 최근 항목 {{n}}개",
+    "empty_hidden_hint": "프로필에서 \"숨겨진 파일 숨기기\"를 끄면 볼 수 있습니다.",
     "loadMore": "더 불러오기",
     "confirm_clear": "최근 항목을 지우시겠습니까?"
   },
@@ -1139,6 +1151,7 @@
     "family_name": "성",
     "notify_on_share": "다른 사람이 나에게 공유할 때 이메일로 알림 받기",
     "notify_on_share_hint": "선택을 해제해도 공유 항목은 계정에 계속 표시되지만, 이메일 알림은 받지 않습니다.",
+    "hide_dotfiles": "이름이 점으로 시작하는 파일 숨기기 (.env, .git, …)",
     "save_profile": "변경 사항 저장",
     "profile_saved": "프로필이 업데이트되었습니다",
     "profile_no_changes": "저장할 변경 사항이 없습니다.",
@@ -1275,7 +1288,17 @@
     "emptyStateTitle": "아직 공유한 항목이 없습니다",
     "manageAccess": "접근 권한 관리",
     "notifySent": "알림이 전송되었습니다.",
-    "passwordLinks": "비밀번호로 보호된 링크"
+    "passwordLinks": "비밀번호로 보호된 링크",
+    "filter": {
+      "button": "종류",
+      "title": "종류로 필터링",
+      "files": "파일",
+      "folders": "폴더",
+      "drives": "드라이브",
+      "emptyTitle": "현재 필터와 일치하는 공유가 없습니다",
+      "emptyHint": "종류 필터를 조정하거나 기본값 (파일 + 폴더) 으로 재설정하세요.",
+      "reset": "필터 재설정"
+    }
   },
   "sort": {
     "asc": "ascending",
@@ -1526,5 +1549,8 @@
   },
   "sortdir": {
     "title": "정렬 방향"
+  },
+  "preferences": {
+    "save_failed": "환경설정을 저장할 수 없습니다. 다시 시도하세요."
   }
 }

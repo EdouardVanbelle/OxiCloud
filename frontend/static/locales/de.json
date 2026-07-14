@@ -58,6 +58,8 @@
   "photos": {
     "empty_state": "Noch keine Fotos",
     "empty_hint": "Laden Sie Bilder oder Videos hoch, um sie hier zu sehen",
+    "empty_hidden": "{{n}} Foto(s) durch Ihre Einstellung ausgeblendet",
+    "empty_hidden_hint": "Deaktivieren Sie \"Verborgene Dateien ausblenden\" in Ihrem Profil, um sie anzuzeigen.",
     "items_selected": "ausgewählt",
     "view_daily": "Tag",
     "view_monthly": "Monat",
@@ -365,7 +367,15 @@
     "folder": "Ordner",
     "new_folder": "Neuer Ordner",
     "share": "Teilen",
-    "view": "Anzeigen"
+    "view": "Anzeigen",
+    "empty_hidden_title": "{{n}} verborgene(s) Element(e) in diesem Ordner",
+    "empty_hidden_hint": "Dateien, deren Name mit '.' beginnt, sind ausgeblendet. Ändern Sie die Einstellung, um sie anzuzeigen.",
+    "show_hidden": "Verborgene Dateien anzeigen",
+    "upload_dotfile_hidden": "{{n}} Datei(en) hochgeladen, aber durch Ihre Einstellung ausgeblendet.",
+    "rename_dotfile_hidden": "In \"{{name}}\" umbenannt — jetzt durch Ihre Einstellung ausgeblendet.",
+    "new_folder_dotfile_hidden": "Ordner \"{{name}}\" erstellt — durch Ihre Einstellung ausgeblendet.",
+    "dotfiles_hidden_toast": "Verborgene Dateien ausgeblendet",
+    "dotfiles_shown_toast": "Verborgene Dateien angezeigt"
   },
   "dialogs": {
     "rename_folder": "Ordner umbenennen",
@@ -570,6 +580,8 @@
     "accessed": "Zugegriffen",
     "empty_state": "Keine zuletzt verwendeten Dateien",
     "empty_hint": "Dateien, die Sie öffnen, werden hier angezeigt",
+    "empty_hidden_state": "{{n}} zuletzt verwendete(s) Element(e) durch Ihre Einstellung ausgeblendet",
+    "empty_hidden_hint": "Deaktivieren Sie \"Verborgene Dateien ausblenden\" in Ihrem Profil, um sie anzuzeigen.",
     "loadMore": "Mehr laden"
   },
   "notifications": {
@@ -879,6 +891,7 @@
     "family_name": "Nachname",
     "notify_on_share": "Mich per E-Mail benachrichtigen, wenn jemand mit mir teilt",
     "notify_on_share_hint": "Wenn deaktiviert, werden Freigaben weiterhin in deinem Konto angezeigt — du erhältst nur keine E-Mail dazu.",
+    "hide_dotfiles": "Dateien ausblenden, deren Name mit einem Punkt beginnt (.env, .git, …)",
     "save_profile": "Änderungen speichern",
     "profile_saved": "Profil aktualisiert",
     "profile_no_changes": "Keine Änderungen zu speichern.",
@@ -999,7 +1012,17 @@
     "notifyRateLimited": "Zu viele Benachrichtigungen für diesen Empfänger — versuchen Sie es später erneut.",
     "removeAccess": "Zugriff entfernen",
     "resendInvitation": "Einladungs-E-Mail erneut senden",
-    "publicLinks": "Public links"
+    "publicLinks": "Public links",
+    "filter": {
+      "button": "Arten",
+      "title": "Nach Art filtern",
+      "files": "Dateien",
+      "folders": "Ordner",
+      "drives": "Laufwerke",
+      "emptyTitle": "Keine Freigaben entsprechen dem aktuellen Filter",
+      "emptyHint": "Passen Sie den Art-Filter an oder setzen Sie ihn auf den Standard zurück (Dateien + Ordner).",
+      "reset": "Filter zurücksetzen"
+    }
   },
   "sort": {
     "asc": "aufsteigend",
@@ -1129,5 +1152,8 @@
   "view": {
     "grid": "Rasteransicht",
     "list": "Listenansicht"
+  },
+  "preferences": {
+    "save_failed": "Ihre Einstellung konnte nicht gespeichert werden. Bitte versuchen Sie es erneut."
   }
 }

@@ -12,6 +12,9 @@
 		type ShareListing,
 		type ShareMeta
 	} from '$lib/api/endpoints/share';
+	import { preferences } from '$lib/stores/preferences.svelte';
+	import { session } from '$lib/stores/session.svelte';
+	import { filterDotfiles } from '$lib/utils/dotfileFilter';
 	import { t } from '$lib/i18n/index.svelte';
 
 	type State = 'loading' | 'password' | 'expired' | 'invalid' | 'file' | 'folder';
@@ -41,9 +44,18 @@
 		return null;
 	}
 
-	const mediaFiles = $derived(
-		(listing?.files ?? []).filter((f) => mediaKind(f.mime_type) !== null)
-	);
+	// Dotfile hide only applies to LOGGED-IN viewers of a public
+	// share. Anonymous viewers see exactly what the sharer put in
+	// the link — hiding items behind a UI toggle they don't
+	// control would be surprising ("the owner said this was in
+	// there but I don't see it"). Logged-in viewers get their own
+	// preference respected, matching every other list surface in
+	// the app.
+	const applyDotfileFilter = $derived(session.isAuthenticated && preferences.hideDotfiles);
+	const visibleFolders = $derived(filterDotfiles(listing?.folders ?? [], applyDotfileFilter));
+	const visibleFiles = $derived(filterDotfiles(listing?.files ?? [], applyDotfileFilter));
+
+	const mediaFiles = $derived(visibleFiles.filter((f) => mediaKind(f.mime_type) !== null));
 
 	function setViewMode(mode: ViewMode) {
 		viewMode = mode;
@@ -335,14 +347,14 @@
 			</div>
 		</header>
 
-		{#if listing.folders.length === 0 && listing.files.length === 0}
+		{#if visibleFolders.length === 0 && visibleFiles.length === 0}
 			<p class="share__status">{t('share.empty_folder', 'This folder is empty.')}</p>
 		{/if}
 
-		{#if listing.folders.length > 0}
+		{#if visibleFolders.length > 0}
 			<h2 class="share__section">{t('share.folders', 'Folders')}</h2>
 			<ul class="share__grid" class:share__grid--list={viewMode === 'list'}>
-				{#each listing.folders as f (f.id)}
+				{#each visibleFolders as f (f.id)}
 					<li>
 						<button
 							class="card"
@@ -357,10 +369,10 @@
 			</ul>
 		{/if}
 
-		{#if listing.files.length > 0}
+		{#if visibleFiles.length > 0}
 			<h2 class="share__section">{t('share.files', 'Files')}</h2>
 			<ul class="share__grid" class:share__grid--list={viewMode === 'list'}>
-				{#each listing.files as f (f.id)}
+				{#each visibleFiles as f (f.id)}
 					{@const kind = mediaKind(f.mime_type)}
 					{#if kind}
 						<li>

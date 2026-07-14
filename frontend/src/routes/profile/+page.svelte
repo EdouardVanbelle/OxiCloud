@@ -17,6 +17,7 @@
 	import { SUPPORTED_LOCALES, setLocale, t, type Locale } from '$lib/i18n/index.svelte';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { confirmDialog } from '$lib/stores/dialogs.svelte';
+	import { preferences } from '$lib/stores/preferences.svelte';
 	import { session } from '$lib/stores/session.svelte';
 	import { ui } from '$lib/stores/ui.svelte';
 	import { formatBytes } from '$lib/utils/format';
@@ -28,6 +29,12 @@
 	let username = $state('');
 	let preferredLocale = $state<string>('');
 	let notifyOnShare = $state(true);
+	// Batched into the profile save flow (same UX as
+	// `notifyOnShare` above). The `preferences` store is still the
+	// source of truth for the persisted value — this local mirrors it
+	// on hydrate, and the diff feeds `patch.ui_preferences` on save
+	// so the whole card follows one save discipline.
+	let hideDotfiles = $state(false);
 
 	let currentPw = $state('');
 	let newPw = $state('');
@@ -91,6 +98,12 @@
 		username = u.username ?? '';
 		preferredLocale = u.preferred_locale ?? '';
 		notifyOnShare = u.notify_on_share;
+		// Source of truth is the preferences store, which itself
+		// derives from `session.user.ui_preferences`. Reading through
+		// the store here (rather than the raw bag) means a new
+		// preference field just needs a getter in the store and its
+		// own line here — no wire-format knowledge on the page.
+		hideDotfiles = preferences.hideDotfiles;
 	}
 
 	async function saveProfile(e: SubmitEvent) {
@@ -110,6 +123,12 @@
 			patch.preferred_locale = preferredLocale || undefined;
 		}
 		if (notifyOnShare !== u.notify_on_share) patch.notify_on_share = notifyOnShare;
+		// Ship the diff as a partial `ui_preferences` patch — the
+		// server does a shallow merge, so only the changed key is
+		// touched; siblings set on other devices survive.
+		if (hideDotfiles !== preferences.hideDotfiles) {
+			patch.ui_preferences = { hide_dotfiles: hideDotfiles };
+		}
 
 		if (Object.keys(patch).length === 0) {
 			ui.notify(t('profile.profile_no_changes', 'No changes to save.'), 'info');
@@ -538,6 +557,19 @@
 							bind:checked={notifyOnShare}
 						/>
 						<span>{t('profile.notify_on_share', 'Email me when someone shares with me')}</span>
+					</label>
+					<label class="checkbox">
+						<input
+							type="checkbox"
+							data-testid="profile-hide-dotfiles-checkbox"
+							bind:checked={hideDotfiles}
+						/>
+						<span
+							>{t(
+								'profile.hide_dotfiles',
+								'Hide files whose name starts with a dot (.env, .git, …)'
+							)}</span
+						>
 					</label>
 					<button type="submit" data-testid="profile-save-btn" disabled={savingProfile}
 						>{t('profile.save_profile', 'Save changes')}</button

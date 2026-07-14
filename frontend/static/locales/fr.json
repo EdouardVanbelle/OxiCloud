@@ -58,6 +58,8 @@
   "photos": {
     "empty_state": "Pas encore de photos",
     "empty_hint": "Téléchargez des images ou des vidéos pour les voir ici",
+    "empty_hidden": "{{n}} photo(s) masquée(s) par votre préférence",
+    "empty_hidden_hint": "Désactivez \"Masquer les fichiers\" dans votre profil pour les voir.",
     "items_selected": "sélectionnés",
     "view_daily": "Jour",
     "view_monthly": "Mois",
@@ -365,7 +367,15 @@
     "folder": "Dossier",
     "new_folder": "Nouveau dossier",
     "share": "Partager",
-    "view": "Afficher"
+    "view": "Afficher",
+    "empty_hidden_title": "{{n}} élément(s) masqué(s) dans ce dossier",
+    "empty_hidden_hint": "Les fichiers dont le nom commence par '.' sont masqués. Modifiez le réglage pour les afficher.",
+    "show_hidden": "Afficher les fichiers masqués",
+    "upload_dotfile_hidden": "{{n}} fichier(s) téléversé(s) mais masqué(s) par votre préférence.",
+    "rename_dotfile_hidden": "Renommé en \"{{name}}\" — désormais masqué par votre préférence.",
+    "new_folder_dotfile_hidden": "Dossier \"{{name}}\" créé — masqué par votre préférence.",
+    "dotfiles_hidden_toast": "Fichiers masqués",
+    "dotfiles_shown_toast": "Fichiers affichés"
   },
   "dialogs": {
     "rename_folder": "Renommer le dossier",
@@ -570,6 +580,8 @@
     "accessed": "Consulté",
     "empty_state": "Aucun fichier récent",
     "empty_hint": "Les fichiers que vous ouvrez apparaîtront ici",
+    "empty_hidden_state": "{{n}} élément(s) récent(s) masqué(s) par votre préférence",
+    "empty_hidden_hint": "Désactivez \"Masquer les fichiers\" dans votre profil pour les voir.",
     "loadMore": "Charger plus"
   },
   "notifications": {
@@ -879,6 +891,7 @@
     "family_name": "Nom",
     "notify_on_share": "M'avertir par e-mail quand quelqu'un partage avec moi",
     "notify_on_share_hint": "Lorsque décoché, les partages apparaissent toujours dans votre compte — vous ne recevrez simplement pas d'e-mail à leur sujet.",
+    "hide_dotfiles": "Masquer les fichiers dont le nom commence par un point (.env, .git, …)",
     "save_profile": "Enregistrer",
     "profile_saved": "Profil mis à jour",
     "profile_no_changes": "Aucun changement à enregistrer.",
@@ -999,7 +1012,17 @@
     "notifyRateLimited": "Trop de notifications pour ce destinataire — réessayez plus tard.",
     "removeAccess": "Retirer l'accès",
     "resendInvitation": "Renvoyer l'e-mail d'invitation",
-    "publicLinks": "Public links"
+    "publicLinks": "Public links",
+    "filter": {
+      "button": "Types",
+      "title": "Filtrer par type",
+      "files": "Fichiers",
+      "folders": "Dossiers",
+      "drives": "Lecteurs",
+      "emptyTitle": "Aucun partage ne correspond au filtre actuel",
+      "emptyHint": "Ajustez le filtre de type ou réinitialisez-le à sa valeur par défaut (Fichiers + Dossiers).",
+      "reset": "Réinitialiser le filtre"
+    }
   },
   "sort": {
     "asc": "croissant",
@@ -1129,5 +1152,8 @@
   "view": {
     "grid": "Vue en grille",
     "list": "Vue en liste"
+  },
+  "preferences": {
+    "save_failed": "Impossible d'enregistrer votre préférence. Veuillez réessayer."
   }
 }

@@ -58,6 +58,8 @@
   "photos": {
     "empty_state": "还没有照片",
     "empty_hint": "上传图片或视频即可在此查看",
+    "empty_hidden": "根据您的偏好隐藏了 {{n}} 张照片",
+    "empty_hidden_hint": "在个人资料中关闭「隐藏隐藏文件」即可查看。",
     "items_selected": "已选择",
     "view_daily": "日",
     "view_monthly": "月",
@@ -365,7 +367,15 @@
     "folder": "文件夹",
     "new_folder": "新建文件夹",
     "share": "分享",
-    "view": "查看"
+    "view": "查看",
+    "empty_hidden_title": "此文件夹中有 {{n}} 个隐藏项",
+    "empty_hidden_hint": "以 '.' 开头的文件被隐藏。切换设置即可显示。",
+    "show_hidden": "显示隐藏文件",
+    "upload_dotfile_hidden": "已上传 {{n}} 个文件,但已根据您的偏好隐藏。",
+    "rename_dotfile_hidden": "已重命名为「{{name}}」——现已根据您的偏好隐藏。",
+    "new_folder_dotfile_hidden": "已创建文件夹「{{name}}」——根据您的偏好隐藏。",
+    "dotfiles_hidden_toast": "已隐藏隐藏文件",
+    "dotfiles_shown_toast": "已显示隐藏文件"
   },
   "dialogs": {
     "rename_folder": "重命名文件夹",
@@ -570,6 +580,8 @@
     "accessed": "访问于",
     "empty_state": "没有最近文件",
     "empty_hint": "您打开的文件将显示在这里",
+    "empty_hidden_state": "根据您的偏好隐藏了 {{n}} 个最近项目",
+    "empty_hidden_hint": "在个人资料中关闭「隐藏隐藏文件」即可查看。",
     "loadMore": "加载更多"
   },
   "batch": {
@@ -862,6 +874,7 @@
     "family_name": "姓",
     "notify_on_share": "当有人与我共享时通过电子邮件通知我",
     "notify_on_share_hint": "取消勾选后，共享项目仍会显示在您的账户中 — 只是不会收到相关邮件通知。",
+    "hide_dotfiles": "隐藏名称以点开头的文件（.env、.git 等）",
     "save_profile": "保存更改",
     "profile_saved": "个人资料已更新",
     "profile_no_changes": "无更改可保存。",
@@ -999,7 +1012,17 @@
     "notifyRateLimited": "对此收件人的通知过多 — 请稍后重试。",
     "removeAccess": "移除访问权限",
     "resendInvitation": "重新发送邀请邮件",
-    "publicLinks": "Public links"
+    "publicLinks": "Public links",
+    "filter": {
+      "button": "类型",
+      "title": "按类型筛选",
+      "files": "文件",
+      "folders": "文件夹",
+      "drives": "驱动器",
+      "emptyTitle": "没有共享项符合当前筛选",
+      "emptyHint": "调整类型筛选或将其重置为默认 (文件 + 文件夹)。",
+      "reset": "重置筛选"
+    }
   },
   "sort": {
     "asc": "ascending",
@@ -1129,5 +1152,8 @@
   "view": {
     "grid": "网格视图",
     "list": "列表视图"
+  },
+  "preferences": {
+    "save_failed": "无法保存偏好设置。请重试。"
   }
 }

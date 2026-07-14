@@ -30,6 +30,13 @@
 	let groupBy = $state('remainingDays');
 	let reversed = $state(false);
 
+	// Trash view DELIBERATELY ignores `preferences.hideDotfiles`.
+	// Rationale: trash is a safety net — hiding items here would let
+	// an accidentally-trashed dotfile ride the retention timer to
+	// permanent deletion without ever being visible for recovery.
+	// The hide preference is UI cosmetics elsewhere; here it would
+	// become a footgun. Same reasoning applies to any future
+	// "review before destructive action" surface.
 	const entries = $derived(
 		raw.map((it): ResourceEntry => {
 			const isFile = it.resource_type === 'file';

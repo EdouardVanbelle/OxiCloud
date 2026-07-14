@@ -58,6 +58,8 @@
   "photos": {
     "empty_state": "Brak zdjęć",
     "empty_hint": "Prześlij obrazy lub filmy, aby zobaczyć je tutaj",
+    "empty_hidden": "{{n}} zdjęć ukrytych zgodnie z Twoją preferencją",
+    "empty_hidden_hint": "Wyłącz \"Ukryj ukryte pliki\" w swoim profilu, aby je zobaczyć.",
     "items_selected": "wybrane",
     "view_daily": "Dzień",
     "view_monthly": "Miesiąc",
@@ -365,7 +367,15 @@
     "folder": "Folder",
     "new_folder": "Nowy folder",
     "share": "Udostępnij",
-    "view": "Pokaż"
+    "view": "Pokaż",
+    "empty_hidden_title": "{{n}} ukrytych elementów w tym folderze",
+    "empty_hidden_hint": "Pliki, których nazwa zaczyna się od '.', są ukryte. Zmień ustawienie, aby je zobaczyć.",
+    "show_hidden": "Pokaż ukryte pliki",
+    "upload_dotfile_hidden": "Przesłano {{n}} plik(ów), ale są ukryte zgodnie z Twoją preferencją.",
+    "rename_dotfile_hidden": "Zmieniono nazwę na \"{{name}}\" — teraz ukryty zgodnie z Twoją preferencją.",
+    "new_folder_dotfile_hidden": "Utworzono folder \"{{name}}\" — ukryty zgodnie z Twoją preferencją.",
+    "dotfiles_hidden_toast": "Ukryte pliki ukryte",
+    "dotfiles_shown_toast": "Ukryte pliki wyświetlone"
   },
   "dialogs": {
     "rename_folder": "Zmień nazwę folderu",
@@ -570,6 +580,8 @@
     "accessed": "Otwarte",
     "empty_state": "Brak ostatnich plików",
     "empty_hint": "Otwarte pliki pojawią się tutaj",
+    "empty_hidden_state": "{{n}} ostatnich elementów ukrytych zgodnie z Twoją preferencją",
+    "empty_hidden_hint": "Wyłącz \"Ukryj ukryte pliki\" w swoim profilu, aby je zobaczyć.",
     "loadMore": "Załaduj więcej"
   },
   "notifications": {
@@ -879,6 +891,7 @@
     "family_name": "Nazwisko",
     "notify_on_share": "Wyślij mi e-mail, gdy ktoś coś mi udostępni",
     "notify_on_share_hint": "Gdy odznaczone, udostępnienia nadal pojawiają się na Twoim koncie — po prostu nie otrzymasz o nich e-maila.",
+    "hide_dotfiles": "Ukryj pliki, których nazwa zaczyna się od kropki (.env, .git, …)",
     "save_profile": "Zapisz zmiany",
     "profile_saved": "Profil zaktualizowany",
     "profile_no_changes": "Brak zmian do zapisania.",
@@ -999,7 +1012,17 @@
     "notifyRateLimited": "Zbyt wiele powiadomień dla tego odbiorcy — spróbuj ponownie później.",
     "removeAccess": "Usuń dostęp",
     "resendInvitation": "Wyślij ponownie e-mail z zaproszeniem",
-    "publicLinks": "Public links"
+    "publicLinks": "Public links",
+    "filter": {
+      "button": "Rodzaje",
+      "title": "Filtruj według rodzaju",
+      "files": "Pliki",
+      "folders": "Foldery",
+      "drives": "Dyski",
+      "emptyTitle": "Żadne udostępnienie nie pasuje do bieżącego filtru",
+      "emptyHint": "Dostosuj filtr rodzaju lub przywróć wartość domyślną (Pliki + Foldery).",
+      "reset": "Resetuj filtr"
+    }
   },
   "sort": {
     "asc": "ascending",
@@ -1129,5 +1152,8 @@
   "view": {
     "grid": "Widok siatki",
     "list": "Widok listy"
+  },
+  "preferences": {
+    "save_failed": "Nie udało się zapisać ustawienia. Spróbuj ponownie."
   }
 }

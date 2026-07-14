@@ -37,6 +37,15 @@
 
 	const byId = $derived(new Map(raw.map((it) => [it.resource.id, it])));
 
+	// Favorites view DELIBERATELY ignores `preferences.hideDotfiles`.
+	// Rationale: favoriting is an explicit "I want to keep an eye on
+	// this" action by the user — hiding a starred item on a different
+	// listing page because it starts with `.` contradicts that intent.
+	// The hide preference is for reducing incidental clutter in
+	// algorithmic listings (files/recent/photos), not for overriding
+	// user-intentional pins. Trash follows the same principle for a
+	// safety-net reason; the general rule shaping up: explicit-action
+	// surfaces don't filter, algorithmic surfaces do.
 	const entries = $derived(
 		raw.map((it): ResourceEntry => {
 			const isFile = it.resource_type === 'file';

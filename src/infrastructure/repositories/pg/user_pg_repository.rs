@@ -106,6 +106,48 @@ impl UserPgRepository {
         .map_err(Self::map_sqlx_error)?;
         Ok(())
     }
+
+    /// Shallow-merge a partial UI-preferences patch into
+    /// `ui_preferences`. The Postgres `||` operator merges top-level
+    /// keys — `{"a":1,"b":2} || {"b":3,"c":4}` → `{"a":1,"b":3,"c":4}`,
+    /// which is exactly the semantic PATCH callers want: a partial
+    /// write only touches the keys it mentions, so a preference set on
+    /// one device isn't wiped by a partial write from another.
+    ///
+    /// `jsonb_strip_nulls` removes any key whose incoming value is
+    /// null, giving callers a documented delete-a-key path (`PATCH
+    /// {"foo": null}` clears `foo`). Nested nulls inside a value
+    /// object survive — we only strip at the top level via the merge
+    /// result.
+    ///
+    /// Not part of the `UserRepository` trait — called directly from
+    /// `AuthApplicationService::update_profile`. Bumps `updated_at`
+    /// so the standard "when did this row change" audits stay useful.
+    ///
+    /// The CHECK constraints
+    /// (`users_ui_preferences_is_object` + `_size_cap`) enforce shape
+    /// and cap at the schema layer; a violating patch surfaces as an
+    /// sqlx error and returns to the handler as 400.
+    pub async fn update_ui_preferences(
+        &self,
+        user_id: Uuid,
+        patch: &serde_json::Value,
+    ) -> UserRepositoryResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE auth.users
+            SET ui_preferences = jsonb_strip_nulls(ui_preferences || $2::jsonb),
+                updated_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(user_id)
+        .bind(patch)
+        .execute(&*self.pool)
+        .await
+        .map_err(Self::map_sqlx_error)?;
+        Ok(())
+    }
 }
 
 impl UserRepository for UserPgRepository {
@@ -138,10 +180,10 @@ impl UserRepository for UserPgRepository {
                             created_at, updated_at, last_login_at, active,
                             oidc_provider, oidc_subject, image, is_external,
                             given_name, family_name, email_verified_at,
-                            preferred_locale, notify_on_share
+                            preferred_locale, notify_on_share, ui_preferences
                         ) VALUES (
                             $1, $2, $3, $4, $5::auth.userrole, $6, $7, $8, $9, $10, $11,
-                            $12, $13, $14, $15, $16, $17, $18, $19, $20
+                            $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
                         )
                         RETURNING *
                         "#,
@@ -166,6 +208,10 @@ impl UserRepository for UserPgRepository {
                 .bind(user_clone.email_verified_at())
                 .bind(user_clone.preferred_locale())
                 .bind(user_clone.notify_on_share())
+                // ui_preferences bind: always a JSON object. `User::new`
+                // initialises the bag to `{}`; ownership stays with the
+                // repo for shallow-merge writes via `update_ui_preferences`.
+                .bind(user_clone.ui_preferences())
                 .execute(&mut **tx)
                 .await
                 .map_err(Self::map_sqlx_error)?;
@@ -190,7 +236,8 @@ impl UserRepository for UserPgRepository {
                 storage_quota_bytes, storage_used_bytes,
                 created_at, updated_at, last_login_at, active,
                 oidc_provider, oidc_subject, image, is_external,
-                given_name, family_name, email_verified_at, preferred_locale, notify_on_share
+                given_name, family_name, email_verified_at, preferred_locale, notify_on_share,
+                ui_preferences
             FROM auth.users
             WHERE id = $1
             "#,
@@ -228,6 +275,7 @@ impl UserRepository for UserPgRepository {
             row.get("email_verified_at"),
             row.get("preferred_locale"),
             row.get("notify_on_share"),
+            row.get::<serde_json::Value, _>("ui_preferences"),
         ))
     }
 
@@ -240,7 +288,8 @@ impl UserRepository for UserPgRepository {
                 storage_quota_bytes, storage_used_bytes,
                 created_at, updated_at, last_login_at, active,
                 oidc_provider, oidc_subject, image, is_external,
-                given_name, family_name, email_verified_at, preferred_locale, notify_on_share
+                given_name, family_name, email_verified_at, preferred_locale, notify_on_share,
+                ui_preferences
             FROM auth.users
             WHERE username = $1
             "#,
@@ -278,6 +327,7 @@ impl UserRepository for UserPgRepository {
             row.get("email_verified_at"),
             row.get("preferred_locale"),
             row.get("notify_on_share"),
+            row.get::<serde_json::Value, _>("ui_preferences"),
         ))
     }
 
@@ -290,7 +340,8 @@ impl UserRepository for UserPgRepository {
                 storage_quota_bytes, storage_used_bytes,
                 created_at, updated_at, last_login_at, active,
                 oidc_provider, oidc_subject, image, is_external,
-                given_name, family_name, email_verified_at, preferred_locale, notify_on_share
+                given_name, family_name, email_verified_at, preferred_locale, notify_on_share,
+                ui_preferences
             FROM auth.users
             WHERE email = $1
             "#,
@@ -328,6 +379,7 @@ impl UserRepository for UserPgRepository {
             row.get("email_verified_at"),
             row.get("preferred_locale"),
             row.get("notify_on_share"),
+            row.get::<serde_json::Value, _>("ui_preferences"),
         ))
     }
 
@@ -347,7 +399,8 @@ impl UserRepository for UserPgRepository {
                 storage_quota_bytes, storage_used_bytes,
                 created_at, updated_at, last_login_at, active,
                 oidc_provider, oidc_subject, image, is_external,
-                given_name, family_name, email_verified_at, preferred_locale, notify_on_share
+                given_name, family_name, email_verified_at, preferred_locale, notify_on_share,
+                ui_preferences
             FROM auth.users
             WHERE id = ANY($1)
             "#,
@@ -387,6 +440,7 @@ impl UserRepository for UserPgRepository {
                     row.get("email_verified_at"),
                     row.get("preferred_locale"),
                     row.get("notify_on_share"),
+                    row.get::<serde_json::Value, _>("ui_preferences"),
                 )
             })
             .collect())
@@ -514,7 +568,8 @@ impl UserRepository for UserPgRepository {
                 storage_quota_bytes, storage_used_bytes,
                 created_at, updated_at, last_login_at, active,
                 oidc_provider, oidc_subject, image, is_external,
-                given_name, family_name, email_verified_at, preferred_locale, notify_on_share
+                given_name, family_name, email_verified_at, preferred_locale, notify_on_share,
+                ui_preferences
             FROM auth.users
             WHERE ($3 OR is_external = FALSE)
             ORDER BY created_at DESC
@@ -559,6 +614,7 @@ impl UserRepository for UserPgRepository {
                     row.get("email_verified_at"),
                     row.get("preferred_locale"),
                     row.get("notify_on_share"),
+                    row.get::<serde_json::Value, _>("ui_preferences"),
                 )
             })
             .collect();
@@ -580,7 +636,8 @@ impl UserRepository for UserPgRepository {
                 storage_quota_bytes, storage_used_bytes,
                 created_at, updated_at, last_login_at, active,
                 oidc_provider, oidc_subject, image, is_external,
-                given_name, family_name, email_verified_at, preferred_locale, notify_on_share
+                given_name, family_name, email_verified_at, preferred_locale, notify_on_share,
+                ui_preferences
             FROM auth.users
             WHERE (username ILIKE $1 OR email ILIKE $1)
               AND ($3 OR is_external = FALSE)
@@ -625,6 +682,7 @@ impl UserRepository for UserPgRepository {
                     row.get("email_verified_at"),
                     row.get("preferred_locale"),
                     row.get("notify_on_share"),
+                    row.get::<serde_json::Value, _>("ui_preferences"),
                 )
             })
             .collect();
@@ -712,7 +770,8 @@ impl UserRepository for UserPgRepository {
                 storage_quota_bytes, storage_used_bytes,
                 created_at, updated_at, last_login_at, active,
                 oidc_provider, oidc_subject, image, is_external,
-                given_name, family_name, email_verified_at, preferred_locale, notify_on_share
+                given_name, family_name, email_verified_at, preferred_locale, notify_on_share,
+                ui_preferences
             FROM auth.users
             WHERE role::text = $1
             ORDER BY created_at DESC
@@ -754,6 +813,7 @@ impl UserRepository for UserPgRepository {
                     row.get("email_verified_at"),
                     row.get("preferred_locale"),
                     row.get("notify_on_share"),
+                    row.get::<serde_json::Value, _>("ui_preferences"),
                 )
             })
             .collect();
@@ -790,7 +850,8 @@ impl UserRepository for UserPgRepository {
                 storage_quota_bytes, storage_used_bytes,
                 created_at, updated_at, last_login_at, active,
                 oidc_provider, oidc_subject, image, is_external,
-                given_name, family_name, email_verified_at, preferred_locale, notify_on_share
+                given_name, family_name, email_verified_at, preferred_locale, notify_on_share,
+                ui_preferences
             FROM auth.users
             WHERE oidc_provider = $1 AND oidc_subject = $2
             "#,
@@ -828,6 +889,7 @@ impl UserRepository for UserPgRepository {
             row.get("email_verified_at"),
             row.get("preferred_locale"),
             row.get("notify_on_share"),
+            row.get::<serde_json::Value, _>("ui_preferences"),
         ))
     }
 

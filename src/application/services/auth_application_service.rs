@@ -1542,12 +1542,51 @@ impl AuthApplicationService {
             changed.push("notify_on_share");
         }
 
-        if changed.is_empty() {
+        // ── UI preferences shallow-merge ──────────────────────────
+        // The other fields above modify the in-memory `user` and land
+        // via `update_user(user)` at the end. UI preferences take a
+        // different path because the merge has to happen at write
+        // time in SQL — two devices PATCH'ing partial patches
+        // concurrently would otherwise race and clobber each other if
+        // we did merge-then-write in application code. See
+        // `UserPgRepository::update_ui_preferences` for the SQL.
+        //
+        // Boundary validation only: shape must be a JSON object.
+        // Contents are opaque to the server — no key inspection here.
+        // Size cap is enforced by the schema CHECK constraint; a
+        // violating merge surfaces as a repo error.
+        let ui_prefs_patch = if let Some(patch) = dto.ui_preferences.as_ref() {
+            if !patch.is_object() {
+                return Err(DomainError::validation_error(
+                    "ui_preferences must be a JSON object".to_string(),
+                ));
+            }
+            Some(patch.clone())
+        } else {
+            None
+        };
+
+        if changed.is_empty() && ui_prefs_patch.is_none() {
             // No-op — return the current user without a DB write.
             return Ok(UserDto::from(user));
         }
 
-        let updated = self.user_storage.update_user(user).await?;
+        // Persist the typed-field changes first (if any). Skip the
+        // `update_user` call entirely when only `ui_preferences`
+        // changed — the shallow-merge SQL below is authoritative for
+        // that field, and running `update_user` unnecessarily would
+        // rewrite every column with its current in-memory value.
+        if !changed.is_empty() {
+            self.user_storage.update_user(user).await?;
+        }
+
+        if let Some(patch) = ui_prefs_patch {
+            self.user_storage
+                .update_ui_preferences(caller_id, &patch)
+                .await?;
+            changed.push("ui_preferences");
+        }
+
         tracing::info!(
             target: "audit",
             event = "auth.profile_updated",
@@ -1556,7 +1595,11 @@ impl AuthApplicationService {
             "👤 profile updated for {}",
             caller_id,
         );
-        Ok(UserDto::from(updated))
+
+        // Refetch so the returned DTO reflects the merged JSONB bag
+        // (the in-memory `user` above holds the pre-merge value).
+        let refreshed = self.user_storage.get_user_by_id(caller_id).await?;
+        Ok(UserDto::from(refreshed))
     }
 
     // Alias for consistency with handler method

@@ -41,6 +41,8 @@
 	import { addTracks, createPlaylist, listPlaylists } from '$lib/api/endpoints/music';
 	import { apiFetch } from '$lib/api/client';
 	import { getCsrfHeaders } from '$lib/api/csrf';
+	import { countHidden, filterDotfiles } from '$lib/utils/dotfileFilter';
+	import { preferences } from '$lib/stores/preferences.svelte';
 	import type { FileItem, FolderItem, ItemType } from '$lib/api/types';
 	import ListToolbar from '$lib/components/ListToolbar.svelte';
 	import VirtualList from '$lib/components/VirtualList.svelte';
@@ -91,6 +93,24 @@
 	});
 
 	let listing = $state<FolderListing>({ folders: [], files: [], favoriteIds: [], sharedIds: [] });
+
+	// Dotfile hide filter — applied BEFORE sort so `sortedFolders` /
+	// `sortedFiles` reflect exactly what the user sees. Selection,
+	// select-all, batch operations, and the empty-state check all
+	// derive from these visible arrays so a hidden file can't be
+	// silently swept up by "select all" or a "delete visible" batch.
+	// Direct lookups by id (deep-links via `?file=<uuid>`) still go
+	// through `listing.files` so hidden files remain accessible by
+	// their own URL — same UX as macOS Finder.
+	const visibleFolders = $derived(filterDotfiles(listing.folders, preferences.hideDotfiles));
+	const visibleFiles = $derived(filterDotfiles(listing.files, preferences.hideDotfiles));
+	// Count of items suppressed by the filter — surfaced in the
+	// empty-state hint when the folder isn't visually empty but
+	// contains only dotfiles the user has hidden, so a "why is this
+	// empty?" question is answerable at a glance.
+	const hiddenCount = $derived(
+		preferences.hideDotfiles ? countHidden(listing.folders) + countHidden(listing.files) : 0
+	);
 	let crumbs = $state<Array<{ id: string; name: string }>>([]);
 	let currentId = $state<string | null>(null);
 	let loading = $state(false);
@@ -287,6 +307,21 @@
 		try {
 			await createFolder(name, currentId);
 			await reload();
+			// Vanish-warning: user just made a `.folder` and it's
+			// already hidden by their preference — otherwise the new
+			// folder would appear to have not been created. Third hook
+			// point in the "creating a dotfile while hide is on" family
+			// (upload + rename cover the other two).
+			if (preferences.hideDotfiles && name.startsWith('.')) {
+				ui.notify(
+					t(
+						'files.new_folder_dotfile_hidden',
+						{ name },
+						"Created folder '{{name}}' — hidden by your dotfile preference."
+					),
+					'info'
+				);
+			}
 		} catch (e) {
 			errorToast(e);
 		}
@@ -559,6 +594,26 @@
 			// Storage usage changed server-side — pull the fresh figure so the
 			// "Almacenamiento" bar moves off its login value instead of 0%.
 			void session.refresh();
+			// Vanish-warning: if hide-dotfiles is on and any uploaded
+			// files start with `.`, the successfully-uploaded rows are
+			// invisible in the grid the moment they land. Fire a
+			// single grouped nudge so users don't think the upload
+			// failed. Only fires when the preference is on AND at
+			// least one uploaded file matched. Bell notification
+			// stays quiet (already covers success/failure counts).
+			if (preferences.hideDotfiles) {
+				const hidden = files.filter((f) => f.name.startsWith('.')).length;
+				if (hidden > 0) {
+					ui.notify(
+						t(
+							'files.upload_dotfile_hidden',
+							{ n: hidden },
+							'{{n}} file(s) uploaded but hidden by your dotfile preference.'
+						),
+						'info'
+					);
+				}
+			}
 		} catch (err) {
 			ui.finishProgress(nid, errorMessage(err), 'error');
 		} finally {
@@ -645,6 +700,23 @@
 				rememberFolderName(id, name); // keep breadcrumbs current immediately
 			}
 			await reload();
+			// Vanish-warning: the file didn't start with `.` before but
+			// does now, AND the user has hide-dotfiles on → the row is
+			// about to disappear from the grid. Toast so the operation
+			// doesn't feel like a silent failure. Only fires on the
+			// transition (`.env` renamed to `.env2` doesn't need the
+			// nudge — it was already hidden). No toast when hide is off
+			// because nothing vanished.
+			if (preferences.hideDotfiles && name.startsWith('.') && !current.startsWith('.')) {
+				ui.notify(
+					t(
+						'files.rename_dotfile_hidden',
+						{ name },
+						"Renamed to '{{name}}' — now hidden by your preference."
+					),
+					'info'
+				);
+			}
 		} catch (e) {
 			errorToast(e);
 		}
@@ -787,11 +859,14 @@
 	}
 
 	const selectedCount = $derived(selected.size);
-	const totalCount = $derived(listing.folders.length + listing.files.length);
+	const totalCount = $derived(visibleFolders.length + visibleFiles.length);
 
 	function toggleSelectAll() {
 		if (selected.size === totalCount) clearSelection();
-		else selected = new Set([...listing.folders, ...listing.files].map((i) => i.id));
+		// Select-all only picks what the user can see — dotfiles hidden
+		// by the current filter are excluded so "select all → delete"
+		// can't accidentally sweep up hidden files the user never saw.
+		else selected = new Set([...visibleFolders, ...visibleFiles].map((i) => i.id));
 	}
 
 	/**
@@ -1284,7 +1359,12 @@
 		input.value = '';
 	}
 
-	const isEmpty = $derived(listing.folders.length === 0 && listing.files.length === 0);
+	// Visual emptiness — reflects the filtered set, not the raw listing.
+	// When the folder contains only dotfiles that the user has chosen to
+	// hide, `visibleFolders + visibleFiles` is empty and the empty state
+	// renders; `hiddenCount` above lets the template surface a "you're
+	// hiding N items" hint so users aren't confused.
+	const isEmpty = $derived(visibleFolders.length === 0 && visibleFiles.length === 0);
 	const viewClass = $derived(
 		filesStore.viewMode === 'grid' ? 'files-grid-view' : 'files-list-view'
 	);
@@ -1321,8 +1401,12 @@
 		return v * sortDir;
 	}
 
-	const sortedFolders = $derived([...listing.folders].sort(cmpFolders));
-	const sortedFiles = $derived([...listing.files].sort(cmpFiles));
+	// `visibleFolders` / `visibleFiles` are declared up-top (near
+	// `listing`) because `totalCount` and `isEmpty` reference them
+	// before this block; only the sorted copies live here so they
+	// stay next to the sort comparators.
+	const sortedFolders = $derived([...visibleFolders].sort(cmpFolders));
+	const sortedFiles = $derived([...visibleFiles].sort(cmpFiles));
 
 	/** Flat id order matching how rows are displayed (folders then files). */
 	const orderedIds = $derived([...sortedFolders.map((f) => f.id), ...sortedFiles.map((f) => f.id)]);
@@ -1475,6 +1559,7 @@
 	class:dropzone-active={dragOver}
 	role="region"
 	aria-label={t('nav.files', 'Files')}
+	data-testid="files-dropzone"
 	ondragover={(e) => {
 		e.preventDefault();
 		dragOver = true;
@@ -1508,6 +1593,7 @@
 			reversed={sortDir === -1}
 			ongroup={onPickGroup}
 			ondirection={() => (sortDir = (sortDir * -1) as 1 | -1)}
+			showDotfileToggle
 		>
 			{#snippet start()}
 				{#if selectedCount > 0}
@@ -1673,10 +1759,38 @@
 	{:else if showSkeleton && isEmpty}
 		<SkeletonList count={SKELETON.length} />
 	{:else if isEmpty}
-		<EmptyState
-			title={t('files.empty_title', 'This folder is empty')}
-			hint={t('files.empty_hint', 'Drop files here or use the Upload button to add files.')}
-		/>
+		{#if hiddenCount > 0}
+			<!-- Folder isn't really empty — it's just filtered. Hint the
+			     user rather than making the "why is my folder empty?"
+			     question require a preferences hunt. Toggling the
+			     preference flips the whole app's dotfile visibility. -->
+			<EmptyState
+				icon="eye-slash"
+				title={t(
+					'files.empty_hidden_title',
+					{ n: hiddenCount },
+					'{{n}} hidden item(s) in this folder'
+				)}
+				hint={t(
+					'files.empty_hidden_hint',
+					"Files whose name starts with '.' are hidden. Toggle the setting to see them."
+				)}
+			>
+				<button
+					class="btn btn-secondary"
+					onclick={() => preferences.setHideDotfiles(false)}
+					data-testid="files-show-hidden-btn"
+				>
+					<Icon name="eye" />
+					{t('files.show_hidden', 'Show hidden files')}
+				</button>
+			</EmptyState>
+		{:else}
+			<EmptyState
+				title={t('files.empty_title', 'This folder is empty')}
+				hint={t('files.empty_hint', 'Drop files here or use the Upload button to add files.')}
+			/>
+		{/if}
 	{:else}
 		<div class="files-container" bind:clientWidth={gridWidth}>
 			{#if groupBy !== ''}

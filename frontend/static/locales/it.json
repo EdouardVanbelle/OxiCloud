@@ -58,6 +58,8 @@
   "photos": {
     "empty_state": "Nessuna foto ancora",
     "empty_hint": "Carica immagini o video per vederli qui",
+    "empty_hidden": "{{n}} foto nascosta/e dalla tua preferenza",
+    "empty_hidden_hint": "Disattiva \"Nascondi i file nascosti\" nel tuo profilo per vederle.",
     "items_selected": "selezionati",
     "view_daily": "Giorno",
     "view_monthly": "Mese",
@@ -365,7 +367,15 @@
     "folder": "Cartella",
     "new_folder": "Nuova cartella",
     "share": "Condividi",
-    "view": "Visualizza"
+    "view": "Visualizza",
+    "empty_hidden_title": "{{n}} elemento/i nascosto/i in questa cartella",
+    "empty_hidden_hint": "I file il cui nome inizia con '.' sono nascosti. Cambia l'impostazione per vederli.",
+    "show_hidden": "Mostra i file nascosti",
+    "upload_dotfile_hidden": "{{n}} file caricato/i ma nascosto/i dalla tua preferenza.",
+    "rename_dotfile_hidden": "Rinominato in \"{{name}}\" — ora nascosto dalla tua preferenza.",
+    "new_folder_dotfile_hidden": "Cartella \"{{name}}\" creata — nascosta dalla tua preferenza.",
+    "dotfiles_hidden_toast": "File nascosti occultati",
+    "dotfiles_shown_toast": "File nascosti mostrati"
   },
   "dialogs": {
     "rename_folder": "Rinomina cartella",
@@ -570,6 +580,8 @@
     "accessed": "Accesso",
     "empty_state": "Nessun file recente",
     "empty_hint": "I file che apri appariranno qui",
+    "empty_hidden_state": "{{n}} elemento/i recente/i nascosto/i dalla tua preferenza",
+    "empty_hidden_hint": "Disattiva \"Nascondi i file nascosti\" nel tuo profilo per vederli.",
     "loadMore": "Carica altri"
   },
   "notifications": {
@@ -879,6 +891,7 @@
     "family_name": "Cognome",
     "notify_on_share": "Avvisami via email quando qualcuno condivide con me",
     "notify_on_share_hint": "Se deselezionato, le condivisioni continueranno ad apparire nel tuo account — semplicemente non riceverai un'email a riguardo.",
+    "hide_dotfiles": "Nascondi i file il cui nome inizia con un punto (.env, .git, …)",
     "save_profile": "Salva modifiche",
     "profile_saved": "Profilo aggiornato",
     "profile_no_changes": "Nessuna modifica da salvare.",
@@ -999,7 +1012,17 @@
     "notifyRateLimited": "Troppe notifiche per questo destinatario — riprova più tardi.",
     "removeAccess": "Rimuovi accesso",
     "resendInvitation": "Reinvia email di invito",
-    "publicLinks": "Link pubblici"
+    "publicLinks": "Link pubblici",
+    "filter": {
+      "button": "Tipi",
+      "title": "Filtra per tipo",
+      "files": "File",
+      "folders": "Cartelle",
+      "drives": "Unità",
+      "emptyTitle": "Nessun elemento condiviso corrisponde al filtro attuale",
+      "emptyHint": "Modifica il filtro per tipo o reimpostalo al valore predefinito (File + Cartelle).",
+      "reset": "Reimposta filtro"
+    }
   },
   "sort": {
     "asc": "crescente",
@@ -1129,5 +1152,8 @@
   "view": {
     "grid": "Visualizzazione griglia",
     "list": "Visualizzazione elenco"
+  },
+  "preferences": {
+    "save_failed": "Impossibile salvare la preferenza. Riprova."
   }
 }

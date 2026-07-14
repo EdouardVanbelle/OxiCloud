@@ -26,6 +26,8 @@
 		type ResourceEntry
 	} from '$lib/components/ResourceList.svelte';
 	import { confirmDialog, promptDialog } from '$lib/stores/dialogs.svelte';
+	import { preferences } from '$lib/stores/preferences.svelte';
+	import { filterDotfiles } from '$lib/utils/dotfileFilter';
 	import { t } from '$lib/i18n/index.svelte';
 
 	let raw = $state<RecentResourceItem[]>([]);
@@ -39,7 +41,7 @@
 
 	const byId = $derived(new Map(raw.map((it) => [it.resource.id, it])));
 
-	const entries = $derived(
+	const allEntries = $derived(
 		raw.map((it): ResourceEntry => {
 			const isFile = it.resource_type === 'file';
 			// §14 provenance: Recent's mental model is "who touched this
@@ -62,6 +64,11 @@
 			};
 		})
 	);
+	const entries = $derived(filterDotfiles(allEntries, preferences.hideDotfiles));
+	// Count of items suppressed by the dotfile filter — surfaced in
+	// the empty-state hint below so a `.eslintrc`-only Recent doesn't
+	// read as "nothing here yet".
+	const hiddenCount = $derived(preferences.hideDotfiles ? allEntries.length - entries.length : 0);
 
 	const groupBys: GroupByDef[] = [
 		{ key: '', label: t('files.name', 'Name'), orderBy: 'name', icon: 'arrow-up-a-z' },
@@ -323,14 +330,23 @@
 	items={entries}
 	{loading}
 	{error}
-	emptyIcon="clock"
-	emptyText={t('recent.empty_state', 'No recent files')}
-	emptyHint={t('recent.empty_hint', 'Files you open will appear here')}
+	emptyIcon={hiddenCount > 0 ? 'eye-slash' : 'clock'}
+	emptyText={hiddenCount > 0
+		? t(
+				'recent.empty_hidden_state',
+				{ n: hiddenCount },
+				'{{n}} recent item(s) hidden by your dotfile preference'
+			)
+		: t('recent.empty_state', 'No recent files')}
+	emptyHint={hiddenCount > 0
+		? t('recent.empty_hidden_hint', 'Turn off "Hide dotfiles" in your profile to see them.')
+		: t('recent.empty_hint', 'Files you open will appear here')}
 	hasMore={!!cursor}
 	onloadmore={() => load(false, orderByForGroup())}
 	onopen={open}
 	onfavorite={toggleFavorite}
 	showOwner
+	showDotfileToggle
 	selectable
 	{contextActions}
 	{groupBys}

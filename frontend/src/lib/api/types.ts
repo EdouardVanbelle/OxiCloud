@@ -172,6 +172,22 @@ export interface User {
 	email_verified_at?: string;
 	preferred_locale?: string;
 	notify_on_share: boolean;
+	/**
+	 * Opaque UI preferences bag. Server-side JSONB column that persists
+	 * pure UI toggles (hide-dotfiles, view mode, sidebar collapse, …)
+	 * across devices. The server never inspects the contents — the SPA
+	 * defines the keys (see `lib/stores/preferences.svelte.ts` for the
+	 * typed view). Always an object on the wire (empty bag is `{}`,
+	 * never `null` or missing).
+	 *
+	 * When PATCHing back to the server via
+	 * `PATCH /api/auth/me/profile { ui_preferences: {...} }`, the
+	 * server SHALLOW-merges — only the keys present in the patch are
+	 * touched, so partial writes from one device don't clobber
+	 * preferences set on another. Set a key to `null` in the patch to
+	 * delete it from the bag.
+	 */
+	ui_preferences: Record<string, unknown>;
 }
 
 export interface AuthResponse {

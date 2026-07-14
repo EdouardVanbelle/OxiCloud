@@ -14,6 +14,7 @@
 	import { userInitials, avatarColorIndex } from '$lib/utils/avatar';
 	import { i18n, LANGUAGES, setLocale, t, type Locale } from '$lib/i18n/index.svelte';
 	import { apiFetch } from '$lib/api/client';
+	import { preferences } from '$lib/stores/preferences.svelte';
 	import { session } from '$lib/stores/session.svelte';
 	import { theme, type Theme } from '$lib/stores/theme.svelte';
 	import { ui } from '$lib/stores/ui.svelte';
@@ -208,6 +209,19 @@
 		langOpen = false;
 	}
 
+	/**
+	 * True when the shortcut target is a text-input surface — <input>,
+	 * <textarea>, or any `contenteditable` element. Used by the
+	 * Cmd/Ctrl+Shift+. shortcut to defer to normal typing when the
+	 * user is composing text (otherwise typing `.` while holding Shift
+	 * in a filename dialog would fight the shortcut).
+	 */
+	function isTextFieldFocused(target: EventTarget | null): boolean {
+		if (!(target instanceof HTMLElement)) return false;
+		const tag = target.tagName;
+		return tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable;
+	}
+
 	async function chooseLocale(loc: Locale) {
 		langOpen = false;
 		await setLocale(loc);
@@ -251,6 +265,29 @@
 		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k' && !palette.component) {
 			e.preventDefault();
 			void palette.load();
+			return;
+		}
+		// Cmd/Ctrl+Shift+. toggles dotfile visibility — matches macOS
+		// Finder's convention. `e.code === 'Period'` targets the
+		// physical key regardless of keyboard layout (Cmd+Shift+.
+		// yields `.key === '>'` on some layouts). Skip when focus is
+		// inside a text field so users can still type `.` in inputs.
+		if (
+			(e.metaKey || e.ctrlKey) &&
+			e.shiftKey &&
+			e.code === 'Period' &&
+			!isTextFieldFocused(e.target)
+		) {
+			e.preventDefault();
+			preferences.toggleHideDotfiles();
+			ui.notify(
+				preferences.hideDotfiles
+					? t('files.dotfiles_hidden_toast', 'Dotfiles hidden')
+					: t('files.dotfiles_shown_toast', 'Dotfiles shown'),
+				'info',
+				2000,
+				false
+			);
 			return;
 		}
 		if (e.key !== 'Escape') return;

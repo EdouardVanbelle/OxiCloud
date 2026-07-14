@@ -99,6 +99,11 @@
 		showOwner?: boolean;
 		/** Allow grid/list toggle (shares the app-wide view mode). */
 		showViewToggle?: boolean;
+		/** Show the dotfile-visibility eye toggle in the toolbar.
+		 * Opt-in per host page — surfaces that never filter dotfiles
+		 * (favorites, trash) leave this false so the button doesn't
+		 * appear to do nothing. Forwarded to ListToolbar. */
+		showDotfileToggle?: boolean;
 		/** Multi-select checkboxes + selection model. */
 		selectable?: boolean;
 		/** Right-click / overflow context-menu actions. */
@@ -142,6 +147,7 @@
 		bucketAction,
 		showOwner = false,
 		showViewToggle = true,
+		showDotfileToggle = false,
 		selectable = false,
 		contextActions,
 		groupBys,
@@ -398,6 +404,7 @@
 		ongroup={selectGroup}
 		ondirection={toggleDirection}
 		{showViewToggle}
+		{showDotfileToggle}
 	>
 		{#snippet start()}
 			<div class="action-buttons">{@render toolbar?.()}</div>

@@ -11,8 +11,10 @@
 	import { fileDownloadUrl, fileThumbnailUrl } from '$lib/api/endpoints/files';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { confirmDialog } from '$lib/stores/dialogs.svelte';
+	import { preferences } from '$lib/stores/preferences.svelte';
 	import { t } from '$lib/i18n/index.svelte';
 	import { ui } from '$lib/stores/ui.svelte';
+	import { filterDotfiles } from '$lib/utils/dotfileFilter';
 	import { isVideo, photoTimestamp } from '$lib/utils/media';
 
 	type Tab = 'moments' | 'places' | 'people';
@@ -27,6 +29,17 @@
 	let peopleAvailable = $state(false);
 
 	let items = $state<PhotoItem[]>([]);
+	// Client-side dotfile filter over `items`. Applied here (not
+	// server-side) because the filter is a UI-only preference and
+	// applies uniformly across every listing surface. Lightbox +
+	// grouping consume `visibleItems`; mutations still target `items`
+	// (the raw fetched set) so a deletion still removes the photo even
+	// if it's currently hidden by the filter.
+	const visibleItems = $derived(filterDotfiles(items, preferences.hideDotfiles));
+	// Count of items suppressed by the dotfile filter — surfaced in
+	// the empty-state hint below so a `.thumbnails/`-only photos view
+	// doesn't read as "no photos yet".
+	const hiddenCount = $derived(preferences.hideDotfiles ? items.length - visibleItems.length : 0);
 	let cursor = $state<string | null>(null);
 	let exhausted = $state(false);
 	let loading = $state(false);
@@ -76,7 +89,7 @@
 		// Transient scratch map built inside $derived.by and discarded — not reactive state.
 		// eslint-disable-next-line svelte/prefer-svelte-reactivity
 		const index = new Map<string, number>();
-		for (const p of items) {
+		for (const p of visibleItems) {
 			const d = new Date(photoTimestamp(p));
 			const key = bucketKey(d);
 			let i = index.get(key);
@@ -230,7 +243,11 @@
 	/** A plain tile click toggles selection once anything is selected, else opens the lightbox. */
 	function onTileClick(p: PhotoItem) {
 		if (selected.size > 0) selected.toggle(p.id);
-		else lightbox = items.findIndex((x) => x.id === p.id);
+		// Lightbox index refers to what's actually rendered — grouping
+		// loops `visibleItems`, so the index space must too. If we
+		// used `items` here a hidden photo could ride the paging
+		// buttons even though it doesn't appear in the grid.
+		else lightbox = visibleItems.findIndex((x) => x.id === p.id);
 	}
 
 	function onDeletePhoto(id: string) {
@@ -406,15 +423,30 @@
 
 	{#if error}
 		<p class="status status--error" role="alert">{error}</p>
-	{:else if items.length === 0 && exhausted}
-		<EmptyState
-			icon="images"
-			title={t('photos.empty', 'No photos yet.')}
-			hint={t(
-				'photos.empty_hint',
-				'Photos and videos you upload will appear here, grouped by date.'
-			)}
-		/>
+	{:else if visibleItems.length === 0 && exhausted}
+		{#if hiddenCount > 0}
+			<EmptyState
+				icon="eye-slash"
+				title={t(
+					'photos.empty_hidden',
+					{ n: hiddenCount },
+					'{{n}} photo(s) hidden by your dotfile preference'
+				)}
+				hint={t(
+					'photos.empty_hidden_hint',
+					'Turn off "Hide dotfiles" in your profile to see them.'
+				)}
+			/>
+		{:else}
+			<EmptyState
+				icon="images"
+				title={t('photos.empty', 'No photos yet.')}
+				hint={t(
+					'photos.empty_hint',
+					'Photos and videos you upload will appear here, grouped by date.'
+				)}
+			/>
+		{/if}
 	{:else}
 		<div class="photos-area">
 			<div class="photos-measure" bind:clientWidth={gridWidth}>
@@ -444,7 +476,10 @@
 
 	{#if photoLightbox.component}
 		{@const PhotoLightbox = photoLightbox.component}
-		<PhotoLightbox {items} bind:index={lightbox} onDelete={onDeletePhoto} />
+		<!-- Lightbox operates on `visibleItems` — indices align with
+		     what the grid rendered, so next/prev never surfaces a
+		     hidden photo the user can't see in the grid behind. -->
+		<PhotoLightbox items={visibleItems} bind:index={lightbox} onDelete={onDeletePhoto} />
 	{/if}
 {:else if tab === 'places'}
 	{#if placesMap.component}
