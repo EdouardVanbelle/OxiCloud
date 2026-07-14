@@ -587,10 +587,12 @@ async fn handle_mkcalendar(
         is_public: Some(false),
     };
 
+    // See the comment above create_event_from_ical for why this uses
+    // `AppError::from` (kind-aware mapping) instead of `internal_error`.
     calendar_service
         .create_calendar(create_dto, user.id)
         .await
-        .map_err(|e| AppError::internal_error(format!("Failed to create calendar: {}", e)))?;
+        .map_err(AppError::from)?;
 
     Ok(Response::builder()
         .status(StatusCode::CREATED)
@@ -639,11 +641,15 @@ async fn handle_put(
     };
 
     if let Some(existing_event) = existing {
-        // Update existing event — re-create from iCal for full fidelity
+        // Update existing event — re-create from iCal for full fidelity.
+        // Both calls use `AppError::from` — the delete propagates
+        // NotFound/AccessDenied as 404/403, and the recreate propagates
+        // InvalidInput on malformed iCalendar as 400 (see comment on
+        // create_event_from_ical below).
         calendar_service
             .delete_event(&existing_event.id, user.id)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to update event: {}", e)))?;
+            .map_err(AppError::from)?;
 
         let create_dto = CreateEventICalDto {
             calendar_id: calendar_id.to_string(),
@@ -652,7 +658,7 @@ async fn handle_put(
         let event = calendar_service
             .create_event_from_ical(create_dto, user.id)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to recreate event: {}", e)))?;
+            .map_err(AppError::from)?;
 
         Ok(Response::builder()
             .status(StatusCode::NO_CONTENT)
@@ -665,10 +671,25 @@ async fn handle_put(
             ical_data,
         };
 
+        // `AppError::from(DomainError)` (via the `From` impl in
+        // `interfaces/errors.rs`) maps the ErrorKind onto the correct
+        // HTTP status:
+        //   * `InvalidInput` → 400 (e.g. "Missing DTSTART in iCalendar
+        //     data" from `CalendarEvent::from_ical`) — this is the fix
+        //     for AtalayaLabs/OxiCloud#545 comment from `funboytwo`.
+        //   * `NotFound`     → 404 (parent calendar doesn't exist)
+        //   * `AccessDenied` → 403 (caller lacks Write on the calendar)
+        //   * `DatabaseError`/`InternalError` → 500 (genuine server bug)
+        //
+        // The old `map_err(|e| AppError::internal_error(...))` was
+        // blanket-wrapping every case as 500, hiding client-input bugs
+        // as opaque server errors. Downstream monitoring (500 rate,
+        // pager alerts) took the false hit; users saw an unhelpful
+        // "Internal Server Error" for their own bad iCalendar.
         let event = calendar_service
             .create_event_from_ical(create_dto, user.id)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to create event: {}", e)))?;
+            .map_err(AppError::from)?;
 
         Ok(Response::builder()
             .status(StatusCode::CREATED)

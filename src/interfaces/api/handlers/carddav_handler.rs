@@ -511,10 +511,13 @@ async fn handle_mkcol(
         is_public: Some(false),
     };
 
+    // See the comment on the vCard PUT path — kind-aware error mapping
+    // so a client MKCOL body with a bad name / duplicate returns
+    // 400 / 409 instead of an opaque 500.
     addressbook_service
         .create_address_book(create_dto)
         .await
-        .map_err(|e| AppError::internal_error(format!("Failed to create address book: {}", e)))?;
+        .map_err(AppError::from)?;
 
     Ok(Response::builder()
         .status(StatusCode::CREATED)
@@ -564,11 +567,17 @@ async fn handle_put(
     };
 
     if let Some(existing_contact) = existing {
-        // Update: delete + recreate from vCard
+        // Update: delete + recreate from vCard. `AppError::from` maps
+        // the domain-error ErrorKind onto the right status code:
+        // NotFound → 404 (contact/address-book gone), AccessDenied →
+        // 403, InvalidInput → 400 (malformed vCard PUT from the
+        // client). Naive `internal_error(...)` wrapping used to hide
+        // all client-input bugs as 500 — same class of bug as the
+        // CalDAV `create_event_from_ical` path (see #545).
         contact_svc
             .delete_contact(&existing_contact.id, user.id)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to update contact: {}", e)))?;
+            .map_err(AppError::from)?;
 
         let create_dto = CreateContactVCardDto {
             address_book_id: address_book_id.to_string(),
@@ -578,7 +587,7 @@ async fn handle_put(
         let contact = contact_svc
             .create_contact_from_vcard(create_dto)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to recreate contact: {}", e)))?;
+            .map_err(AppError::from)?;
 
         Ok(Response::builder()
             .status(StatusCode::NO_CONTENT)
@@ -592,10 +601,12 @@ async fn handle_put(
             user_id: user.id.to_string(),
         };
 
+        // See the comment above the update branch — same rationale for
+        // preferring `AppError::from` over blanket 500.
         let contact = contact_svc
             .create_contact_from_vcard(create_dto)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to create contact: {}", e)))?;
+            .map_err(AppError::from)?;
 
         Ok(Response::builder()
             .status(StatusCode::CREATED)
