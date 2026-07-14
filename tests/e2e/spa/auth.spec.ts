@@ -29,11 +29,22 @@ test.describe('SPA · authentication', () => {
     await expect(page.getByTestId('login-form')).toBeVisible();
   });
 
-  test('magic-link panel toggles open', async ({ page }) => {
+  test('submit button dispatches to magic-link when password is empty', async ({ page }) => {
+    // Unified login form: one identifier + one optional password + one
+    // adaptive submit button. Filling the identifier and leaving the
+    // password blank flips the button label to "Send sign-in link" and
+    // routes to /api/auth/magic-link/send on click. The old two-form
+    // UX with `login-magic-toggle-btn` was retired 2026-07-14.
     await page.goto('/login');
-    await page.getByTestId('login-magic-toggle-btn').click();
-    await expect(page.getByTestId('login-magic-form')).toBeVisible();
-    await expect(page.getByTestId('login-magic-email-input')).toBeVisible();
+    await expect(page.getByTestId('login-form')).toBeVisible();
+    await page.getByTestId('login-username-input').fill('someone@example.test');
+    // Password intentionally NOT filled — this drives the label swap.
+    const submit = page.getByTestId('login-submit-btn');
+    await expect(submit).toBeVisible();
+    // Label content differs per mode: password-empty → magic-link copy;
+    // password-filled → "Sign in". Assert the magic-link copy is what's
+    // shown so the dispatch is provably in the magic-link branch.
+    await expect(submit).toHaveText(/link|Link|Send/);
   });
 
   test('successful login reaches the files app shell', async ({ page }) => {

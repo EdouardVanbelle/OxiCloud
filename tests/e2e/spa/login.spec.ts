@@ -58,13 +58,21 @@ test('an oidc callback code is exchanged on load', async ({ page }) => {
 });
 
 test('request a magic link from the login page', async ({ page }) => {
+  // Unified form: leave the password field empty and submit — the
+  // adaptive submit routes to /api/auth/magic-link/send with the
+  // identifier as-is (backend accepts email OR username via `@`
+  // dispatch). Old separate `login-magic-*` testids retired in the
+  // single-form refactor.
   await page.goto('/login');
-  await page.getByTestId('login-magic-toggle-btn').click();
-  await expect(page.getByTestId('login-magic-form')).toBeVisible();
+  await expect(page.getByTestId('login-form')).toBeVisible();
 
-  await page.getByTestId('login-magic-email-input').fill('someone@example.test');
-  await page.getByTestId('login-magic-send-btn').click();
-  // A status message resolves (success or error); give the request time to run.
+  await page.getByTestId('login-username-input').fill('someone@example.test');
+  // Password intentionally NOT filled.
+  await page.getByTestId('login-submit-btn').click();
+
+  // A status message resolves (uniform 200 anti-enum success or error);
+  // give the request time to run.
   await page.waitForTimeout(1_000);
-  await expect(page.getByTestId('login-magic-form').or(page.getByTestId('login-form')).first()).toBeVisible();
+  // Still on the login page either way — anti-enum success doesn't redirect.
+  await expect(page.getByTestId('login-form')).toBeVisible();
 });
