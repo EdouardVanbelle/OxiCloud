@@ -19,6 +19,21 @@ flate2 = "1.1.9"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 chrono = { version = "0.4.45", features = ["serde"] }
+# RFC 5545 iCalendar parser + emitter.
+#
+# Adopted 2026-07-14 to replace the hand-rolled property-scan in
+# `src/domain/entities/calendar_event.rs::extract_ical_property`,
+# which used a naive `format!("\n{}:", name)` substring search and
+# refused ANY property carrying parameters (`DTSTART;VALUE=DATE:...`,
+# `RECURRENCE-ID;VALUE=DATE:...`, `ATTENDEE;CN=…;PARTSTAT=…:mailto:…`).
+# That broke all-day events and made the domain unaware of exception
+# instances (see AtalayaLabs/OxiCloud#528).
+#
+# The crate is the widely-used Rust parser (~1500 SLOC, MIT/Apache),
+# actively maintained by @Peltoche as `ical-rs` on GitHub. It handles
+# line-folding, escaped characters, parameter maps, and every standard
+# component. If a spec conformance gap is found, we contribute upstream.
+ical = "0.11"
 http-body = "1.0.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
