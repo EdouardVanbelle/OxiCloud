@@ -69,6 +69,31 @@ jsonpath "$.enabled" == true
 jsonpath "$.provider_name" == "MockSSO"
 jsonpath "$.authorize_endpoint" == "/api/auth/oidc/authorize"
 jsonpath "$.password_login_enabled" == true
+# OIDC-master rule: magic-link login must be reported as OFF when OIDC
+# is enabled, regardless of `OXICLOUD_AUTH_METHODS` or SMTP wiring.
+# Magic-link would bypass any 2FA / step-up the IdP enforces; refusing
+# it at the deployment level is a hard invariant. The SPA reads this
+# to hide the "Send sign-in link" affordance.
+jsonpath "$.magic_link_login_enabled" == false
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 2b — OIDC-master rule regression at the endpoint layer.
+#           `POST /api/auth/magic-link/send` is refused with 403
+#           `MagicLinkLoginDisabled` when OIDC is enabled. The
+#           mock SMTP is configured (server-with-oidc.env has the
+#           full SMTP block) so this proves the policy gate fires
+#           BEFORE the "SMTP not wired" 503, which would otherwise
+#           mask the real reason. The 403 error_type is the machine-
+#           readable contract the SPA switches on.
+# ─────────────────────────────────────────────────────────────
+POST {{base_url}}/api/auth/magic-link/send
+Content-Type: application/json
+{ "email": "someone@example.com" }
+
+HTTP 403
+[Asserts]
+jsonpath "$.error_type" == "MagicLinkLoginDisabled"
 
 
 # ─────────────────────────────────────────────────────────────

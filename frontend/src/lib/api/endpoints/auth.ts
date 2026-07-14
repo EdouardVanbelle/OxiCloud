@@ -3,9 +3,31 @@
  * primitives here intentionally bypass it (see client.ts) so a 401 surfaces as
  * a genuine failure to the caller.
  */
-import { apiFetch } from '$lib/api/client';
+import { ApiError, apiFetch } from '$lib/api/client';
 import { getCsrfHeaders } from '$lib/api/csrf';
 import type { AuthResponse, User } from '$lib/api/types';
+
+/**
+ * Best-effort parse of the backend `ErrorResponse` shape
+ * (`{ status, error, message, error_type }`). Returns whatever it could
+ * extract; never throws — a malformed body just yields undefineds.
+ */
+async function parseErrorBody(res: Response): Promise<{ errorType?: string; message?: string }> {
+	try {
+		const body = (await res.clone().json()) as {
+			error_type?: unknown;
+			message?: unknown;
+			error?: unknown;
+		};
+		const errorType = typeof body.error_type === 'string' ? body.error_type : undefined;
+		const rawMessage =
+			(typeof body.message === 'string' ? body.message : undefined) ??
+			(typeof body.error === 'string' ? body.error : undefined);
+		return { errorType, message: rawMessage };
+	} catch {
+		return {};
+	}
+}
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
@@ -48,7 +70,13 @@ export async function login(emailOrUsername: string, password: string): Promise<
 		headers: { ...JSON_HEADERS, ...getCsrfHeaders() },
 		body: JSON.stringify({ username: emailOrUsername, password })
 	});
-	if (!res.ok) throw new Error(`login failed: ${res.status}`);
+	if (!res.ok) {
+		// Surface the backend `error_type` so the login page can offer
+		// specific UX: `EmailNotVerified` → "resend verification link",
+		// `PasswordLoginDisabled` → nudge toward magic-link / SSO, etc.
+		const { errorType, message } = await parseErrorBody(res);
+		throw new ApiError(res.status, res.statusText, '/api/auth/login', errorType, message);
+	}
 	return (await res.json()) as AuthResponse;
 }
 
@@ -56,6 +84,20 @@ export interface OidcProviders {
 	enabled: boolean;
 	provider_name?: string;
 	password_login_enabled?: boolean;
+	/**
+	 * True when the server accepts magic-link login requests. The backend
+	 * composes three factors: SMTP wired, `OXICLOUD_AUTH_METHODS` allowlist
+	 * includes `magic_link`, and OIDC is NOT enabled at the deployment
+	 * (OIDC-enabled deployments must not offer magic-link — it would bypass
+	 * any 2FA / step-up the IdP enforces).
+	 */
+	magic_link_login_enabled?: boolean;
+	/**
+	 * True when `OXICLOUD_REQUIRE_VERIFIED_EMAIL` is set. The login page
+	 * uses this to explain the `EmailNotVerified` login response and
+	 * surface a "resend verification link" affordance.
+	 */
+	require_verified_email?: boolean;
 	authorize_endpoint?: string;
 }
 
@@ -135,16 +177,21 @@ export async function exchangeOidcCode(code: string): Promise<User | null> {
 }
 
 /**
- * Register a new user. Raw `fetch` (NOT apiFetch) so a 401/validation failure
- * surfaces to the caller instead of tripping the global refresh-and-redirect
- * interceptor — mirrors the login primitive.
+ * Register a new user. Since PR 18 both `username` and `password` are optional
+ * on the backend: an email-only signup is valid and mints a welcome magic-link.
+ * Raw `fetch` (NOT apiFetch) so a 401/validation failure surfaces to the caller
+ * instead of tripping the global refresh-and-redirect interceptor — mirrors
+ * the login primitive.
  */
-export async function register(username: string, email: string, password: string): Promise<void> {
+export async function register(email: string, password?: string, username?: string): Promise<void> {
+	const body: Record<string, unknown> = { email, role: 'user' };
+	if (password) body.password = password;
+	if (username) body.username = username;
 	const res = await fetch('/api/auth/register', {
 		method: 'POST',
 		credentials: 'same-origin',
 		headers: { ...JSON_HEADERS, ...getCsrfHeaders() },
-		body: JSON.stringify({ username, email, password, role: 'user' })
+		body: JSON.stringify(body)
 	});
 	if (!res.ok) {
 		const e = (await res.json().catch(() => ({}))) as { error?: string; message?: string };

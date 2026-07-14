@@ -470,6 +470,148 @@ pub struct AuthConfig {
     pub hash_parallelism: u32,
     /// Rate limiting / account lockout configuration
     pub rate_limit: RateLimitConfig,
+    /// Allowlist of email domains accepted on the public `POST
+    /// /api/auth/register` endpoint. Empty = no restriction (any
+    /// domain is allowed). Entries are lowercased and trimmed at
+    /// load time; matching is case-insensitive exact-match on the
+    /// post-`@` part of the address.
+    ///
+    /// This is DISTINCT from
+    /// [`MagicLinkConfig::allowed_email_domains`], which gates who
+    /// can be INVITED (email-typed grants + magic-link login for
+    /// existing recipients). This list gates SELF-registration
+    /// only. An operator can, for example, keep public registration
+    /// open to `partner-a.com` and `partner-b.io` while allowing
+    /// invitations to any domain — the two lists are independent.
+    ///
+    /// Example: `["partner-a.com", "partner-b.io"]` — only
+    /// addresses `<anything>@partner-a.com` or
+    /// `<anything>@partner-b.io` can self-register; everything else
+    /// is rejected with 403 `RegistrationDomainNotAllowed`.
+    ///
+    /// Wildcards / subdomain semantics are intentionally out of
+    /// scope (mirroring `MagicLinkConfig::allowed_email_domains`):
+    /// `partner.com` does NOT match `eng.partner.com`. List every
+    /// subdomain explicitly.
+    ///
+    /// Env: `OXICLOUD_REGISTRATION_ALLOWED_EMAIL_DOMAINS` (comma-
+    /// separated).
+    pub registration_allowed_email_domains: Vec<String>,
+    /// Additive auth-policy toggles the operator has opted into.
+    /// Distinct from `allowed_auth_methods` (which enables/disables a
+    /// method wholesale) — this vector composes policy switches that
+    /// tweak the default auth behaviour. Empty = pure defaults in
+    /// effect, matching legacy behaviour.
+    ///
+    /// Vector shape (rather than one boolean per policy) so future
+    /// switches can be added by appending a variant instead of
+    /// growing the env-var surface — `OXICLOUD_AUTH_POLICIES=policy_a,policy_b`.
+    /// Each variant's name carries its own polarity (`Permit...`,
+    /// future `Require...` / `Deny...`); the field name stays neutral
+    /// so a future deny-style policy reads correctly at the call site.
+    ///
+    /// Env: `OXICLOUD_AUTH_POLICIES` (comma-separated).
+    ///
+    /// Deprecated legacy alias: `OXICLOUD_MAGIC_LINK_OPEN_TO_PASSWORD_USERS=true`
+    /// still adds `PermitMagicLinkForPasswordUsers` to the vector for
+    /// backwards compatibility; emits a startup warning encouraging
+    /// migration to the vector form.
+    pub auth_policies: Vec<AuthPolicy>,
+    /// Allowlist of self-service auth methods offered on the login
+    /// page and accepted by their respective endpoints. Empty (the
+    /// default) = both methods allowed, matching legacy behaviour.
+    /// OIDC is orthogonal — controlled via `OxidcConfig::enabled`.
+    ///
+    /// Semantics:
+    ///   * `AuthMethod::Password` allowed → `POST /api/auth/login`
+    ///     accepts credentials; password-based `register` works.
+    ///   * `AuthMethod::MagicLink` allowed → `POST /api/auth/magic-
+    ///     link/send` mints tokens; email-only `register` works.
+    ///
+    /// A method NOT in the list returns 403 with a specific
+    /// `error_type` (`PasswordLoginDisabled`,
+    /// `MagicLinkLoginDisabled`) so frontends can render a
+    /// contextual message rather than a generic auth error.
+    ///
+    /// Startup guard: when `MagicLink` is in the list but
+    /// `SmtpConfig::is_enabled()` is false, the server refuses to
+    /// start. A magic-link policy without a mail sender is a
+    /// misconfiguration that silently locks users out.
+    ///
+    /// Env: `OXICLOUD_AUTH_METHODS` (comma-separated:
+    /// `password,magic_link`). Alias: the older
+    /// `OXICLOUD_OIDC_DISABLE_PASSWORD_LOGIN=true` still removes
+    /// Password from this list when set (backwards-compat).
+    pub allowed_auth_methods: Vec<AuthMethod>,
+    /// Require the user's email to be verified before login is
+    /// permitted. When `true`, `POST /api/auth/login` returns 403
+    /// `EmailNotVerified` for any account whose `email_verified_at`
+    /// is NULL. Users can prove control by clicking a magic-link
+    /// (which stamps `email_verified_at`) — so this composes with
+    /// `AuthMethod::MagicLink` in the allowlist above to provide a
+    /// verification path.
+    ///
+    /// Admin-created users (`POST /api/admin/users`) and the
+    /// first-run setup admin (`POST /api/setup`) get
+    /// `email_verified_at = NOW()` at creation — admin fiat counts
+    /// as verification, matching the OIDC-JIT convention.
+    ///
+    /// Env: `OXICLOUD_REQUIRE_VERIFIED_EMAIL` (default `false`).
+    pub require_verified_email: bool,
+}
+
+/// Self-service auth method. Exposed as `AuthConfig::allowed_auth_methods`
+/// and parsed from `OXICLOUD_AUTH_METHODS` (comma-separated). OIDC is
+/// deliberately excluded — it lives in `OidcConfig` with its own gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMethod {
+    Password,
+    MagicLink,
+}
+
+impl AuthMethod {
+    /// Case-insensitive parse: accepts `password`, `magic_link`, and the
+    /// dash form `magic-link` (some operators habitually use dashes).
+    /// Unknown token returns `None` so the caller can log-and-skip.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "password" => Some(Self::Password),
+            "magic_link" | "magic-link" | "magiclink" => Some(Self::MagicLink),
+            _ => None,
+        }
+    }
+}
+
+/// Additive auth-policy switches. Exposed as `AuthConfig::auth_policies`
+/// and parsed from `OXICLOUD_AUTH_POLICIES` (comma-separated). Each
+/// variant's name states its own polarity — `Permit...` grants an
+/// exception, future `Require...` / `Deny...` variants restrict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthPolicy {
+    /// Allow magic-link login for accounts that ALSO have a password
+    /// configured. Off by default — magic-link is otherwise gated by
+    /// `magic_link_eligibility()` to users without a password
+    /// (mailbox-strength should not shadow a stronger credential).
+    /// Enabling this weakens the password to mailbox-strength for
+    /// affected accounts; opt-in only.
+    ///
+    /// Deprecated legacy alias: `OXICLOUD_MAGIC_LINK_OPEN_TO_PASSWORD_USERS=true`
+    /// adds this variant to the vector with a startup warning.
+    PermitMagicLinkForPasswordUsers,
+}
+
+impl AuthPolicy {
+    /// Case-insensitive parse: accepts `permit_magic_link_for_password_users`
+    /// (canonical) and the dash form. Unknown token returns `None` so
+    /// the caller can log-and-skip.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "permit_magic_link_for_password_users" | "permit-magic-link-for-password-users" => {
+                Some(Self::PermitMagicLinkForPasswordUsers)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Rate limiting and brute-force protection configuration.
@@ -521,7 +663,27 @@ impl Default for AuthConfig {
             hash_time_cost: 3,
             hash_parallelism: 2,
             rate_limit: RateLimitConfig::default(),
+            registration_allowed_email_domains: Vec::new(),
+            auth_policies: Vec::new(),
+            allowed_auth_methods: vec![AuthMethod::Password, AuthMethod::MagicLink],
+            require_verified_email: false,
         }
+    }
+}
+
+impl AuthConfig {
+    /// True iff `method` is enabled (or the allowlist is empty — meaning
+    /// "all methods allowed", matching pre-`OXICLOUD_AUTH_METHODS`
+    /// behaviour when the operator hasn't opted in yet).
+    pub fn is_method_allowed(&self, method: AuthMethod) -> bool {
+        self.allowed_auth_methods.is_empty() || self.allowed_auth_methods.contains(&method)
+    }
+
+    /// True iff `policy` has been opted into via `OXICLOUD_AUTH_POLICIES`
+    /// (or its legacy alias). Default policies are OFF — the vector is
+    /// additive only, no invert / defaults.
+    pub fn has_policy(&self, policy: AuthPolicy) -> bool {
+        self.auth_policies.contains(&policy)
     }
 }
 
@@ -1508,6 +1670,110 @@ impl AppConfig {
             config.auth.rate_limit.lockout_duration_secs = val;
         }
 
+        // Registration email-domain allowlist. Distinct from
+        // `OXICLOUD_EXTERNAL_EMAIL_DOMAINS` (which gates who can be
+        // INVITED via grants + magic link) — this one gates who can
+        // SELF-register via `POST /api/auth/register`. Empty = no
+        // restriction. Same parse shape as the external-domains list:
+        // comma-separated, lowercased, trimmed, empties dropped.
+        if let Ok(v) = env::var("OXICLOUD_REGISTRATION_ALLOWED_EMAIL_DOMAINS") {
+            config.auth.registration_allowed_email_domains = v
+                .split(',')
+                .map(|d| d.trim().to_ascii_lowercase())
+                .filter(|d| !d.is_empty())
+                .collect();
+        }
+
+        // Self-service auth-method allowlist. Empty (unset) = both methods
+        // allowed. Unknown tokens are logged-and-skipped; a completely
+        // unparseable value falls back to the default rather than locking
+        // the operator out. If the resulting list is empty (e.g. the
+        // operator wrote `OXICLOUD_AUTH_METHODS=nope`), we restore the
+        // default — a zero-method allowlist would refuse every login.
+        if let Ok(v) = env::var("OXICLOUD_AUTH_METHODS") {
+            let methods: Vec<AuthMethod> = v
+                .split(',')
+                .filter_map(|s| {
+                    let parsed = AuthMethod::parse(s);
+                    if parsed.is_none() && !s.trim().is_empty() {
+                        eprintln!(
+                            "⚠️  OXICLOUD_AUTH_METHODS: ignoring unknown token '{}' \
+                             (expected: password, magic_link)",
+                            s.trim()
+                        );
+                    }
+                    parsed
+                })
+                .collect();
+            if methods.is_empty() {
+                eprintln!(
+                    "⚠️  OXICLOUD_AUTH_METHODS parsed to an empty allowlist; \
+                     falling back to default (password, magic_link)"
+                );
+            } else {
+                config.auth.allowed_auth_methods = methods;
+            }
+        }
+
+        // Legacy alias: OXICLOUD_OIDC_DISABLE_PASSWORD_LOGIN=true still
+        // removes Password from the allowlist. Its main handling in the
+        // OIDC config block below is preserved for the `login_options`
+        // response; this line makes the effect apply uniformly through
+        // `is_method_allowed(Password)` so services don't need to check
+        // both flags.
+        if let Ok(v) = env::var("OXICLOUD_OIDC_DISABLE_PASSWORD_LOGIN")
+            && v.parse::<bool>().unwrap_or(false)
+        {
+            config
+                .auth
+                .allowed_auth_methods
+                .retain(|m| *m != AuthMethod::Password);
+        }
+
+        if let Ok(v) = env::var("OXICLOUD_REQUIRE_VERIFIED_EMAIL") {
+            config.auth.require_verified_email = v.parse::<bool>().unwrap_or(false);
+        }
+
+        // Auth-policy vector. Additive — each recognised token adds a
+        // variant; unknown tokens are logged-and-skipped so a typo
+        // doesn't silently zero the whole vector (an operator wanting
+        // "no policies" simply doesn't set the env var).
+        //
+        // The legacy alias
+        // `OXICLOUD_MAGIC_LINK_OPEN_TO_PASSWORD_USERS=true` is applied
+        // AFTER this block (see the MagicLinkConfig section below) so a
+        // deployment setting BOTH env vars ends up with a single copy
+        // of `PermitMagicLinkForPasswordUsers` regardless of order.
+        if let Ok(v) = env::var("OXICLOUD_AUTH_POLICIES") {
+            for token in v.split(',') {
+                match AuthPolicy::parse(token) {
+                    Some(policy) => {
+                        if !config.auth.auth_policies.contains(&policy) {
+                            config.auth.auth_policies.push(policy);
+                        }
+                    }
+                    None if !token.trim().is_empty() => {
+                        eprintln!(
+                            "⚠️  OXICLOUD_AUTH_POLICIES: ignoring unknown token '{}' \
+                             (known: permit_magic_link_for_password_users)",
+                            token.trim()
+                        );
+                    }
+                    None => {}
+                }
+            }
+            // Reflect the vector into the legacy magic_link config field
+            // so `magic_link_eligibility()` (the site that reads the
+            // boolean today) doesn't need to know about the new form.
+            if config
+                .auth
+                .auth_policies
+                .contains(&AuthPolicy::PermitMagicLinkForPasswordUsers)
+            {
+                config.magic_link.open_to_password_users = true;
+            }
+        }
+
         // Feature flags
         if let Ok(enable_auth) = env::var("OXICLOUD_ENABLE_AUTH").map(|v| v.parse::<bool>())
             && let Ok(val) = enable_auth
@@ -2072,8 +2338,29 @@ impl AppConfig {
         {
             config.magic_link.send_per_ip_per_hour = n;
         }
+        // Legacy alias — writes the same effect as
+        // `OXICLOUD_AUTH_POLICIES=permit_magic_link_for_password_users`.
+        // Warn once at boot so operators know to migrate before we drop
+        // the old var. Kept indefinitely for compat, but the encouraged
+        // form is the vector.
         if let Ok(v) = env::var("OXICLOUD_MAGIC_LINK_OPEN_TO_PASSWORD_USERS") {
-            config.magic_link.open_to_password_users = v == "true" || v == "1";
+            let enabled = v == "true" || v == "1";
+            config.magic_link.open_to_password_users = enabled;
+            if enabled
+                && !config
+                    .auth
+                    .auth_policies
+                    .contains(&AuthPolicy::PermitMagicLinkForPasswordUsers)
+            {
+                config
+                    .auth
+                    .auth_policies
+                    .push(AuthPolicy::PermitMagicLinkForPasswordUsers);
+            }
+            eprintln!(
+                "⚠️  OXICLOUD_MAGIC_LINK_OPEN_TO_PASSWORD_USERS is deprecated. \
+                 Use `OXICLOUD_AUTH_POLICIES=permit_magic_link_for_password_users` instead."
+            );
         }
         if let Ok(v) = env::var("OXICLOUD_NOTIFY_INTERNAL_USERS_ON_SHARE") {
             config.magic_link.notify_internal_users_on_share = v == "true" || v == "1";

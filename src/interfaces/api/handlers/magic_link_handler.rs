@@ -8,10 +8,10 @@
 //!   2. Issues access + refresh JWT for the token's owning user.
 //!   3. Sets the standard `oxicloud_access` / `oxicloud_refresh` /
 //!      `oxicloud_csrf` cookies (same as `POST /api/auth/login`).
-//!   4. 302-redirects to a frontend hash-route based on the token's
-//!      resource target:
-//!        - Folder       → `/#/files/folder/{id}`
-//!        - File or NULL → `/#/sharedwithme`
+//!   4. 302-redirects to a SPA route based on the token's resource
+//!      target:
+//!        - Folder       → `/files/{id}`
+//!        - File or NULL → `/shared-with-me`
 //!
 //! Files don't have a deep-link route today; v1 lands file invitations
 //! on Shared With Me where the file shows up.
@@ -140,7 +140,7 @@ struct RedeemQuery {
     params(("token" = String, Path, description = "Opaque magic-link token")),
     responses(
         (status = 200, description = "Cross-browser confirmation prompt (HTML page)"),
-        (status = 302, description = "Redemption succeeded — redirects to the resource or to /#/sharedwithme"),
+        (status = 302, description = "Redemption succeeded — redirects to the resource or to /shared-with-me"),
         (status = 410, description = "Token is unknown, expired, or already used"),
         (status = 503, description = "Magic-link feature is not configured on this server"),
     ),
@@ -574,24 +574,32 @@ fn build_success_response(state: &Arc<AppState>, redemption: MagicLinkRedemption
     response
 }
 
-/// Build the SPA hash-route the redemption should land on. Mirrors the
-/// front-end's `deserializeHash()` parser at `static/js/app/main.js`.
+/// Build the SPA route the redemption should land on.
 ///
-/// - **Resource token** (folder invitation): deep-link to the resource.
-/// - **NULL-resource token + external user**: land on `/#/sharedwithme`
+/// - **Resource token** (folder invitation): deep-link into the folder
+///   view. SvelteKit `files/[...path]` accepts folder IDs as path
+///   segments (see `frontend/src/routes/files/[...path]/+page.svelte`
+///   — `goto(resolve(`/files/${folder.id}`))`).
+/// - **NULL-resource token + external user**: land on `/shared-with-me`
 ///   (their entry point — they own no folders themselves).
-/// - **NULL-resource token + internal user**: land on `/#/files` (the
+/// - **NULL-resource token + internal user**: land on `/files` (the
 ///   user has a home folder; the "shared with me" view would be empty
 ///   on first signup, so home is the better welcome). Internal users
 ///   on NULL-resource tokens come from the email-only-signup welcome
 ///   path (PR 18) or from a magic-link they requested themselves
 ///   while password-eligible-and-lenient-mode (PR 19).
+///
+/// Historical: pre-SvelteKit these were hash routes
+/// (`/#/files`, `/#/sharedwithme`, `/#/files/folder/{id}`) served by the
+/// legacy vanilla frontend. Landing on those now serves the legacy
+/// shell (with old meta-CSP + inline scripts) instead of the SPA and
+/// triggers a CSP violation on modern deployments.
 fn redirect_target(redemption: &MagicLinkRedemption) -> String {
     match (redemption.resource_kind, redemption.resource_id) {
         (Some(MagicLinkResourceKind::Folder), Some(folder_id)) => {
-            format!("/#/files/folder/{}", folder_id)
+            format!("/files/{}", folder_id)
         }
-        _ if redemption.auth.user.is_external => "/#/sharedwithme".to_string(),
-        _ => "/#/files".to_string(),
+        _ if redemption.auth.user.is_external => "/shared-with-me".to_string(),
+        _ => "/files".to_string(),
     }
 }

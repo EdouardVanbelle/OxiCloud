@@ -56,7 +56,8 @@ The frontend's "Username or email" field submits whatever the user typed; the JS
 ```
 1. has_oidc()        → reject "oidc_user"   (unconditional)
 2. has_password()    → reject "has_password" by default
-                       allow when OXICLOUD_MAGIC_LINK_OPEN_TO_PASSWORD_USERS=true
+                       allow when OXICLOUD_AUTH_POLICIES contains
+                       `permit_magic_link_for_password_users`
 3. neither           → allow
 ```
 
@@ -133,7 +134,7 @@ In all four cases the real reason is recorded in the `audit` channel — operato
 
 | Concern | Current treatment |
 |---|---|
-| **Mailbox compromise = account compromise (lenient mode)** | When `OXICLOUD_MAGIC_LINK_OPEN_TO_PASSWORD_USERS=true`, a user's mailbox is as strong as their password — flip the password by mail. Operator opt-in only; off by default. Aligns with modern SaaS norms (Slack, Notion, Substack). |
+| **Mailbox compromise = account compromise (lenient mode)** | When `OXICLOUD_AUTH_POLICIES` contains `permit_magic_link_for_password_users`, a user's mailbox is as strong as their password — flip the password by mail. Operator opt-in only; off by default. Aligns with modern SaaS norms (Slack, Notion, Substack). |
 | **Mailbox compromise = account compromise (strict mode)** | Only applies to magic-link-eligible users (no other credential). Their mailbox **is** their credential by design. Password-secured accounts are unaffected. |
 | **No native MFA** | Today OIDC delegation is the only path to MFA — the IdP (Keycloak, Authentik, Okta) enforces TOTP/WebAuthn/etc., OxiCloud sees only the resulting ID token. This is why OIDC users are unconditionally excluded from magic-link. Native TOTP / WebAuthn enrolment is a future feature. |
 | **Magic-link as bearer token (login-via-email)** | Closed (PR 22). Login tokens carry a per-request challenge mirrored into the originating browser's `oxicloud_magic_request` cookie. Redemption from a different browser shows a confirmation page rather than auto-signing. Asymmetric TTL: login tokens expire in 10 min, invitations in 24 h. |

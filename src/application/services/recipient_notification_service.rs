@@ -486,7 +486,7 @@ impl RecipientNotificationService {
         // body — same pattern as `MagicLinkInviteService::issue_invitation`.
         let inviter_short = granter.display_full(false);
         let inviter_full = granter.display_full(true);
-        let login_link = format!("{}/#/login", self.public_base_url.trim_end_matches('/'),);
+        let login_link = format!("{}/login", self.public_base_url.trim_end_matches('/'),);
 
         let args: Vec<(&str, &str)> = vec![
             ("inviter", inviter_short.as_str()),

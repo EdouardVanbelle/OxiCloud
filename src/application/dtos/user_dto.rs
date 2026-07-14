@@ -264,13 +264,26 @@ pub struct OidcExchangeDto {
     pub code: String,
 }
 
-/// Information about available OIDC providers
+/// Information about available OIDC providers + self-service auth
+/// methods enabled on the deployment. Consumed by the login page to
+/// decide which forms/buttons to render.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct OidcProviderInfoDto {
     pub enabled: bool,
     pub provider_name: String,
     pub authorize_endpoint: String,
     pub password_login_enabled: bool,
+    /// True iff the server accepts magic-link login requests
+    /// (`OXICLOUD_AUTH_METHODS` includes `magic_link` AND SMTP is
+    /// configured). Frontend renders the magic-link form when true.
+    #[serde(default)]
+    pub magic_link_login_enabled: bool,
+    /// True iff `OXICLOUD_REQUIRE_VERIFIED_EMAIL` is set. Frontend uses
+    /// this hint to explain the `EmailNotVerified` login response and
+    /// to nudge new users toward the magic-link verification path
+    /// straight after signup.
+    #[serde(default)]
+    pub require_verified_email: bool,
 }
 
 /// Claims extracted from the validated OIDC ID token

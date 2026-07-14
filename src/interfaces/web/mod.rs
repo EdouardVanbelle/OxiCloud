@@ -169,10 +169,43 @@ fn csp_hash(script: &str) -> String {
 
 /// Text content of every inline `<script>` (no `src`) in `html`, returned as
 /// byte-exact slices suitable for CSP hashing.
+///
+/// Skips HTML comments (`<!-- ... -->`) before matching `<script`. Without this,
+/// a comment containing the literal string `<script>` (e.g. the theme-init
+/// explanatory block in the SvelteKit shell) causes the scanner to match the
+/// comment first, consume through the real script's `</script>`, and emit the
+/// wrong hash — the real inline script then fails CSP with `script-src 'self'`.
 fn inline_scripts(html: &str) -> Vec<&str> {
     let mut scripts = Vec::new();
     let mut cursor = 0;
-    while let Some(rel) = find_ci(&html[cursor..], "<script") {
+    while cursor < html.len() {
+        let tail = &html[cursor..];
+        // Skip past HTML comments — they may contain the literal
+        // string `<script>` in prose and would otherwise poison the
+        // scanner. Comment-nesting is not a spec concern.
+        let next_comment = find_ci(tail, "<!--");
+        let next_script = find_ci(tail, "<script");
+        match (next_comment, next_script) {
+            (Some(c), Some(s)) if c < s => {
+                let end_rel = find_ci(&tail[c + 4..], "-->").map(|r| c + 4 + r + 3);
+                cursor = match end_rel {
+                    Some(e) => cursor + e,
+                    None => break, // unterminated comment; give up
+                };
+                continue;
+            }
+            (Some(c), None) => {
+                let end_rel = find_ci(&tail[c + 4..], "-->").map(|r| c + 4 + r + 3);
+                cursor = match end_rel {
+                    Some(e) => cursor + e,
+                    None => break,
+                };
+                continue;
+            }
+            (None, None) => break,
+            _ => {} // next thing is a real <script
+        }
+        let rel = next_script.unwrap();
         let tag_start = cursor + rel;
         // End of the opening tag.
         let Some(gt) = html[tag_start..].find('>') else {
@@ -261,6 +294,31 @@ mod tests {
             set.insert(csp_hash(s));
         }
         assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn html_comment_mentioning_script_does_not_poison_scanner() {
+        // The SvelteKit shell has an explanatory comment referring to
+        // `<script>` in its prose (see static-dist/index.html theme-init
+        // block). Without comment skipping the scanner matches the
+        // comment's substring first, consumes through the real script's
+        // close tag, and emits the wrong hash — the real script then
+        // fails CSP with `script-src 'self'`.
+        let html = concat!(
+            "<!-- svelte.config.js finds this <script> by id and adds its hash -->\n",
+            "<script id=\"theme-init\">alert(1);</script>\n",
+            "<script>boot();</script>\n",
+        );
+        let scripts = inline_scripts(html);
+        assert_eq!(scripts, vec!["alert(1);", "boot();"]);
+    }
+
+    #[test]
+    fn unterminated_comment_bails_out_gracefully() {
+        // Malformed input: `<!--` never closed. Must not loop forever
+        // and must not falsely capture anything downstream.
+        let html = "<!-- unterminated <script>evil()</script>";
+        assert!(inline_scripts(html).is_empty());
     }
 
     #[test]

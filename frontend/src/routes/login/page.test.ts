@@ -41,7 +41,15 @@ beforeEach(() => {
 	pageState.url = new URL('http://localhost/login');
 	session.user = null;
 	m(auth.fetchMe).mockResolvedValue(null);
-	m(auth.getOidcProviders).mockResolvedValue({ providers: [] });
+	// Default provider info: both password + magic-link enabled, OIDC off.
+	// The unified login form's magic-link submit path is only reachable
+	// when `magic_link_login_enabled === true` — without this pin the
+	// "sends a magic link" test can't reach `sendMagicLink()`.
+	m(auth.getOidcProviders).mockResolvedValue({
+		enabled: false,
+		password_login_enabled: true,
+		magic_link_login_enabled: true
+	});
 	m(auth.getAuthStatus).mockResolvedValue({ initialized: true });
 });
 
@@ -75,16 +83,21 @@ it('enters setup mode on a fresh install', async () => {
 	await screen.findByTestId('login-setup-form');
 });
 
-it('sends a magic link', async () => {
+it('sends a magic link when the password field is left empty', async () => {
+	// Unified form: the same identifier input drives both flows. Filling
+	// the identifier and leaving password empty makes `submitAsMagicLink`
+	// derived resolve to true — the single submit button then dispatches
+	// to `sendMagicLink` instead of `login`.
 	m(auth.sendMagicLink).mockResolvedValue('sent');
 	render(LoginPage);
 	await screen.findByTestId('login-form');
-	await fireEvent.click(screen.getByTestId('login-magic-toggle-btn'));
-	await fireEvent.input(screen.getByTestId('login-magic-email-input'), {
+	await fireEvent.input(screen.getByTestId('login-username-input'), {
 		target: { value: 'a@b.test' }
 	});
-	await fireEvent.click(screen.getByTestId('login-magic-send-btn'));
+	// Password intentionally NOT filled.
+	await fireEvent.click(screen.getByTestId('login-submit-btn'));
 	await waitFor(() => expect(auth.sendMagicLink).toHaveBeenCalledWith('a@b.test'));
+	expect(auth.login).not.toHaveBeenCalled();
 });
 
 it('registers a new account', async () => {

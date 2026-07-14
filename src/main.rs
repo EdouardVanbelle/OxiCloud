@@ -174,7 +174,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Explicit file → hard error on a missing/unreadable path.
             // Silent fallback would defeat the purpose of pinning the
             // config source.
-            if let Err(e) = dotenvy::from_filename(path) {
+            //
+            // `from_filename_override` (not `from_filename`) so the
+            // config file wins over the shell's process env. Without
+            // this, an operator's leftover `export OXICLOUD_*` from a
+            // dev session leaks into a `--config` invocation and
+            // silently corrupts test/CI runs — a rejected shell var
+            // stays in effect despite the "explicit config" contract.
+            // For the default (no `--config`) path we KEEP the
+            // non-overriding `dotenvy::dotenv()` — that path is dev
+            // convenience where a live shell export is the expected
+            // ad-hoc override.
+            if let Err(e) = dotenvy::from_filename_override(path) {
                 eprintln!("failed to load --config {path}: {e}");
                 std::process::exit(2);
             }
@@ -284,6 +295,33 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load configuration from environment variables
     let config = common::config::AppConfig::from_env();
+
+    // SECURITY: fail-closed on incoherent auth-method configuration. A
+    // magic-link-only policy without a working SMTP sender locks every
+    // user out — nothing can mint tokens, so nobody can log in. Refuse
+    // to start rather than boot into a bricked auth surface.
+    //
+    // The SMTP-mock (`OXICLOUD_SMTP_MOCK=true` in `tests/common/server.env`)
+    // sets `OXICLOUD_SMTP_HOST=localhost`, so `is_enabled()` returns
+    // true and the Hurl test harness satisfies this gate without a real
+    // mail server.
+    if config
+        .auth
+        .allowed_auth_methods
+        .contains(&common::config::AuthMethod::MagicLink)
+        && !config
+            .auth
+            .allowed_auth_methods
+            .contains(&common::config::AuthMethod::Password)
+        && !config.smtp.is_enabled()
+    {
+        panic!(
+            "FATAL: OXICLOUD_AUTH_METHODS enables `magic_link` as the ONLY \
+             self-service auth method, but no SMTP transport is configured. \
+             Set OXICLOUD_SMTP_HOST (and matching OXICLOUD_SMTP_* settings) \
+             or add `password` to OXICLOUD_AUTH_METHODS. Refusing to start."
+        );
+    }
 
     // Surface the upload-size limits at startup. Operators (and the
     // CI runner) need to see what's actually in effect — a silent

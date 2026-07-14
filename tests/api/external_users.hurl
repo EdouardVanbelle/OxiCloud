@@ -159,7 +159,11 @@ GET {{magic_url}}
 
 HTTP 302
 [Asserts]
-header "Location" == "/#/files/folder/{{ext_folder_id}}"
+# SvelteKit `files/[...path]` accepts a folder ID as a path segment.
+# Historical value pre-migration was `/#/files/folder/{id}` (legacy
+# vanilla-frontend hash-routing). Kept in sync with the redemption
+# handler in src/interfaces/api/handlers/magic_link_handler.rs.
+header "Location" == "/files/{{ext_folder_id}}"
 [Captures]
 bob_access_token: cookie "oxicloud_access"
 
@@ -240,9 +244,15 @@ HTTP 200
 [Asserts]
 jsonpath "$.id" == "{{alice_user_id}}"
 jsonpath "$.is_external" == false
-# PR 23 — alice is the admin set up via classic password registration
-# and has never clicked a magic-link, so her email is unverified.
-jsonpath "$.email_verified_at" not exists
+# Setup admin is auto-verified at creation. `setup_create_admin` stamps
+# `email_verified_at = NOW()` — admin fiat counts as verification,
+# matching the OIDC-JIT convention. Rationale: an operator running the
+# first-run wizard is authoritative by construction (they set the
+# password at the console on a fresh install). Without this, flipping
+# `OXICLOUD_REQUIRE_VERIFIED_EMAIL=true` on an existing deployment
+# would lock the sole admin out of their own instance. The admin login
+# exemption is a second layer of defense; this stamp is the primary.
+jsonpath "$.email_verified_at" exists
 
 # 11e — bob CANNOT enumerate unrelated users. A random UUID returns 404
 #        (anti-enumeration; same response as "user doesn't exist").
@@ -350,7 +360,7 @@ jsonpath "$.message" contains "sign-in link"
 
 # 15b — Capture the fresh email; extract the NEW magic-link URL.
 #       This is a NULL-resource token (login flow), so redemption
-#       will land on /#/sharedwithme rather than a deep-link.
+#       will land on /shared-with-me rather than a deep-link.
 GET {{base_url}}/api/admin/smtp/test/captured?to=bob@externalcompany.com
 Authorization: Bearer {{alice_token}}
 
@@ -376,13 +386,17 @@ body contains "different browser"
 # 15c-ii — Same token, with `?confirm=1` to acknowledge the
 #          cross-browser redemption. PR 22 audit-logs
 #          `cross_browser_confirmed=true` on the success line.
-#          Lands on /#/sharedwithme since the token has no
-#          resource target.
+#          Lands on /shared-with-me since the token has no
+#          resource target (external user, NULL resource_kind).
 GET {{login_magic_url}}?confirm=1
 
 HTTP 302
 [Asserts]
-header "Location" == "/#/sharedwithme"
+# SvelteKit route (path-based). Historical value pre-migration was
+# `/#/sharedwithme` (legacy vanilla-frontend hash-routing). Kept in
+# sync with `redirect_target()` in
+# src/interfaces/api/handlers/magic_link_handler.rs.
+header "Location" == "/shared-with-me"
 [Captures]
 bob_relogin_token: cookie "oxicloud_access"
 
@@ -408,10 +422,15 @@ Authorization: Bearer {{alice_token}}
 HTTP 404
 
 # 15f — Email maps to an existing internal user with a password
-#        (Alice the admin) → uniform 200 but the magic link is NOT
-#        actually sent. has_login_credential() short-circuits the
-#        service so password/OIDC accounts cannot be bypassed via
-#        mailbox ownership at the moment of request.
+#        (Alice the admin). The test env has
+#        `OXICLOUD_AUTH_POLICIES=permit_magic_link_for_password_users`
+#        set globally in `tests/common/server.env`, so the `has_password`
+#        eligibility check is bypassed and the link IS minted. Under
+#        the STRICT default (policy absent), the eligibility ladder
+#        would refuse with `reason="has_password"` and no mail would
+#        ship — that path is covered by a Rust unit test on
+#        `magic_link_eligibility()` because it needs the opposite env
+#        which we can't hot-swap mid-run.
 POST {{base_url}}/api/auth/magic-link/send
 Content-Type: application/json
 { "email": "{{email}}" }
@@ -420,10 +439,15 @@ HTTP 200
 [Asserts]
 jsonpath "$.message" contains "sign-in link"
 
+# With the permit policy, a mail WAS captured. Rate-limit slot burned
+# either way (increment fires before eligibility) — Step 16's math
+# still holds.
 GET {{base_url}}/api/admin/smtp/test/captured?to={{email}}
 Authorization: Bearer {{alice_token}}
 
-HTTP 404
+HTTP 200
+[Asserts]
+jsonpath "$.to" == "{{email}}"
 
 
 # ─────────────────────────────────────────────────────────────

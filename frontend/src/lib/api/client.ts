@@ -142,12 +142,26 @@ export async function apiJson<T>(input: RequestInfo | URL, init?: RequestInit): 
 }
 
 export class ApiError extends Error {
+	/**
+	 * `error_type` field from the backend's `ErrorResponse` body, when
+	 * present. Callers switch on this to render specific UX for
+	 * distinguished failures (e.g. `EmailNotVerified` → "resend
+	 * verification link" prompt). Falls back to `undefined` when the
+	 * response body isn't parseable or the endpoint doesn't emit one.
+	 */
+	readonly errorType?: string;
+
 	constructor(
 		readonly status: number,
 		readonly statusText: string,
-		readonly resource: RequestInfo | URL
+		readonly resource: RequestInfo | URL,
+		errorType?: string,
+		serverMessage?: string
 	) {
-		super(`API ${status} ${statusText} for ${urlString(resource as RequestInfo | URL)}`);
+		super(
+			serverMessage ?? `API ${status} ${statusText} for ${urlString(resource as RequestInfo | URL)}`
+		);
 		this.name = 'ApiError';
+		this.errorType = errorType;
 	}
 }

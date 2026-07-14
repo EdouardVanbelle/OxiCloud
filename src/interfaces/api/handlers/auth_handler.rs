@@ -127,18 +127,34 @@ pub async fn register(
         }
     };
 
-    // Block password registration when OIDC-only mode is active.
-    // Email-only signup still works in OIDC-only mode (no password
-    // stored; the user authenticates via magic-link).
+    // Block password registration when the policy forbids password
+    // logins (OIDC-only mode OR `OXICLOUD_AUTH_METHODS` allowlist
+    // without `password`). Email-only signup still works — the user
+    // authenticates via magic-link or SSO on their first visit.
     if dto.password.is_some()
-        && auth_service
+        && !auth_service
             .auth_application_service
-            .password_login_disabled()
+            .is_password_login_allowed()
     {
         return Err(AppError::new(
             StatusCode::FORBIDDEN,
-            "Password registration is disabled. Please use SSO/OIDC to sign in.",
+            "Password registration is disabled by policy.",
             "PasswordRegistrationDisabled",
+        ));
+    }
+
+    // Symmetric guard: when magic-link is off, an email-only signup has
+    // no path to a session (there's no token to click). Refuse rather
+    // than silently succeed and leave the user with an unusable account.
+    if dto.password.is_none()
+        && !auth_service
+            .auth_application_service
+            .is_magic_link_login_allowed()
+    {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "Email-only registration requires magic-link login, which is disabled.",
+            "MagicLinkLoginDisabled",
         ));
     }
 
@@ -151,6 +167,47 @@ pub async fn register(
             "Public registration has been disabled by the administrator.",
             "RegistrationDisabled",
         ));
+    }
+
+    // Operator-configured allowlist of email domains that can
+    // self-register. Empty list = no restriction (any domain accepted).
+    // Distinct from `OXICLOUD_EXTERNAL_EMAIL_DOMAINS`, which gates
+    // magic-link / grant invitations — an operator can leave that
+    // permissive while locking self-registration down, or vice versa.
+    //
+    // Matching mirrors the magic-link list:
+    //   * post-`@` part of the address is extracted and lowercased
+    //   * case-insensitive exact match against the allowlist
+    //   * no wildcard / subdomain expansion (list every domain
+    //     explicitly, per the config docstring)
+    //
+    // Audit-log denials at the `audit` target so operators can spot
+    // enumeration / probe attempts — mirrors the shape used by the
+    // magic-link domain rejection at
+    // `magic_link_invite_service.rs`.
+    let allow_list = &state.core.config.auth.registration_allowed_email_domains;
+    if !allow_list.is_empty() {
+        let domain = dto
+            .email
+            .split('@')
+            .nth(1)
+            .map(|d| d.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        if domain.is_empty() || !allow_list.iter().any(|d| d == &domain) {
+            tracing::info!(
+                target: "audit",
+                event = "auth.register_rejected",
+                reason = "domain_not_allowed",
+                domain = %domain,
+                "👮🏻‍♂️ Public registration refused: email domain not in \
+                 OXICLOUD_REGISTRATION_ALLOWED_EMAIL_DOMAINS"
+            );
+            return Err(AppError::new(
+                StatusCode::FORBIDDEN,
+                "Registration is not open to this email domain.",
+                "RegistrationDomainNotAllowed",
+            ));
+        }
     }
 
     // Email-only signup requires SMTP. Without it the welcome mail
@@ -310,13 +367,19 @@ pub async fn login(
         ));
     }
 
-    // Check if password login is disabled (OIDC-only mode)
-    if auth_service
+    // Check if password login is allowed (composes the legacy OIDC-only
+    // flag with the newer `OXICLOUD_AUTH_METHODS` allowlist). When
+    // disabled, return `PasswordLoginDisabled` so the SPA can hide the
+    // password field and surface the available fallback (magic-link or
+    // SSO) instead of showing a generic "invalid credentials".
+    if !auth_service
         .auth_application_service
-        .password_login_disabled()
+        .is_password_login_allowed()
     {
-        return Err(AppError::unauthorized(
-            "Password login is disabled. Please use SSO/OIDC to sign in.",
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "Password login is disabled by policy.",
+            "PasswordLoginDisabled",
         ));
     }
 
@@ -384,6 +447,55 @@ pub async fn login(
                 .login_lockout
                 .record_failure(&dto.username, &client_ip);
             tracing::error!("Login failed for user {}: {}", dto.username, err);
+            // Remap the `require_verified_email` refusal (message
+            // string comes from AuthApplicationService::login) into a
+            // distinguished error_type and, critically, PIGGYBACK a
+            // verification link on the successful-password proof: the
+            // caller just showed they know the password, so we can
+            // safely mint a verification magic-link for their address
+            // without going through the anti-enum-fronted
+            // `magic-link/send` (which would refuse `has_password`).
+            //
+            // This branch is reached ONLY when the password validated
+            // successfully — the service checks `require_verified_email`
+            // AFTER the password check specifically so an attacker
+            // without the password can't discover an account's
+            // verification state from the response shape.
+            if err.message == "Email not verified" {
+                // Best-effort auto-send. We swallow any error and still
+                // return the same EmailNotVerified response — the
+                // frontend hint ("check your inbox") doubles as the
+                // resend affordance if delivery didn't land.
+                if let Some(invite_svc) = state.magic_link_invite_service.as_ref() {
+                    // Re-look up the user by identifier (mirrors the
+                    // service's login dispatch) to get the User entity
+                    // that the verification helper needs. On any
+                    // lookup failure we skip the send — attacker never
+                    // sees the difference.
+                    let lookup = if dto.username.contains('@') {
+                        auth_service
+                            .auth_application_service
+                            .find_user_by_email(&dto.username)
+                            .await
+                    } else {
+                        auth_service
+                            .auth_application_service
+                            .find_user_by_username(&dto.username)
+                            .await
+                    };
+                    if let Ok(user) = lookup {
+                        let challenge = cookie_auth::generate_magic_request_challenge();
+                        let _ = invite_svc
+                            .send_verification_link_authenticated(&user, &challenge)
+                            .await;
+                    }
+                }
+                return Err(AppError::new(
+                    StatusCode::FORBIDDEN,
+                    "Your email is not verified. We sent a verification link to your inbox.",
+                    "EmailNotVerified",
+                ));
+            }
             Err(err.into())
         }
     }
@@ -829,12 +941,22 @@ pub async fn oidc_providers(
 
     let auth_app = &auth_service.auth_application_service;
 
+    // Policy questions the SPA needs to decide which forms to render.
+    // `is_magic_link_login_allowed()` composes SMTP wiring + allowlist +
+    // the "OIDC master → no magic-link login" hard rule; the login page
+    // shows the magic-link tab iff this is true.
+    let password_login_enabled = auth_app.is_password_login_allowed();
+    let magic_link_login_enabled = auth_app.is_magic_link_login_allowed();
+    let require_verified_email = auth_app.require_verified_email();
+
     if !auth_app.oidc_enabled() {
         return Ok(Json(OidcProviderInfoDto {
             enabled: false,
             provider_name: String::new(),
             authorize_endpoint: String::new(),
-            password_login_enabled: true,
+            password_login_enabled,
+            magic_link_login_enabled,
+            require_verified_email,
         }));
     }
 
@@ -844,7 +966,9 @@ pub async fn oidc_providers(
         enabled: true,
         provider_name: config.provider_name.clone(),
         authorize_endpoint: "/api/auth/oidc/authorize".to_string(),
-        password_login_enabled: !config.disable_password_login,
+        password_login_enabled,
+        magic_link_login_enabled,
+        require_verified_email,
     }))
 }
 
@@ -1086,6 +1210,21 @@ pub async fn send_magic_link(
         ));
     };
 
+    // Policy: `OXICLOUD_AUTH_METHODS` may forbid magic-link login even
+    // when SMTP is wired (an operator might want the invite path — used
+    // by admins to seed accounts — without offering it as a login
+    // fallback). Refuse with the same anti-enum shape as any other
+    // policy-gated endpoint.
+    if let Some(auth) = state.auth_service.as_ref()
+        && !auth.auth_application_service.is_magic_link_login_allowed()
+    {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "Magic-link login is disabled by policy.",
+            "MagicLinkLoginDisabled",
+        ));
+    }
+
     // Authentication signal — presence (not validity) of Bearer header
     // OR access cookie. We deliberately don't decode the JWT here: a
     // stale-cookie holder gets a 401 from any other endpoint they
@@ -1122,6 +1261,26 @@ pub async fn send_magic_link(
             "InvalidInput",
         )
     })?;
+
+    // Login-identifier resolution. The DTO field is named `email` for
+    // backwards-compat, but the value may be either an email address or
+    // a username — dispatch matches the `POST /api/auth/login`
+    // convention (`@` present → email, else → username). Username
+    // lookups happen BEFORE rate-limiting so `alice` and
+    // `alice@example.com` bucket on the same key; without this,
+    // alternating shapes would double the effective per-email budget.
+    //
+    // Anti-enum: username misses fall through to `body.email` unchanged
+    // and land in the malformed_email / no_account branches downstream,
+    // both of which return the uniform 200 with an audit line.
+    let resolved_email = if let Some(auth) = state.auth_service.as_ref() {
+        auth.auth_application_service
+            .resolve_login_identifier_to_email(&body.email)
+            .await
+            .unwrap_or_else(|| body.email.clone())
+    } else {
+        body.email.clone()
+    };
 
     // Per-request browser-binding challenge (PR 22). Generated for
     // every request and set as a cookie on every 200 response —
@@ -1170,8 +1329,11 @@ pub async fn send_magic_link(
         // casing/IDN-host tricks don't multiply the budget. Malformed
         // addresses skip this check and fall through to the service,
         // which records its own audit entry under reason="malformed_email".
+        // Buckets on the RESOLVED email (post-username lookup) so
+        // username and email inputs for the same account share one
+        // budget — see resolve_login_identifier_to_email() above.
         if let Ok(normalised) =
-            crate::domain::services::email_normalize::normalize_email(&body.email)
+            crate::domain::services::email_normalize::normalize_email(&resolved_email)
             && state
                 .magic_link_send_per_email_rate_limiter
                 .check_and_increment(&normalised)
@@ -1191,8 +1353,12 @@ pub async fn send_magic_link(
     // The service swallows every operational outcome and logs the truth
     // via the audit channel; we surface only an internal error (DB down,
     // etc.). Anti-enumeration means we always return the same body.
+    // We pass the resolved email — if the caller sent a username, the
+    // service sees the corresponding address; if the caller sent a
+    // bare unknown identifier, the service still audits it as
+    // malformed_email / no_account.
     invite_svc
-        .send_login_link(&body.email, &challenge)
+        .send_login_link(&resolved_email, &challenge)
         .await
         .map_err(AppError::from)?;
 

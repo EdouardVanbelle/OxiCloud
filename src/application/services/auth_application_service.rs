@@ -7,7 +7,7 @@ use crate::application::ports::auth_ports::{
 };
 use crate::application::ports::user_lifecycle::{DeletionMode, LogoutReason};
 use crate::application::services::user_lifecycle_service::UserLifecycleService;
-use crate::common::config::OidcConfig;
+use crate::common::config::{AuthMethod, OidcConfig};
 use crate::common::errors::{DomainError, ErrorKind};
 use crate::domain::entities::magic_link_token::{MagicLinkResourceKind, MagicLinkStatus};
 use crate::domain::entities::session::Session;
@@ -148,6 +148,16 @@ pub struct AuthApplicationService {
     /// per request; the known mutation paths (`change_user_role`,
     /// `set_user_active`) also invalidate eagerly.
     user_flags_cache: Cache<Uuid, UserFlags>,
+    /// Self-service auth-method allowlist (mirrors
+    /// `AuthConfig::allowed_auth_methods`). Empty = both methods
+    /// allowed. Consulted by login / register / magic-link handlers via
+    /// `is_password_login_allowed()` / `is_magic_link_login_allowed()`
+    /// so callers don't have to reach for the app config.
+    allowed_auth_methods: Vec<AuthMethod>,
+    /// Whether `POST /api/auth/login` refuses accounts whose
+    /// `email_verified_at IS NULL`. Mirrors
+    /// `AuthConfig::require_verified_email`.
+    require_verified_email: bool,
 }
 
 /// TTL for [`AuthApplicationService::user_flags_cache`]. Upper bound on how
@@ -191,7 +201,93 @@ impl AuthApplicationService {
                 .max_capacity(10_000)
                 .time_to_live(USER_FLAGS_CACHE_TTL)
                 .build(),
+            allowed_auth_methods: vec![AuthMethod::Password, AuthMethod::MagicLink],
+            require_verified_email: false,
         }
+    }
+
+    /// Populates the auth-method allowlist + `require_verified_email`
+    /// snapshot from the loaded config. Called by the DI factory. If
+    /// left uncalled (test builds), defaults are permissive: both
+    /// methods enabled, verified-email not required.
+    pub fn with_auth_policy(
+        mut self,
+        allowed_methods: Vec<AuthMethod>,
+        require_verified_email: bool,
+    ) -> Self {
+        self.allowed_auth_methods = allowed_methods;
+        self.require_verified_email = require_verified_email;
+        self
+    }
+
+    /// True iff `POST /api/auth/login` is a supported endpoint on this
+    /// deployment. Composes the OIDC `disable_password_login` legacy
+    /// flag with the newer `OXICLOUD_AUTH_METHODS` allowlist.
+    pub fn is_password_login_allowed(&self) -> bool {
+        !self.password_login_disabled()
+            && (self.allowed_auth_methods.is_empty()
+                || self.allowed_auth_methods.contains(&AuthMethod::Password))
+    }
+
+    /// True iff `POST /api/auth/magic-link/send` should mint tokens for
+    /// end-user login on this deployment.
+    ///
+    /// Requires ALL of:
+    ///   * repo wired (SMTP configured, tokens can actually be minted);
+    ///   * allowlist permits `MagicLink` (or is empty = permissive);
+    ///   * OIDC is NOT enabled at the deployment level.
+    ///
+    /// The OIDC guard is a hard rule: when OIDC is enabled it is the
+    /// master identity provider — magic-link would bypass any 2FA / step-up
+    /// policy that the IdP enforces. An operator running OIDC + local
+    /// accounts hybrid must NOT expose magic-link login for the local
+    /// accounts either, because a user provisioned via OIDC-JIT could
+    /// receive a magic-link on the same mailbox and sidestep MFA. Admin-
+    /// mediated invites use OIDC or password bootstrap instead.
+    pub fn is_magic_link_login_allowed(&self) -> bool {
+        self.magic_link_enabled()
+            && !self.oidc_enabled()
+            && (self.allowed_auth_methods.is_empty()
+                || self.allowed_auth_methods.contains(&AuthMethod::MagicLink))
+    }
+
+    /// True iff login should reject accounts with `email_verified_at IS
+    /// NULL`. Backed by `OXICLOUD_REQUIRE_VERIFIED_EMAIL`.
+    pub fn require_verified_email(&self) -> bool {
+        self.require_verified_email
+    }
+
+    /// Resolve a login-identifier (username OR email) to the account's
+    /// registered email address. Mirrors the `POST /api/auth/login`
+    /// dispatcher (`@` presence → email lookup, else → username
+    /// lookup). Returns `None` when the identifier doesn't match any
+    /// account — callers that need anti-enumeration semantics MUST
+    /// still return their uniform response after logging the reason.
+    ///
+    /// The username namespace forbids `@` (PR 16), so the two paths
+    /// are disjoint — no ambiguity.
+    pub async fn resolve_login_identifier_to_email(&self, identifier: &str) -> Option<String> {
+        if identifier.contains('@') {
+            Some(identifier.to_string())
+        } else {
+            self.user_storage
+                .get_user_by_username(identifier)
+                .await
+                .ok()
+                .map(|u| u.email().to_string())
+        }
+    }
+
+    /// Direct lookup helpers used by handlers that need the full `User`
+    /// entity (not just the email). Mirrors the internal `user_storage`
+    /// calls the service already makes in `login`. Currently used by
+    /// the login handler to auto-mint a verification magic-link after
+    /// a successful password check.
+    pub async fn find_user_by_email(&self, email: &str) -> Result<User, DomainError> {
+        self.user_storage.get_user_by_email(email).await
+    }
+    pub async fn find_user_by_username(&self, username: &str) -> Result<User, DomainError> {
+        self.user_storage.get_user_by_username(username).await
     }
 
     /// Wire the magic-link token repository. Called from the DI factory
@@ -508,6 +604,13 @@ impl AuthApplicationService {
             )
         })?;
 
+        // First-run admin is authoritative by definition — they set the
+        // password themselves, at the console, on a fresh install. Mark
+        // verified so `OXICLOUD_REQUIRE_VERIFIED_EMAIL` never locks the
+        // sole account with root-level power out of their own instance.
+        let mut user = user;
+        user.mark_email_verified();
+
         let created_user = self.user_storage.create_user(user).await?;
 
         // Lifecycle: notify hooks. PR 3 moves home-folder creation into
@@ -527,6 +630,26 @@ impl AuthApplicationService {
     }
 
     pub async fn login(&self, dto: LoginDto) -> Result<AuthResponseDto, DomainError> {
+        // Gate: policy may forbid password logins entirely (either the
+        // legacy OIDC-only mode or the newer `OXICLOUD_AUTH_METHODS`
+        // allowlist without `password`). Refuse BEFORE the user lookup
+        // so we don't leak account existence via timing on a disabled
+        // endpoint.
+        if !self.is_password_login_allowed() {
+            tracing::info!(
+                target: "audit",
+                event = "auth.login_rejected",
+                reason = "password_login_disabled",
+                attempted_username = %dto.username,
+                "🔐 login rejected: password login disabled by policy",
+            );
+            return Err(DomainError::new(
+                ErrorKind::AccessDenied,
+                "Auth",
+                "Password login is disabled",
+            ));
+        }
+
         // Dispatch on `@` in the input: presence of `@` means an email
         // was typed, absence means a username. The two namespaces are
         // provably disjoint (PR 16 forbids `@` in usernames), so this
@@ -612,6 +735,45 @@ impl AuthApplicationService {
             ));
         }
 
+        // Gate: `OXICLOUD_REQUIRE_VERIFIED_EMAIL`. Checked AFTER password
+        // validation so an attacker with only a username cannot probe
+        // account verification state (the response shape is
+        // `Invalid credentials` for bad passwords regardless of whether
+        // the email is verified — a wrong-password observer learns
+        // nothing).
+        //
+        // ADMIN EXEMPTION: admins are trusted by fiat and predate this
+        // gate. Fresh admin accounts (admin_create_user /
+        // setup_create_admin) are stamped verified at creation; the
+        // exemption covers pre-existing admin accounts installed before
+        // the flag shipped.
+        //
+        // The auto-send of a verification magic-link when this branch
+        // fires is done at the handler layer (login handler triggers
+        // `send_verification_link_authenticated`) rather than here —
+        // the service returns the distinguished error and the handler
+        // orchestrates the side effect. Keeps this method side-effect-
+        // free on the audit path.
+        if self.require_verified_email
+            && !matches!(user.role(), UserRole::Admin)
+            && !user.is_email_verified()
+        {
+            tracing::info!(
+                target: "audit",
+                event = "auth.login_rejected",
+                reason = "email_not_verified",
+                user_id = %user.id(),
+                username = %user.display_for_audit(),
+                "🔐 login rejected: email not verified for '{}' (password OK)",
+                user.display_for_audit(),
+            );
+            return Err(DomainError::new(
+                ErrorKind::AccessDenied,
+                "Auth",
+                "Email not verified",
+            ));
+        }
+
         // Lifecycle: dispatch login BEFORE register_login() so hooks
         // observing `last_login_at().is_none()` see "first ever login"
         // correctly. See tip #1 in user_lifecycle.rs.
@@ -689,6 +851,17 @@ impl AuthApplicationService {
             )
         })?;
 
+        // Defense-in-depth: if magic-link login was minted under an older
+        // policy and the operator has since flipped OIDC on (or dropped
+        // `MagicLink` from `OXICLOUD_AUTH_METHODS`), we must not honour
+        // pre-existing login tokens. Invitation tokens (resource_kind =
+        // File / Folder) are checked separately below — they represent
+        // an admin-mediated invite, which is a distinct policy question
+        // from "self-service login via email".
+        //
+        // We do the token lookup FIRST so we can classify by
+        // `resource_kind()` before applying the gate — invitations
+        // survive, plain logins do not.
         let mlt = repo.find_by_token(token).await?.ok_or_else(|| {
             // Audit: unknown / forged magic-link redemption. The first
             // 8 chars of the bogus token are logged so a recurring
@@ -709,6 +882,27 @@ impl AuthApplicationService {
                 "unknown or invalid magic link",
             )
         })?;
+
+        // Enforce the login-magic-link policy on stale tokens.
+        // resource_kind = None means "plain login-via-email"; anything
+        // else is an invite (which follows its own admin-mediated
+        // trust chain). Refuse the login case if the current policy
+        // forbids magic-link login.
+        if mlt.resource_kind().is_none() && !self.is_magic_link_login_allowed() {
+            tracing::info!(
+                target: "audit",
+                event = "magic_link.redemption_rejected",
+                reason = "login_disabled_by_policy",
+                token_id = %mlt.id(),
+                user_id = %mlt.user_id(),
+                "🔗 magic-link rejected: login-via-email disabled by policy (OIDC-master or allowlist)",
+            );
+            return Err(DomainError::new(
+                ErrorKind::AccessDenied,
+                "MagicLink",
+                "magic-link login is disabled",
+            ));
+        }
 
         // Friendly early-rejection messages. The atomic `mark_used`
         // below is the canonical single-use guard.
@@ -1716,6 +1910,16 @@ impl AuthApplicationService {
                 format!("Error creating user: {}", e),
             )
         })?;
+
+        // Admin fiat counts as verification. When
+        // `OXICLOUD_REQUIRE_VERIFIED_EMAIL` is set, admin-created users
+        // still get to log in without a magic-link round-trip — the
+        // operator explicitly vouched for the address at creation. This
+        // mirrors the OIDC-JIT convention (see `redeem_pending_oidc_token`
+        // and `login_oidc_callback` which also stamp
+        // `email_verified_at` on first sight).
+        let mut user = user;
+        user.mark_email_verified();
 
         // Persist
         let created = self.user_storage.create_user(user).await?;

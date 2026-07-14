@@ -622,6 +622,7 @@
     "login_identifier_placeholder": "Enter your username or email",
     "password": "Password",
     "password_placeholder": "Enter your password",
+    "password_or_link_hint": "Password (leave blank for a sign-in link)",
     "login_button": "Sign in",
     "no_account": "Don't have an account?",
     "register": "Sign up",
@@ -676,6 +677,7 @@
     "session_expired": "Your session expired. Please sign in again.",
     "sign_in": "Sign in",
     "signing_in": "Signing in…",
+    "sending": "Sending…",
     "toggle_password": "Show password"
   },
   "storage": {
