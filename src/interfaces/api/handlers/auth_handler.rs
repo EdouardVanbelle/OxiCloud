@@ -12,7 +12,8 @@ use uuid::Uuid;
 
 use crate::application::dtos::user_dto::{
     AuthResponseDto, ChangePasswordDto, LoginDto, OidcCallbackQueryDto, OidcExchangeDto,
-    OidcProviderInfoDto, RefreshTokenDto, RegisterDto, SetupAdminDto, UserDto,
+    OidcProviderInfoDto, RefreshTokenDto, RegisterDto, SetupAdminDto, UpgradeToInternalDto,
+    UserDto,
 };
 use crate::application::services::auth_application_service::{OidcCallbackResult, RegisterResult};
 use crate::common::di::AppState;
@@ -45,6 +46,7 @@ pub fn auth_protected_routes() -> Router<Arc<AppState>> {
         .route("/me/image", put(update_user_image))
         .route("/me/profile", patch(update_profile))
         .route("/change-password", put(change_password))
+        .route("/upgrade-to-internal", post(upgrade_to_internal))
         .route("/logout", post(logout))
 }
 
@@ -637,6 +639,118 @@ pub async fn change_password(
         .await?;
 
     Ok(StatusCode::OK)
+}
+
+/// Convert the authenticated external user into a full internal
+/// account. The caller must currently be `is_external = true`; on
+/// success, `is_external` is flipped to `false`, a personal drive is
+/// provisioned (atomic CTE via `PersonalDriveLifecycleHook`), and the
+/// user's flags cache is invalidated so subsequent per-request guards
+/// see the new state within cache-round-trip time.
+///
+/// Password policy:
+///   * If the deployment offers magic-link login
+///     (`OXICLOUD_AUTH_METHODS` includes `magic_link` AND OIDC is not
+///     enabled AND SMTP is wired), the body's `password` field is
+///     optional — an upgraded user without a password stays magic-
+///     link-only for login.
+///   * Otherwise, `password` is required — refused with 400
+///     `error_type = "PasswordRequired"`.
+///
+/// Domain gate: the caller's email domain MUST be in
+/// `OXICLOUD_REGISTRATION_ALLOWED_EMAIL_DOMAINS` (when non-empty).
+/// Otherwise invitations would become a bypass of the operator's
+/// self-registration policy. Refused with 403
+/// `error_type = "RegistrationDomainNotAllowed"`.
+///
+/// Response: the updated `UserDto` (post-upgrade view — `is_external`
+/// is false, `storage_quota_bytes` is set).
+#[utoipa::path(
+    post,
+    path = "/api/auth/upgrade-to-internal",
+    request_body = UpgradeToInternalDto,
+    responses(
+        (status = 200, description = "Upgrade succeeded", body = UserDto),
+        (status = 400, description = "Password missing / too short"),
+        (status = 401, description = "Not authenticated"),
+        (status = 403, description = "OIDC user, or domain not in allowlist"),
+        (status = 409, description = "Already internal"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "auth"
+)]
+pub async fn upgrade_to_internal(
+    State(state): State<Arc<AppState>>,
+    CurrentUserId(user_id): CurrentUserId,
+    Json(dto): Json<UpgradeToInternalDto>,
+) -> Result<impl IntoResponse, AppError> {
+    let auth_service = state
+        .auth_service
+        .as_ref()
+        .ok_or_else(|| AppError::internal_error("Authentication service not configured"))?;
+
+    // Domain gate. Mirrors the register handler
+    // (`OXICLOUD_REGISTRATION_ALLOWED_EMAIL_DOMAINS`). Rationale: an
+    // internal-user invitation must NOT become a way around the
+    // operator's self-registration policy. If a domain isn't
+    // allowlisted for register, it shouldn't be allowed for upgrade
+    // either. External users on non-allowlisted domains remain
+    // external — they can still act on shared resources but never own
+    // a drive of their own on this deployment.
+    let allow_list = &state.core.config.auth.registration_allowed_email_domains;
+    if !allow_list.is_empty() {
+        // The service re-fetches the user inside `upgrade_to_internal`;
+        // one extra id-lookup here just to extract the email is cheap
+        // and keeps the domain check at the same layer as the register
+        // handler for consistency.
+        let email = auth_service
+            .auth_application_service
+            .get_user_by_id(user_id)
+            .await
+            .map(|dto| dto.email)?;
+        let domain = email
+            .split('@')
+            .nth(1)
+            .map(|d| d.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        if domain.is_empty() || !allow_list.iter().any(|d| d == &domain) {
+            tracing::info!(
+                target: "audit",
+                event = "user.upgrade_rejected",
+                reason = "domain_not_allowed",
+                user_id = %user_id,
+                domain = %domain,
+                "👮🏻‍♂️ upgrade refused: email domain not in \
+                 OXICLOUD_REGISTRATION_ALLOWED_EMAIL_DOMAINS"
+            );
+            return Err(AppError::new(
+                StatusCode::FORBIDDEN,
+                "This deployment does not accept new accounts from your email domain.",
+                "RegistrationDomainNotAllowed",
+            ));
+        }
+    }
+
+    let updated = auth_service
+        .auth_application_service
+        .upgrade_to_internal(user_id, dto)
+        .await
+        .map_err(|err| match err.message.as_str() {
+            "Account is already internal" => {
+                AppError::new(StatusCode::CONFLICT, err.message.clone(), "AlreadyInternal")
+            }
+            "SSO/OIDC accounts are managed by your identity provider" => {
+                AppError::new(StatusCode::FORBIDDEN, err.message.clone(), "ManagedByIdP")
+            }
+            m if m.starts_with("Password is required") => AppError::new(
+                StatusCode::BAD_REQUEST,
+                err.message.clone(),
+                "PasswordRequired",
+            ),
+            _ => AppError::from(err),
+        })?;
+
+    Ok((StatusCode::OK, Json(updated)))
 }
 
 /// Update the caller's profile (PR 24).

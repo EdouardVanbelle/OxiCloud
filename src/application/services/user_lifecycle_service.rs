@@ -62,6 +62,28 @@ impl UserLifecycleService {
         }
     }
 
+    /// Upgraded: log-and-continue. Called by
+    /// `AuthApplicationService::upgrade_to_internal` after the
+    /// `is_external = false` UPDATE persists. Same log-and-continue
+    /// semantics as `dispatch_created` — the row is already updated,
+    /// hook failure at (e.g.) home-drive provisioning is recoverable
+    /// on the next login via `PersonalDriveLifecycleHook::on_user_login`
+    /// (its safety-net path already handles the "user is internal but
+    /// no drive yet" case idempotently).
+    pub async fn dispatch_upgraded_to_internal(&self, user: &User) {
+        for h in &self.hooks {
+            if let Err(e) = h.on_upgraded_to_internal(user).await {
+                tracing::error!(
+                    target: "user_lifecycle",
+                    hook = h.name(),
+                    user_id = %user.id(),
+                    error = %e,
+                    "on_upgraded_to_internal failed; drive provisioning will retry on next login"
+                );
+            }
+        }
+    }
+
     /// Login: log-and-continue. Same reasoning as `dispatch_created`.
     /// Must fire BEFORE `user.register_login()` so that hooks observing
     /// `last_login_at().is_none()` correctly detect the first-ever login.
@@ -196,6 +218,19 @@ impl UserLifecycleHook for AuditLifecycleHook {
             username = %user.display_for_audit(),
             is_external = user.is_external(),
             mode = ?mode,
+        );
+        Ok(())
+    }
+
+    async fn on_upgraded_to_internal(&self, user: &User) -> Result<(), DomainError> {
+        // Post-upgrade state — `is_external` is already `false` here
+        // (the service persisted before dispatching), so we don't log
+        // it as a field; the event name carries the transition.
+        tracing::info!(
+            target: "audit",
+            event = "user.upgraded_to_internal",
+            user_id = %user.id(),
+            username = %user.display_for_audit(),
         );
         Ok(())
     }

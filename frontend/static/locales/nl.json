@@ -1155,5 +1155,22 @@
   },
   "preferences": {
     "save_failed": "Kon je voorkeur niet opslaan. Probeer het opnieuw."
+  },
+  "upgrade": {
+    "title": "Upgraden naar een volledig account",
+    "lede": "Krijg je eigen opslag en begin met het uploaden van bestanden. Je bestaande gedeelde items blijven onaangeroerd.",
+    "busy": "Upgraden…",
+    "submit": "Mijn account upgraden",
+    "cancel": "Niet nu — terug naar met mij gedeeld",
+    "success": "Je account is geüpgraded. Doorsturen naar je bestanden…",
+    "error": "Upgraden mislukt.",
+    "password_required": "Wachtwoord is verplicht — deze installatie biedt geen inloggen via e-maillink.",
+    "password_too_short": "Wachtwoord moet minimaal 8 tekens lang zijn.",
+    "oidc_user": "SSO/OIDC-accounts worden beheerd door je identiteitsprovider. Upgraden is niet beschikbaar.",
+    "domain_not_allowed": "Deze installatie accepteert geen nieuwe accounts vanuit jouw e-maildomein. Neem contact op met de beheerder om het in te schakelen.",
+    "banner_aria": "Upgrademelding",
+    "banner_title": "Krijg je eigen opslag",
+    "banner_body": "Je gebruikt een gastaccount. Upgrade om een persoonlijke schijf te krijgen en bestanden te uploaden.",
+    "banner_cta": "Upgraden"
   }
 }

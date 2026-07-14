@@ -13,6 +13,14 @@
 		type ResourceEntry
 	} from '$lib/components/ResourceList.svelte';
 	import { t } from '$lib/i18n/index.svelte';
+	import { session } from '$lib/stores/session.svelte';
+
+	// External users landing here are the natural audience for the
+	// "upgrade to a full account" prompt — they don't own a drive of
+	// their own, this view IS their entry point. Internal users don't
+	// see the banner even when their /shared-with-me happens to be
+	// non-empty (they already have a drive; nothing to upgrade).
+	const showUpgradeBanner = $derived(session.isExternalUser);
 
 	let raw = $state<IncomingGrantItem[]>([]);
 	let cursor = $state<string | undefined>(undefined);
@@ -137,6 +145,27 @@
 
 <svelte:head><title>{t('nav.shared_with_me', 'Shared with me')} · OxiCloud</title></svelte:head>
 
+{#if showUpgradeBanner}
+	<div class="upgrade-banner" role="region" aria-label={t('upgrade.banner_aria', 'Upgrade prompt')}>
+		<div class="upgrade-banner__body">
+			<strong>{t('upgrade.banner_title', 'Get your own storage')}</strong>
+			<span
+				>{t(
+					'upgrade.banner_body',
+					"You're using a guest account. Upgrade to get a personal drive and start uploading files."
+				)}</span
+			>
+		</div>
+		<a
+			class="upgrade-banner__cta"
+			data-testid="shared-with-me-upgrade-btn"
+			href={resolve('/upgrade')}
+		>
+			{t('upgrade.banner_cta', 'Upgrade')}
+		</a>
+	</div>
+{/if}
+
 <ResourceList
 	title={t('nav.shared_with_me', 'Shared with me')}
 	items={entries}
@@ -160,3 +189,58 @@
 	{@const FileViewer = fileViewer.component}
 	<FileViewer bind:open={viewerOpen} file={viewerFile} />
 {/if}
+
+<style>
+	.upgrade-banner {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-4);
+		padding: var(--space-3) var(--space-4);
+		margin-bottom: var(--space-4);
+		background: var(--color-surface-raised);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+	}
+
+	.upgrade-banner__body {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-1);
+		color: var(--color-text);
+	}
+
+	.upgrade-banner__body strong {
+		font-weight: var(--weight-semibold);
+	}
+
+	.upgrade-banner__body span {
+		color: var(--color-text-muted);
+		font-size: var(--text-sm);
+	}
+
+	.upgrade-banner__cta {
+		flex-shrink: 0;
+		padding: var(--space-2) var(--space-4);
+		background: var(--color-accent);
+		color: var(--color-accent-contrast);
+		text-decoration: none;
+		font-weight: var(--weight-medium);
+		border-radius: var(--radius-md);
+	}
+
+	.upgrade-banner__cta:hover {
+		filter: brightness(0.95);
+	}
+
+	@media (width <= 600px) {
+		.upgrade-banner {
+			flex-direction: column;
+			align-items: stretch;
+		}
+
+		.upgrade-banner__cta {
+			text-align: center;
+		}
+	}
+</style>

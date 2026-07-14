@@ -229,6 +229,23 @@ pub struct RefreshTokenDto {
     pub refresh_token: String,
 }
 
+/// Body for `POST /api/auth/upgrade-to-internal`. Converts an
+/// authenticated external user into an internal user with their own
+/// personal drive.
+///
+/// `password` is optional — semantics decided per deployment:
+///   * If `magic_link` is in `OXICLOUD_AUTH_METHODS` (and OIDC isn't
+///     enabled) → password can be omitted; user remains magic-link-only
+///     for login after upgrade.
+///   * Otherwise → password is required; refusal returns 400
+///     `error_type = "PasswordRequired"`. Without it the upgraded user
+///     would have no login path.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpgradeToInternalDto {
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
 /// Authenticated current user data (for use in application services)
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct CurrentUser {

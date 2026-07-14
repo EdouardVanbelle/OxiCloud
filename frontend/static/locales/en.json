@@ -1556,5 +1556,22 @@
   },
   "preferences": {
     "save_failed": "Couldn't save your preference. Please try again."
+  },
+  "upgrade": {
+    "title": "Upgrade to a full account",
+    "lede": "Get your own storage and start uploading files. Your existing shares stay untouched.",
+    "busy": "Upgrading…",
+    "submit": "Upgrade my account",
+    "cancel": "Not now — back to shared with me",
+    "success": "Your account has been upgraded. Redirecting to your files…",
+    "error": "Upgrade failed.",
+    "password_required": "Password is required — this deployment does not offer email-link login.",
+    "password_too_short": "Password must be at least 8 characters long.",
+    "oidc_user": "SSO/OIDC accounts are managed by your identity provider. Upgrade is not available.",
+    "domain_not_allowed": "This deployment does not accept new accounts from your email domain. Contact the administrator to enable it.",
+    "banner_aria": "Upgrade prompt",
+    "banner_title": "Get your own storage",
+    "banner_body": "You're using a guest account. Upgrade to get a personal drive and start uploading files.",
+    "banner_cta": "Upgrade"
   }
 }

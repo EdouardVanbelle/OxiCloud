@@ -512,6 +512,47 @@ impl User {
         }
     }
 
+    /// Promote a currently-external user to an internal account.
+    /// Atomically flips the invariant-linked fields:
+    ///   * `is_external`  → false
+    ///   * `password_hash` → provided (Some) or preserved (None)
+    ///   * `storage_quota_bytes` → quota (external users had 0; DB CHECK
+    ///     `users_external_no_storage` enforces the pair before this call
+    ///     and would refuse a non-zero quota on an external row — the
+    ///     write MUST flip `is_external` first, which happens
+    ///     transactionally at persist time via the sqlx UPDATE).
+    ///
+    /// Password is `Option<String>` because the service allows password-
+    /// less upgrades when magic-link login is available on the
+    /// deployment. When `None`, `password_hash` stays as it was (either
+    /// NULL, or a hash left over from an admin-created invitation —
+    /// externals don't authenticate with it either way).
+    ///
+    /// Refuses if the caller is already internal — the upgrade path
+    /// only makes sense on `is_external = true` users. Service pre-
+    /// checks `user.is_external()` before calling; this guard is
+    /// belt-and-braces against a race.
+    ///
+    /// Admin combo is impossible by construction: external + admin was
+    /// refused at creation (see `User::new`), so a promoted external
+    /// user always retains their `UserRole::User` — role isn't changed.
+    pub fn promote_to_internal(
+        &mut self,
+        password_hash: Option<String>,
+        storage_quota_bytes: i64,
+    ) -> UserResult<()> {
+        if !self.is_external {
+            return Err(UserError::AlreadyInternal);
+        }
+        self.is_external = false;
+        if let Some(hash) = password_hash {
+            self.password_hash = Some(hash);
+        }
+        self.storage_quota_bytes = storage_quota_bytes;
+        self.updated_at = Utc::now();
+        Ok(())
+    }
+
     pub fn set_image(&mut self, image: Option<String>) {
         self.image = image;
         self.updated_at = Utc::now();

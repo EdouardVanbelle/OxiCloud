@@ -79,6 +79,9 @@ pub enum UserError {
     ValidationError(String),
     /// Authentication error
     AuthenticationError(String),
+    /// Upgrade path: the user is already internal — cannot re-upgrade.
+    /// Surfaced by the service as `error_type = "AlreadyInternal"`.
+    AlreadyInternal,
 }
 
 impl Display for UserError {
@@ -88,6 +91,7 @@ impl Display for UserError {
             UserError::InvalidPassword(msg) => write!(f, "Invalid password: {}", msg),
             UserError::ValidationError(msg) => write!(f, "Validation error: {}", msg),
             UserError::AuthenticationError(msg) => write!(f, "Authentication error: {}", msg),
+            UserError::AlreadyInternal => write!(f, "User is already an internal account"),
         }
     }
 }

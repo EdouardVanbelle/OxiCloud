@@ -962,6 +962,17 @@ impl UserLifecycleHook for PersonalDriveLifecycleHook {
         self.provision_if_needed(user).await
     }
 
+    /// External → internal upgrade. `on_user_created` fired at signup
+    /// with `is_external=true` and short-circuited in
+    /// `provision_if_needed`. The user is now internal — same helper
+    /// runs, but this time the `is_external` guard passes through and
+    /// the atomic CTE creates their default drive + root folder +
+    /// owner grant. Idempotent by construction: a rerun after a partial
+    /// failure hits the `find_default_for_user` short-circuit.
+    async fn on_upgraded_to_internal(&self, user: &User) -> Result<(), DomainError> {
+        self.provision_if_needed(user).await
+    }
+
     async fn on_user_logout(&self, _user: &User, _reason: LogoutReason) -> Result<(), DomainError> {
         // Drives don't react to logout. Explicit no-op per the
         // "no defaults" convention.

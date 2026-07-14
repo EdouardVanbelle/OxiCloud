@@ -1155,5 +1155,22 @@
   },
   "preferences": {
     "save_failed": "Ihre Einstellung konnte nicht gespeichert werden. Bitte versuchen Sie es erneut."
+  },
+  "upgrade": {
+    "title": "Auf vollständiges Konto upgraden",
+    "lede": "Erhalten Sie Ihren eigenen Speicher und beginnen Sie, Dateien hochzuladen. Ihre bestehenden Freigaben bleiben unverändert.",
+    "busy": "Upgrade läuft…",
+    "submit": "Mein Konto upgraden",
+    "cancel": "Nicht jetzt — zurück zu den Freigaben",
+    "success": "Ihr Konto wurde upgegradet. Weiterleitung zu Ihren Dateien…",
+    "error": "Upgrade fehlgeschlagen.",
+    "password_required": "Ein Passwort ist erforderlich — diese Instanz bietet keine E-Mail-Link-Anmeldung.",
+    "password_too_short": "Das Passwort muss mindestens 8 Zeichen lang sein.",
+    "oidc_user": "SSO/OIDC-Konten werden von Ihrem Identitätsanbieter verwaltet. Ein Upgrade ist nicht verfügbar.",
+    "domain_not_allowed": "Diese Instanz akzeptiert keine neuen Konten von Ihrer E-Mail-Domäne. Wenden Sie sich an den Administrator, um dies zu aktivieren.",
+    "banner_aria": "Upgrade-Aufforderung",
+    "banner_title": "Erhalten Sie Ihren eigenen Speicher",
+    "banner_body": "Sie verwenden ein Gast-Konto. Upgraden Sie, um einen persönlichen Speicher zu erhalten und Dateien hochzuladen.",
+    "banner_cta": "Upgraden"
   }
 }

@@ -1155,5 +1155,22 @@
   },
   "preferences": {
     "save_failed": "Não foi possível salvar sua preferência. Tente novamente."
+  },
+  "upgrade": {
+    "title": "Atualizar para conta completa",
+    "lede": "Obtenha seu próprio armazenamento e comece a enviar arquivos. Seus compartilhamentos existentes permanecem intactos.",
+    "busy": "Atualizando…",
+    "submit": "Atualizar minha conta",
+    "cancel": "Agora não — voltar a compartilhados comigo",
+    "success": "Sua conta foi atualizada. Redirecionando para seus arquivos…",
+    "error": "Falha na atualização.",
+    "password_required": "A senha é obrigatória — esta instância não oferece login por link de e-mail.",
+    "password_too_short": "A senha deve ter pelo menos 8 caracteres.",
+    "oidc_user": "Contas SSO/OIDC são gerenciadas pelo seu provedor de identidade. A atualização não está disponível.",
+    "domain_not_allowed": "Esta instância não aceita novas contas do seu domínio de e-mail. Contate o administrador para habilitar.",
+    "banner_aria": "Solicitação de atualização",
+    "banner_title": "Obtenha seu próprio armazenamento",
+    "banner_body": "Você está usando uma conta de convidado. Atualize para obter uma unidade pessoal e enviar arquivos.",
+    "banner_cta": "Atualizar"
   }
 }

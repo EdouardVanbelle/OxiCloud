@@ -199,6 +199,44 @@ export async function register(email: string, password?: string, username?: stri
 	}
 }
 
+/**
+ * Convert the authenticated external user into a full internal account.
+ * Server flips `is_external` to false, provisions a personal drive via
+ * the lifecycle hook, and returns the updated `User`.
+ *
+ * Password is optional — see backend `UpgradeToInternalDto`:
+ *   * If the deployment offers magic-link login, blank password is
+ *     accepted (user remains magic-link-only after upgrade).
+ *   * Otherwise a password is required — the backend refuses with 400
+ *     `error_type = "PasswordRequired"` and the SPA surfaces the
+ *     server message.
+ *
+ * Uses `apiFetch` (unlike register/login) because the caller IS
+ * authenticated; a 401 here IS a genuine "session expired" and the
+ * refresh interceptor is the right response.
+ */
+export async function upgradeToInternal(password?: string): Promise<User> {
+	const body: Record<string, unknown> = {};
+	if (password) body.password = password;
+	const res = await apiFetch('/api/auth/upgrade-to-internal', {
+		method: 'POST',
+		credentials: 'same-origin',
+		headers: { ...JSON_HEADERS, ...getCsrfHeaders() },
+		body: JSON.stringify(body)
+	});
+	if (!res.ok) {
+		const { errorType, message } = await parseErrorBody(res);
+		throw new ApiError(
+			res.status,
+			res.statusText,
+			'/api/auth/upgrade-to-internal',
+			errorType,
+			message
+		);
+	}
+	return (await res.json()) as User;
+}
+
 export type MagicLinkResult = 'sent' | 'unavailable';
 
 /**

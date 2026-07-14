@@ -1155,5 +1155,22 @@
   },
   "preferences": {
     "save_failed": "Impossible d'enregistrer votre préférence. Veuillez réessayer."
+  },
+  "upgrade": {
+    "title": "Passer à un compte complet",
+    "lede": "Obtenez votre propre espace de stockage et commencez à téléverser des fichiers. Vos partages existants restent intacts.",
+    "busy": "Mise à niveau…",
+    "submit": "Mettre à niveau mon compte",
+    "cancel": "Pas maintenant — retour aux partages reçus",
+    "success": "Votre compte a été mis à niveau. Redirection vers vos fichiers…",
+    "error": "La mise à niveau a échoué.",
+    "password_required": "Un mot de passe est requis — cette instance ne propose pas la connexion par lien e-mail.",
+    "password_too_short": "Le mot de passe doit contenir au moins 8 caractères.",
+    "oidc_user": "Les comptes SSO/OIDC sont gérés par votre fournisseur d'identité. La mise à niveau n'est pas disponible.",
+    "domain_not_allowed": "Cette instance n'accepte pas de nouveaux comptes depuis votre domaine e-mail. Contactez l'administrateur pour l'activer.",
+    "banner_aria": "Invitation à mettre à niveau",
+    "banner_title": "Obtenez votre propre espace",
+    "banner_body": "Vous utilisez un compte invité. Passez à un compte complet pour obtenir un disque personnel et téléverser des fichiers.",
+    "banner_cta": "Mettre à niveau"
   }
 }

@@ -1155,5 +1155,22 @@
   },
   "preferences": {
     "save_failed": "无法保存偏好设置。请重试。"
+  },
+  "upgrade": {
+    "title": "升级为完整账户",
+    "lede": "获得您自己的存储空间并开始上传文件。您现有的共享保持不变。",
+    "busy": "升级中…",
+    "submit": "升级我的账户",
+    "cancel": "暂不 — 返回共享给我",
+    "success": "您的账户已升级。正在跳转到您的文件…",
+    "error": "升级失败。",
+    "password_required": "需要密码 — 此部署未提供邮件链接登录。",
+    "password_too_short": "密码必须至少 8 个字符。",
+    "oidc_user": "SSO/OIDC 账户由您的身份提供商管理。无法升级。",
+    "domain_not_allowed": "此部署不接受来自您邮箱域的新账户。请联系管理员启用。",
+    "banner_aria": "升级提示",
+    "banner_title": "获得您自己的存储空间",
+    "banner_body": "您正在使用访客账户。升级以获得个人云盘并开始上传文件。",
+    "banner_cta": "升级"
   }
 }

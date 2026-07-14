@@ -1155,5 +1155,22 @@
   },
   "preferences": {
     "save_failed": "Nie udało się zapisać ustawienia. Spróbuj ponownie."
+  },
+  "upgrade": {
+    "title": "Rozszerz do pełnego konta",
+    "lede": "Uzyskaj własną przestrzeń i zacznij przesyłać pliki. Twoje istniejące udostępnienia pozostają nienaruszone.",
+    "busy": "Rozszerzanie…",
+    "submit": "Rozszerz moje konto",
+    "cancel": "Nie teraz — powrót do udostępnionych mi",
+    "success": "Twoje konto zostało rozszerzone. Przekierowywanie do plików…",
+    "error": "Rozszerzenie nie powiodło się.",
+    "password_required": "Hasło jest wymagane — ta instancja nie oferuje logowania przez link e-mail.",
+    "password_too_short": "Hasło musi mieć co najmniej 8 znaków.",
+    "oidc_user": "Konta SSO/OIDC są zarządzane przez Twojego dostawcę tożsamości. Rozszerzenie jest niedostępne.",
+    "domain_not_allowed": "Ta instancja nie akceptuje nowych kont z Twojej domeny e-mail. Skontaktuj się z administratorem, aby ją włączyć.",
+    "banner_aria": "Zachęta do rozszerzenia",
+    "banner_title": "Uzyskaj własną przestrzeń",
+    "banner_body": "Używasz konta gościa. Rozszerz, aby uzyskać osobisty dysk i przesyłać pliki.",
+    "banner_cta": "Rozszerz"
   }
 }

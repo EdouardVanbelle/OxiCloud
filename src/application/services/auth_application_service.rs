@@ -1,5 +1,6 @@
 use crate::application::dtos::user_dto::{
-    AuthResponseDto, ChangePasswordDto, LoginDto, RefreshTokenDto, RegisterDto, UserDto,
+    AuthResponseDto, ChangePasswordDto, LoginDto, RefreshTokenDto, RegisterDto,
+    UpgradeToInternalDto, UserDto,
 };
 use crate::application::ports::auth_ports::{
     OidcIdClaims, OidcServicePort, PasswordHasherPort, SessionStoragePort, TokenServicePort,
@@ -1231,6 +1232,147 @@ impl AuthApplicationService {
             .await?;
 
         Ok(revoked_count)
+    }
+
+    /// External → internal account upgrade.
+    ///
+    /// Contract:
+    ///   * Caller must be authenticated as the user being upgraded.
+    ///     Session-elevation is not required — being logged in as
+    ///     yourself IS the proof of intent.
+    ///   * User must be `is_external = true` — else the entity refuses
+    ///     with `UserError::AlreadyInternal`, surfaced as `error_type =
+    ///     "AlreadyInternal"` (409).
+    ///   * OIDC-linked users are refused (the IdP owns their identity).
+    ///   * If `dto.password` is `None`, the deployment MUST have magic-
+    ///     link login enabled — otherwise the upgraded user would have
+    ///     no login path. Refused with `error_type = "PasswordRequired"`
+    ///     (400) in that case.
+    ///   * Domain-allowlist check lives at the HANDLER layer, mirroring
+    ///     the register handler — the service doesn't hold that config.
+    ///
+    /// On success:
+    ///   * User's `is_external` flipped to `false`.
+    ///   * `password_hash` set from the provided password (Argon2id) or
+    ///     left as-is (magic-link-only upgrade).
+    ///   * `storage_quota_bytes` set to the default user quota (capped
+    ///     by disk).
+    ///   * `PersonalDriveLifecycleHook::on_upgraded_to_internal` runs and
+    ///     provisions the home drive + root folder + owner grant via the
+    ///     atomic CTE. Failure at this step is logged but the row update
+    ///     stands — the next login's `on_user_login` safety-net retries
+    ///     provisioning.
+    ///   * `user_flags_cache` invalidated eagerly so per-request guards
+    ///     (WebDAV / CalDAV / CardDAV) observe the new `is_external`
+    ///     within cache-round-trip time, not the 30-second TTL.
+    ///   * Audit log emits `event="user.upgraded_to_internal"` via the
+    ///     `AuditLifecycleHook` on the dispatched event.
+    pub async fn upgrade_to_internal(
+        &self,
+        caller_id: Uuid,
+        dto: UpgradeToInternalDto,
+    ) -> Result<UserDto, DomainError> {
+        let mut user = self.user_storage.get_user_by_id(caller_id).await?;
+
+        // Precondition: caller is currently external. Fast-path 409 so
+        // the audit log carries a clear reason before the entity's own
+        // guard fires.
+        if !user.is_external() {
+            tracing::info!(
+                target: "audit",
+                event = "user.upgrade_rejected",
+                reason = "already_internal",
+                user_id = %user.id(),
+                username = %user.display_for_audit(),
+                "👮🏻‍♂️ upgrade refused: user is already internal",
+            );
+            return Err(DomainError::new(
+                ErrorKind::Conflict,
+                "User",
+                "Account is already internal",
+            ));
+        }
+
+        // OIDC-linked: never. The IdP owns identity and role.
+        if user.is_oidc_user() {
+            tracing::info!(
+                target: "audit",
+                event = "user.upgrade_rejected",
+                reason = "oidc_user",
+                user_id = %user.id(),
+                "👮🏻‍♂️ upgrade refused: OIDC-linked user is managed by the IdP",
+            );
+            return Err(DomainError::new(
+                ErrorKind::AccessDenied,
+                "User",
+                "SSO/OIDC accounts are managed by your identity provider",
+            ));
+        }
+
+        // Password policy composite:
+        //   * Provided → validate + hash.
+        //   * Omitted   → only accepted when magic-link login is on
+        //     for this deployment (otherwise no login path post-upgrade).
+        let password_hash = match dto.password.as_deref() {
+            Some(pw) if !pw.is_empty() => {
+                if pw.len() < 8 {
+                    return Err(DomainError::new(
+                        ErrorKind::InvalidInput,
+                        "User",
+                        "Password must be at least 8 characters long",
+                    ));
+                }
+                Some(self.password_hasher.hash_password(pw).await?)
+            }
+            _ => {
+                if !self.is_magic_link_login_allowed() {
+                    tracing::info!(
+                        target: "audit",
+                        event = "user.upgrade_rejected",
+                        reason = "password_required",
+                        user_id = %user.id(),
+                        "👮🏻‍♂️ upgrade refused: password omitted but magic-link login is not available on this deployment",
+                    );
+                    return Err(DomainError::new(
+                        ErrorKind::InvalidInput,
+                        "User",
+                        "Password is required — magic-link login is not enabled on this deployment",
+                    ));
+                }
+                None
+            }
+        };
+
+        // Quota policy: same as a fresh regular-user signup.
+        let quota = self.capped_quota(&UserRole::User);
+
+        user.promote_to_internal(password_hash, quota)
+            .map_err(|e| {
+                // The entity refuses `AlreadyInternal` here belt-and-braces
+                // against a race with a concurrent upgrade; the pre-check
+                // above already covers the intended path.
+                DomainError::new(
+                    ErrorKind::Conflict,
+                    "User",
+                    format!("Upgrade refused: {}", e),
+                )
+            })?;
+
+        let updated = self.user_storage.update_user(user).await?;
+
+        // Invalidate the flags cache so subsequent per-request guards
+        // observe the new `is_external=false` without waiting for the
+        // 30-second TTL. Same pattern as `change_user_role`.
+        self.user_flags_cache.invalidate(&caller_id);
+
+        // Dispatch — home-drive provisioning happens here. Log-and-
+        // continue: a provisioning failure leaves the row updated and
+        // the next login's safety-net (`on_user_login`) retries.
+        if let Some(lc) = &self.user_lifecycle {
+            lc.dispatch_upgraded_to_internal(&updated).await;
+        }
+
+        Ok(UserDto::from(updated))
     }
 
     pub async fn change_password(

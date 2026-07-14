@@ -1155,5 +1155,22 @@
   },
   "preferences": {
     "save_failed": "無法儲存偏好設定。請再試一次。"
+  },
+  "upgrade": {
+    "title": "升級為完整帳號",
+    "lede": "取得您自己的儲存空間並開始上傳檔案。您現有的共享保持不變。",
+    "busy": "升級中…",
+    "submit": "升級我的帳號",
+    "cancel": "暫不 — 返回共享給我",
+    "success": "您的帳號已升級。正在跳轉到您的檔案…",
+    "error": "升級失敗。",
+    "password_required": "需要密碼 — 此部署未提供電子郵件連結登入。",
+    "password_too_short": "密碼必須至少 8 個字元。",
+    "oidc_user": "SSO/OIDC 帳號由您的身分提供者管理。無法升級。",
+    "domain_not_allowed": "此部署不接受來自您電子郵件網域的新帳號。請聯絡管理員啟用。",
+    "banner_aria": "升級提示",
+    "banner_title": "取得您自己的儲存空間",
+    "banner_body": "您正在使用訪客帳號。升級以取得個人雲端硬碟並開始上傳檔案。",
+    "banner_cta": "升級"
   }
 }

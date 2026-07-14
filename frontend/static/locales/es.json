@@ -1170,5 +1170,22 @@
   },
   "preferences": {
     "save_failed": "No se pudo guardar tu preferencia. Inténtalo de nuevo."
+  },
+  "upgrade": {
+    "title": "Pasar a una cuenta completa",
+    "lede": "Consigue tu propio almacenamiento y empieza a subir archivos. Tus recursos compartidos existentes permanecen intactos.",
+    "busy": "Actualizando…",
+    "submit": "Actualizar mi cuenta",
+    "cancel": "Ahora no — volver a compartidos conmigo",
+    "success": "Tu cuenta ha sido actualizada. Redirigiendo a tus archivos…",
+    "error": "La actualización falló.",
+    "password_required": "Se requiere contraseña — esta instancia no ofrece inicio de sesión por enlace de correo.",
+    "password_too_short": "La contraseña debe tener al menos 8 caracteres.",
+    "oidc_user": "Las cuentas SSO/OIDC son gestionadas por tu proveedor de identidad. La actualización no está disponible.",
+    "domain_not_allowed": "Esta instancia no acepta nuevas cuentas desde tu dominio de correo. Contacta al administrador para habilitarlo.",
+    "banner_aria": "Aviso de actualización",
+    "banner_title": "Consigue tu propio almacenamiento",
+    "banner_body": "Estás usando una cuenta invitada. Actualiza para obtener una unidad personal y empezar a subir archivos.",
+    "banner_cta": "Actualizar"
   }
 }

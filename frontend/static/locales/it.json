@@ -1155,5 +1155,22 @@
   },
   "preferences": {
     "save_failed": "Impossibile salvare la preferenza. Riprova."
+  },
+  "upgrade": {
+    "title": "Passa a un account completo",
+    "lede": "Ottieni il tuo spazio di archiviazione e inizia a caricare file. Le tue condivisioni esistenti rimangono intatte.",
+    "busy": "Aggiornamento…",
+    "submit": "Aggiorna il mio account",
+    "cancel": "Non ora — torna a condivisi con me",
+    "success": "Il tuo account è stato aggiornato. Reindirizzamento ai tuoi file…",
+    "error": "Aggiornamento non riuscito.",
+    "password_required": "La password è obbligatoria — questa istanza non offre l'accesso tramite link email.",
+    "password_too_short": "La password deve avere almeno 8 caratteri.",
+    "oidc_user": "Gli account SSO/OIDC sono gestiti dal tuo provider di identità. L'aggiornamento non è disponibile.",
+    "domain_not_allowed": "Questa istanza non accetta nuovi account dal tuo dominio email. Contatta l'amministratore per abilitarlo.",
+    "banner_aria": "Invito all'aggiornamento",
+    "banner_title": "Ottieni il tuo spazio di archiviazione",
+    "banner_body": "Stai utilizzando un account ospite. Passa a un account completo per ottenere un'unità personale e caricare file.",
+    "banner_cta": "Aggiorna"
   }
 }

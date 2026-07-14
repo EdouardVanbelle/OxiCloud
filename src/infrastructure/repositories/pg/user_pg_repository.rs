@@ -472,7 +472,19 @@ impl UserRepository for UserPgRepository {
                             family_name = $13,
                             email_verified_at = $14,
                             preferred_locale = $15,
-                            notify_on_share = $16
+                            notify_on_share = $16,
+                            -- Include `is_external` so the external →
+                            -- internal upgrade path
+                            -- (`AuthApplicationService::upgrade_to_internal`)
+                            -- can flip this flag. Previously omitted
+                            -- because no code path mutated it after
+                            -- creation. The DB CHECK
+                            -- `users_external_no_storage`
+                            -- (`is_external=false OR quota=0`) is
+                            -- satisfied by the upgrade because it
+                            -- writes both fields in the same UPDATE:
+                            -- `is_external=false, quota>0`.
+                            is_external = $17
                         WHERE id = $1
                         "#,
                 )
@@ -492,6 +504,7 @@ impl UserRepository for UserPgRepository {
                 .bind(user_clone.email_verified_at())
                 .bind(user_clone.preferred_locale())
                 .bind(user_clone.notify_on_share())
+                .bind(user_clone.is_external())
                 .execute(&mut **tx)
                 .await
                 .map_err(Self::map_sqlx_error)?;
