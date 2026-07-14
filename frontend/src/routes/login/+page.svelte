@@ -323,6 +323,19 @@
 		setupAvailable = !status.initialized;
 		if (setupAvailable) mode = 'setup';
 
+		// 4) Auto-redirect: when OIDC is the only auth method, skip the login page.
+		//    Guard against loops: if the IdP returned ?error=, fall through to the UI.
+		if (
+			oidc.enabled &&
+			oidc.password_login_enabled === false &&
+			oidc.authorize_endpoint &&
+			!setupAvailable &&
+			!page.url.searchParams.has('error')
+		) {
+			window.location.replace(oidc.authorize_endpoint);
+			return;
+		}
+
 		booting = false;
 	});
 
