@@ -199,6 +199,27 @@ api-test:
         echo "XXX litmus webdav not found, ignore test"
     fi
 
+# CalDAV client-driven conformance suite.
+#
+# Drives OxiCloud through the maintained `python-caldav` client library
+# — the same VObject/RFC 5545 stack Thunderbird / DAVx⁵ / Gnome Calendar
+# use. Complements Hurl coverage (which exercises raw HTTP) by proving
+# a real client can round-trip recurring events, per-instance overrides
+# (RFC 5545 §3.8.4.4), and all-day masters (the shape #528 was filed
+# against).
+#
+# Not chained into `api-test` because it needs python3; run explicitly.
+# The orchestrator spawns its own postgres + server on port 8091 so it
+# can run in parallel with api-test/webdav.
+test-caldav:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "XXX python3 not found — skipping CalDAV client-driven tests"
+        exit 0
+    fi
+    ./tests/caldav/run-pycaldav.sh
+
 # ---------------------------------------------------------------------------
 # SvelteKit frontend (frontend/) — the only frontend. These `fe-*` recipes
 # drive its dev server, build, lint and tests.
