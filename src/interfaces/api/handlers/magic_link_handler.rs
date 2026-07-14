@@ -8,10 +8,10 @@
 //!   2. Issues access + refresh JWT for the token's owning user.
 //!   3. Sets the standard `oxicloud_access` / `oxicloud_refresh` /
 //!      `oxicloud_csrf` cookies (same as `POST /api/auth/login`).
-//!   4. 302-redirects to a frontend hash-route based on the token's
-//!      resource target:
-//!        - Folder       → `/#/files/folder/{id}`
-//!        - File or NULL → `/#/sharedwithme`
+//!   4. 302-redirects to a SPA route based on the token's resource
+//!      target:
+//!        - Folder       → `/files/{id}`
+//!        - File or NULL → `/shared-with-me`
 //!
 //! Files don't have a deep-link route today; v1 lands file invitations
 //! on Shared With Me where the file shows up.
@@ -140,7 +140,7 @@ struct RedeemQuery {
     params(("token" = String, Path, description = "Opaque magic-link token")),
     responses(
         (status = 200, description = "Cross-browser confirmation prompt (HTML page)"),
-        (status = 302, description = "Redemption succeeded — redirects to the resource or to /#/sharedwithme"),
+        (status = 302, description = "Redemption succeeded — redirects to the resource or to /shared-with-me"),
         (status = 410, description = "Token is unknown, expired, or already used"),
         (status = 503, description = "Magic-link feature is not configured on this server"),
     ),

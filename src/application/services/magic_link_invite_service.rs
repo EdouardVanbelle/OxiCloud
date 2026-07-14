@@ -449,7 +449,8 @@ impl MagicLinkInviteService {
     /// is reserved for `resolve_or_create_recipient` — and if the
     /// matched user has no other login credential, mint a NULL-resource
     /// magic-link token and email a sign-in link. The redemption
-    /// endpoint lands a NULL-resource token on `/#/sharedwithme`.
+    /// endpoint lands a NULL-resource token on `/shared-with-me`
+    /// (external users) or `/files` (internal users).
     ///
     /// Always returns `Ok(())` so the caller can emit a uniform
     /// response shape (`"If an account exists, a link will be sent."`)
