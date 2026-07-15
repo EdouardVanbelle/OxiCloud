@@ -99,6 +99,16 @@ pub trait FileUploadUseCase: Send + Sync + 'static {
     /// on the overwrite branch and `authz.require(caller, Create,
     /// Folder|Drive(id))` on the new-file branch. Handlers just plumb
     /// `caller_id` through — no protocol-layer authz.
+    ///
+    /// `expected_hash`: forwarded to
+    /// `FileWritePort::update_file_content_with_blob` on the overwrite
+    /// branch for compare-and-swap; ignored on the new-file branch
+    /// (nothing to compare against). Pass `None` for plain PUT/WOPI/
+    /// chunked-upload last-write-wins semantics; pass the pre-write
+    /// snapshot's content hash for PATCH, where a concurrent write
+    /// during the (potentially slow) splice must be rejected rather
+    /// than silently clobbered.
+    #[allow(clippy::too_many_arguments)]
     async fn update_file_streaming_with_perms(
         &self,
         path: &str,
@@ -107,6 +117,7 @@ pub trait FileUploadUseCase: Send + Sync + 'static {
         content_type: &str,
         modified_at: Option<i64>,
         caller_id: Uuid,
+        expected_hash: Option<&str>,
     ) -> Result<FileDto, DomainError>;
 }
 

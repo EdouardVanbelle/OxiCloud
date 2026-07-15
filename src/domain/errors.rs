@@ -39,6 +39,12 @@ pub enum ErrorKind {
     /// `AlreadyExists` (which is a uniqueness violation) so audit
     /// readers can tell them apart.
     Conflict,
+    /// RFC 7232 precondition failure — a caller-supplied conditional
+    /// (If-Match, or an internal compare-and-swap standing in for one)
+    /// did not hold against the resource's current state. Maps to
+    /// HTTP 412. Distinct from `Conflict` (409): this is specifically
+    /// "the state you thought you were writing against has moved."
+    PreconditionFailed,
 }
 
 impl ErrorKind {
@@ -58,6 +64,7 @@ impl ErrorKind {
             ErrorKind::DatabaseError => "Database Error",
             ErrorKind::QuotaExceeded => "Quota Exceeded",
             ErrorKind::Conflict => "Conflict",
+            ErrorKind::PreconditionFailed => "Precondition Failed",
         }
     }
 }
@@ -190,6 +197,17 @@ impl DomainError {
         Self {
             kind: ErrorKind::QuotaExceeded,
             entity_type: "Storage",
+            entity_id: None,
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// Creates a precondition-failed error (RFC 7232 / CAS mismatch)
+    pub fn precondition_failed<S: Into<String>>(entity_type: &'static str, message: S) -> Self {
+        Self {
+            kind: ErrorKind::PreconditionFailed,
+            entity_type,
             entity_id: None,
             message: message.into(),
             source: None,

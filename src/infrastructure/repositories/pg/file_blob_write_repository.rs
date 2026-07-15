@@ -153,6 +153,15 @@ impl FileBlobWriteRepository {
     /// row — not the row's owner. D2 shared drives let non-owners
     /// overwrite content; the previous `updated_by = f.user_id` would
     /// have silently recorded the wrong principal.
+    /// `expected_hash`, when `Some`, turns this into a real
+    /// compare-and-swap: the SET clause only takes effect if the row's
+    /// `blob_hash` still matches at the moment the `FOR UPDATE` lock is
+    /// held (same statement, same transaction — no gap a concurrent
+    /// writer can land in). A mismatch leaves the row untouched and is
+    /// reported back via the `matched` flag rather than silently
+    /// overwriting a sibling PATCH's content. `None` preserves the old
+    /// blind-overwrite behaviour for PUT/WOPI/chunked-upload finalize,
+    /// where last-write-wins is the intended HTTP semantics.
     async fn swap_blob_hash(
         &self,
         file_id: &str,
@@ -160,57 +169,83 @@ impl FileBlobWriteRepository {
         new_size: i64,
         modified_at: Option<i64>,
         caller_id: Uuid,
+        expected_hash: Option<&str>,
     ) -> Result<(String, i64), DomainError> {
-        // Atomic CTE: capture old hash then update in one round-trip, no TOCTOU.
+        // Atomic CTE: capture old hash then conditionally update in one
+        // round-trip, no TOCTOU. The CASE arms make the SET a no-op when
+        // `expected_hash` is given and doesn't match `old.blob_hash` —
+        // the row is still returned (with its unchanged values) so the
+        // caller can tell "mismatch" apart from "file not found".
         // Deadlock victims (40P01) retry before the compensation below runs —
         // a successful retry must keep the new blob reference alive.
-        let (old_hash, updated_at) = match retry_on_deadlock("files.swap_blob_hash", || {
-            sqlx::query_as::<_, (String, i64)>(
-                r#"
+        let (old_hash, updated_at, matched) =
+            match retry_on_deadlock("files.swap_blob_hash", || {
+                sqlx::query_as::<_, (String, i64, bool)>(
+                    r#"
                 WITH old AS (
                     SELECT id, blob_hash FROM storage.files WHERE id = $3::uuid FOR UPDATE
                 )
                 UPDATE storage.files f
-                   SET blob_hash = $1, size = $2,
-                       updated_at = COALESCE(to_timestamp($4), NOW()),
-                       updated_by = $5
+                   SET blob_hash = CASE WHEN $6::text IS NULL OR old.blob_hash = $6
+                                        THEN $1 ELSE f.blob_hash END,
+                       size = CASE WHEN $6::text IS NULL OR old.blob_hash = $6
+                                   THEN $2 ELSE f.size END,
+                       updated_at = CASE WHEN $6::text IS NULL OR old.blob_hash = $6
+                                         THEN COALESCE(to_timestamp($4), NOW()) ELSE f.updated_at END,
+                       updated_by = CASE WHEN $6::text IS NULL OR old.blob_hash = $6
+                                         THEN $5 ELSE f.updated_by END
                   FROM old
                  WHERE f.id = old.id
-                RETURNING old.blob_hash, EXTRACT(EPOCH FROM f.updated_at)::bigint
+                RETURNING old.blob_hash, EXTRACT(EPOCH FROM f.updated_at)::bigint,
+                          ($6::text IS NULL OR old.blob_hash = $6)
                 "#,
-            )
-            .bind(new_hash)
-            .bind(new_size)
-            .bind(file_id)
-            .bind(modified_at.map(|t| t as f64))
-            .bind(caller_id)
-            .fetch_optional(self.pool.as_ref())
-        })
-        .await
-        {
-            Ok(Some(row)) => row,
-            Ok(None) => {
-                // File not found — compensate: remove the new blob ref
-                if let Err(e) = self.dedup.remove_reference(new_hash).await {
-                    tracing::error!("Blob orphaned after missing file: {}", e);
+                )
+                .bind(new_hash)
+                .bind(new_size)
+                .bind(file_id)
+                .bind(modified_at.map(|t| t as f64))
+                .bind(caller_id)
+                .bind(expected_hash)
+                .fetch_optional(self.pool.as_ref())
+            })
+            .await
+            {
+                Ok(Some(row)) => row,
+                Ok(None) => {
+                    // File not found — compensate: remove the new blob ref
+                    if let Err(e) = self.dedup.remove_reference(new_hash).await {
+                        tracing::error!("Blob orphaned after missing file: {}", e);
+                    }
+                    return Err(DomainError::not_found("File", file_id));
                 }
-                return Err(DomainError::not_found("File", file_id));
-            }
-            Err(e) => {
-                // UPDATE failed — compensate: remove the new blob ref
-                if let Err(rollback_err) = self.dedup.remove_reference(new_hash).await {
-                    tracing::error!(
-                        "Blob orphaned after failed UPDATE — hash: {}, err: {}",
-                        &new_hash[..12],
-                        rollback_err
-                    );
+                Err(e) => {
+                    // UPDATE failed — compensate: remove the new blob ref
+                    if let Err(rollback_err) = self.dedup.remove_reference(new_hash).await {
+                        tracing::error!(
+                            "Blob orphaned after failed UPDATE — hash: {}, err: {}",
+                            &new_hash[..12],
+                            rollback_err
+                        );
+                    }
+                    return Err(DomainError::internal_error(
+                        "FileBlobWrite",
+                        format!("update: {e}"),
+                    ));
                 }
-                return Err(DomainError::internal_error(
-                    "FileBlobWrite",
-                    format!("update: {e}"),
-                ));
+            };
+
+        if !matched {
+            // CAS lost the race — some other writer's content is now the
+            // row's truth. Release the blob we ingested for nothing;
+            // nothing was written.
+            if let Err(e) = self.dedup.remove_reference(new_hash).await {
+                tracing::error!("Blob orphaned after CAS mismatch: {}", e);
             }
-        };
+            return Err(DomainError::precondition_failed(
+                "File",
+                "content was modified concurrently",
+            ));
+        }
 
         // Decrement old blob ref (only if hash changed, best-effort)
         if old_hash != new_hash
@@ -790,12 +825,20 @@ impl FileWritePort for FileBlobWriteRepository {
         size: u64,
         modified_at: Option<i64>,
         caller_id: Uuid,
+        expected_hash: Option<&str>,
     ) -> Result<(String, i64), DomainError> {
         // The content was already ingested into the chunk store by the
         // upload-ingest layer; swap_blob_hash consumes its reference and
         // releases it on failure.
         let swapped = self
-            .swap_blob_hash(file_id, blob_hash, size as i64, modified_at, caller_id)
+            .swap_blob_hash(
+                file_id,
+                blob_hash,
+                size as i64,
+                modified_at,
+                caller_id,
+                expected_hash,
+            )
             .await?;
         // The file now maps to a different blob — drop the read-side cache
         // entry so streaming downloads cannot serve the previous content

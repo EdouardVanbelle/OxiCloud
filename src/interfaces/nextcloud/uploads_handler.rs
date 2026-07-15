@@ -466,6 +466,10 @@ async fn handle_assemble(
     // AuthZ audit #2 (2026-07-12): route DomainError through
     // `AppError::from` so authz denials keep the graduated 403/404
     // shape instead of collapsing into 500.
+    //
+    // No client-supplied ETag to enforce here (NC chunked MOVE has no
+    // If-Match semantics) — `expected_hash: None`, same as every other
+    // plain-write callsite; only PATCH's CAS passes `Some(&hash)`.
     let dto = match upload_service
         .update_file_streaming_with_perms(
             &internal_path,
@@ -474,6 +478,7 @@ async fn handle_assemble(
             &content_type,
             oc_mtime,
             user.id,
+            None,
         )
         .await
     {

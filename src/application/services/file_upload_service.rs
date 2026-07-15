@@ -305,7 +305,7 @@ impl FileUploadService {
         let file = file_read.get_file(file_id).await?;
         let (new_hash, updated_at) = self
             .file_write
-            .update_file_content_with_blob(file_id, &blob.hash, blob.size, None, caller_id)
+            .update_file_content_with_blob(file_id, &blob.hash, blob.size, None, caller_id, None)
             .await?;
         // The file maps to a different blob now — stale cached content must
         // never be served for the rest of its TTI window.
@@ -506,6 +506,7 @@ impl FileUploadUseCase for FileUploadService {
     /// member and cross-tenant PUT. See
     /// `docs/plan/authz_audit/nextcloud.md` and the sibling native
     /// `/webdav/*` handler.
+    #[allow(clippy::too_many_arguments)]
     async fn update_file_streaming_with_perms(
         &self,
         path: &str,
@@ -514,6 +515,7 @@ impl FileUploadUseCase for FileUploadService {
         content_type: &str,
         modified_at: Option<i64>,
         caller_id: Uuid,
+        expected_hash: Option<&str>,
     ) -> Result<FileDto, DomainError> {
         let Some(authz) = &self.authorization else {
             return Err(DomainError::internal_error(
@@ -552,6 +554,7 @@ impl FileUploadUseCase for FileUploadService {
                     blob.size,
                     modified_at,
                     caller_id,
+                    expected_hash,
                 )
                 .await?;
             // Invalidate content cache — file content has changed.

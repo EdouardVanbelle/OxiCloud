@@ -1972,6 +1972,7 @@ async fn handle_put(
             &content_type,
             None,
             user.id,
+            None,
         )
         .await;
 
@@ -2303,25 +2304,15 @@ async fn handle_patch(
         ));
     }
 
-    // ── Optimistic-concurrency re-check ───────────────────────────────
-    // `file.etag` was snapshotted before the (potentially slow) splice +
-    // CAS-ingest above. Re-verify nothing else wrote to this file in the
-    // meantime, narrowing the window in which two concurrent PATCHes to
-    // disjoint ranges — each individually passing its own If-Match check
-    // against the same stale snapshot — could otherwise silently clobber
-    // each other on the blind-overwrite write path below.
-    if let Ok(current) = file_retrieval_service
-        .get_file_by_path(&path, drive_id)
-        .await
-        && current.etag != file.etag
-    {
-        upload_ingest::discard_ingested(&state.core.dedup_service, &ingested).await;
-        return Err(AppError::precondition_failed(
-            "File was modified concurrently — retry the PATCH",
-        ));
-    }
-
-    // ── Atomic store ──────────────────────────────────────────────────
+    // ── Atomic store, compare-and-swap on the pre-splice content hash ──
+    // `file.content_hash` was snapshotted before the (potentially slow)
+    // splice + CAS-ingest above. Passing it as `expected_hash` makes the
+    // write itself a compare-and-swap: the repository checks and applies
+    // under the same row lock, so nothing else can write to this file
+    // between the check and the write. This is what actually closes the
+    // race two concurrent PATCHes to disjoint ranges could otherwise hit
+    // — each individually passing its own If-Match check against the
+    // same stale snapshot, then blindly overwriting each other.
     let new_size = ingested.size;
     let content_type = ingested.content_type.clone();
     let result = file_upload_service
@@ -2332,6 +2323,7 @@ async fn handle_patch(
             &content_type,
             None,
             user.id,
+            Some(&file.content_hash),
         )
         .await;
 

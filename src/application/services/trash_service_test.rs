@@ -589,6 +589,7 @@ impl FileWritePort for MockFileRepository {
         _size: u64,
         _modified_at: Option<i64>,
         _caller_id: Uuid,
+        _expected_hash: Option<&str>,
     ) -> std::result::Result<(String, i64), DomainError> {
         Ok((String::new(), 0))
     }

@@ -413,6 +413,7 @@ async fn put_file(
             &content_type,
             None,
             claims_sub_uuid,
+            None,
         )
         .await;
 

@@ -299,6 +299,14 @@ pub trait FileWritePort: Send + Sync + 'static {
     ///
     /// `caller_id` is stamped into `updated_by` alongside the
     /// `updated_at` bump (§14 provenance).
+    ///
+    /// `expected_hash`: when `Some`, makes this a true compare-and-swap —
+    /// the write only takes effect if the row's current `blob_hash`
+    /// still equals it, checked and applied atomically under the same
+    /// row lock (no gap between check and write for a concurrent writer
+    /// to land in). A mismatch returns `ErrorKind::PreconditionFailed`
+    /// and leaves the row untouched. `None` keeps the previous
+    /// blind-overwrite behaviour (PUT/WOPI/chunked-upload finalize).
     async fn update_file_content_with_blob(
         &self,
         file_id: &str,
@@ -306,6 +314,7 @@ pub trait FileWritePort: Send + Sync + 'static {
         size: u64,
         modified_at: Option<i64>,
         caller_id: Uuid,
+        expected_hash: Option<&str>,
     ) -> Result<(String, i64), DomainError>;
 
     /// Registers file metadata WITHOUT writing content to disk (write-behind).

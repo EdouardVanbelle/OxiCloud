@@ -131,6 +131,7 @@ impl From<DomainError> for AppError {
             ErrorKind::DatabaseError => StatusCode::INTERNAL_SERVER_ERROR,
             ErrorKind::QuotaExceeded => StatusCode::INSUFFICIENT_STORAGE,
             ErrorKind::Conflict => StatusCode::CONFLICT,
+            ErrorKind::PreconditionFailed => StatusCode::PRECONDITION_FAILED,
         };
 
         Self {

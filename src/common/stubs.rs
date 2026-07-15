@@ -196,6 +196,7 @@ impl FileWritePort for StubFileWritePort {
         _size: u64,
         _modified_at: Option<i64>,
         _caller_id: Uuid,
+        _expected_hash: Option<&str>,
     ) -> Result<(String, i64), DomainError> {
         Ok((String::new(), 0))
     }
@@ -491,6 +492,7 @@ impl FileUploadUseCase for StubFileUploadUseCase {
         Ok(FileDto::default())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn update_file_streaming_with_perms(
         &self,
         _path: &str,
@@ -499,6 +501,7 @@ impl FileUploadUseCase for StubFileUploadUseCase {
         _content_type: &str,
         _modified_at: Option<i64>,
         _caller_id: Uuid,
+        _expected_hash: Option<&str>,
     ) -> Result<FileDto, DomainError> {
         Ok(FileDto::default())
     }
