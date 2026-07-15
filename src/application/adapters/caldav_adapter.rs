@@ -17,6 +17,36 @@ use crate::application::adapters::webdav_adapter::{
 };
 use crate::application::dtos::calendar_dto::{CalendarDto, CalendarEventDto};
 
+/// Parse a CalDAV `time-range` element's `start` / `end` attribute
+/// value into a UTC `DateTime`.
+///
+/// RFC 4791 §9.9 requires iCalendar DATE-TIME format
+/// (`YYYYMMDDTHHMMSSZ` — no dashes, no colons). Every real client
+/// (Thunderbird, Apple Calendar, DAVx⁵, Gnome Calendar) sends this
+/// shape, as does the `python-caldav` library.
+///
+/// A prior pass parsed the value with `DateTime::parse_from_rfc3339`
+/// exclusively, which expects `YYYY-MM-DDTHH:MM:SSZ` and fails on
+/// the standard shape — silently returning `None`. The caller then
+/// dropped the whole time-range filter and fell through to
+/// `list_events`, returning the entire calendar regardless of the
+/// window. RFC 3339 is retained as a defensive fallback for the rare
+/// client that emits it.
+///
+/// Returns `None` on any parse failure — callers propagate that as
+/// "no time-range filter provided", matching the pre-fix behaviour
+/// for missing attributes.
+fn parse_caldav_datetime(value: &str) -> Option<DateTime<Utc>> {
+    chrono::NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%SZ")
+        .map(|nd| nd.and_utc())
+        .ok()
+        .or_else(|| {
+            DateTime::parse_from_rfc3339(value)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
+        })
+}
+
 /// Returns whether `caller_id` owns `calendar`.
 ///
 /// CalDAV clients (DAVx5, Apple Calendar, Thunderbird) only mount a collection
@@ -92,7 +122,6 @@ impl CalDavAdapter {
                         s if s == "prop" || s.ends_with(":prop") => in_prop = true,
                         s if s == "filter" || s.ends_with(":filter") => in_filter = true,
                         s if s == "time-range" || s.ends_with(":time-range") => {
-                            // Parse time-range attributes
                             for attr in e.attributes().flatten() {
                                 let attr_name =
                                     std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
@@ -101,14 +130,9 @@ impl CalDavAdapter {
                                     .unwrap_or_default();
 
                                 if attr_name == "start" {
-                                    // Parse ISO date format with Z for UTC
-                                    start_time = DateTime::parse_from_rfc3339(&attr_value)
-                                        .ok()
-                                        .map(|dt| dt.with_timezone(&Utc));
+                                    start_time = parse_caldav_datetime(&attr_value);
                                 } else if attr_name == "end" {
-                                    end_time = DateTime::parse_from_rfc3339(&attr_value)
-                                        .ok()
-                                        .map(|dt| dt.with_timezone(&Utc));
+                                    end_time = parse_caldav_datetime(&attr_value);
                                 }
                             }
                         }
@@ -160,7 +184,7 @@ impl CalDavAdapter {
                         let qname = WebDavAdapter::resolve_name(name_str, &ns_map);
                         props.push(qname);
                     } else if name_str == "time-range" || name_str.ends_with(":time-range") {
-                        // Parse time-range attributes
+                        // Empty-element form: <C:time-range start="..." end="..."/>
                         for attr in e.attributes().flatten() {
                             let attr_name = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
                             let attr_value = attr
@@ -168,14 +192,9 @@ impl CalDavAdapter {
                                 .unwrap_or_default();
 
                             if attr_name == "start" {
-                                // Parse ISO date format with Z for UTC
-                                start_time = DateTime::parse_from_rfc3339(&attr_value)
-                                    .ok()
-                                    .map(|dt| dt.with_timezone(&Utc));
+                                start_time = parse_caldav_datetime(&attr_value);
                             } else if attr_name == "end" {
-                                end_time = DateTime::parse_from_rfc3339(&attr_value)
-                                    .ok()
-                                    .map(|dt| dt.with_timezone(&Utc));
+                                end_time = parse_caldav_datetime(&attr_value);
                             }
                         }
                     }
@@ -1302,5 +1321,114 @@ impl CalDavAdapter {
         }
 
         Ok((displayname, description, color))
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod time_range_parser_tests {
+    use super::*;
+
+    // ── parse_caldav_datetime ─────────────────────────────────
+
+    #[test]
+    fn ical_date_time_utc_form_parses() {
+        // Standard shape per RFC 4791 §9.9 / RFC 5545 §3.3.5 —
+        // what every real CalDAV client sends.
+        let parsed = parse_caldav_datetime("20260103T090000Z").expect("iCal DATE-TIME must parse");
+        assert_eq!(parsed.to_rfc3339(), "2026-01-03T09:00:00+00:00");
+    }
+
+    #[test]
+    fn rfc3339_form_parses_as_fallback() {
+        // Defensive fallback for the rare client that emits
+        // dashes+colons. Retained so behaviour is a superset of
+        // the pre-fix parser (which accepted only this shape).
+        let parsed = parse_caldav_datetime("2026-01-03T09:00:00Z").expect("RFC 3339 fallback");
+        assert_eq!(parsed.to_rfc3339(), "2026-01-03T09:00:00+00:00");
+    }
+
+    #[test]
+    fn ical_and_rfc3339_agree_on_same_instant() {
+        // Sanity: the two accepted forms represent the same
+        // instant when they describe the same wall time.
+        let a = parse_caldav_datetime("20260103T090000Z").unwrap();
+        let b = parse_caldav_datetime("2026-01-03T09:00:00Z").unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn empty_string_returns_none() {
+        assert!(parse_caldav_datetime("").is_none());
+    }
+
+    #[test]
+    fn malformed_returns_none() {
+        // Neither iCal nor RFC 3339 shape — parser must reject
+        // without panicking. The caller treats None as "no
+        // time-range attribute provided", falling through to the
+        // unfiltered event listing (same as the pre-fix
+        // behaviour on unparseable input — but at least now we
+        // reach that branch by intent, not by silent parse loss).
+        assert!(parse_caldav_datetime("not-a-datetime").is_none());
+        assert!(parse_caldav_datetime("20260103").is_none()); // date only, no time
+        assert!(parse_caldav_datetime("20260103T090000").is_none()); // missing Z
+    }
+
+    // ── parse_report — end-to-end integration ─────────────────
+
+    #[test]
+    fn calendar_query_with_ical_time_range_captures_both_bounds() {
+        // The end-to-end regression: a calendar-query REPORT
+        // with iCal DATE-TIME `time-range` attributes MUST
+        // surface both bounds as Some in `CalDavReportType::
+        // CalendarQuery { time_range, .. }`. Pre-fix this test
+        // would have seen `time_range = None` because
+        // parse_from_rfc3339 rejected `20260101T093000Z`.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop><D:getetag/><C:calendar-data/></D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR">
+      <C:comp-filter name="VEVENT">
+        <C:time-range start="20260101T093000Z" end="20260101T120000Z"/>
+      </C:comp-filter>
+    </C:comp-filter>
+  </C:filter>
+</C:calendar-query>"#;
+
+        let report = CalDavAdapter::parse_report(xml.as_bytes()).expect("REPORT parses");
+
+        match report {
+            CalDavReportType::CalendarQuery { time_range, .. } => {
+                let (start, end) = time_range
+                    .expect("iCal DATE-TIME time-range must parse as Some; got None (regression)");
+                assert_eq!(start.to_rfc3339(), "2026-01-01T09:30:00+00:00");
+                assert_eq!(end.to_rfc3339(), "2026-01-01T12:00:00+00:00");
+            }
+            other => panic!("Expected CalendarQuery, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn calendar_query_without_time_range_has_none() {
+        // Baseline: a filter-less calendar-query still produces
+        // CalendarQuery with time_range=None. Guards against a
+        // fix that overreaches and starts inventing time bounds.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop><D:getetag/><C:calendar-data/></D:prop>
+</C:calendar-query>"#;
+
+        let report = CalDavAdapter::parse_report(xml.as_bytes()).expect("REPORT parses");
+        match report {
+            CalDavReportType::CalendarQuery { time_range, .. } => {
+                assert!(time_range.is_none());
+            }
+            other => panic!("Expected CalendarQuery, got {:?}", other),
+        }
     }
 }
