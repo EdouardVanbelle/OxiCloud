@@ -80,15 +80,24 @@ const HEADER_DAV: HeaderName = HeaderName::from_static("dav");
 /// Replaces the pre-D0 hardcoded `"My Folder - {username}/"` prefix.
 pub fn nc_to_internal_path(chroot: &FolderDto, subpath: &str) -> Result<String, AppError> {
     let subpath = subpath.trim_matches('/');
+    // `chroot.path` comes from `Folder::path_string()` /
+    // `StoragePath::to_string()`, which prepends a leading `/` (e.g.
+    // `"/Personal"`) — trim it so the result matches the leading-
+    // slash-free convention `storage.folders.path` (and the plain
+    // WebDAV surface's `db_path`) actually use. Without this, exact-
+    // string comparisons against a plain-surface path (e.g. the
+    // in-memory WebDAV lock store's key) silently mismatch even
+    // though DB-backed lookups tolerate the discrepancy.
+    let chroot_path = chroot.path.trim_start_matches('/');
     if subpath.is_empty() {
-        return Ok(chroot.path.clone());
+        return Ok(chroot_path.to_string());
     }
     // Reject path traversal attempts.
     if subpath.split('/').any(|seg| seg == ".." || seg == ".") {
         return Err(AppError::bad_request("Invalid path: traversal not allowed"));
     }
 
-    Ok(format!("{}/{}", chroot.path, subpath))
+    Ok(format!("{}/{}", chroot_path, subpath))
 }
 
 /// Strip the caller's chroot prefix from an internal
@@ -1167,7 +1176,7 @@ async fn handle_patch(
             session.user.id,
         )
         .await
-        .map_err(|e| AppError::internal_error(format!("Failed to store file: {}", e)))?;
+        .map_err(AppError::from)?;
 
     // Everything from `start` to the new EOF reflects the patch (the
     // untouched suffix, if any, may have shifted when the body's length
@@ -2314,6 +2323,23 @@ mod tests {
             nc_to_internal_path(&home, "/Photos/").unwrap(),
             "My Folder - alice/Photos"
         );
+    }
+
+    /// Regression: `chroot.path` as returned by `folder_service.get_folder`
+    /// in production carries a leading `/` (from `StoragePath::to_string()`
+    /// — see `Folder::path_string`), unlike this module's `stub_folder`
+    /// test helper which builds the path directly. A real chroot must
+    /// still map to the leading-slash-free convention the plain WebDAV
+    /// surface's `db_path` uses, or exact-string comparisons against it
+    /// (e.g. the WebDAV lock store's key) silently mismatch.
+    #[test]
+    fn test_strips_leading_slash_from_chroot_path() {
+        let home = stub_folder("/Personal");
+        assert_eq!(
+            nc_to_internal_path(&home, "report.pdf").unwrap(),
+            "Personal/report.pdf"
+        );
+        assert_eq!(nc_to_internal_path(&home, "").unwrap(), "Personal");
     }
 
     #[test]

@@ -17,6 +17,18 @@
 #   6. PATCH on a directory → 409.
 #   7. PATCH on a missing resource → 404.
 #   8. PATCH without X-Update-Range → 400.
+#   9. If-None-Match precondition failure (tag matches current ETag) → 412.
+#  10. If-Match with a WEAK (`W/`) form of the current ETag → 412 (RFC 7232
+#      §3.1: If-Match requires a STRONG match; a weak validator in the
+#      request never satisfies it, even if the underlying tag value is
+#      identical — see `if_match_precondition_fails`).
+#
+# Hurl gotcha: a triple-backtick ``` multiline body appends a trailing
+# `\n` the server counts as part of Content-Length — that silently
+# breaks the exact `end - start + 1` span check on a byte-range PATCH.
+# Plain-text bodies below use the single-backtick ONELINE string form
+# (`` `text` ``) instead, which sends exactly the bytes between the
+# backticks with no injected newline.
 # =============================================================
 
 
@@ -38,9 +50,7 @@ token: jsonpath "$.access_token"
 PUT {{base_url}}/webdav/patch-probe.txt
 Authorization: Bearer {{token}}
 Content-Type: text/plain
-```
-0123456789
-```
+`0123456789`
 
 HTTP 201
 [Captures]
@@ -55,9 +65,7 @@ PATCH {{base_url}}/webdav/patch-probe.txt
 Authorization: Bearer {{token}}
 X-Update-Range: bytes=3-5
 Content-Type: text/plain
-```
-XYZ
-```
+`XYZ`
 
 HTTP 204
 [Asserts]
@@ -79,11 +87,11 @@ PATCH {{base_url}}/webdav/patch-probe.txt
 Authorization: Bearer {{token}}
 X-Update-Range: append
 Content-Type: text/plain
-```
--APPENDED
-```
+`-APPENDED`
 
 HTTP 204
+[Captures]
+current_etag: header "ETag"
 
 
 GET {{base_url}}/webdav/patch-probe.txt
@@ -103,9 +111,7 @@ PATCH {{base_url}}/webdav/patch-probe.txt
 Authorization: Bearer {{token}}
 X-Update-Range: bytes=1000-1005
 Content-Type: text/plain
-```
-oops
-```
+`oops`
 
 HTTP 416
 
@@ -118,9 +124,7 @@ Authorization: Bearer {{token}}
 X-Update-Range: bytes=0-2
 If-Match: "not-the-real-etag"
 Content-Type: text/plain
-```
-NOP
-```
+`NOP`
 
 HTTP 412
 
@@ -149,9 +153,7 @@ PATCH {{base_url}}/webdav/patch-probe.txt
 Authorization: Bearer {{token}}
 X-Update-Range: bytes=0-2
 Content-Type: text/plain
-```
-NOP
-```
+`NOP`
 
 HTTP 423
 
@@ -177,9 +179,7 @@ PATCH {{base_url}}/webdav/patch-probe-dir/
 Authorization: Bearer {{token}}
 X-Update-Range: bytes=0-2
 Content-Type: text/plain
-```
-NOP
-```
+`NOP`
 
 HTTP 409
 
@@ -191,9 +191,7 @@ PATCH {{base_url}}/webdav/patch-probe-does-not-exist.txt
 Authorization: Bearer {{token}}
 X-Update-Range: bytes=0-2
 Content-Type: text/plain
-```
-NOP
-```
+`NOP`
 
 HTTP 404
 
@@ -204,11 +202,40 @@ HTTP 404
 PATCH {{base_url}}/webdav/patch-probe.txt
 Authorization: Bearer {{token}}
 Content-Type: text/plain
-```
-NOP
-```
+`NOP`
 
 HTTP 400
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 11 — If-None-Match precondition failure: the header names the
+#          CURRENT ETag, so the "only if it does NOT match" condition
+#          is violated → 412.
+# ─────────────────────────────────────────────────────────────
+PATCH {{base_url}}/webdav/patch-probe.txt
+Authorization: Bearer {{token}}
+X-Update-Range: bytes=0-2
+If-None-Match: {{current_etag}}
+Content-Type: text/plain
+`NOP`
+
+HTTP 412
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 12 — If-Match with a WEAK form (`W/`) of the current ETag → 412.
+#          RFC 7232 §3.1 requires If-Match to STRONG-match; a request
+#          carrying a weak validator never satisfies it even when the
+#          underlying tag value is identical.
+# ─────────────────────────────────────────────────────────────
+PATCH {{base_url}}/webdav/patch-probe.txt
+Authorization: Bearer {{token}}
+X-Update-Range: bytes=0-2
+If-Match: W/{{current_etag}}
+Content-Type: text/plain
+`NOP`
+
+HTTP 412
 
 
 # ─────────────────────────────────────────────────────────────

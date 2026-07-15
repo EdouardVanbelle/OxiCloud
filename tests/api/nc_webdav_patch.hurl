@@ -16,6 +16,16 @@
 #   3. PATCH with a Content-Range header → 400 (must use X-Update-Range).
 #   4. PATCH without X-Update-Range → 400.
 #   5. PATCH on a nonexistent file → 404.
+#   6. PATCH on a directory → 409 (not 404 — the NC surface previously
+#      had no folder-existence check and returned 404 for both a missing
+#      file AND an existing directory; the fix commit added an explicit
+#      check so the two cases are distinguishable again, matching the
+#      plain-surface behavior).
+#
+# Hurl gotcha: headers MUST come before section blocks like
+# `[BasicAuth]` in a request — a header line placed after `[BasicAuth]`
+# is parsed as the START OF A NEW REQUEST instead (see
+# `nc_multidrive_move_regression.hurl`'s note on the same gotcha).
 # =============================================================
 
 
@@ -50,12 +60,10 @@ ap_id:       jsonpath "$.id"
 # Step 1 — Seed a 10-byte probe file: "0123456789".
 # ─────────────────────────────────────────────────────────────
 PUT {{base_url}}/remote.php/dav/files/{{nc_username}}/nc-patch-probe.txt
+Content-Type: text/plain
 [BasicAuth]
 {{nc_username}}: {{nc_password}}
-Content-Type: text/plain
-```
-0123456789
-```
+`0123456789`
 
 HTTP 201
 
@@ -64,13 +72,11 @@ HTTP 201
 # Step 2 — PATCH bytes 3-5 ("345") with "XYZ".
 # ─────────────────────────────────────────────────────────────
 PATCH {{base_url}}/remote.php/dav/files/{{nc_username}}/nc-patch-probe.txt
-[BasicAuth]
-{{nc_username}}: {{nc_password}}
 X-Update-Range: bytes=3-5
 Content-Type: text/plain
-```
-XYZ
-```
+[BasicAuth]
+{{nc_username}}: {{nc_password}}
+`XYZ`
 
 HTTP 204
 [Asserts]
@@ -90,13 +96,11 @@ body == "012XYZ6789"
 # Step 3 — PATCH append.
 # ─────────────────────────────────────────────────────────────
 PATCH {{base_url}}/remote.php/dav/files/{{nc_username}}/nc-patch-probe.txt
-[BasicAuth]
-{{nc_username}}: {{nc_password}}
 X-Update-Range: append
 Content-Type: text/plain
-```
-END
-```
+[BasicAuth]
+{{nc_username}}: {{nc_password}}
+`END`
 
 HTTP 204
 [Asserts]
@@ -116,14 +120,12 @@ body == "012XYZ6789END"
 # Step 4 — Content-Range header on PATCH is rejected.
 # ─────────────────────────────────────────────────────────────
 PATCH {{base_url}}/remote.php/dav/files/{{nc_username}}/nc-patch-probe.txt
-[BasicAuth]
-{{nc_username}}: {{nc_password}}
 X-Update-Range: bytes=0-2
 Content-Range: bytes 0-2/13
 Content-Type: text/plain
-```
-abc
-```
+[BasicAuth]
+{{nc_username}}: {{nc_password}}
+`abc`
 
 HTTP 400
 
@@ -132,12 +134,10 @@ HTTP 400
 # Step 5 — Missing X-Update-Range header.
 # ─────────────────────────────────────────────────────────────
 PATCH {{base_url}}/remote.php/dav/files/{{nc_username}}/nc-patch-probe.txt
+Content-Type: text/plain
 [BasicAuth]
 {{nc_username}}: {{nc_password}}
-Content-Type: text/plain
-```
-abc
-```
+`abc`
 
 HTTP 400
 
@@ -146,15 +146,40 @@ HTTP 400
 # Step 6 — PATCH on a nonexistent file → 404.
 # ─────────────────────────────────────────────────────────────
 PATCH {{base_url}}/remote.php/dav/files/{{nc_username}}/nc-patch-does-not-exist.txt
-[BasicAuth]
-{{nc_username}}: {{nc_password}}
 X-Update-Range: append
 Content-Type: text/plain
-```
-abc
-```
+[BasicAuth]
+{{nc_username}}: {{nc_password}}
+`abc`
 
 HTTP 404
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 7 — PATCH on a directory → 409 Conflict (not 404).
+# ─────────────────────────────────────────────────────────────
+MKCOL {{base_url}}/remote.php/dav/files/{{nc_username}}/nc-patch-probe-dir/
+[BasicAuth]
+{{nc_username}}: {{nc_password}}
+
+HTTP 201
+
+
+PATCH {{base_url}}/remote.php/dav/files/{{nc_username}}/nc-patch-probe-dir/
+X-Update-Range: bytes=0-2
+Content-Type: text/plain
+[BasicAuth]
+{{nc_username}}: {{nc_password}}
+`NOP`
+
+HTTP 409
+
+
+DELETE {{base_url}}/remote.php/dav/files/{{nc_username}}/nc-patch-probe-dir/
+[BasicAuth]
+{{nc_username}}: {{nc_password}}
+
+HTTP 204
 
 
 # ─────────────────────────────────────────────────────────────
