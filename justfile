@@ -180,6 +180,12 @@ front-design:
 #                                     --config server-with-oidc.env so the
 #                                     api and webdav suites stay on the
 #                                     OIDC-off config.
+#   * tests/oidc/run-manual-sso-only.sh — NOT part of this chain (see
+#                                     `oidc-manual-sso-only` below): a
+#                                http://localhost:8090/files/1bf4713c-891e-46fb-acf0-b10231fe32c8     human-run check that OIDC-as-only-
+#                                     login-method actually redirects a
+#                                     real browser, which the curl-driven
+#                                     suite above can't observe.
 #
 # Same chain runs in CI under the `api-test` job in
 # .github/workflows/ci.yml; keep the order in sync so a local pass means
@@ -227,6 +233,13 @@ test-caldav:
     fi
     cargo build
     ./tests/caldav/run-pycaldav.sh
+
+# Manual, human-run: launches OxiCloud with OIDC as the ONLY login method
+# (fake IdP on :1081, server on :8090) and waits for you to eyeball the
+# /login auto-redirect in a real browser. Not part of `just api-test` —
+# there's no automated assertion here, it's a visual check. Ctrl-C to stop.
+#oidc-manual-sso-only:
+#    bash tests/oidc/run-manual-sso-only.sh
 
 # ---------------------------------------------------------------------------
 # SvelteKit frontend (frontend/) — the only frontend. These `fe-*` recipes

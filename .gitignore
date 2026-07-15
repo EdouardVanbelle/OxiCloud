@@ -100,7 +100,9 @@ tests/e2e/test-results/
 tests/e2e/blob-report/
 tests/e2e/playwright/.cache/
 tests/e2e/playwright/.auth/
+
 tests/webdav/storage-litmus/
+tests/oidc-manual/
 tests/caldav/storage/
 tests/caldav/.venv/
 tests/caldav/__pycache__/
