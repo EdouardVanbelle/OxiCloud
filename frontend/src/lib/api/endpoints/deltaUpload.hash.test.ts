@@ -24,6 +24,7 @@ describe('worker-pool hashing (architecture gate)', () => {
 		// on the main thread, serially.
 		const nFiles = 24;
 		const size = 4 * 1024 * 1024;
+		const trials = 3;
 		const dir = await fs.mkdtemp(join(tmpdir(), 'hashbench-'));
 		const paths: string[] = [];
 		for (let i = 0; i < nFiles; i++) {
@@ -35,12 +36,14 @@ describe('worker-pool hashing (architecture gate)', () => {
 		}
 
 		// Sequential (old): read + hash on the calling thread.
-		const t0 = performance.now();
-		for (const p of paths) {
-			const b = await fs.readFile(p);
-			createHash('sha256').update(b).digest('hex');
-		}
-		const seqMs = performance.now() - t0;
+		const runSequential = async () => {
+			const t0 = performance.now();
+			for (const p of paths) {
+				const b = await fs.readFile(p);
+				createHash('sha256').update(b).digest('hex');
+			}
+			return performance.now() - t0;
+		};
 
 		// 3-lane pool (new): each worker reads + hashes its own files.
 		const lanes = 3;
@@ -53,35 +56,52 @@ describe('worker-pool hashing (architecture gate)', () => {
 				parentPort.postMessage(createHash('sha256').update(b).digest('hex'));
 			});
 		`;
-		const workers = Array.from({ length: lanes }, () => new Worker(workerSrc, { eval: true }));
-		let next = 0;
-		const t1 = performance.now();
-		await Promise.all(
-			workers.map(
-				(w) =>
-					new Promise<void>((resolve, reject) => {
-						const feed = () => {
-							if (next >= paths.length) {
-								resolve();
-								return;
-							}
-							const i = next++;
-							w.once('message', () => feed());
-							w.once('error', reject);
-							w.postMessage(paths[i]);
-						};
-						feed();
-					})
-			)
-		);
-		const poolMs = performance.now() - t1;
-		await Promise.all(workers.map((w) => w.terminate()));
+		const runPooled = async () => {
+			const workers = Array.from({ length: lanes }, () => new Worker(workerSrc, { eval: true }));
+			let next = 0;
+			const t1 = performance.now();
+			await Promise.all(
+				workers.map(
+					(w) =>
+						new Promise<void>((resolve, reject) => {
+							const feed = () => {
+								if (next >= paths.length) {
+									resolve();
+									return;
+								}
+								const i = next++;
+								w.once('message', () => feed());
+								w.once('error', reject);
+								w.postMessage(paths[i]);
+							};
+							feed();
+						})
+				)
+			);
+			const ms = performance.now() - t1;
+			await Promise.all(workers.map((w) => w.terminate()));
+			return ms;
+		};
+
+		// Best-of-`trials` wall-clock per strategy: a single sample is prone
+		// to scheduler/GC noise on a loaded machine, which can tip either
+		// side when the two are close. Noise only ever adds delay, so the
+		// minimum across trials is each strategy's true achievable time —
+		// a genuine architecture regression still fails every trial.
+		const seqTimes: number[] = [];
+		const poolTimes: number[] = [];
+		for (let i = 0; i < trials; i++) {
+			seqTimes.push(await runSequential());
+			poolTimes.push(await runPooled());
+		}
+		const seqMs = Math.min(...seqTimes);
+		const poolMs = Math.min(...poolTimes);
+
 		await fs.rm(dir, { recursive: true, force: true });
 
-		// eslint-disable-next-line no-console
 		console.info(
-			`read+hash ${nFiles} x 4 MiB: sequential ${seqMs.toFixed(0)} ms vs 3-lane pool ${poolMs.toFixed(0)} ms (${(seqMs / poolMs).toFixed(1)}x)`
+			`read+hash ${nFiles} x 4 MiB over ${trials} trials: best sequential ${seqMs.toFixed(0)} ms vs best 3-lane pool ${poolMs.toFixed(0)} ms (${(seqMs / poolMs).toFixed(1)}x)`
 		);
 		expect(poolMs).toBeLessThan(seqMs);
-	});
+	}, 20000);
 });
