@@ -818,6 +818,96 @@ Authorization: Bearer {{adam_token}}
 
 HTTP 204
 
+# ── Regression pin for AuthZ audit #17 (2026-07-12). ─────────
+# The chunked-upload `complete` handler used to call plain
+# `upload_file_streaming` at finalize — no `_with_perms` check.
+# A grant revoked between session-open and finalize stayed
+# effective until the last chunk landed (up to 24h JWT TTL,
+# forever with app-passwords). Fix: swap to
+# `upload_file_streaming_with_perms` so `authz.require(Create,
+# Folder)` re-runs at complete time.
+#
+# Sequence:
+#   1. Adam (Editor) opens a session — pre-check passes.
+#   2. Adam PATCHes the single chunk (chunk upload is unauth'd,
+#      always allowed).
+#   3. Alice DEMOTES Adam to Viewer (Viewer bundle has Read but
+#      no Create).
+#   4. Adam POST /complete → 403 (pre-fix: 201 + file created).
+#   5. Cleanup: cancel the orphaned session + re-promote Adam
+#      to Editor so the following steps aren't disturbed.
+
+# 1 — Open session while Editor.
+POST {{base_url}}/api/uploads
+Authorization: Bearer {{adam_token}}
+Content-Type: application/json
+{
+  "filename": "audit17-post-revoke.mp4",
+  "folder_id": "{{perm_folder_id}}",
+  "content_type": "video/mp4",
+  "total_size": 2760653,
+  "chunk_size": 3000000
+}
+
+HTTP 201
+[Captures]
+audit17_upload_id: jsonpath "$.upload_id"
+
+
+# 2 — Send the single chunk (session pre-authorised).
+PATCH {{base_url}}/api/uploads/{{audit17_upload_id}}?chunk_index=0
+Authorization: Bearer {{adam_token}}
+Content-Type: application/octet-stream
+file,fixtures/free_video_over_1MB.mp4;
+
+HTTP 200
+
+
+# 3 — Alice demotes Adam Editor → Viewer (Create removed).
+PUT {{base_url}}/api/grants/role
+Authorization: Bearer {{alice_token}}
+Content-Type: application/json
+{
+  "subject":  { "type": "user",   "id": "{{adam_user_id}}" },
+  "resource": { "type": "folder", "id": "{{perm_folder_id}}" },
+  "role":     "viewer"
+}
+
+HTTP 200
+
+
+# 4 — Finalize now fails: engine re-checks Create at complete
+# time. Adam still has Read (viewer role) → graduated denial
+# returns 403; pre-fix returned 201 with a phantom file.
+POST {{base_url}}/api/uploads/{{audit17_upload_id}}/complete
+Authorization: Bearer {{adam_token}}
+
+HTTP 403
+
+
+# 5a — The session is orphaned (chunks on disk, no completion).
+# Cancel it as Adam (still owns the session, so the `_with_perms`
+# gate on DELETE-session lets him through).
+DELETE {{base_url}}/api/uploads/{{audit17_upload_id}}
+Authorization: Bearer {{adam_token}}
+
+HTTP 204
+
+
+# 5b — Restore Adam to Editor so subsequent steps behave as
+# before this regression pin was inserted.
+PUT {{base_url}}/api/grants/role
+Authorization: Bearer {{alice_token}}
+Content-Type: application/json
+{
+  "subject":  { "type": "user",   "id": "{{adam_user_id}}" },
+  "resource": { "type": "folder", "id": "{{perm_folder_id}}" },
+  "role":     "editor"
+}
+
+HTTP 200
+
+
 # ── Delete still denied (Editor excludes Delete). Editor has
 #    Read → graduated denial returns 403.
 DELETE {{base_url}}/api/files/{{perm_file_id}}

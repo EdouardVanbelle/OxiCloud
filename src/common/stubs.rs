@@ -511,6 +511,17 @@ impl FileUploadUseCase for StubFileUploadUseCase {
     ) -> Result<FileDto, DomainError> {
         Ok(FileDto::default())
     }
+
+    async fn upload_file_streaming_with_perms(
+        &self,
+        _name: String,
+        _folder_id: Option<String>,
+        _content_type: String,
+        _blob: StoredBlob,
+        _caller_id: Uuid,
+    ) -> Result<FileDto, DomainError> {
+        Ok(FileDto::default())
+    }
 }
 
 // ---------------------------------------------------------------------------

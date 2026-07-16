@@ -60,6 +60,25 @@ pub trait FileUploadUseCase: Send + Sync + 'static {
         caller_id: Uuid,
     ) -> Result<FileDto, DomainError>;
 
+    /// `_with_perms` variant of `upload_file_streaming` — enforces
+    /// `Create` on the target folder before registering the row.
+    ///
+    /// AuthZ audit #17 (2026-07-12): the chunked-upload `complete`
+    /// path called plain `upload_file_streaming` at finalize; a grant
+    /// revoked between session open and finalize stayed effective
+    /// until the caller landed the final chunk (up to 24h JWT TTL,
+    /// forever with app-passwords). Handlers now call this variant
+    /// so the engine re-checks at finalize regardless of how long
+    /// the session was open.
+    async fn upload_file_streaming_with_perms(
+        &self,
+        name: String,
+        folder_id: Option<String>,
+        content_type: String,
+        blob: StoredBlob,
+        caller_id: Uuid,
+    ) -> Result<FileDto, DomainError>;
+
     /// Replace the content of the file at `path` with an already-ingested
     /// blob, or create the file when it doesn't exist (WebDAV/WOPI PUT).
     ///

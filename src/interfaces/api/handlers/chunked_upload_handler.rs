@@ -188,9 +188,14 @@ impl ChunkedUploadHandler {
 
         // ── Permission pre-check: caller must have Create on the target
         // folder BEFORE we allocate a session and accept chunks. The
-        // upload service re-checks at finalize time, but failing here
-        // avoids wasting client+server resources on chunks that will be
-        // rejected. None = caller's root namespace, no check needed.
+        // upload service re-checks at finalize via
+        // `upload_file_streaming_with_perms` (AuthZ audit #17 fix,
+        // 2026-07-16) so a grant revoked mid-session is caught. This
+        // pre-check is the fail-fast: it avoids wasting client+server
+        // resources on chunks that will be rejected anyway. `None`
+        // means the write lands at drive-root — that path is currently
+        // unchecked (session doesn't carry `drive_id`; tracked with the
+        // folder-id-walking follow-up).
         if let Some(ref fid) = request.folder_id
             && let Err(err) = state
                 .applications
@@ -441,9 +446,17 @@ impl ChunkedUploadHandler {
         }
 
         // Register the file row against the ingested blob.
+        //
+        // AuthZ audit #17 (2026-07-12): swapped `upload_file_streaming` →
+        // `upload_file_streaming_with_perms` so `Create` on the target
+        // folder is re-verified at finalize. Session creation already
+        // pre-checked (line ~198), but that was potentially hours or
+        // days ago; app-passwords keep sessions valid indefinitely.
+        // Without the finalize re-check, a grant revoked mid-session
+        // stayed effective until the last chunk landed.
         let size = ingested.size;
         match upload_service
-            .upload_file_streaming(
+            .upload_file_streaming_with_perms(
                 parts.filename.clone(),
                 parts.folder_id.clone(),
                 ingested.content_type.clone(),
