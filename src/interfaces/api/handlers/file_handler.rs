@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use utoipa::ToSchema;
 
 use crate::application::ports::file_ports::{
-    FileManagementUseCase, FileRetrievalUseCase, FileUploadUseCase,
+    FileManagementUseCase, FileRetrievalUseCase, FileUploadUseCase, RangeContent,
 };
 use crate::application::ports::storage_ports::{FileReadPort, StorageUsagePort};
 use crate::application::ports::thumbnail_ports::ThumbnailPort;
@@ -713,10 +713,19 @@ impl FileHandler {
                         Self::content_disposition(&file_dto.name, &file_dto.mime_type, &params);
 
                     match retrieval
-                        .get_file_range_stream_with_perms(&id, auth_user.id, start, Some(end + 1))
+                        .get_file_range_preloaded_with_perms(
+                            &file_dto,
+                            auth_user.id,
+                            start,
+                            Some(end + 1),
+                        )
                         .await
                     {
-                        Ok(stream) => {
+                        Ok(content) => {
+                            let body = match content {
+                                RangeContent::Bytes(b) => Body::from(b),
+                                RangeContent::Stream(s) => Body::from_stream(Box::into_pin(s)),
+                            };
                             return Response::builder()
                                 .status(StatusCode::PARTIAL_CONTENT)
                                 .header(header::CONTENT_TYPE, &*file_dto.mime_type)
@@ -732,7 +741,7 @@ impl FileHandler {
                                     header::CACHE_CONTROL,
                                     "private, max-age=3600, must-revalidate",
                                 )
-                                .body(Body::from_stream(Box::into_pin(stream)))
+                                .body(body)
                                 .unwrap()
                                 .into_response();
                         }

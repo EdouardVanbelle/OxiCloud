@@ -14,7 +14,7 @@ use crate::application::dtos::trash_dto::{
 };
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::file_lifecycle::FileLifecycleHook;
-use crate::application::ports::storage_ports::{FileReadPort, FileWritePort};
+use crate::application::ports::storage_ports::FileWritePort;
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::common::errors::{DomainError, ErrorKind, Result};
 use crate::domain::entities::file::File;
@@ -24,7 +24,6 @@ use crate::domain::repositories::folder_repository::FolderRepository;
 use crate::domain::repositories::trash_repository::TrashRepository;
 use crate::domain::services::authorization::ResourceKind;
 use crate::domain::services::authorization::{Permission, Resource, Subject};
-use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
 use crate::infrastructure::repositories::pg::file_blob_write_repository::FileBlobWriteRepository;
 use crate::infrastructure::repositories::pg::folder_db_repository::FolderDbRepository;
 use crate::infrastructure::repositories::pg::trash_db_repository::TrashDbRepository;
@@ -49,9 +48,6 @@ pub struct TrashService {
     /// Repository for trash-specific operations like listing and retrieving trashed items
     trash_repository: Arc<TrashDbRepository>,
 
-    /// Port for file read operations (get file metadata)
-    file_read_port: Arc<FileBlobReadRepository>,
-
     /// Port for file write operations (trash, restore, delete)
     file_write_port: Arc<FileBlobWriteRepository>,
 
@@ -75,19 +71,14 @@ pub struct TrashService {
     /// so trash listings filter by drive membership instead of the legacy
     /// per-user scope.
     drive_repo: Arc<crate::infrastructure::repositories::pg::DrivePgRepository>,
-
-    /// Number of days items should be kept in trash before automatic cleanup
-    retention_days: u32,
 }
 
 impl TrashService {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         trash_repository: Arc<TrashDbRepository>,
-        file_read_port: Arc<FileBlobReadRepository>,
         file_write_port: Arc<FileBlobWriteRepository>,
         folder_storage_port: Arc<FolderDbRepository>,
-        retention_days: u32,
         dedup_service: Arc<DedupService>,
         content_cache: Option<Arc<FileContentCache>>,
         authz: Arc<PgAclEngine>,
@@ -95,7 +86,6 @@ impl TrashService {
     ) -> Self {
         Self {
             trash_repository,
-            file_read_port,
             file_write_port,
             folder_storage_port,
             dedup_service,
@@ -103,7 +93,6 @@ impl TrashService {
             content_cache,
             authz,
             drive_repo,
-            retention_days,
         }
     }
 
@@ -177,23 +166,17 @@ impl TrashUseCase for TrashService {
         // Note: We now verify file/folder ownership BEFORE moving to trash.
         // This prevents users from trashing items they do not own (IDOR).
 
-        // Parse UUIDs with detailed error handling
+        // Parse UUIDs with detailed error handling. The parsed value is
+        // re-derived per branch below; this early check preserves the 400
+        // (validation) error shape for malformed ids.
         debug!("Validating item UUID: {}", item_id);
-        let item_uuid = match Uuid::parse_str(item_id) {
-            Ok(uuid) => {
-                debug!("Valid item UUID: {}", uuid);
-                uuid
-            }
-            Err(e) => {
-                error!("Invalid item UUID: {} - Error: {}", item_id, e);
-                return Err(DomainError::validation_error(format!(
-                    "Invalid item ID: {}",
-                    e
-                )));
-            }
-        };
-
-        let user_uuid = user_id;
+        if let Err(e) = Uuid::parse_str(item_id) {
+            error!("Invalid item UUID: {} - Error: {}", item_id, e);
+            return Err(DomainError::validation_error(format!(
+                "Invalid item ID: {}",
+                e
+            )));
+        }
 
         match item_type {
             "file" => {
@@ -209,59 +192,13 @@ impl TrashUseCase for TrashService {
                     )
                     .await?;
 
-                // Authz already passed — use the non-owner-scoped read so that
-                // grantees with Delete permission can trash files they don't own.
-                // The file's user_id in storage.files is unchanged, so the item
-                // will appear in the original owner's trash view.
-                let file = match self.file_read_port.get_file(item_id).await {
-                    Ok(file) => {
-                        debug!("File found: {} ({})", file.name(), item_id);
-                        file
-                    }
-                    Err(e) => {
-                        error!("Error getting file: {} - {}", item_id, e);
-                        return Err(DomainError::new(
-                            ErrorKind::NotFound,
-                            "File",
-                            format!("Error retrieving file {}: {}", item_id, e),
-                        ));
-                    }
-                };
-
-                let original_path = file.storage_path().to_string();
-                debug!("Original file path: {}", original_path);
-
-                debug!("Creating TrashedItem object for the file");
-                let trashed_item = TrashedItem::new(
-                    item_uuid,
-                    user_uuid,
-                    TrashedItemType::File,
-                    file.name().to_string(),
-                    original_path,
-                    self.retention_days,
-                );
-                debug!(
-                    "TrashedItem created successfully: {} -> {}",
-                    file.name(),
-                    trashed_item.id()
-                );
-
-                // First add to trash index to register the item
-                info!("Adding file {} to trash index", item_id);
-                match self.trash_repository.add_to_trash(&trashed_item).await {
-                    Ok(_) => {
-                        debug!("File added to trash index successfully");
-                    }
-                    Err(e) => {
-                        error!("Error adding file to trash index: {}", e);
-                        return Err(DomainError::internal_error(
-                            "TrashRepository",
-                            format!("Failed to add file to trash: {}", e),
-                        ));
-                    }
-                };
-
-                // Then physically move the file to trash.
+                // Soft-delete model: the is_trashed flag on the row IS the
+                // trash membership — there is no separate trash index to
+                // register into (`TrashRepository::add_to_trash` is a
+                // documented no-op). The previous shape still fetched the
+                // full file entity and built a `TrashedItem` only to feed
+                // that no-op: one wasted SELECT per trash operation.
+                //
                 // §14: caller_id stamps `updated_by` on the trashed row.
                 info!("Physically moving file to trash: {}", item_id);
                 match self.file_write_port.move_to_trash(item_id, user_id).await {
@@ -293,43 +230,10 @@ impl TrashUseCase for TrashService {
                     )
                     .await?;
 
-                let folder = self
-                    .folder_storage_port
-                    .get_folder(item_id)
-                    .await
-                    .map_err(|e| {
-                        DomainError::new(
-                            ErrorKind::NotFound,
-                            "Folder",
-                            format!("Error retrieving folder {}: {}", item_id, e),
-                        )
-                    })?;
-
-                let original_path = folder.storage_path().to_string();
-
-                let trashed_item = TrashedItem::new(
-                    item_uuid,
-                    user_uuid,
-                    TrashedItemType::Folder,
-                    folder.name().to_string(),
-                    original_path,
-                    self.retention_days,
-                );
-
-                // First add to trash index to register the item
-                debug!("Adding folder {} to trash repository", item_id);
-                match self.trash_repository.add_to_trash(&trashed_item).await {
-                    Ok(_) => debug!("Successfully added folder to trash repository"),
-                    Err(e) => {
-                        error!("Failed to add folder to trash repository: {}", e);
-                        return Err(DomainError::internal_error(
-                            "TrashRepository",
-                            format!("Failed to add folder to trash: {}", e),
-                        ));
-                    }
-                };
-
-                // Then physically move the folder to trash.
+                // Soft-delete model — same as the file branch above: the
+                // cascade UPDATE below is the whole operation; no folder
+                // fetch or trash-index write needed.
+                //
                 // §14: caller_id stamps `updated_by` on every cascade-trashed row.
                 self.folder_storage_port
                     .move_to_trash(item_id, user_id)

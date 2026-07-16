@@ -260,7 +260,7 @@ impl SearchService {
         user_id: Uuid,
     ) -> Vec<ContentHitDto> {
         use crate::application::ports::authorization_ports::AuthorizationEngine;
-        use crate::domain::services::authorization::{Permission, Resource, Subject};
+        use crate::domain::services::authorization::Subject;
 
         let Some(index) = &self.content_index else {
             return Vec::new();
@@ -316,36 +316,42 @@ impl SearchService {
         //     drive the caller doesn't otherwise have. The Tantivy
         //     filter is drive-only; this re-check restores per-file
         //     resolution.
-        // Failures degrade conservatively (drop the hit, log it) —
-        // never leak.
-        let mut verified = Vec::with_capacity(hits.len());
-        for hit in hits {
-            let file_uuid = match Uuid::parse_str(&hit.file_id) {
-                Ok(u) => u,
+        // Failures degrade conservatively (drop the hit / the page,
+        // log it) — never leak. Batched: one drive-resolution query for
+        // the whole page instead of up to CONTENT_HITS_LIMIT sequential
+        // point SELECTs (benches/SEARCH-REBAC.md).
+        let mut hit_ids = Vec::with_capacity(hits.len());
+        for hit in &hits {
+            match Uuid::parse_str(&hit.file_id) {
+                Ok(u) => hit_ids.push(u),
                 Err(_) => {
                     tracing::warn!("Content-index hit had non-UUID file_id: {}", hit.file_id);
-                    continue;
                 }
+            }
+        }
+        let allowed = match authz
+            .check_files_read_batch(Subject::User(user_id), &hit_ids)
+            .await
+        {
+            Ok(set) => set,
+            Err(e) => {
+                tracing::warn!("ReBAC re-check failed for content hits: {e}");
+                return Vec::new();
+            }
+        };
+        let mut verified = Vec::with_capacity(hits.len());
+        for hit in hits {
+            let Ok(file_uuid) = Uuid::parse_str(&hit.file_id) else {
+                continue; // already warned above
             };
-            match authz
-                .check(
-                    Subject::User(user_id),
-                    Permission::Read,
-                    Resource::File(file_uuid),
-                )
-                .await
-            {
-                Ok(true) => verified.push(hit),
-                Ok(false) => {
-                    tracing::debug!(
-                        target: "oxicloud::search",
-                        file_id = %file_uuid,
-                        "dropping content-index hit: ReBAC denies Read after Tantivy filter",
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!("ReBAC re-check failed for {file_uuid}: {e}");
-                }
+            if allowed.contains(&file_uuid) {
+                verified.push(hit);
+            } else {
+                tracing::debug!(
+                    target: "oxicloud::search",
+                    file_id = %file_uuid,
+                    "dropping content-index hit: ReBAC denies Read after Tantivy filter",
+                );
             }
         }
         verified

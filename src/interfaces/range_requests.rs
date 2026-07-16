@@ -13,7 +13,7 @@ use http_range_header::parse_range_header;
 use std::sync::Arc;
 
 use crate::application::dtos::file_dto::FileDto;
-use crate::application::ports::file_ports::FileRetrievalUseCase;
+use crate::application::ports::file_ports::RangeContent;
 use crate::application::services::file_retrieval_service::FileRetrievalService;
 
 /// `If-None-Match` short-circuit: returns a `304 Not Modified` response
@@ -71,24 +71,32 @@ pub async fn range_response(
     let end = *range.end();
     let range_length = end - start + 1;
 
+    // Cache-aware: sub-threshold files already in the RAM content cache are
+    // answered with a zero-copy Bytes slice — no PG, no disk (benches/RANGE-CACHE.md).
     match retrieval
-        .get_file_range_stream(&file.id, start, Some(end + 1))
+        .get_file_range_preloaded(file, start, Some(end + 1))
         .await
     {
-        Ok(stream) => Some(
-            Response::builder()
-                .status(StatusCode::PARTIAL_CONTENT)
-                .header(header::CONTENT_TYPE, &*file.mime_type)
-                .header(header::CONTENT_LENGTH, range_length)
-                .header(
-                    header::CONTENT_RANGE,
-                    format!("bytes {}-{}/{}", start, end, file.size),
-                )
-                .header(header::ACCEPT_RANGES, "bytes")
-                .header(header::ETAG, etag)
-                .body(Body::from_stream(Box::into_pin(stream)))
-                .unwrap(),
-        ),
+        Ok(content) => {
+            let body = match content {
+                RangeContent::Bytes(b) => Body::from(b),
+                RangeContent::Stream(s) => Body::from_stream(Box::into_pin(s)),
+            };
+            Some(
+                Response::builder()
+                    .status(StatusCode::PARTIAL_CONTENT)
+                    .header(header::CONTENT_TYPE, &*file.mime_type)
+                    .header(header::CONTENT_LENGTH, range_length)
+                    .header(
+                        header::CONTENT_RANGE,
+                        format!("bytes {}-{}/{}", start, end, file.size),
+                    )
+                    .header(header::ACCEPT_RANGES, "bytes")
+                    .header(header::ETAG, etag)
+                    .body(body)
+                    .unwrap(),
+            )
+        }
         Err(err) => {
             tracing::error!("Error creating range stream: {}", err);
             None // fall through to the full download

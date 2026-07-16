@@ -99,6 +99,28 @@ pub trait ShareStoragePort: Send + Sync + 'static {
         share: &crate::domain::entities::share::Share,
     ) -> Result<crate::domain::entities::share::Share, DomainError>;
 
+    /// Atomically bump a link's access counter (public share landing).
+    /// Returns the number of rows updated — 0 means "no live share for
+    /// this token" (missing OR expired).
+    ///
+    /// The default is the legacy read-modify-write (kept for test mocks);
+    /// `SharePgRepository` overrides it with a single `UPDATE … SET
+    /// access_count = access_count + 1`, replacing 2 correlated-subquery
+    /// round-trips per anonymous visit with 1 and removing the lost-update
+    /// race between concurrent visitors (benches/SHARE-ACCESS.md).
+    async fn increment_access_count(&self, token: &str) -> Result<u64, DomainError> {
+        let share = match self.find_share_by_token(token).await {
+            Ok(s) => s,
+            Err(e) if e.kind == crate::common::errors::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e),
+        };
+        if share.is_expired() {
+            return Ok(0);
+        }
+        self.update_share(&share.increment_access_count()).await?;
+        Ok(1)
+    }
+
     async fn find_shares_by_user(
         &self,
         user_id: Uuid,

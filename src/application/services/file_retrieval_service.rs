@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::ports::authorization_ports::AuthorizationEngine;
-use crate::application::ports::file_ports::{FileRetrievalUseCase, OptimizedFileContent};
+use crate::application::ports::file_ports::{
+    FileRetrievalUseCase, OptimizedFileContent, RangeContent,
+};
 use crate::application::ports::resource_access_hook::ResourceAccessHook;
 use crate::application::ports::storage_ports::FileReadPort;
 use crate::common::errors::DomainError;
@@ -284,6 +286,69 @@ impl FileRetrievalService {
         let files = self.file_read.get_files_by_ids(ids).await?;
         Ok(files.into_iter().map(FileDto::from).collect())
     }
+
+    /// Range read that first consults the RAM content cache (see
+    /// [`Self::get_file_range_preloaded`]).
+    pub async fn get_file_range_preloaded_with_perms(
+        &self,
+        dto: &FileDto,
+        caller_id: Uuid,
+        start: u64,
+        end: Option<u64>,
+    ) -> Result<RangeContent, DomainError> {
+        self.require_file(&dto.id, Permission::Read, caller_id)
+            .await?;
+        // Same throttled Recent recording as the streaming variant.
+        self.notify_file_accessed(caller_id, &dto.id);
+        self.get_file_range_preloaded(dto, start, end).await
+    }
+
+    /// Range read for HTTP Range Requests, cache-aware.
+    ///
+    /// Media players and PDF viewers fetch these files *exclusively* through
+    /// Range requests (a `bytes=0-` probe, then seeks) — the plain streaming
+    /// path paid 1 PG round-trip (blob-hash resolve) + a chunk open/seek for
+    /// EVERY seek, even when the whole blob was already sitting in the moka
+    /// content cache as one contiguous `Bytes`. For sub-`CACHE_THRESHOLD`
+    /// files this now answers from the cache: `Bytes::slice` is a refcount
+    /// bump — zero copy, zero I/O, zero PG (benches/RANGE-CACHE.md). A miss
+    /// populates the cache via the same single-flight `get_or_load` Tier 1
+    /// uses, so one probe warms every subsequent seek. `end` is exclusive
+    /// (callers pass `Some(last_byte + 1)`), matching the streaming variant.
+    pub async fn get_file_range_preloaded(
+        &self,
+        dto: &FileDto,
+        start: u64,
+        end: Option<u64>,
+    ) -> Result<RangeContent, DomainError> {
+        let cacheable = dto.size < CACHE_THRESHOLD && !dto.content_hash.is_empty();
+        if cacheable && let Some(cache) = &self.content_cache {
+            let etag: Arc<str> = format!("\"{}\"", dto.content_hash).into();
+            let ct: Arc<str> = dto.mime_type.clone();
+            let file_read = Arc::clone(&self.file_read);
+            let id_owned = dto.id.clone();
+            let cap = dto.size as usize;
+            let (bytes, _etag, _ct) = cache
+                .get_or_load(dto.content_hash.to_string(), etag, ct, async move {
+                    debug!("💾 Range cache MISS: {} – loading from disk", id_owned);
+                    Self::read_full(&file_read, &id_owned, cap).await
+                })
+                .await?;
+            let len = bytes.len() as u64;
+            let s = start.min(len) as usize;
+            let e = end.unwrap_or(len).min(len) as usize;
+            if s <= e {
+                return Ok(RangeContent::Bytes(bytes.slice(s..e)));
+            }
+            // Degenerate range the validator should have rejected — fall
+            // through to the streaming path rather than panic on slice.
+        }
+        let stream = self
+            .file_read
+            .get_file_range_stream(&dto.id, start, end)
+            .await?;
+        Ok(RangeContent::Stream(stream))
+    }
 }
 
 impl FileRetrievalUseCase for FileRetrievalService {
@@ -451,12 +516,12 @@ impl FileRetrievalUseCase for FileRetrievalService {
     async fn list_files_batch(
         &self,
         folder_id: Option<&str>,
-        offset: i64,
+        after_name: Option<&str>,
         limit: i64,
     ) -> Result<Vec<FileDto>, DomainError> {
         let files = self
             .file_read
-            .list_files_batch(folder_id, offset, limit)
+            .list_files_batch(folder_id, after_name, limit)
             .await?;
         Ok(files.into_iter().map(FileDto::from).collect())
     }
@@ -465,7 +530,7 @@ impl FileRetrievalUseCase for FileRetrievalService {
         &self,
         folder_id: Option<&str>,
         owner_id: Uuid,
-        offset: i64,
+        after_name: Option<&str>,
         limit: i64,
     ) -> Result<Vec<FileDto>, DomainError> {
         // Post-D0: every file lives in a folder — `storage.files.folder_id`
@@ -482,7 +547,7 @@ impl FileRetrievalUseCase for FileRetrievalService {
             .await?;
         let files = self
             .file_read
-            .list_files_batch(folder_id, offset, limit)
+            .list_files_batch(folder_id, after_name, limit)
             .await?;
         Ok(files.into_iter().map(FileDto::from).collect())
     }

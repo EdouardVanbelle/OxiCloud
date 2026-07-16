@@ -186,6 +186,60 @@ impl FaceRepository for FacePgRepository {
         Ok(rows.into_iter().map(row_to_face).collect())
     }
 
+    async fn person_face_stats(&self, user_id: Uuid) -> Result<Vec<(Uuid, i64)>, DomainError> {
+        // Grouped COUNT — the People tab only needs per-person counts, so
+        // this replaces a full faces_for_user scan that shipped a 2 KiB
+        // embedding BYTEA per row (benches/PEOPLE-LIST.md).
+        let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+            "SELECT person_id, COUNT(*) FROM faces.faces
+              WHERE user_id = $1 AND person_id IS NOT NULL
+              GROUP BY person_id",
+        )
+        .bind(user_id)
+        .fetch_all(self.pool.as_ref())
+        .await
+        .map_err(|e| db_err("person_face_stats", e))?;
+        Ok(rows)
+    }
+
+    async fn file_ids_for_faces(
+        &self,
+        user_id: Uuid,
+        face_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, Uuid>, DomainError> {
+        if face_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+            "SELECT id, file_id FROM faces.faces WHERE user_id = $1 AND id = ANY($2)",
+        )
+        .bind(user_id)
+        .bind(face_ids)
+        .fetch_all(self.pool.as_ref())
+        .await
+        .map_err(|e| db_err("file_ids_for_faces", e))?;
+        Ok(rows.into_iter().collect())
+    }
+
+    async fn reassign_person_faces(
+        &self,
+        user_id: Uuid,
+        from: Uuid,
+        into: Uuid,
+    ) -> Result<u64, DomainError> {
+        let result = sqlx::query(
+            "UPDATE faces.faces SET person_id = $3
+              WHERE user_id = $1 AND person_id = $2",
+        )
+        .bind(user_id)
+        .bind(from)
+        .bind(into)
+        .execute(self.pool.as_ref())
+        .await
+        .map_err(|e| db_err("reassign_person_faces", e))?;
+        Ok(result.rows_affected())
+    }
+
     async fn assign_person(
         &self,
         face_id: Uuid,

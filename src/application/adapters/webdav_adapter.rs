@@ -129,6 +129,30 @@ pub struct PropFindRequest {
     pub prop_find_type: PropFindType,
 }
 
+impl PropFindRequest {
+    /// Whether answering this PROPFIND requires resolving the account /
+    /// drive quota at all.
+    ///
+    /// `resolve_webdav_quota` costs two DB round-trips per request; sync
+    /// clients poll folders with an explicit `<D:prop>` list that most of
+    /// the time names only etag/length/type props — computing quota there
+    /// is pure waste (the response never mentions it). `AllProp` and
+    /// `PropName` keep quota: the writers emit RFC 4331 props for both.
+    /// Measured in `benches/QUOTA-PATH.md`.
+    pub fn wants_quota(&self) -> bool {
+        match &self.prop_find_type {
+            PropFindType::AllProp | PropFindType::PropName => true,
+            PropFindType::Prop(props) => props.iter().any(|p| {
+                p.namespace == "DAV:"
+                    && matches!(
+                        p.name.as_str(),
+                        "quota-used-bytes" | "quota-available-bytes"
+                    )
+            }),
+        }
+    }
+}
+
 /// WebDAV property value
 #[derive(Debug, Clone)]
 pub struct PropValue {

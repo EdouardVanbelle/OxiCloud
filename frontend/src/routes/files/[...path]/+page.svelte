@@ -308,7 +308,22 @@
 			});
 
 		try {
-			const res = await fetchFolderListing(folderId, { etag: cached?.etag });
+			const res = await fetchFolderListing(folderId, {
+				etag: cached?.etag,
+				// Paint page one (~200 items) immediately instead of waiting
+				// for every sequential page of a large folder; later pages
+				// extend the view as they land. Skip when a cached copy is
+				// already on screen — replacing it with a partial list would
+				// briefly shrink the view.
+				onPage: cached
+					? undefined
+					: (partial, done) => {
+							if (seq !== loadSeq || done) return; // final state applied below
+							applyListing(partial);
+							loading = false;
+							showSkeleton = false;
+						}
+			});
 			if (seq !== loadSeq) return; // superseded by a newer navigation
 			if (res.status === 200 && res.listing) {
 				applyListing(res.listing);

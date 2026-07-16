@@ -46,10 +46,23 @@ pub fn create_web_routes() -> Router<Arc<AppState>> {
     let static_path = resolve_static_path(&config);
 
     // SPA fallback: serve the file if it exists, else the app shell.
-    let spa = ServeDir::new(&static_path).fallback(ServeFile::new(static_path.join("index.html")));
+    //
+    // `precompressed_*`: if the frontend build emitted a sibling `.br`/`.gz`
+    // (frontend/scripts/precompress.mjs runs at build time), serve those
+    // bytes directly with the right Content-Encoding instead of re-running
+    // Brotli over the same immutable bundle on EVERY request — the
+    // `CompressionLayer` below then skips the already-encoded response and
+    // remains only the fallback for assets without a precompressed sibling
+    // (benches/STATIC-PRECOMPRESSED.md).
+    let spa = ServeDir::new(&static_path)
+        .precompressed_br()
+        .precompressed_gzip()
+        .fallback(ServeFile::new(static_path.join("index.html")));
 
     // Hashed, immutable assets (SvelteKit emits these under /_app/immutable).
-    let app_immutable = ServeDir::new(static_path.join("_app").join("immutable"));
+    let app_immutable = ServeDir::new(static_path.join("_app").join("immutable"))
+        .precompressed_br()
+        .precompressed_gzip();
 
     Router::new()
         .nest_service(
@@ -60,7 +73,17 @@ pub fn create_web_routes() -> Router<Arc<AppState>> {
             )),
         )
         .fallback_service(spa)
-        .layer(CompressionLayer::new().br(true).gzip(true))
+        // Fallback compression for assets without a precompressed sibling.
+        // Quality 4, NOT the default: the default maps to Brotli q11 —
+        // ~1.3 s of CPU per 700 KiB bundle per request (measured in
+        // benches/STATIC-PRECOMPRESSED.md; the .br siblings above carry the
+        // real q11 bytes, paid once at build time).
+        .layer(
+            CompressionLayer::new()
+                .quality(tower_http::CompressionLevel::Precise(4))
+                .br(true)
+                .gzip(true),
+        )
         // `if_not_present` so the immutable assets above keep their long cache;
         // the shell itself must always revalidate so a deploy can't pin a stale
         // app in browsers.

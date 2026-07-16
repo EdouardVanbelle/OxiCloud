@@ -74,6 +74,14 @@ async fn session_bytes_so_far(
     username: &str,
     upload_id: &str,
 ) -> Result<u64, AppError> {
+    // Warm path: O(1) in-RAM counter maintained by the PUT handler and
+    // the service (seeded on MKCOL, dropped on cleanup/overwrite). The
+    // directory walk below only runs cold (restart / eviction) — the old
+    // shape ran it on EVERY chunk PUT: O(k) stats for chunk k, O(N²/2)
+    // over the upload (benches/NC-CHUNK-GATE.md).
+    if let Some(bytes) = nc.chunked_uploads.cached_session_bytes(username, upload_id) {
+        return Ok(bytes);
+    }
     let listing = nc
         .chunked_uploads
         .list_chunks(username, upload_id)
@@ -85,7 +93,10 @@ async fn session_bytes_so_far(
         // chunk after MKCOL (race-tolerant).
         return Ok(0);
     };
-    Ok(listing.chunks.iter().map(|c| c.size).sum())
+    let total = listing.chunks.iter().map(|c| c.size).sum();
+    nc.chunked_uploads
+        .set_session_bytes(username, upload_id, total);
+    Ok(total)
 }
 
 /// Dispatch Nextcloud chunked upload WebDAV requests.
@@ -314,11 +325,21 @@ async fn handle_put_chunk(
         .map_err(|e| AppError::bad_request(format!("Invalid chunk path: {}", e)))?;
 
     let max_chunk = state.core.config.storage.chunk_max_bytes;
+    // A re-PUT of an existing chunk (client retry) makes the running
+    // session counter stale — drop it so the next gate rebuilds from disk.
+    let overwrite = tokio::fs::metadata(&chunk_path).await.is_ok();
     // No client-side integrity contract on the NC chunked surface — the
     // NC desktop client validates the assembled-file ETag against the
     // server-side `oc:checksums` after MOVE. So we skip per-chunk
     // hashing here (peak heap stays at ~one HTTP frame).
-    stream_body_to_path(req.into_body(), &chunk_path, max_chunk, None).await?;
+    let streamed = stream_body_to_path(req.into_body(), &chunk_path, max_chunk, None).await?;
+    if overwrite {
+        nc.chunked_uploads
+            .forget_session_bytes(&user.username, upload_id);
+    } else {
+        nc.chunked_uploads
+            .bump_session_bytes(&user.username, upload_id, streamed.bytes_written);
+    }
 
     Ok(Response::builder()
         .status(StatusCode::CREATED)

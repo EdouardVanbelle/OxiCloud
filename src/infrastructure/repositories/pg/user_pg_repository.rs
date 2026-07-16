@@ -85,6 +85,33 @@ impl UserPgRepository {
         })
     }
 
+    /// Fetch only `(storage_used_bytes, storage_quota_bytes)`. Not part of
+    /// the `UserRepository` trait — called from `StorageUsageService`.
+    ///
+    /// Same rationale as [`Self::get_user_flags`]: the full-row SELECT drags
+    /// `image` (a data URI of up to 512 KiB), `password_hash`,
+    /// `ui_preferences`, … across the wire, and the quota path runs on every
+    /// folder PROPFIND and every upload quota check just to read two i64s.
+    /// Measured in `benches/QUOTA-PATH.md`.
+    pub async fn get_storage_usage(&self, id: Uuid) -> UserRepositoryResult<(i64, i64)> {
+        let row = sqlx::query(
+            r#"
+            SELECT storage_used_bytes, storage_quota_bytes
+            FROM auth.users
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .fetch_one(&*self.pool)
+        .await
+        .map_err(Self::map_sqlx_error)?;
+
+        Ok((
+            row.get("storage_used_bytes"),
+            row.get("storage_quota_bytes"),
+        ))
+    }
+
     /// Updates a user's profile image (URL or data URI). Not part of the
     /// `UserRepository` trait — called directly from `AuthApplicationService`.
     pub async fn update_image(

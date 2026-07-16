@@ -122,6 +122,35 @@ impl ShareStoragePort for SharePgRepository {
         Self::row_to_entity(&row)
     }
 
+    async fn increment_access_count(&self, token: &str) -> Result<u64, DomainError> {
+        // One atomic statement — the relative bump can't lose concurrent
+        // increments and never rewrites unrelated columns (the legacy
+        // read-modify-write wrote back item_name/password_hash wholesale,
+        // silently clobbering concurrent owner edits). The expiry guard
+        // mirrors find_share_by_token's MIN(expires_at) subquery: NULL =
+        // never expires.
+        let result = sqlx::query(
+            r#"
+            UPDATE storage.shares s
+               SET access_count = s.access_count + 1
+             WHERE s.token = $1
+               AND COALESCE(
+                     (SELECT MIN(ag.expires_at)
+                        FROM storage.role_grants ag
+                       WHERE ag.subject_type = 'token' AND ag.subject_id = s.id) > NOW(),
+                     TRUE)
+            "#,
+        )
+        .bind(token)
+        .execute(&*self.db_pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("Database error incrementing share access count: {}", e);
+            DomainError::internal_error("Share", format!("Failed to register access: {e}"))
+        })?;
+        Ok(result.rows_affected())
+    }
+
     async fn find_share_by_token(&self, token: &str) -> Result<Share, DomainError> {
         let row = sqlx::query(
             r#"

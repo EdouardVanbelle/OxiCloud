@@ -5,7 +5,7 @@
 //! infrastructure/services/path_service.rs because it has file system dependencies.
 
 use std::path::PathBuf;
-use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
 
 /// NFC-normalize a single file or folder name component.
 ///
@@ -25,7 +25,18 @@ use unicode_normalization::UnicodeNormalization;
 /// (`migrate-nfc-filenames`) cleans up rows that pre-date this rule.
 ///
 /// Pure function — no I/O, allocates one `String`.
+///
+/// Fast path: `is_nfc_quick` is a per-char table lookup that answers
+/// `Yes` for virtually every name already in NFC — which is every name
+/// loaded back from PostgreSQL (the DB invariant above) and every
+/// ASCII name. That skips the full decompose/recompose state machine
+/// this function otherwise runs once per row on every listing
+/// (PROPFIND, folder listing, photos timeline). `Maybe`/`No` fall
+/// through to the full pipeline.
 pub fn normalize_storage_name(name: &str) -> String {
+    if is_nfc_quick(name.chars()) == IsNormalized::Yes {
+        return name.to_string();
+    }
     name.nfc().collect()
 }
 

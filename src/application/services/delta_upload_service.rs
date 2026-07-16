@@ -607,6 +607,12 @@ impl DeltaUploadService {
         Ok(DeltaDownloadOutcome::Ready(ordered))
     }
 
+    /// Backend-recommended read-ahead depth for multi-chunk drains
+    /// (see `DedupService::read_prefetch`).
+    pub fn read_prefetch(&self) -> usize {
+        self.dedup.read_prefetch()
+    }
+
     /// Stream one authorized chunk's bytes (entitlement was established by
     /// [`authorize_chunk_download_with_perms`]).
     pub async fn chunk_stream(

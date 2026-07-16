@@ -10,7 +10,9 @@
 //! schema and `docs/plan/drive.md` §3 / §15 for the locked design.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use moka::future::Cache;
 use sqlx::{PgPool, Row, types::Uuid};
 
 use crate::domain::entities::drive::{Drive, DriveKind};
@@ -18,13 +20,38 @@ use crate::domain::repositories::drive_repository::{
     DriveRepository, DriveRepositoryError, DriveWithRootName,
 };
 
+/// `default_drive_cache` TTL. The default-drive → root-folder binding is
+/// nearly immutable (changes only on provisioning / drive deletion /
+/// policy edits — all of which invalidate explicitly below), yet it is
+/// re-resolved on EVERY NextCloud request (basic-auth chroot), every
+/// native `/webdav` request (Mode-B scope resolution) and every WOPI
+/// call. 30 s mirrors `drive_role_cache` in `pg_acl_engine.rs` and bounds
+/// the one non-invalidated staleness source: a root-folder *rename*,
+/// which doesn't pass through this repository. Measured in
+/// `benches/CHROOT-CACHE.md`.
+const DEFAULT_DRIVE_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// One entry per active user; entries are small (a `Drive` + a name).
+const DEFAULT_DRIVE_CACHE_CAPACITY: u64 = 100_000;
+
 pub struct DrivePgRepository {
     pool: Arc<PgPool>,
+    /// user_id → default drive (+ root folder name). See
+    /// [`DEFAULT_DRIVE_CACHE_TTL`]. Only `Ok` results are cached, so the
+    /// provisioning idempotency check (`NotFound` → create) always sees
+    /// the live table.
+    default_drive_cache: Cache<Uuid, DriveWithRootName>,
 }
 
 impl DrivePgRepository {
     pub fn new(pool: Arc<PgPool>) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            default_drive_cache: Cache::builder()
+                .max_capacity(DEFAULT_DRIVE_CACHE_CAPACITY)
+                .time_to_live(DEFAULT_DRIVE_CACHE_TTL)
+                .build(),
+        }
     }
 
     fn map_sqlx_err(context: &'static str, e: sqlx::Error) -> DriveRepositoryError {
@@ -208,6 +235,10 @@ impl DriveRepository for DrivePgRepository {
         tx.commit()
             .await
             .map_err(|e| Self::map_sqlx_err("create_personal_drive_atomic.commit", e))?;
+
+        // Drop any cached default-drive resolution for this user (a stale
+        // NotFound is never cached, but be explicit about the write path).
+        self.default_drive_cache.invalidate(&owner_id).await;
 
         Self::row_to_drive_with_name(&row)
     }
@@ -394,6 +425,10 @@ impl DriveRepository for DrivePgRepository {
         tx.commit()
             .await
             .map_err(|e| Self::map_sqlx_err("delete_atomic.commit", e))?;
+        // We only have the drive id here; the cache is keyed by user.
+        // Deletion is rare — clearing the whole cache is the simple,
+        // always-correct move (repopulates at one query per active user).
+        self.default_drive_cache.invalidate_all();
         Ok(())
     }
 
@@ -448,6 +483,10 @@ impl DriveRepository for DrivePgRepository {
         &self,
         user_id: Uuid,
     ) -> Result<DriveWithRootName, DriveRepositoryError> {
+        if let Some(cached) = self.default_drive_cache.get(&user_id).await {
+            return Ok(cached);
+        }
+
         let row = sqlx::query(
             r#"
             SELECT d.id, d.kind, d.default_for_user, d.root_folder_id,
@@ -465,7 +504,9 @@ impl DriveRepository for DrivePgRepository {
         .map_err(|e| Self::map_sqlx_err("find_default_for_user", e))?
         .ok_or_else(|| DriveRepositoryError::NotFound(user_id.to_string()))?;
 
-        Self::row_to_drive_with_name(&row)
+        let dwr = Self::row_to_drive_with_name(&row)?;
+        self.default_drive_cache.insert(user_id, dwr.clone()).await;
+        Ok(dwr)
     }
 
     async fn list_readable_by(
@@ -675,6 +716,10 @@ impl DriveRepository for DrivePgRepository {
         let raw = row
             .ok_or_else(|| DriveRepositoryError::NotFound(drive_id.to_string()))?
             .0;
+        // Policy edits must not serve a stale `policies` bag from the
+        // default-drive cache (keyed by user, and we only have the drive
+        // id) — clear it; policy edits are admin-rare.
+        self.default_drive_cache.invalidate_all();
         Ok(crate::domain::entities::drive::DrivePolicies::from_value(
             &raw,
         ))

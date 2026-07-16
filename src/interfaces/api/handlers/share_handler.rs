@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::json;
 use utoipa::ToSchema;
 
+use crate::application::ports::file_ports::RangeContent;
 use crate::application::services::share_browse_service::ZipTarget;
 use crate::application::services::share_service::ShareService;
 use crate::infrastructure::services::share_unlock_cookie;
@@ -30,7 +31,6 @@ use crate::{
     interfaces::errors::AppError,
     interfaces::middleware::auth::AuthUser,
 };
-use tokio_util::io::ReaderStream;
 
 fn unlock_jwt_from_headers(headers: &HeaderMap, share_token: &str) -> Option<String> {
     headers
@@ -438,10 +438,14 @@ async fn serve_share_file(
                     let length = end - start + 1;
 
                     match retrieval
-                        .get_file_range_stream(file_id, start, Some(end + 1))
+                        .get_file_range_preloaded(&file_dto, start, Some(end + 1))
                         .await
                     {
-                        Ok(stream) => {
+                        Ok(content) => {
+                            let body = match content {
+                                RangeContent::Bytes(b) => Body::from(b),
+                                RangeContent::Stream(s) => Body::from_stream(Box::into_pin(s)),
+                            };
                             return Response::builder()
                                 .status(StatusCode::PARTIAL_CONTENT)
                                 .header(header::CONTENT_TYPE, &*mime)
@@ -458,7 +462,7 @@ async fn serve_share_file(
                                     "private, max-age=3600, must-revalidate",
                                 )
                                 .header(header::VARY, "Cookie, Range")
-                                .body(Body::from_stream(Box::into_pin(stream)))
+                                .body(body)
                                 .unwrap()
                                 .into_response();
                         }
@@ -730,30 +734,19 @@ async fn serve_share_zip(
         Err(err) => return share_browse_error_response(err),
     };
 
-    let temp_file = match zip_service
-        .create_folder_zip(&target.folder_id, &target.display_name)
+    // Streamed archive: first byte after the first entry, not after the
+    // whole ZIP is built (benches/ZIP-STREAM.md). No Content-Length.
+    let stream = match zip_service
+        .create_folder_zip_stream(&target.folder_id, &target.display_name)
         .await
     {
-        Ok(f) => f,
+        Ok(s) => s,
         Err(err) => {
             tracing::error!("share zip: create_folder_zip failed: {}", err);
             return AppError::internal_error(format!("ZIP creation failed: {}", err))
                 .into_response();
         }
     };
-
-    let file_size = match temp_file.as_file().metadata() {
-        Ok(m) => m.len(),
-        Err(e) => {
-            tracing::error!("share zip: temp metadata failed: {}", e);
-            return AppError::internal_error("ZIP creation failed").into_response();
-        }
-    };
-
-    // Reuse the existing fd: split off the std::File and the TempPath.
-    let (std_file, temp_path) = temp_file.into_parts();
-    let tokio_file = tokio::fs::File::from_std(std_file);
-    let stream = ReaderStream::new(tokio_file);
     let body = Body::from_stream(stream);
 
     let disposition = build_content_disposition(
@@ -762,17 +755,12 @@ async fn serve_share_zip(
         false,
     );
 
-    let mut response = Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/zip")
         .header(header::CONTENT_DISPOSITION, disposition)
-        .header(header::CONTENT_LENGTH, file_size)
         .header(header::CACHE_CONTROL, "private, no-store")
         .header(header::VARY, "Cookie")
         .body(body)
-        .unwrap();
-
-    // Keep TempPath alive until the body finishes streaming.
-    response.extensions_mut().insert(Arc::new(temp_path));
-    response
+        .unwrap()
 }

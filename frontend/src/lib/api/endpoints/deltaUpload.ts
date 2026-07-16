@@ -176,6 +176,59 @@ export async function instantUploadOwned(
 	return null;
 }
 
+const HASH_WORKER_URL = '/workers/hashWorker.js';
+/** Parallel hashing lanes — enough to saturate small-file hashing without
+ *  starving the upload workers of cores. */
+const HASH_POOL_SIZE = Math.min(4, Math.max(1, (navigator.hardwareConcurrency ?? 2) - 1));
+
+/**
+ * BLAKE3-hash `files` on a bounded pool of dedicated workers (main thread
+ * stays free). A file whose worker errors is simply absent from the result —
+ * the caller uploads it the normal way. Falls back to the sequential inline
+ * hasher when `Worker` is unavailable.
+ */
+async function hashFilesPooled(files: File[]): Promise<Map<File, string>> {
+	if (typeof Worker === 'undefined') {
+		const out = new Map<File, string>();
+		for (const f of files) out.set(f, await blake3HexOfFile(f));
+		return out;
+	}
+	const lanes = Math.min(HASH_POOL_SIZE, files.length);
+	const workers = Array.from(
+		{ length: lanes },
+		() => new Worker(HASH_WORKER_URL, { type: 'module' })
+	);
+	const out = new Map<File, string>();
+	let next = 0;
+	try {
+		await Promise.all(
+			workers.map(
+				(w) =>
+					new Promise<void>((resolve, reject) => {
+						const feed = () => {
+							if (next >= files.length) {
+								resolve();
+								return;
+							}
+							const i = next++;
+							const file = files[i];
+							w.onmessage = (ev: MessageEvent<{ id: number; hex?: string; error?: string }>) => {
+								if (ev.data.hex) out.set(file, ev.data.hex);
+								feed(); // per-file errors: skip the file, keep the lane
+							};
+							w.onerror = (e) => reject(e);
+							w.postMessage({ id: i, file });
+						};
+						feed();
+					})
+			)
+		);
+	} finally {
+		for (const w of workers) w.terminate();
+	}
+	return out;
+}
+
 /**
  * Resolve which of `files` the server already owns, with a SINGLE batch round
  * trip (the Dropbox-style "have you got these?" probe). Every file below the
@@ -193,7 +246,13 @@ export async function resolveOwnedHashes(files: File[]): Promise<Map<File, strin
 
 	const hashByFile = new Map<File, string>();
 	try {
-		for (const f of inBand) hashByFile.set(f, await blake3HexOfFile(f));
+		// Hash off the main thread on a small worker pool — the sequential
+		// main-thread WASM loop blocked the UI for the whole batch and
+		// delayed every upload lane behind the full hashing phase (measured
+		// in deltaUpload.hash.test.ts). Falls back to the inline loop when
+		// Workers are unavailable (some test environments).
+		const hashed = await hashFilesPooled(inBand);
+		for (const [f, h] of hashed) hashByFile.set(f, h);
 	} catch {
 		return new Map(); // WASM/hashing unavailable → skip instant uploads
 	}

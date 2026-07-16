@@ -1,22 +1,82 @@
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::fs;
 
 use crate::common::errors::{DomainError, Result};
 
+/// In-RAM running byte counter per upload session (`user/upload_id` →
+/// bytes accepted so far). The per-chunk quota gate used to recompute
+/// this by listing the whole session directory and stat-ing every chunk
+/// on EVERY chunk PUT — O(k) stats for chunk k, O(N²/2) over an upload
+/// (~500k stats for a 10 GB / 1000-chunk upload). The counter makes the
+/// gate O(1); a cache miss (process restart, eviction) lazily rebuilds
+/// from the directory listing, so crash-correctness is unchanged
+/// (benches/NC-CHUNK-GATE.md). Sessions are forgotten on cleanup; the
+/// TTL reaps counters for sessions the client abandoned.
+fn build_session_bytes_cache() -> moka::sync::Cache<String, u64> {
+    moka::sync::Cache::builder()
+        .max_capacity(100_000)
+        .time_to_idle(Duration::from_secs(24 * 3600))
+        .build()
+}
+
 #[derive(Clone)]
 pub struct NextcloudChunkedUploadService {
     pub base_dir: PathBuf,
+    /// See [`build_session_bytes_cache`]. Cloning the service shares the
+    /// counter (moka `Cache` clones are handles to the same store).
+    session_bytes: moka::sync::Cache<String, u64>,
 }
 
 impl NextcloudChunkedUploadService {
     pub fn new(base_dir: PathBuf) -> Self {
-        Self { base_dir }
+        Self {
+            base_dir,
+            session_bytes: build_session_bytes_cache(),
+        }
     }
 
     pub fn new_stub() -> Self {
         Self {
             base_dir: PathBuf::from("./storage/.uploads/nextcloud"),
+            session_bytes: build_session_bytes_cache(),
         }
+    }
+
+    fn bytes_key(user: &str, upload_id: &str) -> String {
+        format!("{user}/{upload_id}")
+    }
+
+    /// Session bytes accepted so far, if the counter is warm.
+    /// `None` = rebuild from the directory listing and call
+    /// [`Self::set_session_bytes`].
+    pub fn cached_session_bytes(&self, user: &str, upload_id: &str) -> Option<u64> {
+        self.session_bytes.get(&Self::bytes_key(user, upload_id))
+    }
+
+    /// Seed / overwrite the session counter (post-rebuild or on MKCOL).
+    pub fn set_session_bytes(&self, user: &str, upload_id: &str, bytes: u64) {
+        self.session_bytes
+            .insert(Self::bytes_key(user, upload_id), bytes);
+    }
+
+    /// Add an accepted chunk's bytes to the counter (no-op when cold —
+    /// the next gate rebuilds from disk). Two racing PUTs on one session
+    /// could drop an increment; the counter is a gate hint, and the
+    /// MOVE-time quota check stays authoritative.
+    pub fn bump_session_bytes(&self, user: &str, upload_id: &str, delta: u64) {
+        let key = Self::bytes_key(user, upload_id);
+        if let Some(current) = self.session_bytes.get(&key) {
+            self.session_bytes
+                .insert(key, current.saturating_add(delta));
+        }
+    }
+
+    /// Drop the counter (session cleanup, or a chunk overwrite made the
+    /// running total untrustworthy — rebuilt lazily on next use).
+    pub fn forget_session_bytes(&self, user: &str, upload_id: &str) {
+        self.session_bytes
+            .invalidate(&Self::bytes_key(user, upload_id));
     }
 
     /// Validate that a path component contains no traversal characters.
@@ -48,6 +108,7 @@ impl NextcloudChunkedUploadService {
         fs::create_dir_all(&session_dir)
             .await
             .map_err(|e| DomainError::internal_error("ChunkedUpload", e.to_string()))?;
+        self.set_session_bytes(user, upload_id, 0);
         Ok(())
     }
 
@@ -97,9 +158,17 @@ impl NextcloudChunkedUploadService {
         data: &[u8],
     ) -> Result<()> {
         let chunk_path = self.safe_chunk_path(user, upload_id, chunk_name)?;
+        let overwrite = fs::metadata(&chunk_path).await.is_ok();
         fs::write(&chunk_path, data)
             .await
-            .map_err(|e| DomainError::internal_error("ChunkedUpload", e.to_string()))
+            .map_err(|e| DomainError::internal_error("ChunkedUpload", e.to_string()))?;
+        if overwrite {
+            // Retried chunk — running total is stale; rebuild lazily.
+            self.forget_session_bytes(user, upload_id);
+        } else {
+            self.bump_session_bytes(user, upload_id, data.len() as u64);
+        }
+        Ok(())
     }
 
     /// List the session's chunk files in assembly (numeric) order.
@@ -146,6 +215,7 @@ impl NextcloudChunkedUploadService {
                 .await
                 .map_err(|e| DomainError::internal_error("ChunkedUpload", e.to_string()))?;
         }
+        self.forget_session_bytes(user, upload_id);
         Ok(())
     }
 

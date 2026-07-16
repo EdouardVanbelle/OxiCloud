@@ -166,18 +166,23 @@ impl PeopleService {
     }
 
     /// People (non-empty clusters), most-photographed first.
+    ///
+    /// Counts come from a grouped-COUNT query and cover photos from one
+    /// batched lookup of just the cover face ids — the previous
+    /// `faces_for_user` shipped every face row (2 KiB embedding included)
+    /// only to count them: ~20 MB of BYTEA per request on a 10k-face
+    /// library (benches/PEOPLE-LIST.md).
     pub async fn list_people(&self, caller_id: Uuid) -> Result<Vec<PersonDto>, DomainError> {
         let persons = self.repo.persons_for_user(caller_id).await?;
-        let faces = self.repo.faces_for_user(caller_id).await?;
-
-        let mut count: HashMap<Uuid, i64> = HashMap::new();
-        let mut face_file: HashMap<Uuid, Uuid> = HashMap::new();
-        for f in &faces {
-            if let Some(pid) = f.person_id {
-                *count.entry(pid).or_default() += 1;
-            }
-            face_file.insert(f.id, f.file_id);
-        }
+        let count: HashMap<Uuid, i64> = self
+            .repo
+            .person_face_stats(caller_id)
+            .await?
+            .into_iter()
+            .collect();
+        let cover_ids: Vec<Uuid> = persons.iter().filter_map(|p| p.cover_face_id).collect();
+        let face_file: HashMap<Uuid, Uuid> =
+            self.repo.file_ids_for_faces(caller_id, &cover_ids).await?;
 
         let mut out: Vec<PersonDto> = persons
             .into_iter()
@@ -245,11 +250,13 @@ impl PeopleService {
 
     /// Merge `from` into `into` by reassigning all of `from`'s faces. The
     /// now-empty `from` person is hidden by `list_people`.
+    ///
+    /// One set-based UPDATE — the previous shape loaded every face row
+    /// (embeddings included) and issued one UPDATE per matching face.
     pub async fn merge(&self, caller_id: Uuid, into: Uuid, from: Uuid) -> Result<(), DomainError> {
-        let faces = self.repo.faces_for_user(caller_id).await?;
-        for f in faces.into_iter().filter(|f| f.person_id == Some(from)) {
-            self.repo.assign_person(f.id, Some(into)).await?;
-        }
+        self.repo
+            .reassign_person_faces(caller_id, from, into)
+            .await?;
         Ok(())
     }
 

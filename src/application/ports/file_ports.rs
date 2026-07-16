@@ -111,6 +111,17 @@ pub enum OptimizedFileContent {
     Stream(Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>),
 }
 
+/// Result of a cache-aware HTTP-Range read
+/// (`FileRetrievalService::get_file_range_preloaded`). Same split as
+/// [`OptimizedFileContent`]: handlers map each variant onto a response body.
+pub enum RangeContent {
+    /// Zero-copy slice out of the RAM content cache (a `Bytes::slice` is a
+    /// refcount bump — no allocation, no I/O, no DB).
+    Bytes(Bytes),
+    /// Streaming range read from the blob store (cache miss / large file).
+    Stream(Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>),
+}
+
 /// Primary port for file retrieval operations
 pub trait FileRetrievalUseCase: Send + Sync + 'static {
     /// Gets a file by its ID (system/internal — no ownership check).
@@ -235,13 +246,14 @@ pub trait FileRetrievalUseCase: Send + Sync + 'static {
     async fn list_files_batch(
         &self,
         folder_id: Option<&str>,
-        offset: i64,
+        after_name: Option<&str>,
         limit: i64,
     ) -> Result<Vec<FileDto>, DomainError> {
-        let all = self.list_files(folder_id).await?;
+        let mut all = self.list_files(folder_id).await?;
+        all.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(all
             .into_iter()
-            .skip(offset as usize)
+            .filter(|f| after_name.is_none_or(|a| f.name.as_str() > a))
             .take(limit as usize)
             .collect())
     }
@@ -257,10 +269,10 @@ pub trait FileRetrievalUseCase: Send + Sync + 'static {
         &self,
         folder_id: Option<&str>,
         _owner_id: Uuid,
-        offset: i64,
+        after_name: Option<&str>,
         limit: i64,
     ) -> Result<Vec<FileDto>, DomainError> {
-        self.list_files_batch(folder_id, offset, limit).await
+        self.list_files_batch(folder_id, after_name, limit).await
     }
 }
 

@@ -170,6 +170,64 @@ name = "bench_thumbnails_mem"
 path = "examples/bench_thumbnails_mem.rs"
 required-features = ["bench"]
 
+# ZIP entry-compression benchmark — Deflate-always vs MIME-aware Stored for
+# already-compressed media on the folder/batch ZIP download path. No Postgres.
+[[example]]
+name = "bench_zip_media"
+path = "examples/bench_zip_media.rs"
+required-features = ["bench"]
+
+# WebDAV dead-properties fetch benchmark — PROPFIND's per-child N+1 (with a
+# non-indexable IS NOT DISTINCT FROM predicate) vs batched = ANY($1) per page
+# (needs the dev Postgres up).
+[[example]]
+name = "bench_dead_props"
+path = "examples/bench_dead_props.rs"
+required-features = ["bench"]
+
+# NC chroot / default-drive resolution benchmark — the middleware's 2 uncached
+# queries per request vs the moka caches (needs the dev Postgres up).
+[[example]]
+name = "bench_chroot_cache"
+path = "examples/bench_chroot_cache.rs"
+required-features = ["bench"]
+
+# Quota-path benchmark — full auth.users row (incl. 512 KiB avatar) vs the
+# narrow 2-column read, on every upload check / quota PROPFIND (needs Postgres).
+[[example]]
+name = "bench_quota_path"
+path = "examples/bench_quota_path.rs"
+required-features = ["bench"]
+
+# People-tab benchmark — full faces scan (2 KiB embedding per row) vs grouped
+# COUNT + batched cover lookup (needs Postgres).
+[[example]]
+name = "bench_people_list"
+path = "examples/bench_people_list.rs"
+required-features = ["bench"]
+
+# PROPFIND folder-paging benchmark — LIMIT/OFFSET full-folder rescan per page
+# vs keyset + (folder_id, name) index (needs Postgres).
+[[example]]
+name = "bench_propfind_paging"
+path = "examples/bench_propfind_paging.rs"
+required-features = ["bench"]
+
+# Static-asset compression benchmark — per-request Brotli vs precompressed
+# sibling read. No Postgres.
+[[example]]
+name = "bench_static_precompress"
+path = "examples/bench_static_precompress.rs"
+required-features = ["bench"]
+
+# Round-2 battery: range-from-cache, NC chunk gate, delta prefetch, ingest
+# overlap (real store_from_stream; run with OXICLOUD_INGEST_OVERLAP=0/1),
+# ZIP streaming TTFB. Sections 1 and 4 need Postgres.
+[[example]]
+name = "bench_round2"
+path = "examples/bench_round2.rs"
+required-features = ["bench"]
+
 # Video thumbnail benchmark — Option B (server-side ffmpeg frame → WebP). Needs
 # `ffmpeg` on PATH (libx264/libx265/libvpx-vp9 to synthesize the test corpus).
 [[example]]

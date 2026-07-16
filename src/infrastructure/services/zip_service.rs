@@ -44,15 +44,22 @@ impl From<ZipError> for DomainError {
     }
 }
 
-/// Type alias for the fully-async ZIP writer backed by a buffered tokio file.
-type AsyncZipWriter = ZipFileWriter<Compat<BufWriter<tokio::fs::File>>>;
+/// Fully-async ZIP writer over any buffered tokio sink (temp file for the
+/// legacy path, one half of a `tokio::io::duplex` for the streaming path).
+type AsyncZipWriter<W> = ZipFileWriter<Compat<BufWriter<W>>>;
 
 /// One planned archive entry, in final ZIP order.
 enum ZipPlanEntry {
     /// Directory entry (Stored, zero-length body).
     Dir(String),
     /// File entry: ZIP-relative path + file id to stream from the blob store.
-    File { zip_path: String, file_id: String },
+    /// `compression` is picked from the file's MIME type at plan time —
+    /// `Stored` for already-compressed media (JPEG/MP4/…), `Deflate` otherwise.
+    File {
+        zip_path: String,
+        file_id: String,
+        compression: Compression,
+    },
 }
 
 /// Message protocol from the prefetch task to the ZIP writer. For each
@@ -74,8 +81,11 @@ const PREFETCH_BUFFER_CHUNKS: usize = 64;
 ///
 /// Uses `async_zip` for fully-async archive creation.  Every write (headers,
 /// compressed chunk data, central directory) goes through
-/// `tokio::io::BufWriter` → `tokio::fs::File`, so **no Tokio worker is ever
-/// blocked** by disk I/O or compression.
+/// `tokio::io::BufWriter` → `tokio::fs::File`, so no Tokio worker is ever
+/// blocked by disk I/O. Deflate itself DOES run inline on the writing task
+/// (async_zip compresses inside `poll_write`), which is why entries whose
+/// MIME says the content is already compressed are `Stored` instead — that
+/// turns the archive hot path from ~1 CPU core per download into CRC + memcpy.
 ///
 /// Archive creation is a 2-stage pipeline: a prefetch task reads file
 /// content from the blob store ahead of the writer, so the next file's
@@ -110,6 +120,110 @@ impl ZipService {
         folder_id: &str,
         folder_name: &str,
     ) -> Result<NamedTempFile> {
+        let plan = self.plan_archive(folder_id, folder_name).await?;
+
+        // ── Open the temp file + ZIP writer ──────────────────────────────
+        let temp = NamedTempFile::new().map_err(ZipError::IoError)?;
+        let tokio_file = tokio::fs::File::create(temp.path())
+            .await
+            .map_err(ZipError::IoError)?;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Prefetched>(PREFETCH_BUFFER_CHUNKS);
+        let _prefetcher = tokio::spawn(Self::prefetch_files(
+            self.file_service.clone(),
+            Self::planned_file_ids(&plan),
+            tx,
+        ));
+        Self::write_archive(tokio_file, &plan, &mut rx).await?;
+
+        Ok(temp)
+    }
+
+    /// Streaming variant: the archive bytes are produced on a spawned task
+    /// and yielded as they are written — the client's first byte arrives
+    /// after the first entry starts, not after the whole archive has been
+    /// built (the temp-file variant's time-to-first-byte grows with folder
+    /// size; benches/ZIP-STREAM.md). The plan phase still runs inline so
+    /// planning errors surface as proper HTTP errors; a blob-read error
+    /// mid-archive can only truncate the stream (no central directory →
+    /// clients detect the corrupt archive), which is the standard tradeoff
+    /// for streamed ZIPs.
+    pub async fn create_folder_zip_stream(
+        &self,
+        folder_id: &str,
+        folder_name: &str,
+    ) -> Result<impl futures::Stream<Item = std::io::Result<bytes::Bytes>> + Send + use<>> {
+        let plan = self.plan_archive(folder_id, folder_name).await?;
+
+        let (writer, reader) = tokio::io::duplex(256 * 1024);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Prefetched>(PREFETCH_BUFFER_CHUNKS);
+        let _prefetcher = tokio::spawn(Self::prefetch_files(
+            self.file_service.clone(),
+            Self::planned_file_ids(&plan),
+            tx,
+        ));
+        tokio::spawn(async move {
+            if let Err(e) = Self::write_archive(writer, &plan, &mut rx).await {
+                // Dropping the writer EOFs the reader early — the truncated
+                // archive has no central directory, so clients flag it.
+                warn!("Streaming ZIP aborted mid-archive: {e}");
+            }
+        });
+
+        Ok(tokio_util::io::ReaderStream::new(reader))
+    }
+
+    /// File ids of the plan, in archive order (the prefetcher's read list).
+    fn planned_file_ids(plan: &[ZipPlanEntry]) -> Vec<String> {
+        plan.iter()
+            .filter_map(|entry| match entry {
+                ZipPlanEntry::File { file_id, .. } => Some(file_id.clone()),
+                ZipPlanEntry::Dir(_) => None,
+            })
+            .collect()
+    }
+
+    /// Write every planned entry through a buffered ZIP writer over `sink`,
+    /// then finalize (central directory + flush). Shared by the temp-file
+    /// and streaming variants.
+    async fn write_archive<W: tokio::io::AsyncWrite + Unpin>(
+        sink: W,
+        plan: &[ZipPlanEntry],
+        rx: &mut tokio::sync::mpsc::Receiver<Prefetched>,
+    ) -> Result<()> {
+        let buf_writer = BufWriter::with_capacity(256 * 1024, sink);
+        let mut zip = ZipFileWriter::with_tokio(buf_writer);
+
+        for entry in plan {
+            match entry {
+                ZipPlanEntry::Dir(zip_dir) => {
+                    let dir_entry =
+                        ZipEntryBuilder::new(zip_dir.clone().into(), Compression::Stored);
+                    match zip.write_entry_whole(dir_entry, &[]).await {
+                        Ok(()) => debug!("Folder added to ZIP: {}", zip_dir),
+                        Err(e) => {
+                            warn!("Could not add folder entry (may already exist): {}", e);
+                        }
+                    }
+                }
+                ZipPlanEntry::File {
+                    zip_path,
+                    compression,
+                    ..
+                } => {
+                    Self::write_prefetched_file(&mut zip, zip_path, *compression, rx).await?;
+                }
+            }
+        }
+
+        let mut compat_writer = zip.close().await.map_err(ZipError::AsyncZipError)?;
+        compat_writer.close().await.map_err(ZipError::IoError)?;
+        Ok(())
+    }
+
+    /// Resolve the folder, fetch its subtree (2 bulk queries) and lay out
+    /// the archive entries in final ZIP order.
+    async fn plan_archive(&self, folder_id: &str, folder_name: &str) -> Result<Vec<ZipPlanEntry>> {
         info!(
             "Creating ZIP for folder: {} (ID: {})",
             folder_name, folder_id
@@ -183,62 +297,15 @@ impl ZipService {
                     plan.push(ZipPlanEntry::File {
                         zip_path: format!("{}{}", zip_dir, file.name),
                         file_id: file.id.to_string(),
+                        compression: crate::common::mime_detect::zip_entry_compression(
+                            &file.mime_type,
+                        ),
                     });
                 }
             }
         }
 
-        // ── 5. Open the temp file + ZIP writer ───────────────────────────
-        let temp = NamedTempFile::new().map_err(ZipError::IoError)?;
-        let tokio_file = tokio::fs::File::create(temp.path())
-            .await
-            .map_err(ZipError::IoError)?;
-        let buf_writer = BufWriter::with_capacity(256 * 1024, tokio_file);
-        let mut zip = ZipFileWriter::with_tokio(buf_writer);
-
-        // ── 6. Write entries: 2-stage pipeline ───────────────────────────
-        // The prefetch task reads blob streams for the planned files, in
-        // order, ahead of the writer — the next file's blob-store latency
-        // overlaps the current file's deflate. If the writer bails out,
-        // dropping the receiver makes the prefetcher's next send fail and
-        // it stops on its own.
-        let file_ids: Vec<String> = plan
-            .iter()
-            .filter_map(|entry| match entry {
-                ZipPlanEntry::File { file_id, .. } => Some(file_id.clone()),
-                ZipPlanEntry::Dir(_) => None,
-            })
-            .collect();
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Prefetched>(PREFETCH_BUFFER_CHUNKS);
-        let _prefetcher = tokio::spawn(Self::prefetch_files(
-            self.file_service.clone(),
-            file_ids,
-            tx,
-        ));
-
-        for entry in &plan {
-            match entry {
-                ZipPlanEntry::Dir(zip_dir) => {
-                    let dir_entry =
-                        ZipEntryBuilder::new(zip_dir.clone().into(), Compression::Stored);
-                    match zip.write_entry_whole(dir_entry, &[]).await {
-                        Ok(()) => debug!("Folder added to ZIP: {}", zip_dir),
-                        Err(e) => {
-                            warn!("Could not add folder entry (may already exist): {}", e);
-                        }
-                    }
-                }
-                ZipPlanEntry::File { zip_path, .. } => {
-                    Self::write_prefetched_file(&mut zip, zip_path, &mut rx).await?;
-                }
-            }
-        }
-
-        // ── 7. Finalize ──────────────────────────────────────────────────
-        let mut compat_writer = zip.close().await.map_err(ZipError::AsyncZipError)?;
-        compat_writer.close().await.map_err(ZipError::IoError)?;
-
-        Ok(temp)
+        Ok(plan)
     }
 
     /// Prefetch stage: streams each planned file's content from the blob
@@ -282,17 +349,19 @@ impl ZipService {
         }
     }
 
-    /// Writer stage: drains one file's prefetched chunks into a Deflate
-    /// ZIP entry. Peak memory stays bounded by the channel, independent
-    /// of individual file sizes.
-    async fn write_prefetched_file(
-        zip: &mut AsyncZipWriter,
+    /// Writer stage: drains one file's prefetched chunks into a ZIP entry
+    /// (`Stored` for already-compressed media, `Deflate` otherwise — see
+    /// `entry_compression`). Peak memory stays bounded by the channel,
+    /// independent of individual file sizes.
+    async fn write_prefetched_file<W: tokio::io::AsyncWrite + Unpin>(
+        zip: &mut AsyncZipWriter<W>,
         zip_path: &str,
+        compression: Compression,
         rx: &mut tokio::sync::mpsc::Receiver<Prefetched>,
     ) -> Result<()> {
         info!("Adding file to ZIP: {}", zip_path);
 
-        let entry = ZipEntryBuilder::new(zip_path.to_string().into(), Compression::Deflate);
+        let entry = ZipEntryBuilder::new(zip_path.to_string().into(), compression);
         let mut entry_writer = zip
             .write_entry_stream(entry)
             .await

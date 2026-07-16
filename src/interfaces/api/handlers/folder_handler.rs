@@ -6,7 +6,6 @@ use axum::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio_util::io::ReaderStream;
 
 use crate::application::dtos::display_helpers::{
     category_for, format_file_size, icon_class_for, icon_special_class_for,
@@ -238,53 +237,28 @@ impl FolderHandler {
                     }
                 };
 
-                // Create the ZIP archive (written to a temp file, O(1) RAM)
-                match zip_service.create_folder_zip(&id, &folder.name).await {
-                    Ok(temp_file) => {
-                        // Get the file size for Content-Length
-                        let file_size = match temp_file.as_file().metadata() {
-                            Ok(m) => m.len(),
-                            Err(e) => {
-                                tracing::error!("Error reading temp file metadata: {}", e);
-                                return (
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    Json(serde_json::json!({
-                                        "error": "Error creating ZIP file"
-                                    })),
-                                )
-                                    .into_response();
-                            }
-                        };
-
-                        tracing::info!("ZIP file created successfully, size: {} bytes", file_size);
-
-                        // Split the NamedTempFile into the already-open std File
-                        // and the TempPath (auto-deletes on drop).  This reuses
-                        // the existing fd instead of opening a second one.
-                        let (std_file, temp_path) = temp_file.into_parts();
-                        let tokio_file = tokio::fs::File::from_std(std_file);
-
-                        // Stream the file to the client in chunks
-                        let stream = ReaderStream::new(tokio_file);
+                // Stream the archive as it is built — the first byte reaches
+                // the client after the first entry, not after the whole ZIP
+                // exists on disk (benches/ZIP-STREAM.md). No Content-Length:
+                // the final size isn't known up front (chunked encoding).
+                match zip_service
+                    .create_folder_zip_stream(&id, &folder.name)
+                    .await
+                {
+                    Ok(stream) => {
                         let body = axum::body::Body::from_stream(stream);
 
                         // Setup headers for download
                         let filename = format!("{}.zip", folder.name);
                         let content_disposition = format!("attachment; filename=\"{}\"", filename);
 
-                        let mut response = Response::builder()
+                        Response::builder()
                             .status(StatusCode::OK)
                             .header(header::CONTENT_TYPE, "application/zip")
                             .header(header::CONTENT_DISPOSITION, content_disposition)
-                            .header(header::CONTENT_LENGTH, file_size)
                             .body(body)
-                            .unwrap();
-
-                        // Keep TempPath alive in the response extensions so the
-                        // file is only deleted AFTER the body stream finishes.
-                        response.extensions_mut().insert(Arc::new(temp_path));
-
-                        response.into_response()
+                            .unwrap()
+                            .into_response()
                     }
                     Err(err) => {
                         tracing::error!("Error creating ZIP file: {}", err);

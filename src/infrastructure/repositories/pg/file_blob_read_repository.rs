@@ -366,6 +366,30 @@ impl FileBlobReadRepository {
         .ok_or_else(|| DomainError::not_found("File", file_id))
     }
 
+    /// Batched variant of [`Self::get_file_drive_id`]: one `= ANY($1)`
+    /// round-trip for a whole result page. Missing / unknown ids are simply
+    /// absent from the output (the single-id variant maps them to
+    /// `NotFound`). Used by `PgAclEngine::check_files_read_batch` — the
+    /// per-hit loop cost up to 200 sequential point SELECTs per content
+    /// search (benches/SEARCH-REBAC.md).
+    pub async fn get_file_drive_ids(
+        &self,
+        file_ids: &[uuid::Uuid],
+    ) -> Result<Vec<(uuid::Uuid, uuid::Uuid)>, DomainError> {
+        if file_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid)>(
+            "SELECT id, drive_id FROM storage.files WHERE id = ANY($1)",
+        )
+        .bind(file_ids)
+        .fetch_all(self.pool.as_ref())
+        .await
+        .map_err(|e| {
+            DomainError::internal_error("FileBlobRead", format!("drive_id batch lookup: {e}"))
+        })
+    }
+
     /// Creates a stub instance for testing — never hits PG.
     /// Available in both standard unit-test (`cfg(test)`) and integration
     /// (`cfg(integration_tests)`) builds; `PgAclEngine::new_stub` chains
@@ -494,7 +518,24 @@ impl FileBlobReadRepository {
         before: Option<i64>,
         limit: i64,
     ) -> Result<(Vec<File>, Vec<i64>, Vec<(Option<i32>, Option<i32>)>), DomainError> {
-        let rows: Vec<MediaFileRow> = sqlx::query_as(
+        // Sargable keyset cursor: compare the RAW `media_sort_date` column
+        // against a timestamptz bind so the planner can use the cursor as
+        // an index boundary condition on `idx_files_media_timeline_by_drive`.
+        // The old shape wrapped the column in `EXTRACT(EPOCH …)::bigint`
+        // (plus an `IS NULL OR` disjunction), which degraded the cursor to
+        // a per-row Filter: page k re-read and discarded all k·limit rows
+        // already scrolled past (benches/PHOTOS-CURSOR.md). Since `before`
+        // is whole seconds, `media_sort_date < to_timestamp(before)` admits
+        // exactly the same rows as the old truncated comparison. The
+        // predicate is emitted only when a cursor exists — a bound
+        // disjunction would block the index condition under generic plans.
+        let cursor_ts = before.and_then(|s| chrono::DateTime::from_timestamp(s, 0));
+        let cursor_pred = if cursor_ts.is_some() {
+            "AND fi.media_sort_date < $2"
+        } else {
+            "AND $2::timestamptz IS NULL"
+        };
+        let sql = format!(
             r#"
             SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
                    fi.size, fi.mime_type,
@@ -524,18 +565,18 @@ impl FileBlobReadRepository {
                    )
                AND NOT fi.is_trashed
                AND (fi.mime_type LIKE 'image/%' OR fi.mime_type LIKE 'video/%')
-               AND ($2::bigint IS NULL
-                    OR EXTRACT(EPOCH FROM fi.media_sort_date)::bigint < $2::bigint)
+               {cursor_pred}
              ORDER BY fi.media_sort_date DESC
              LIMIT $3
             "#,
-        )
-        .bind(caller_id)
-        .bind(before)
-        .bind(limit)
-        .fetch_all(self.pool.as_ref())
-        .await
-        .map_err(|e| DomainError::internal_error("FileBlobRead", format!("list_media: {e}")))?;
+        );
+        let rows: Vec<MediaFileRow> = sqlx::query_as(&sql)
+            .bind(caller_id)
+            .bind(cursor_ts)
+            .bind(limit)
+            .fetch_all(self.pool.as_ref())
+            .await
+            .map_err(|e| DomainError::internal_error("FileBlobRead", format!("list_media: {e}")))?;
 
         let mut files = Vec::with_capacity(rows.len());
         let mut sort_dates = Vec::with_capacity(rows.len());
@@ -768,62 +809,57 @@ impl FileReadPort for FileBlobReadRepository {
         self.resolve_blob_hash(file_id).await
     }
 
-    /// Paginated file listing — fetches only `limit` rows starting at `offset`.
+    /// Keyset-paginated file listing in name order — fetches only `limit`
+    /// rows after `after_name` (exclusive).
     ///
-    /// Uses a single SQL query with `LIMIT/OFFSET` to avoid loading the full
-    /// folder contents into memory.  Ideal for streaming WebDAV PROPFIND.
+    /// Names are unique per folder, so `name > $after` is a total cursor.
+    /// Served by `idx_files_folder_name (folder_id, name) WHERE NOT
+    /// is_trashed` as a pure index-range read: O(page) per page with no
+    /// sort, where the old `LIMIT/OFFSET` shape re-scanned and re-sorted
+    /// the entire folder for every page (benches/PROPFIND-PAGING.md). The
+    /// cursor predicate is emitted only when a cursor exists — a
+    /// `$2 IS NULL OR name > $2` disjunction would block the index
+    /// condition under the extended protocol's generic plans.
     #[allow(clippy::type_complexity)]
     async fn list_files_batch(
         &self,
         folder_id: Option<&str>,
-        offset: i64,
+        after_name: Option<&str>,
         limit: i64,
     ) -> Result<Vec<File>, DomainError> {
-        let rows: Vec<FileRow> = if let Some(fid) = folder_id {
-            sqlx::query_as(
-                r#"
-                SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
-                       fi.size, fi.mime_type,
-                       EXTRACT(EPOCH FROM fi.created_at)::bigint,
-                       EXTRACT(EPOCH FROM fi.updated_at)::bigint,
-                       fi.blob_hash,
-
-                   fi.created_by, fi.updated_by
-                  FROM storage.files fi
-                  LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
-                 WHERE fi.folder_id = $1::uuid AND NOT fi.is_trashed
-                 ORDER BY fi.name
-                 LIMIT $2 OFFSET $3
-                "#,
-            )
-            .bind(fid)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(self.pool.as_ref())
-            .await
+        let folder_pred = if folder_id.is_some() {
+            "fi.folder_id = $1::uuid"
         } else {
-            sqlx::query_as(
-                r#"
-                SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
-                       fi.size, fi.mime_type,
-                       EXTRACT(EPOCH FROM fi.created_at)::bigint,
-                       EXTRACT(EPOCH FROM fi.updated_at)::bigint,
-                       fi.blob_hash,
+            "fi.folder_id IS NULL AND $1::uuid IS NULL"
+        };
+        let cursor_pred = if after_name.is_some() {
+            "AND fi.name > $3"
+        } else {
+            "AND $3::text IS NULL"
+        };
+        let sql = format!(
+            r#"
+            SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
+                   fi.size, fi.mime_type,
+                   EXTRACT(EPOCH FROM fi.created_at)::bigint,
+                   EXTRACT(EPOCH FROM fi.updated_at)::bigint,
+                   fi.blob_hash,
 
-                   fi.created_by, fi.updated_by
-                  FROM storage.files fi
-                  LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
-                 WHERE fi.folder_id IS NULL AND NOT fi.is_trashed
-                 ORDER BY fi.name
-                 LIMIT $1 OFFSET $2
-                "#,
-            )
+               fi.created_by, fi.updated_by
+              FROM storage.files fi
+              LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
+             WHERE {folder_pred} AND NOT fi.is_trashed {cursor_pred}
+             ORDER BY fi.name
+             LIMIT $2
+            "#,
+        );
+        let rows: Vec<FileRow> = sqlx::query_as(&sql)
+            .bind(folder_id)
             .bind(limit)
-            .bind(offset)
+            .bind(after_name)
             .fetch_all(self.pool.as_ref())
             .await
-        }
-        .map_err(|e| DomainError::internal_error("FileBlobRead", format!("list_batch: {e}")))?;
+            .map_err(|e| DomainError::internal_error("FileBlobRead", format!("list_batch: {e}")))?;
 
         rows.into_iter()
             .map(

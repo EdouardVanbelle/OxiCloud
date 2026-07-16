@@ -5,10 +5,35 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::Engine;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
+use crate::application::dtos::folder_dto::FolderDto;
 use crate::common::di::AppState;
 use crate::interfaces::middleware::auth::CurrentUser;
+
+/// Markerless-chroot cache: default-drive root folder id → `FolderDto`.
+///
+/// This middleware wraps EVERY protected NextCloud route (DAV files,
+/// per-chunk uploads, trashbin, previews, avatars, OCS polls). With the
+/// app-password verification already cached, the chroot resolution was the
+/// last per-request DB work: `find_default_for_user` (now cached in
+/// `DrivePgRepository`) plus this folder-by-PK fetch. A desktop sync run
+/// issues hundreds of these per minute for a value that changes only on a
+/// root-folder rename — the 30 s TTL bounds that staleness (mirrors
+/// `drive_role_cache` / the default-drive cache; measured in
+/// `benches/CHROOT-CACHE.md`).
+///
+/// Only the MARKERLESS branch is cached: it targets the caller's own
+/// default drive root, so no per-request authorization decision is being
+/// skipped. The drive-marker branch keeps its `get_folder_with_perms`
+/// check on every request.
+static NC_CHROOT_CACHE: LazyLock<moka::sync::Cache<uuid::Uuid, FolderDto>> = LazyLock::new(|| {
+    moka::sync::Cache::builder()
+        .max_capacity(100_000)
+        .time_to_live(Duration::from_secs(30))
+        .build()
+});
 
 #[derive(Debug, thiserror::Error)]
 pub enum NextcloudAuthError {
@@ -191,12 +216,24 @@ pub async fn basic_auth_middleware(
                         .find_default_for_user(current_user.id)
                         .await
                     {
-                        Ok(drive_with_name) => state
-                            .applications
-                            .folder_service
-                            .get_folder(&drive_with_name.drive.root_folder_id.to_string())
-                            .await
-                            .ok(),
+                        Ok(drive_with_name) => {
+                            let root_id = drive_with_name.drive.root_folder_id;
+                            match NC_CHROOT_CACHE.get(&root_id) {
+                                Some(cached) => Some(cached),
+                                None => {
+                                    let fetched = state
+                                        .applications
+                                        .folder_service
+                                        .get_folder(&root_id.to_string())
+                                        .await
+                                        .ok();
+                                    if let Some(f) = &fetched {
+                                        NC_CHROOT_CACHE.insert(root_id, f.clone());
+                                    }
+                                    fetched
+                                }
+                            }
+                        }
                         Err(_) => None,
                     }
                 }
