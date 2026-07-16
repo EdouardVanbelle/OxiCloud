@@ -21,7 +21,9 @@ use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::ports::inbound::SearchUseCase;
 use crate::common::di::AppState;
 use crate::domain::entities::file::File;
-use crate::interfaces::api::handlers::webdav_handler::{file_dead_props, folder_dead_props};
+use crate::interfaces::api::handlers::webdav_handler::{
+    dead_props_for, files_dead_props_map, folders_dead_props_map,
+};
 use crate::interfaces::errors::AppError;
 use crate::interfaces::nextcloud::webdav_handler::{
     batch_resolve_ids, format_oc_id, nc_href, write_file_response, write_folder_response,
@@ -160,6 +162,11 @@ async fn handle_filter_files(
 
         write_multistatus_start(&mut xml)?;
 
+        // Batched dead-props: one = ANY($1) query per type, not one per
+        // result (benches/DEAD-PROPS.md).
+        let file_deads = files_dead_props_map(&state.webdav_dead_props, &files).await;
+        let folder_deads = folders_dead_props_map(&state.webdav_dead_props, &folders).await;
+
         // Keep main's batched-resolution structure (one batch query
         // per type, not 2N round-trips). Hrefs use `url_user` so the
         // multi-drive `~{drive}` form is echoed back to the client;
@@ -179,7 +186,7 @@ async fn handle_filter_files(
             let href = nc_href(url_user, subpath);
             let fid = file_id_map.get(&file.id).copied();
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
-            let dead = file_dead_props(&state, file).await;
+            let dead = dead_props_for(&file.id, &file_deads);
             write_file_response(
                 &mut xml,
                 file,
@@ -187,7 +194,7 @@ async fn handle_filter_files(
                 (fid, oc_id.as_deref()),
                 &user.username,
                 &favorite_ids,
-                &dead,
+                dead,
             )
             .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
         }
@@ -205,7 +212,7 @@ async fn handle_filter_files(
             let href = format!("{}/", nc_href(url_user, subpath));
             let fid = folder_id_map.get(&folder.id).copied();
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
-            let dead = folder_dead_props(&state.webdav_dead_props, folder).await;
+            let dead = dead_props_for(&folder.id, &folder_deads);
             write_folder_response(
                 &mut xml,
                 folder,
@@ -217,7 +224,7 @@ async fn handle_filter_files(
                 // PROPFIND on a specific collection — quota isn't
                 // meaningful here (see `AppState::resolve_webdav_quota`).
                 None,
-                &dead,
+                dead,
             )
             .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
         }
@@ -301,6 +308,11 @@ async fn handle_search(
 
         write_multistatus_start(&mut xml)?;
 
+        // Batched dead-props: one = ANY($1) query per type, not one per
+        // result (benches/DEAD-PROPS.md).
+        let file_deads = files_dead_props_map(&state.webdav_dead_props, &files).await;
+        let folder_deads = folders_dead_props_map(&state.webdav_dead_props, &folders).await;
+
         // Files.
         for file in &files {
             let Some(subpath) = strip_home_prefix(chroot, &file.path, home_prefix) else {
@@ -315,7 +327,7 @@ async fn handle_search(
             let href = nc_href(url_user, subpath);
             let fid = file_id_map.get(&file.id).copied();
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
-            let dead = file_dead_props(&state, file).await;
+            let dead = dead_props_for(&file.id, &file_deads);
             write_file_response(
                 &mut xml,
                 file,
@@ -323,7 +335,7 @@ async fn handle_search(
                 (fid, oc_id.as_deref()),
                 &user.username,
                 &favorite_ids,
-                &dead,
+                dead,
             )
             .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
         }
@@ -342,7 +354,7 @@ async fn handle_search(
             let href = format!("{}/", nc_href(url_user, subpath));
             let fid = folder_id_map.get(&folder.id).copied();
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
-            let dead = folder_dead_props(&state.webdav_dead_props, folder).await;
+            let dead = dead_props_for(&folder.id, &folder_deads);
             write_folder_response(
                 &mut xml,
                 folder,
@@ -354,7 +366,7 @@ async fn handle_search(
                 // PROPFIND on a specific collection — quota isn't
                 // meaningful here (see `AppState::resolve_webdav_quota`).
                 None,
-                &dead,
+                dead,
             )
             .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
         }

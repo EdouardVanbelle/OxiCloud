@@ -29,6 +29,30 @@ pub trait AuthorizationEngine: Send + Sync + 'static {
         resource: Resource,
     ) -> Result<bool, DomainError>;
 
+    /// Batched `check(subject, Read, File(id))` over a result page: returns
+    /// the subset of `file_ids` the subject may read. Semantically identical
+    /// to looping [`Self::check`] (the default does exactly that); the
+    /// `PgAclEngine` override resolves every file's drive in ONE query and
+    /// reuses the per-drive role cache, so verifying a 200-hit search page
+    /// costs 1 SQL round-trip instead of up to 200 sequential ones
+    /// (benches/SEARCH-REBAC.md).
+    async fn check_files_read_batch(
+        &self,
+        subject: Subject,
+        file_ids: &[Uuid],
+    ) -> Result<std::collections::HashSet<Uuid>, DomainError> {
+        let mut allowed = std::collections::HashSet::with_capacity(file_ids.len());
+        for id in file_ids {
+            if self
+                .check(subject, Permission::Read, Resource::File(*id))
+                .await?
+            {
+                allowed.insert(*id);
+            }
+        }
+        Ok(allowed)
+    }
+
     /// Convenience wrapper around `check`: returns `Ok(())` when allowed and
     /// `DomainError::not_found` when denied (anti-enumeration — same error as
     /// "resource doesn't exist" so attackers can't probe IDs by error shape).

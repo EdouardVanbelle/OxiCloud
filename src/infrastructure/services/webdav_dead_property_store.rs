@@ -34,6 +34,7 @@
 //! it was not handled by the path-based store either, so this is a
 //! parity decision, not a regression.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use sqlx::{PgPool, Row};
@@ -126,17 +127,23 @@ impl DeadPropertyStore {
     }
 
     /// Delete a specific dead property. No-op if not present.
+    ///
+    /// Filters on the concrete id column (`folder_id = $1` / `file_id = $1`)
+    /// rather than the old `IS NOT DISTINCT FROM` pair — PostgreSQL cannot
+    /// serve `IS NOT DISTINCT FROM` from a B-tree index, so every lookup
+    /// degraded to a sequential scan as the table grew. The `=` shape is
+    /// served by the partial unique indexes from migration 20260830000001.
+    /// (Same rationale for `get_all` / `get` / the batched readers below —
+    /// measured in `benches/DEAD-PROPS.md`.)
     pub async fn remove(&self, r: ResourceRef, name: &QualifiedName) -> Result<(), DomainError> {
-        let (folder_id, file_id) = split_ref(r);
-        sqlx::query(
+        let (column, id) = split_ref(r);
+        sqlx::query(&format!(
             "DELETE FROM storage.webdav_dead_properties
-              WHERE folder_id IS NOT DISTINCT FROM $1
-                AND file_id   IS NOT DISTINCT FROM $2
-                AND namespace = $3
-                AND local_name = $4",
-        )
-        .bind(folder_id)
-        .bind(file_id)
+              WHERE {column} = $1
+                AND namespace = $2
+                AND local_name = $3",
+        ))
+        .bind(id)
         .bind(&name.namespace)
         .bind(&name.name)
         .execute(&*self.pool)
@@ -150,28 +157,64 @@ impl DeadPropertyStore {
         &self,
         r: ResourceRef,
     ) -> Result<Vec<(QualifiedName, Option<String>)>, DomainError> {
-        let (folder_id, file_id) = split_ref(r);
-        let rows = sqlx::query(
+        let (column, id) = split_ref(r);
+        let rows = sqlx::query(&format!(
             "SELECT namespace, local_name, value
                FROM storage.webdav_dead_properties
-              WHERE folder_id IS NOT DISTINCT FROM $1
-                AND file_id   IS NOT DISTINCT FROM $2",
-        )
-        .bind(folder_id)
-        .bind(file_id)
+              WHERE {column} = $1",
+        ))
+        .bind(id)
         .fetch_all(&*self.pool)
         .await
         .map_err(|e| DomainError::internal_error("DeadPropertyStore", format!("get_all: {e}")))?;
 
-        Ok(rows
-            .into_iter()
-            .map(|r| {
-                let namespace: String = r.get("namespace");
-                let local_name: String = r.get("local_name");
-                let value: Option<String> = r.get("value");
-                (QualifiedName::new(namespace, local_name), value)
-            })
-            .collect())
+        Ok(rows.into_iter().map(row_to_prop).collect())
+    }
+
+    /// Batched variant of [`get_all`] for every file in a PROPFIND page:
+    /// ONE `file_id = ANY($1)` round-trip instead of N sequential queries.
+    /// Files with no dead properties are simply absent from the map.
+    pub async fn get_all_for_files(
+        &self,
+        file_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<(QualifiedName, Option<String>)>>, DomainError> {
+        self.get_all_batched("file_id", file_ids).await
+    }
+
+    /// Batched variant of [`get_all`] for every subfolder in a PROPFIND page.
+    pub async fn get_all_for_folders(
+        &self,
+        folder_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<(QualifiedName, Option<String>)>>, DomainError> {
+        self.get_all_batched("folder_id", folder_ids).await
+    }
+
+    async fn get_all_batched(
+        &self,
+        column: &str,
+        ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<(QualifiedName, Option<String>)>>, DomainError> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows = sqlx::query(&format!(
+            "SELECT {column} AS resource_id, namespace, local_name, value
+               FROM storage.webdav_dead_properties
+              WHERE {column} = ANY($1)",
+        ))
+        .bind(ids)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| {
+            DomainError::internal_error("DeadPropertyStore", format!("get_all_batched: {e}"))
+        })?;
+
+        let mut map: HashMap<Uuid, Vec<(QualifiedName, Option<String>)>> = HashMap::new();
+        for row in rows {
+            let resource_id: Uuid = row.get("resource_id");
+            map.entry(resource_id).or_default().push(row_to_prop(row));
+        }
+        Ok(map)
     }
 
     /// Return a specific dead property, or `None` if not stored.
@@ -181,16 +224,14 @@ impl DeadPropertyStore {
         r: ResourceRef,
         name: &QualifiedName,
     ) -> Result<Option<Option<String>>, DomainError> {
-        let (folder_id, file_id) = split_ref(r);
-        let row = sqlx::query(
+        let (column, id) = split_ref(r);
+        let row = sqlx::query(&format!(
             "SELECT value FROM storage.webdav_dead_properties
-              WHERE folder_id IS NOT DISTINCT FROM $1
-                AND file_id   IS NOT DISTINCT FROM $2
-                AND namespace = $3
-                AND local_name = $4",
-        )
-        .bind(folder_id)
-        .bind(file_id)
+              WHERE {column} = $1
+                AND namespace = $2
+                AND local_name = $3",
+        ))
+        .bind(id)
         .bind(&name.namespace)
         .bind(&name.name)
         .fetch_optional(&*self.pool)
@@ -201,14 +242,21 @@ impl DeadPropertyStore {
     }
 }
 
-/// Splits a `ResourceRef` into `(folder_id, file_id)` Option pairs for
-/// binding into SQL. The unused slot is `None` so `IS NOT DISTINCT FROM`
-/// matches the NULL stored in the unused column.
-fn split_ref(r: ResourceRef) -> (Option<Uuid>, Option<Uuid>) {
+/// Maps a `ResourceRef` onto the column that stores it plus the id to bind.
+/// The column name is one of two compile-time literals — never user input —
+/// so interpolating it into the SQL text is safe.
+fn split_ref(r: ResourceRef) -> (&'static str, Uuid) {
     match r {
-        ResourceRef::Folder(id) => (Some(id), None),
-        ResourceRef::File(id) => (None, Some(id)),
+        ResourceRef::Folder(id) => ("folder_id", id),
+        ResourceRef::File(id) => ("file_id", id),
     }
+}
+
+fn row_to_prop(r: sqlx::postgres::PgRow) -> (QualifiedName, Option<String>) {
+    let namespace: String = r.get("namespace");
+    let local_name: String = r.get("local_name");
+    let value: Option<String> = r.get("value");
+    (QualifiedName::new(namespace, local_name), value)
 }
 
 pub fn create_dead_property_store(pool: Arc<PgPool>) -> Arc<DeadPropertyStore> {

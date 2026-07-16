@@ -108,9 +108,116 @@ pub async fn refine_content_type_from_file(
     }
 }
 
+/// Whether a MIME type identifies content that is already compressed, so
+/// running Deflate over it burns CPU for ~0 % size gain.
+///
+/// Used by the ZIP export paths (`ZipService`, `BatchOperations`) to pick
+/// `Compression::Stored` per entry instead of deflating JPEG/MP4/… bytes.
+/// The set mirrors the HTTP `CompressionLayer` exclusion list in `main.rs`
+/// (keep the two in sync), minus entries that are containers of possibly
+/// incompressible data rather than compressed formats themselves
+/// (`application/x-tar`, `application/octet-stream`) — those stay on Deflate
+/// so unknown-but-compressible content is never stored uncompressed.
+pub fn is_precompressed_mime(mime: &str) -> bool {
+    // Strip any parameters ("; charset=…") and normalize case.
+    let essence = mime.split(';').next().unwrap_or(mime).trim();
+
+    // Compressed families: every common video/audio codec container.
+    if essence.starts_with("video/") || essence.starts_with("audio/") {
+        return true;
+    }
+    // Zip-based document bundles (docx/xlsx/pptx, odt/ods/odp, …).
+    if essence.starts_with("application/vnd.openxmlformats-officedocument")
+        || essence.starts_with("application/vnd.oasis.opendocument")
+    {
+        return true;
+    }
+
+    matches!(
+        essence,
+        // Raster images with built-in compression (SVG intentionally absent).
+        "image/jpeg"
+            | "image/png"
+            | "image/gif"
+            | "image/webp"
+            | "image/avif"
+            | "image/heic"
+            | "image/heif"
+            | "image/jp2"
+            // Already-compressed web fonts; ttf/otf left compressible.
+            | "font/woff"
+            | "font/woff2"
+            | "application/font-woff"
+            // Archives & compressed containers.
+            | "application/zip"
+            | "application/gzip"
+            | "application/x-gzip"
+            | "application/x-7z-compressed"
+            | "application/x-rar-compressed"
+            | "application/x-bzip2"
+            | "application/zstd"
+            | "application/x-xz"
+            | "application/epub+zip"
+            | "application/java-archive"
+            | "application/vnd.android.package-archive"
+            // PDF: internal streams are usually already deflated.
+            | "application/pdf"
+    )
+}
+
+/// ZIP entry compression for a file of the given MIME type: `Stored` for
+/// already-compressed content, `Deflate` otherwise. Shared by every ZIP
+/// export path (`ZipService`, `BatchOperations`).
+pub fn zip_entry_compression(mime: &str) -> async_zip::Compression {
+    if is_precompressed_mime(mime) {
+        async_zip::Compression::Stored
+    } else {
+        async_zip::Compression::Deflate
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── is_precompressed_mime ───────────────────────────────────
+
+    #[test]
+    fn media_and_archives_are_precompressed() {
+        for mime in [
+            "image/jpeg",
+            "image/webp",
+            "video/mp4",
+            "video/quicktime",
+            "audio/mpeg",
+            "application/zip",
+            "application/pdf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "font/woff2",
+        ] {
+            assert!(is_precompressed_mime(mime), "{mime} should be Stored");
+        }
+    }
+
+    #[test]
+    fn compressible_types_keep_deflate() {
+        for mime in [
+            "text/plain",
+            "text/html",
+            "application/json",
+            "image/svg+xml",
+            "application/x-tar",
+            "application/octet-stream",
+            "",
+        ] {
+            assert!(!is_precompressed_mime(mime), "{mime} should stay Deflate");
+        }
+    }
+
+    #[test]
+    fn mime_parameters_are_ignored() {
+        assert!(is_precompressed_mime("image/jpeg; charset=binary"));
+    }
 
     // ── refine_content_type (sync) ──────────────────────────────
 

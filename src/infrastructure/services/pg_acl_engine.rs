@@ -1112,6 +1112,78 @@ impl AuthorizationEngine for PgAclEngine {
         result
     }
 
+    /// Batched Read check over a page of file ids (see the trait docs).
+    ///
+    /// Decision-equivalent to looping `check`: (1) resolve every file's
+    /// drive in one `= ANY($1)` query (same rows as N ×
+    /// `get_file_drive_id`; absent ids decide `false` exactly like the
+    /// per-file `NotFound` path), (2) evaluate the drive-role floor once
+    /// per distinct drive through the same `drive_role_cache`, (3) send
+    /// only the drive-floor misses through the full per-file cascade —
+    /// preserving per-file grant resolution. `Read` is never gated by the
+    /// read-only drive freeze, so skipping that branch changes nothing.
+    async fn check_files_read_batch(
+        &self,
+        subject: Subject,
+        file_ids: &[Uuid],
+    ) -> Result<std::collections::HashSet<Uuid>, DomainError> {
+        use std::collections::{HashMap, HashSet};
+        let start = std::time::Instant::now();
+        let counters = QueryCounters::default();
+
+        counters.sql_queries.fetch_add(1, Ordering::Relaxed);
+        let pairs = self.file_repo.get_file_drive_ids(file_ids).await?;
+
+        // Prime the resource→drive cache — later single checks on these
+        // files (download, share) skip their point lookup too.
+        for (file_id, drive_id) in &pairs {
+            self.owner_cache
+                .insert(Resource::File(*file_id), *drive_id)
+                .await;
+        }
+
+        let mut drive_readable: HashMap<Uuid, bool> = HashMap::new();
+        for (_, drive_id) in &pairs {
+            if !drive_readable.contains_key(drive_id) {
+                let ok = self
+                    .caller_role_on_drive_cached(subject, *drive_id, &counters)
+                    .await?
+                    .is_some_and(|role| role.expand().contains(&Permission::Read));
+                drive_readable.insert(*drive_id, ok);
+            }
+        }
+
+        let mut allowed: HashSet<Uuid> = HashSet::with_capacity(pairs.len());
+        for (file_id, drive_id) in &pairs {
+            if drive_readable.get(drive_id).copied().unwrap_or(false) {
+                allowed.insert(*file_id);
+            } else if self
+                .check_inner(
+                    subject,
+                    Permission::Read,
+                    Resource::File(*file_id),
+                    &counters,
+                )
+                .await?
+            {
+                // Per-file / folder-cascade grant inside a drive the caller
+                // has no role on — rare, but must keep resolving.
+                allowed.insert(*file_id);
+            }
+        }
+
+        tracing::debug!(
+            target: "oxicloud::authz",
+            event = "authz.check_files_read_batch",
+            subject = %subject,
+            files = file_ids.len(),
+            allowed = allowed.len(),
+            duration_us = start.elapsed().as_micros() as u64,
+            sql_queries = counters.sql_queries.load(Ordering::Relaxed),
+        );
+        Ok(allowed)
+    }
+
     async fn list_incoming_grants(&self, subject: Subject) -> Result<Vec<Grant>, DomainError> {
         let counters = QueryCounters::default();
         let (subject_types, subject_ids) = self.subject_match_set(subject, &counters).await?;

@@ -38,6 +38,7 @@ use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::{AuthUser, CurrentUser};
 use crate::interfaces::range_requests::{not_modified_response, range_response};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Characters that MUST NOT be percent-encoded inside a URI path segment.
@@ -557,7 +558,13 @@ async fn handle_propfind(
                 created_by: None,
                 updated_by: None,
             };
-            let quota = state.resolve_webdav_quota(user.id, Uuid::nil()).await;
+            // Skip the 2-query quota resolution when the request's prop list
+            // never mentions quota (benches/QUOTA-PATH.md).
+            let quota = if propfind_request.wants_quota() {
+                state.resolve_webdav_quota(user.id, Uuid::nil()).await
+            } else {
+                None
+            };
             return build_streaming_propfind_response(
                 root_folder,
                 None, // folder_id = None → root children (drive-root folders)
@@ -597,7 +604,11 @@ async fn handle_propfind(
                     )
                     .await?;
                 let folder_id = folder.id.clone();
-                let quota = state.resolve_webdav_quota(user.id, drive_id).await;
+                let quota = if propfind_request.wants_quota() {
+                    state.resolve_webdav_quota(user.id, drive_id).await
+                } else {
+                    None
+                };
                 return build_streaming_propfind_response(
                     folder,
                     Some(folder_id),
@@ -663,7 +674,11 @@ async fn handle_propfind(
                 )
                 .await?;
             let folder_id = folder.id.clone();
-            let quota = state.resolve_webdav_quota(user.id, drive_id).await;
+            let quota = if propfind_request.wants_quota() {
+                state.resolve_webdav_quota(user.id, drive_id).await
+            } else {
+                None
+            };
             return build_streaming_propfind_response(
                 folder,
                 Some(folder_id),
@@ -788,19 +803,18 @@ async fn build_streaming_propfind_response(
                     break;
                 }
 
-                // Materialise dead-props for the whole page before
-                // we start writing — keeps the borrow checker happy
-                // (the writer borrows the FolderDto and the dead-props
-                // vec for the duration of write_folder_entry_*).
-                let mut subfolder_deads = Vec::with_capacity(result.items.len());
-                for subfolder in &result.items {
-                    subfolder_deads.push(folder_dead_props(&dead_props_store, subfolder).await);
-                }
+                // ONE batched dead-props query per page instead of a
+                // sequential per-child round-trip — the N+1 shape cost
+                // 1-4.5 s of pure DB chatter on a 2000-child folder
+                // (measured in benches/DEAD-PROPS.md).
+                let subfolder_deads =
+                    folders_dead_props_map(&dead_props_store, &result.items).await;
 
                 let mut chunk = Vec::with_capacity(result.items.len() * 800);
                 {
                     let mut w = Writer::new(&mut chunk);
-                    for (subfolder, child_dead) in result.items.iter().zip(subfolder_deads.iter()) {
+                    for subfolder in result.items.iter() {
+                        let child_dead = dead_props_for(&subfolder.id, &subfolder_deads);
                         let href = format!("{}{}/", base_href, encode_path_segment(&subfolder.name));
                         WebDavAdapter::write_folder_entry_with_dead_props(&mut w, subfolder, &propfind_request, &href, child_dead, quota)
                             .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -815,11 +829,17 @@ async fn build_streaming_propfind_response(
                 page += 1;
             }
 
-            // Stream files in pages (user-scoped)
-            let mut offset: i64 = 0;
+            // Stream files in pages (user-scoped, keyset cursor — O(page)
+            // per page instead of the quadratic LIMIT/OFFSET walk).
+            let mut after_name: Option<String> = None;
             loop {
                 let batch: Vec<FileDto> = file_retrieval_service
-                    .list_files_batch_with_perms(fid_ref, user_id, offset, PROPFIND_BATCH_SIZE)
+                    .list_files_batch_with_perms(
+                        fid_ref,
+                        user_id,
+                        after_name.as_deref(),
+                        PROPFIND_BATCH_SIZE,
+                    )
                     .await
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
 
@@ -828,15 +848,14 @@ async fn build_streaming_propfind_response(
                 }
 
                 let batch_len = batch.len();
-                let mut file_deads = Vec::with_capacity(batch_len);
-                for file in &batch {
-                    file_deads.push(streamed_file_dead_props(&dead_props_store, file).await);
-                }
+                // Batched: one = ANY($1) query per 500-file page.
+                let file_deads = files_dead_props_map(&dead_props_store, &batch).await;
 
                 let mut chunk = Vec::with_capacity(batch_len * 800);
                 {
                     let mut w = Writer::new(&mut chunk);
-                    for (file, child_dead) in batch.iter().zip(file_deads.iter()) {
+                    for file in batch.iter() {
+                        let child_dead = dead_props_for(&file.id, &file_deads);
                         let href = format!("{}{}", base_href, encode_path_segment(&file.name));
                         WebDavAdapter::write_file_entry_with_dead_props(&mut w, file, &propfind_request, &href, child_dead)
                             .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -847,7 +866,7 @@ async fn build_streaming_propfind_response(
                 if (batch_len as i64) < PROPFIND_BATCH_SIZE {
                     break;
                 }
-                offset += batch_len as i64;
+                after_name = batch.last().map(|f| f.name.clone());
             }
         }
 
@@ -1381,20 +1400,45 @@ pub(crate) async fn folder_dead_props(
         .unwrap_or_default()
 }
 
-/// File-leaf variant for the streaming walker (takes a `&DeadPropertyStore`
-/// rather than the full `&Arc<AppState>` so it can be called from inside
-/// the async-stream future without cloning state).
-pub(crate) async fn streamed_file_dead_props(
+/// Batched dead-props fetch for a whole PROPFIND page of files: ONE
+/// `file_id = ANY($1)` round-trip instead of one query per child (the old
+/// per-child `streamed_file_dead_props` loop cost seconds on large folders —
+/// benches/DEAD-PROPS.md). Same leniency as the single-resource helpers:
+/// any failure → empty map, so the PROPFIND still emits live properties.
+pub(crate) async fn files_dead_props_map(
     store: &DeadPropertyStore,
-    file: &FileDto,
-) -> Vec<(QualifiedName, Option<String>)> {
-    let Ok(file_id) = Uuid::parse_str(&file.id) else {
-        return Vec::new();
-    };
-    store
-        .get_all(ResourceRef::File(file_id))
-        .await
-        .unwrap_or_default()
+    files: &[FileDto],
+) -> HashMap<Uuid, Vec<(QualifiedName, Option<String>)>> {
+    let ids: Vec<Uuid> = files
+        .iter()
+        .filter_map(|f| Uuid::parse_str(&f.id).ok())
+        .collect();
+    store.get_all_for_files(&ids).await.unwrap_or_default()
+}
+
+/// Folder-page variant of [`files_dead_props_map`].
+pub(crate) async fn folders_dead_props_map(
+    store: &DeadPropertyStore,
+    folders: &[FolderDto],
+) -> HashMap<Uuid, Vec<(QualifiedName, Option<String>)>> {
+    let ids: Vec<Uuid> = folders
+        .iter()
+        .filter_map(|f| Uuid::parse_str(&f.id).ok())
+        .collect();
+    store.get_all_for_folders(&ids).await.unwrap_or_default()
+}
+
+/// Looks up one resource's dead props in a batched map (resources with no
+/// dead properties are absent from the map → empty slice).
+pub(crate) fn dead_props_for<'a>(
+    id: &str,
+    map: &'a HashMap<Uuid, Vec<(QualifiedName, Option<String>)>>,
+) -> &'a [(QualifiedName, Option<String>)] {
+    Uuid::parse_str(id)
+        .ok()
+        .and_then(|u| map.get(&u))
+        .map(|v| v.as_slice())
+        .unwrap_or(&[])
 }
 
 /// A single condition inside a `List` of the WebDAV `If:` header

@@ -39,6 +39,23 @@ pub trait FaceRepository: Send + Sync + 'static {
         user_id: Uuid,
         blob_hash: &str,
     ) -> Result<Vec<Face>, DomainError>;
+    /// `(person_id, face_count)` per non-empty cluster — a grouped COUNT
+    /// instead of dragging every face row (each with a 2 KiB embedding
+    /// BYTEA) across the wire just to count them. See benches/PEOPLE-LIST.md.
+    async fn person_face_stats(&self, user_id: Uuid) -> Result<Vec<(Uuid, i64)>, DomainError>;
+    /// face id → file id for the given faces (cover-photo resolution).
+    async fn file_ids_for_faces(
+        &self,
+        user_id: Uuid,
+        face_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, Uuid>, DomainError>;
+    /// Reassign every face of `from` to `into` in one statement (merge).
+    async fn reassign_person_faces(
+        &self,
+        user_id: Uuid,
+        from: Uuid,
+        into: Uuid,
+    ) -> Result<u64, DomainError>;
     async fn assign_person(
         &self,
         face_id: Uuid,

@@ -836,10 +836,8 @@ impl AppServiceFactory {
         let service = Arc::new(
             TrashService::new(
                 trash_repo.clone(),
-                repos.file_read_repository.clone(),
                 repos.file_write_repository.clone(),
                 repos.folder_repository.clone(),
-                self.config.storage.trash_retention_days,
                 core.dedup_service.clone(),
                 Some(core.file_content_cache.clone()),
                 authz.clone(),

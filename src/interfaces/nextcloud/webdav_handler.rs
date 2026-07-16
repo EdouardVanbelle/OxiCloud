@@ -30,7 +30,8 @@ use crate::domain::services::authorization::{Permission, Resource, Subject};
 use crate::infrastructure::services::path_resolver_service::ResolvedResource;
 use crate::infrastructure::services::webdav_dead_property_store::ResourceRef;
 use crate::interfaces::api::handlers::webdav_handler::{
-    PROPFIND_BATCH_SIZE, file_dead_props, folder_dead_props, streamed_file_dead_props,
+    PROPFIND_BATCH_SIZE, dead_props_for, file_dead_props, files_dead_props_map, folder_dead_props,
+    folders_dead_props_map,
 };
 use crate::interfaces::errors::AppError;
 use crate::interfaces::range_requests::{not_modified_response, range_response};
@@ -297,9 +298,10 @@ async fn handle_propfind(
         .map_err(|e| AppError::bad_request(format!("Failed to read body: {}", e)))?;
 
     // Parse (and thereby validate) the PROPFIND body. The NC response
-    // always emits the full property set, so the parsed request is not
-    // consulted further — but malformed XML must still fail with 400.
-    let _propfind = if body_bytes.is_empty() {
+    // always emits the full property set; the parsed request is consulted
+    // only to skip the quota DB round-trips when the client's explicit
+    // prop list never names a quota prop. Malformed XML still fails 400.
+    let propfind = if body_bytes.is_empty() {
         PropFindRequest {
             prop_find_type: crate::application::adapters::webdav_adapter::PropFindType::AllProp,
         }
@@ -341,7 +343,13 @@ async fn handle_propfind(
             // function's username arg. Refining the owner-id usages
             // back to the canonical username is deferred to the
             // NcSession commit.
-            let quota = state.resolve_webdav_quota(user.id, chroot.drive_id).await;
+            // Explicit prop lists that never name a quota prop skip the
+            // 2-query quota resolution (benches/QUOTA-PATH.md).
+            let quota = if propfind.wants_quota() {
+                state.resolve_webdav_quota(user.id, chroot.drive_id).await
+            } else {
+                None
+            };
             Ok(build_nc_streaming_propfind(
                 state.clone(),
                 folder,
@@ -1519,11 +1527,17 @@ fn build_nc_streaming_propfind(
 
         // ── Children (only if Depth != 0) ────────────────────────────
         if depth != "0" {
-            // Files in pages.
-            let mut offset: i64 = 0;
+            // Files in pages (keyset cursor — O(page) per page instead of
+            // the quadratic LIMIT/OFFSET walk).
+            let mut after_name: Option<String> = None;
             loop {
                 let batch = file_service
-                    .list_files_batch_with_perms(Some(&folder.id), user_id, offset, PROPFIND_BATCH_SIZE)
+                    .list_files_batch_with_perms(
+                        Some(&folder.id),
+                        user_id,
+                        after_name.as_deref(),
+                        PROPFIND_BATCH_SIZE,
+                    )
                     .await
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
                 if batch.is_empty() {
@@ -1541,15 +1555,15 @@ fn build_nc_streaming_propfind(
                 };
                 let file_uuids: Vec<String> = batch.iter().map(|f| f.id.clone()).collect();
                 let (file_id_map, _) = batch_resolve_ids(file_id_svc, &file_uuids, &[]).await;
-                let mut file_deads = Vec::with_capacity(batch_len);
-                for file in &batch {
-                    file_deads.push(streamed_file_dead_props(&state.webdav_dead_props, file).await);
-                }
+                // One batched dead-props query per page, not one per child
+                // (benches/DEAD-PROPS.md).
+                let file_deads = files_dead_props_map(&state.webdav_dead_props, &batch).await;
 
                 let mut chunk = Vec::with_capacity(batch_len * 1024);
                 {
                     let mut xml = Writer::new(&mut chunk);
-                    for (file, dead) in batch.iter().zip(file_deads.iter()) {
+                    for file in batch.iter() {
+                        let dead = dead_props_for(&file.id, &file_deads);
                         let child_sub = if subpath.is_empty() {
                             file.name.clone()
                         } else {
@@ -1567,7 +1581,7 @@ fn build_nc_streaming_propfind(
                 if (batch_len as i64) < PROPFIND_BATCH_SIZE {
                     break;
                 }
-                offset += batch_len as i64;
+                after_name = batch.last().map(|f| f.name.clone());
             }
 
             // Subfolders in pages — also collections, same trailing-slash rule.
@@ -1594,15 +1608,15 @@ fn build_nc_streaming_propfind(
                 };
                 let folder_uuids: Vec<String> = result.items.iter().map(|sf| sf.id.clone()).collect();
                 let (_, sub_id_map) = batch_resolve_ids(file_id_svc, &[], &folder_uuids).await;
-                let mut sub_deads = Vec::with_capacity(result.items.len());
-                for sf in &result.items {
-                    sub_deads.push(folder_dead_props(&state.webdav_dead_props, sf).await);
-                }
+                // Batched — see benches/DEAD-PROPS.md.
+                let sub_deads =
+                    folders_dead_props_map(&state.webdav_dead_props, &result.items).await;
 
                 let mut chunk = Vec::with_capacity(result.items.len() * 1024);
                 {
                     let mut xml = Writer::new(&mut chunk);
-                    for (sf, dead) in result.items.iter().zip(sub_deads.iter()) {
+                    for sf in result.items.iter() {
+                        let dead = dead_props_for(&sf.id, &sub_deads);
                         let child_sub = if subpath.is_empty() {
                             sf.name.clone()
                         } else {

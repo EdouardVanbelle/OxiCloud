@@ -451,12 +451,12 @@ impl FileRetrievalUseCase for FileRetrievalService {
     async fn list_files_batch(
         &self,
         folder_id: Option<&str>,
-        offset: i64,
+        after_name: Option<&str>,
         limit: i64,
     ) -> Result<Vec<FileDto>, DomainError> {
         let files = self
             .file_read
-            .list_files_batch(folder_id, offset, limit)
+            .list_files_batch(folder_id, after_name, limit)
             .await?;
         Ok(files.into_iter().map(FileDto::from).collect())
     }
@@ -465,7 +465,7 @@ impl FileRetrievalUseCase for FileRetrievalService {
         &self,
         folder_id: Option<&str>,
         owner_id: Uuid,
-        offset: i64,
+        after_name: Option<&str>,
         limit: i64,
     ) -> Result<Vec<FileDto>, DomainError> {
         // Post-D0: every file lives in a folder — `storage.files.folder_id`
@@ -482,7 +482,7 @@ impl FileRetrievalUseCase for FileRetrievalService {
             .await?;
         let files = self
             .file_read
-            .list_files_batch(folder_id, offset, limit)
+            .list_files_batch(folder_id, after_name, limit)
             .await?;
         Ok(files.into_iter().map(FileDto::from).collect())
     }

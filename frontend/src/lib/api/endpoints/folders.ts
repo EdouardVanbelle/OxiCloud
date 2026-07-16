@@ -108,7 +108,19 @@ export async function getFolder(id: string): Promise<FolderItem> {
  */
 export async function fetchFolderListing(
 	folderId: string,
-	opts: { etag?: string; forceRefresh?: boolean } = {}
+	opts: {
+		etag?: string;
+		forceRefresh?: boolean;
+		/**
+		 * Progressive render hook: invoked after EVERY page with the
+		 * accumulated listing so far (the arrays are fresh copies — safe to
+		 * hand to reactive state). Without it, a 2,000-item folder waited
+		 * for all ⌈N/200⌉ sequential round-trips before the first row
+		 * painted; with it the view paints after page one (~200 items) and
+		 * fills in as the tail pages land.
+		 */
+		onPage?: (partial: FolderListing, done: boolean) => void;
+	} = {}
 ): Promise<FolderListingResult> {
 	const folders: FolderItem[] = [];
 	const files: FileItem[] = [];
@@ -132,6 +144,10 @@ export async function fetchFolderListing(
 			else files.push(it.resource as FileItem);
 		}
 		cursor = page.next_cursor;
+		opts.onPage?.(
+			{ folders: [...folders], files: [...files], favoriteIds: [], sharedIds: [] },
+			!cursor
+		);
 	} while (cursor);
 
 	return { status: 200, listing: { folders, files, favoriteIds: [], sharedIds: [] } };

@@ -1,4 +1,3 @@
-use crate::application::ports::auth_ports::UserStoragePort;
 use crate::application::ports::storage_ports::StorageUsagePort;
 use crate::common::errors::DomainError;
 use crate::infrastructure::repositories::pg::UserPgRepository;
@@ -512,9 +511,9 @@ impl StorageUsagePort for StorageUsageService {
         user_id: Uuid,
         additional_bytes: u64,
     ) -> Result<(), DomainError> {
-        let user = self.user_repository.get_user_by_id(user_id).await?;
-        let quota = user.storage_quota_bytes();
-        let used = user.storage_used_bytes();
+        // Narrow 2-column read — the full user row carries the up-to-512 KiB
+        // avatar `image` column, paid on every upload quota check otherwise.
+        let (used, quota) = self.user_repository.get_storage_usage(user_id).await?;
 
         // Quota of 0 means unlimited
         if quota <= 0 {
@@ -548,8 +547,9 @@ impl StorageUsagePort for StorageUsageService {
     }
 
     async fn get_user_storage_info(&self, user_id: Uuid) -> Result<(i64, i64), DomainError> {
-        let user = self.user_repository.get_user_by_id(user_id).await?;
-        Ok((user.storage_used_bytes(), user.storage_quota_bytes()))
+        // Narrow 2-column read (avatar-free) — runs on every folder PROPFIND
+        // that reports quota. See benches/QUOTA-PATH.md.
+        Ok(self.user_repository.get_storage_usage(user_id).await?)
     }
 
     async fn add_drive_storage_usage_delta(

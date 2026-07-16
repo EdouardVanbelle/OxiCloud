@@ -880,7 +880,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             // ── file-body downloads carry Content-Disposition (see above) ──
             .and(NotForDownloads);
 
-        app = app.layer(CompressionLayer::new().compress_when(predicate));
+        // Explicit quality: the layer's default maps to Brotli QUALITY 11
+        // (async-compression Level::Default → BrotliEncoderParams::default(),
+        // brotli-8.0.2 encode.rs:323) — a deploy-grade setting that cost
+        // ~90 ms of CPU per 64 KiB JSON response. Level 4 emits ~15 % more
+        // bytes at ~1 % of the CPU (0.9 ms) — measured in
+        // benches/STATIC-PRECOMPRESSED.md. Applies to gzip too (level 4,
+        // the classic dynamic-content setting).
+        app = app.layer(
+            CompressionLayer::new()
+                .quality(tower_http::CompressionLevel::Precise(4))
+                .compress_when(predicate),
+        );
     }
 
     // ── Security headers ─────────────────────────────────────────────────

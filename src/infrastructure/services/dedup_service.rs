@@ -240,6 +240,16 @@ impl Drop for IngestGuard {
 /// in the [`BlobStorageBackend`], and maintains a manifest in PostgreSQL
 /// mapping file_hash → \[chunk_hashes\].  BLAKE3 hashing, ref-counting
 /// and the PostgreSQL dedup index all live here.
+/// Immutable chunk map of one CDC blob (`storage.chunk_manifests` row,
+/// minus the mutable `ref_count`). Content-addressed: for a given
+/// `file_hash` the chunk list and total size never change, which is what
+/// makes [`DedupService::manifest_cached`] safe.
+pub struct ChunkManifest {
+    pub chunk_hashes: Vec<String>,
+    pub chunk_sizes: Vec<i64>,
+    pub total_size: i64,
+}
+
 pub struct DedupService {
     /// Pluggable blob storage backend (local FS, S3, …).
     backend: Arc<dyn BlobStorageBackend>,
@@ -251,6 +261,13 @@ pub struct DedupService {
     maintenance_pool: Arc<PgPool>,
     /// Single lifecycle dispatcher — fired on blob created / deleted.
     blob_lifecycle: Option<Arc<BlobLifecycleService>>,
+    /// `file_hash → ChunkManifest` for the read path — every stream / range
+    /// / full read of a CDC blob used to pay one manifest query first, even
+    /// for the media the gallery re-reads constantly. Positive-only (a
+    /// legacy blob gaining a manifest via background rechunking must be
+    /// seen immediately), weight-bounded (a manifest is ~72 B per chunk),
+    /// short TTL so GC'd manifests age out fast (benches/MANIFEST-CACHE.md).
+    manifest_cache: moka::future::Cache<String, Arc<ChunkManifest>>,
 }
 
 impl DedupService {
@@ -269,7 +286,20 @@ impl DedupService {
             pool,
             maintenance_pool,
             blob_lifecycle: None,
+            manifest_cache: Self::build_manifest_cache(),
         }
+    }
+
+    /// See the `manifest_cache` field docs. Weight ≈ real heap bytes of one
+    /// entry; 32 MiB cap ≈ tens of thousands of typical (sub-1 GB) files.
+    fn build_manifest_cache() -> moka::future::Cache<String, Arc<ChunkManifest>> {
+        moka::future::Cache::builder()
+            .weigher(|key: &String, value: &Arc<ChunkManifest>| {
+                (key.len() + value.chunk_hashes.len() * 80 + 64) as u32
+            })
+            .max_capacity(32 * 1024 * 1024)
+            .time_to_live(std::time::Duration::from_secs(60))
+            .build()
     }
 
     /// Registers the blob lifecycle dispatcher (thumbnail cleanup, …).
@@ -311,6 +341,7 @@ impl DedupService {
             pool: stub_pool.clone(),
             maintenance_pool: stub_pool,
             blob_lifecycle: None,
+            manifest_cache: Self::build_manifest_cache(),
         }
     }
 
@@ -1385,6 +1416,10 @@ impl DedupService {
                 .await
                 .map_err(|e| DomainError::internal_error("Dedup", format!("Commit: {}", e)))?;
 
+            // Post-commit so a concurrent read can't re-cache the manifest
+            // between invalidation and the delete becoming visible.
+            self.manifest_cache.invalidate(file_hash).await;
+
             // File content is gone — drop its blob-keyed thumbnails now.
             self.fire_blob_hooks(file_hash);
 
@@ -1606,27 +1641,49 @@ impl DedupService {
         Box::pin(chunk_stream)
     }
 
+    /// Cached manifest fetch for the read path (see the `manifest_cache`
+    /// field docs). `None` = legacy whole-file blob — never cached, so a
+    /// background rechunk that creates a manifest is honoured immediately.
+    async fn manifest_cached(&self, hash: &str) -> Result<Option<Arc<ChunkManifest>>, DomainError> {
+        if let Some(m) = self.manifest_cache.get(hash).await {
+            return Ok(Some(m));
+        }
+        let row = sqlx::query_as::<_, (Vec<String>, Vec<i64>, i64)>(
+            "SELECT chunk_hashes, chunk_sizes, total_size
+             FROM storage.chunk_manifests WHERE file_hash = $1",
+        )
+        .bind(hash)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(|e| DomainError::internal_error("Dedup", format!("Manifest lookup: {}", e)))?;
+        match row {
+            Some((chunk_hashes, chunk_sizes, total_size)) => {
+                let m = Arc::new(ChunkManifest {
+                    chunk_hashes,
+                    chunk_sizes,
+                    total_size,
+                });
+                self.manifest_cache
+                    .insert(hash.to_string(), m.clone())
+                    .await;
+                Ok(Some(m))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Stream blob content — CDC-aware with legacy fallback.
     ///
-    /// For CDC files: looks up the manifest, then streams chunks in order,
-    /// concatenating them into a single byte stream.
+    /// For CDC files: looks up the manifest (RAM-cached), then streams
+    /// chunks in order, concatenating them into a single byte stream.
     /// For legacy blobs: delegates directly to the backend.
     pub async fn read_blob_stream(
         &self,
         hash: &str,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>, DomainError>
     {
-        // Check manifest
-        let manifest = sqlx::query_scalar::<_, Vec<String>>(
-            "SELECT chunk_hashes FROM storage.chunk_manifests WHERE file_hash = $1",
-        )
-        .bind(hash)
-        .fetch_optional(self.pool.as_ref())
-        .await
-        .map_err(|e| DomainError::internal_error("Dedup", format!("Manifest lookup: {}", e)))?;
-
-        match manifest {
-            Some(chunk_hashes) => Ok(self.stream_chunks(chunk_hashes)),
+        match self.manifest_cached(hash).await? {
+            Some(m) => Ok(self.stream_chunks(m.chunk_hashes.clone())),
             // Legacy whole-file blob
             None => self.backend.get_blob_stream(hash).await,
         }
@@ -1644,18 +1701,11 @@ impl DedupService {
     /// `blob_size` + `read_blob_stream`) doubled the manifest round-trips on
     /// every full-blob read (e.g. 2N queries for an N-image gallery cold load).
     pub async fn read_blob_bytes(&self, hash: &str) -> Result<Bytes, DomainError> {
-        let manifest = sqlx::query_as::<_, (Vec<String>, i64)>(
-            "SELECT chunk_hashes, total_size FROM storage.chunk_manifests WHERE file_hash = $1",
-        )
-        .bind(hash)
-        .fetch_optional(self.pool.as_ref())
-        .await
-        .map_err(|e| DomainError::internal_error("Dedup", format!("Manifest lookup: {}", e)))?;
-
-        let (mut stream, expected_size) = match manifest {
-            Some((chunk_hashes, total_size)) => {
-                (self.stream_chunks(chunk_hashes), total_size.max(0) as usize)
-            }
+        let (mut stream, expected_size) = match self.manifest_cached(hash).await? {
+            Some(m) => (
+                self.stream_chunks(m.chunk_hashes.clone()),
+                m.total_size.max(0) as usize,
+            ),
             None => {
                 // Legacy whole-file blob: size + stream straight from the backend.
                 let size = self.backend.blob_size(hash).await? as usize;
@@ -1685,17 +1735,9 @@ impl DedupService {
         end: Option<u64>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>, DomainError>
     {
-        // Check manifest
-        let manifest = sqlx::query_as::<_, (Vec<String>, Vec<i64>, i64)>(
-            "SELECT chunk_hashes, chunk_sizes, total_size
-             FROM storage.chunk_manifests WHERE file_hash = $1",
-        )
-        .bind(hash)
-        .fetch_optional(self.pool.as_ref())
-        .await
-        .map_err(|e| DomainError::internal_error("Dedup", format!("Manifest lookup: {}", e)))?;
-
-        if let Some((chunk_hashes, chunk_sizes, total_size)) = manifest {
+        if let Some(m) = self.manifest_cached(hash).await? {
+            let (chunk_hashes, chunk_sizes, total_size) =
+                (&m.chunk_hashes, &m.chunk_sizes, m.total_size);
             let end = end.unwrap_or(total_size as u64);
 
             // Calculate which chunks overlap [start, end)
@@ -1749,17 +1791,9 @@ impl DedupService {
 
     /// Get blob size — manifest-aware with legacy fallback.
     pub async fn blob_size(&self, hash: &str) -> Result<u64, DomainError> {
-        // Check manifest first (O(1) from PG)
-        let manifest_size = sqlx::query_scalar::<_, i64>(
-            "SELECT total_size FROM storage.chunk_manifests WHERE file_hash = $1",
-        )
-        .bind(hash)
-        .fetch_optional(self.pool.as_ref())
-        .await
-        .map_err(|e| DomainError::internal_error("Dedup", format!("Manifest lookup: {}", e)))?;
-
-        if let Some(size) = manifest_size {
-            return Ok(size as u64);
+        // Check manifest first (RAM cache, else one O(1) PG row)
+        if let Some(m) = self.manifest_cached(hash).await? {
+            return Ok(m.total_size as u64);
         }
 
         // Legacy: delegate to backend
@@ -2048,6 +2082,7 @@ impl DedupService {
             }
 
             for (file_hash, chunk_hashes, size) in &batch {
+                self.manifest_cache.invalidate(file_hash).await;
                 // Decrement chunk ref_counts. GREATEST(.., 0) guards against the
                 // single-chunk file case where the PG file-delete trigger already
                 // decremented blobs.ref_count (because file_hash == chunk_hash);

@@ -510,29 +510,18 @@ impl ShareUseCase for ShareService {
     }
 
     async fn register_shared_link_access(&self, token: &str) -> Result<(), DomainError> {
-        // Find the shared link by its token
-        let share = self
-            .share_repository
-            .find_share_by_token(token)
-            .await
-            .map_err(|e| {
-                ShareServiceError::NotFound(format!("Share with token {} not found: {}", token, e))
-            })?;
-
-        // Check if it has expired
-        if share.is_expired() {
-            return Err(ShareServiceError::Expired.into());
+        // One atomic UPDATE (see `ShareStoragePort::increment_access_count`).
+        // 0 rows = missing or expired — collapsed into NotFound, same
+        // response shape either way (anti-enumeration; the landing handler
+        // discards this result regardless).
+        let updated = self.share_repository.increment_access_count(token).await?;
+        if updated == 0 {
+            return Err(ShareServiceError::NotFound(format!(
+                "Share with token {} not found or expired",
+                token
+            ))
+            .into());
         }
-
-        // Increment the access counter
-        let updated_share = share.increment_access_count();
-
-        // Save the changes
-        self.share_repository
-            .update_share(&updated_share)
-            .await
-            .map_err(|e| ShareServiceError::Repository(e.to_string()))?;
-
         Ok(())
     }
 }

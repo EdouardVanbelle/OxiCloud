@@ -52,7 +52,13 @@ enum ZipPlanEntry {
     /// Directory entry (Stored, zero-length body).
     Dir(String),
     /// File entry: ZIP-relative path + file id to stream from the blob store.
-    File { zip_path: String, file_id: String },
+    /// `compression` is picked from the file's MIME type at plan time —
+    /// `Stored` for already-compressed media (JPEG/MP4/…), `Deflate` otherwise.
+    File {
+        zip_path: String,
+        file_id: String,
+        compression: Compression,
+    },
 }
 
 /// Message protocol from the prefetch task to the ZIP writer. For each
@@ -74,8 +80,11 @@ const PREFETCH_BUFFER_CHUNKS: usize = 64;
 ///
 /// Uses `async_zip` for fully-async archive creation.  Every write (headers,
 /// compressed chunk data, central directory) goes through
-/// `tokio::io::BufWriter` → `tokio::fs::File`, so **no Tokio worker is ever
-/// blocked** by disk I/O or compression.
+/// `tokio::io::BufWriter` → `tokio::fs::File`, so no Tokio worker is ever
+/// blocked by disk I/O. Deflate itself DOES run inline on the writing task
+/// (async_zip compresses inside `poll_write`), which is why entries whose
+/// MIME says the content is already compressed are `Stored` instead — that
+/// turns the archive hot path from ~1 CPU core per download into CRC + memcpy.
 ///
 /// Archive creation is a 2-stage pipeline: a prefetch task reads file
 /// content from the blob store ahead of the writer, so the next file's
@@ -183,6 +192,9 @@ impl ZipService {
                     plan.push(ZipPlanEntry::File {
                         zip_path: format!("{}{}", zip_dir, file.name),
                         file_id: file.id.to_string(),
+                        compression: crate::common::mime_detect::zip_entry_compression(
+                            &file.mime_type,
+                        ),
                     });
                 }
             }
@@ -228,8 +240,12 @@ impl ZipService {
                         }
                     }
                 }
-                ZipPlanEntry::File { zip_path, .. } => {
-                    Self::write_prefetched_file(&mut zip, zip_path, &mut rx).await?;
+                ZipPlanEntry::File {
+                    zip_path,
+                    compression,
+                    ..
+                } => {
+                    Self::write_prefetched_file(&mut zip, zip_path, *compression, &mut rx).await?;
                 }
             }
         }
@@ -282,17 +298,19 @@ impl ZipService {
         }
     }
 
-    /// Writer stage: drains one file's prefetched chunks into a Deflate
-    /// ZIP entry. Peak memory stays bounded by the channel, independent
-    /// of individual file sizes.
+    /// Writer stage: drains one file's prefetched chunks into a ZIP entry
+    /// (`Stored` for already-compressed media, `Deflate` otherwise — see
+    /// `entry_compression`). Peak memory stays bounded by the channel,
+    /// independent of individual file sizes.
     async fn write_prefetched_file(
         zip: &mut AsyncZipWriter,
         zip_path: &str,
+        compression: Compression,
         rx: &mut tokio::sync::mpsc::Receiver<Prefetched>,
     ) -> Result<()> {
         info!("Adding file to ZIP: {}", zip_path);
 
-        let entry = ZipEntryBuilder::new(zip_path.to_string().into(), Compression::Deflate);
+        let entry = ZipEntryBuilder::new(zip_path.to_string().into(), compression);
         let mut entry_writer = zip
             .write_entry_stream(entry)
             .await
