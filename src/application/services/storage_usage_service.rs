@@ -19,6 +19,13 @@ use uuid::Uuid;
 pub struct StorageUsageService {
     pool: Arc<PgPool>,
     user_repository: Arc<UserPgRepository>,
+    /// Optional so DI can wire it lazily and older test constructors
+    /// keep compiling. When `Some`, every write path that mutates
+    /// `drives.used_bytes` or `users.storage_used_bytes` invalidates
+    /// the drive lookup caches so `GET /api/drives` reflects the new
+    /// usage on the next call (see the invalidation calls in the
+    /// delta / sweep methods below).
+    drive_repo: Option<Arc<dyn crate::domain::repositories::drive_repository::DriveRepository>>,
 }
 
 impl StorageUsageService {
@@ -27,6 +34,44 @@ impl StorageUsageService {
         Self {
             pool,
             user_repository,
+            drive_repo: None,
+        }
+    }
+
+    /// Wires the drive repository used for cache-invalidation-on-write.
+    /// Production DI calls this in `common::di`; tests without a real
+    /// drive repo leave it `None` and the invalidation calls no-op.
+    pub fn with_drive_repo(
+        mut self,
+        drive_repo: Arc<dyn crate::domain::repositories::drive_repository::DriveRepository>,
+    ) -> Self {
+        self.drive_repo = Some(drive_repo);
+        self
+    }
+
+    /// Drop the per-caller readable-drive listing cache and the
+    /// per-user default-drive cache so `GET /api/drives` and the
+    /// WebDAV / NextCloud / WOPI drive-lookup paths re-read fresh
+    /// values.
+    ///
+    /// **Called only from the reconciliation sweep**, not from the
+    /// hot-path `add_drive_storage_usage_delta*` methods. The design
+    /// (Ed's call, 2026-07-17): keep the cache useful under active
+    /// upload load — per-mutation invalidation would nuke the cache
+    /// on every file upload, defeating the point. `used_bytes` on
+    /// `GET /api/drives` therefore lags by up to the cache TTL (30 s),
+    /// which matches the sibling caches' accepted UX phantom for
+    /// drive-name staleness. Tests / operators that need immediate
+    /// freshness call `POST /api/admin/internal/trigger-sweep`, which
+    /// runs `update_all_drives_storage_usage` → this method.
+    ///
+    /// Security posture unaffected: `check_drive_quota` reads
+    /// directly from SQL, bypassing the cache entirely, so quota
+    /// enforcement is honest regardless of listing staleness.
+    fn invalidate_drive_lookup_caches(&self) {
+        if let Some(repo) = &self.drive_repo {
+            repo.invalidate_readable_all();
+            repo.invalidate_default_drive_all();
         }
     }
 
@@ -209,6 +254,9 @@ impl StorageUsageService {
         .execute(self.pool.as_ref())
         .await
         .map_err(|e| DomainError::internal_error("StorageUsage", format!("drive delta: {e}")))?;
+        // Deliberate no-invalidate here — see the class doc on
+        // `invalidate_drive_lookup_caches`. Delta writes lag the
+        // cache by up to the TTL; the sweep is the escape hatch.
         Ok(())
     }
 
@@ -285,6 +333,7 @@ impl StorageUsageService {
         .map_err(|e| {
             DomainError::internal_error("StorageUsage", format!("drive delta by folder: {e}"))
         })?;
+        // See `add_drive_storage_usage_delta` — deliberate no-invalidate.
         Ok(())
     }
 
@@ -595,6 +644,20 @@ impl StorageUsagePort for StorageUsageService {
             "Drive storage-usage reconciliation corrected {} drive(s)",
             result.rows_affected()
         );
+        // Unconditional invalidation — do NOT gate on
+        // `rows_affected() > 0`. When a fire-and-forget delta has
+        // already made SQL correct BEFORE the sweep runs, the sweep
+        // touches zero rows but the cache may still hold the
+        // pre-delta value from an earlier `GET /api/drives`. Gating
+        // means the cache stays stale in exactly the case
+        // `trigger-sweep` is called to fix. The invalidation cost is
+        // small (moka `invalidate_all` on both caches); the
+        // correctness guarantee matters. Regression avoidance:
+        // drive_quota.hurl Step 6 exercises this race — 2nd upload's
+        // delta lands during the 200 ms delay, sweep sees SQL is
+        // already right → zero rows → without unconditional
+        // invalidation, cache stays at the previous step's value.
+        self.invalidate_drive_lookup_caches();
         Ok(())
     }
 
@@ -613,6 +676,7 @@ impl Clone for StorageUsageService {
         Self {
             pool: Arc::clone(&self.pool),
             user_repository: Arc::clone(&self.user_repository),
+            drive_repo: self.drive_repo.clone(),
         }
     }
 }

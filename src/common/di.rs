@@ -1056,14 +1056,25 @@ impl AppServiceFactory {
         _repos: &RepositoryServices,
         db_pool: &Arc<PgPool>,
         maintenance_pool: &Arc<PgPool>,
+        drive_repo: Arc<crate::infrastructure::repositories::pg::DrivePgRepository>,
     ) -> Arc<StorageUsageService> {
         let user_repository = Arc::new(
             crate::infrastructure::repositories::pg::UserPgRepository::new(db_pool.clone()),
         );
+        // The `drive_repo` passed in is the SAME instance held on
+        // `AppState`, so its `readable_cache` / `default_drive_cache`
+        // are the caches the request path reads from. A separately
+        // constructed `DrivePgRepository` would have its OWN caches
+        // and invalidation would be a no-op observed by nobody —
+        // this is the trap that regressed the used_bytes freshness
+        // after perf commit `12dc648c`.
         let service = Arc::new(
             crate::application::services::storage_usage_service::StorageUsageService::new(
                 maintenance_pool.clone(),
                 user_repository,
+            )
+            .with_drive_repo(
+                drive_repo as Arc<dyn crate::domain::repositories::drive_repository::DriveRepository>,
             ),
         );
         // Keep cached storage usage fresh off the request path: GET /api/auth/me
@@ -1250,7 +1261,8 @@ impl AppServiceFactory {
         // 3c. Storage usage / quota service (needed by the instant-upload
         // path inside the application services, and re-exposed on AppState
         // for the handler-side quota checks of the byte-upload paths).
-        let storage_usage = self.create_storage_usage_service(&repos, &pool, &maintenance_pool);
+        let storage_usage =
+            self.create_storage_usage_service(&repos, &pool, &maintenance_pool, drive_repo.clone());
 
         // 3d. Content index (embedded Tantivy) — opened before application
         // services so SearchService can hold the query port; the feeding
