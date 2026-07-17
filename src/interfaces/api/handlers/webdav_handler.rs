@@ -31,6 +31,7 @@ use crate::application::ports::file_ports::{FileManagementUseCase, FileUploadUse
 use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::ports::storage_ports::StorageUsagePort;
 use crate::application::services::file_retrieval_service::FileRetrievalService;
+use crate::application::services::file_upload_service::FileUploadService;
 use crate::application::services::folder_service::FolderService;
 use crate::common::di::AppState;
 use crate::domain::repositories::drive_repository::DriveRepository;
@@ -40,6 +41,7 @@ use crate::infrastructure::services::webdav_dead_property_store::{DeadPropertySt
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::{AuthUser, CurrentUser};
 use crate::interfaces::range_requests::{not_modified_response, range_response};
+use crate::interfaces::upload_ingest::{IngestedBlob, RangeSegment, discard_ingested};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1892,39 +1894,20 @@ async fn handle_put(
 
     // ── RFC 7232 conditional preconditions ────────────────────────────
     // Evaluated before ingesting the body to save bandwidth on doomed requests.
-    if let Some(ref inm) = if_none_match {
-        // If-None-Match: * → fail if resource exists (prevent overwrite)
-        if inm == "*" && file_existed {
-            return Err(AppError::precondition_failed(
-                "If-None-Match: * — resource already exists",
-            ));
-        }
+    // Shared with `handle_patch` (both surfaces) — handles comma-separated
+    // multi-value lists and the weak/strong distinction the previous
+    // hand-rolled single-tag comparison here didn't.
+    if let Some(ref value) = if_none_match
+        && if_none_match_precondition_fails(value, current_etag.as_deref())
+    {
+        return Err(AppError::precondition_failed(
+            "If-None-Match — resource already exists with that ETag",
+        ));
     }
-    if let Some(ref im) = if_match {
-        if im == "*" {
-            // If-Match: * → fail if resource does not exist
-            if !file_existed {
-                return Err(AppError::precondition_failed(
-                    "If-Match: * — resource does not exist",
-                ));
-            }
-        } else {
-            // If-Match: <etag> → strong comparison against current ETag
-            match &current_etag {
-                None => {
-                    return Err(AppError::precondition_failed(
-                        "If-Match — resource does not exist",
-                    ));
-                }
-                Some(etag) => {
-                    let client_tag = im.trim_matches('"');
-                    let server_tag = etag.trim_matches('"');
-                    if client_tag != server_tag {
-                        return Err(AppError::precondition_failed("If-Match — ETag mismatch"));
-                    }
-                }
-            }
-        }
+    if let Some(ref value) = if_match
+        && if_match_precondition_fails(value, current_etag.as_deref())
+    {
+        return Err(AppError::precondition_failed("If-Match — ETag mismatch"));
     }
 
     // ── Streaming ingest ──────────────────────────────────────────────
@@ -1988,7 +1971,7 @@ async fn handle_put(
             };
             Ok(Response::builder()
                 .status(status)
-                .header(header::ETAG, &file_dto.etag)
+                .header(header::ETAG, format!("\"{}\"", file_dto.etag))
                 .body(Body::empty())
                 .unwrap())
         }
@@ -2094,6 +2077,106 @@ pub(crate) fn if_match_precondition_fails(header: &str, current_etag: Option<&st
         let (is_weak, parsed) = parse_etag_value(tag);
         !is_weak && !parsed.is_empty() && parsed == current
     })
+}
+
+/// Build the untouched prefix/suffix byte-range streams either side of a
+/// PATCH edit, paired with their known lengths (`upload_ingest::RangeSegment`)
+/// ready to hand to `ingest_range_patch_to_cas`.
+///
+/// `pub(crate)` so both the plain and NextCloud-surface PATCH handlers share
+/// one implementation instead of each re-deriving the same offsets — this was
+/// byte-identical duplicated code before the DRY pass that added this fn.
+pub(crate) async fn splice_patch_streams(
+    file_retrieval: &FileRetrievalService,
+    file_id: &str,
+    caller_id: Uuid,
+    start: u64,
+    end: Option<u64>,
+    file_size: u64,
+) -> Result<(RangeSegment, RangeSegment), AppError> {
+    let prefix_stream: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> =
+        if start == 0 {
+            Box::pin(stream::empty())
+        } else {
+            Box::into_pin(
+                file_retrieval
+                    .get_file_range_stream_with_perms(file_id, caller_id, 0, Some(start))
+                    .await
+                    .map_err(AppError::from)?,
+            )
+        };
+    let suffix_len = match end {
+        Some(end) if end + 1 < file_size => file_size - (end + 1),
+        _ => 0,
+    };
+    let suffix_stream: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> = match end
+    {
+        Some(end) if end + 1 < file_size => Box::into_pin(
+            file_retrieval
+                .get_file_range_stream_with_perms(file_id, caller_id, end + 1, None)
+                .await
+                .map_err(AppError::from)?,
+        ),
+        _ => Box::pin(stream::empty()),
+    };
+    Ok(((prefix_stream, start), (suffix_stream, suffix_len)))
+}
+
+/// Quota-check + compare-and-swap write for a PATCH edit already spliced and
+/// ingested into the chunk store (`ingested`). On quota rejection the blob
+/// reference just taken by ingest is released and `QuotaExceeded` (507) is
+/// returned; on success this is the CAS write keyed on `expected_hash` (the
+/// file's pre-splice content hash) that closes the race between two
+/// concurrent PATCHes to disjoint ranges of the same file (see
+/// `FileBlobWritePort::swap_blob_hash`).
+///
+/// `pub(crate)` — shared by the plain and NextCloud-surface PATCH handlers;
+/// `log_prefix` lets each surface keep its own log-line tag (`"WEBDAV PATCH"`
+/// vs `"NC WEBDAV PATCH"`) for grep-ability.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn cas_write_patch(
+    state: &AppState,
+    upload_service: &FileUploadService,
+    path: &str,
+    drive_id: Uuid,
+    ingested: &IngestedBlob,
+    caller_id: Uuid,
+    expected_hash: &str,
+    log_prefix: &str,
+) -> Result<FileDto, AppError> {
+    if let Some(storage_svc) = state.storage_usage_service.as_ref()
+        && let Err(err) = storage_svc
+            .check_storage_quota(caller_id, ingested.size)
+            .await
+    {
+        discard_ingested(&state.core.dedup_service, ingested).await;
+        tracing::warn!(
+            "⛔ {} REJECTED (quota): user={}, file={}, size={}",
+            log_prefix,
+            caller_id,
+            path,
+            ingested.size
+        );
+        return Err(AppError::new(
+            StatusCode::INSUFFICIENT_STORAGE,
+            err.message,
+            "QuotaExceeded",
+        ));
+    }
+
+    let content_type = ingested.content_type.clone();
+    upload_service
+        .update_file_streaming_with_perms(
+            path,
+            drive_id,
+            ingested.stored(),
+            &content_type,
+            None,
+            caller_id,
+            Some(expected_hash),
+        )
+        .await
+        .map_err(AppError::from)
 }
 
 /**
@@ -2244,36 +2327,20 @@ async fn handle_patch(
     }
 
     // ── Splice prefix/suffix around the patched span ───────────────────
-    let prefix_stream: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> =
-        if start == 0 {
-            Box::pin(stream::empty())
-        } else {
-            Box::into_pin(
-                file_retrieval_service
-                    .get_file_range_stream_with_perms(&file.id, user.id, 0, Some(start))
-                    .await
-                    .map_err(AppError::from)?,
-            )
-        };
-    let suffix_len = match end {
-        Some(end) if end + 1 < file.size => file.size - (end + 1),
-        _ => 0,
-    };
-    let suffix_stream: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> = match end
-    {
-        Some(end) if end + 1 < file.size => Box::into_pin(
-            file_retrieval_service
-                .get_file_range_stream_with_perms(&file.id, user.id, end + 1, None)
-                .await
-                .map_err(AppError::from)?,
-        ),
-        _ => Box::pin(stream::empty()),
-    };
+    let (prefix_segment, suffix_segment) = splice_patch_streams(
+        file_retrieval_service,
+        &file.id,
+        user.id,
+        start,
+        end,
+        file.size,
+    )
+    .await?;
     let filename = crate::common::mime_detect::filename_from_path(&path).to_string();
     let ingested = upload_ingest::ingest_range_patch_to_cas(
-        (prefix_stream, start),
+        prefix_segment,
         req.into_body(),
-        (suffix_stream, suffix_len),
+        suffix_segment,
         &state.core.dedup_service,
         &filename,
         &content_type,
@@ -2284,27 +2351,8 @@ async fn handle_patch(
     )
     .await?;
 
-    // ── Quota enforcement ─────────────────────────────────────────────
-    if let Some(storage_svc) = state.storage_usage_service.as_ref()
-        && let Err(err) = storage_svc
-            .check_storage_quota(user.id, ingested.size)
-            .await
-    {
-        upload_ingest::discard_ingested(&state.core.dedup_service, &ingested).await;
-        tracing::warn!(
-            "⛔ WEBDAV PATCH REJECTED (quota): user={}, file={}, size={}",
-            user.id,
-            path,
-            ingested.size
-        );
-        return Err(AppError::new(
-            StatusCode::INSUFFICIENT_STORAGE,
-            err.message,
-            "QuotaExceeded",
-        ));
-    }
-
-    // ── Atomic store, compare-and-swap on the pre-splice content hash ──
+    // ── Quota enforcement + atomic store, compare-and-swap on the
+    // pre-splice content hash ─────────────────────────────────────────
     // `file.content_hash` was snapshotted before the (potentially slow)
     // splice + CAS-ingest above. Passing it as `expected_hash` makes the
     // write itself a compare-and-swap: the repository checks and applies
@@ -2314,37 +2362,31 @@ async fn handle_patch(
     // — each individually passing its own If-Match check against the
     // same stale snapshot, then blindly overwriting each other.
     let new_size = ingested.size;
-    let content_type = ingested.content_type.clone();
-    let result = file_upload_service
-        .update_file_streaming_with_perms(
-            &path,
-            drive_id,
-            ingested.stored(),
-            &content_type,
-            None,
-            user.id,
-            Some(&file.content_hash),
-        )
-        .await;
+    let file_dto = cas_write_patch(
+        &state,
+        file_upload_service,
+        &path,
+        drive_id,
+        &ingested,
+        user.id,
+        &file.content_hash,
+        "WEBDAV PATCH",
+    )
+    .await?;
 
-    match result {
-        Ok(file_dto) => {
-            // Everything from `start` to the new EOF reflects the patch
-            // (the untouched suffix, if any, may have shifted when the
-            // body's length differs from the replaced span).
-            let range_end = new_size.saturating_sub(1);
-            Ok(Response::builder()
-                .status(StatusCode::NO_CONTENT)
-                .header(header::ETAG, &file_dto.etag)
-                .header(
-                    header::CONTENT_RANGE,
-                    format!("bytes {}-{}/{}", start, range_end, new_size),
-                )
-                .body(Body::empty())
-                .unwrap())
-        }
-        Err(e) => Err(AppError::from(e)),
-    }
+    // Everything from `start` to the new EOF reflects the patch
+    // (the untouched suffix, if any, may have shifted when the
+    // body's length differs from the replaced span).
+    let range_end = new_size.saturating_sub(1);
+    Ok(Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .header(header::ETAG, format!("\"{}\"", file_dto.etag))
+        .header(
+            header::CONTENT_RANGE,
+            format!("bytes {}-{}/{}", start, range_end, new_size),
+        )
+        .body(Body::empty())
+        .unwrap())
 }
 
 /**
@@ -3774,5 +3816,57 @@ mod tests {
         let err = parse_update_range("bytes=5-9", 9).unwrap_err();
         assert_eq!(err.status_code, StatusCode::RANGE_NOT_SATISFIABLE);
         assert!(parse_update_range("bytes=0-0", 0).is_err());
+    }
+
+    // ── RFC 7232 If-Match / If-None-Match — multi-value lists ───────
+    //
+    // Regression coverage for `handle_put`'s hand-rolled precondition
+    // check, which only ever compared the header as a single tag and
+    // never split on commas — a client sending the standard
+    // comma-separated multi-value form would silently mismatch even
+    // when one of the listed ETags matched. Both handlers now share
+    // `if_none_match_precondition_fails`/`if_match_precondition_fails`,
+    // which already handled this correctly for `handle_patch`.
+
+    #[test]
+    fn if_none_match_multi_value_list_matches_second_tag() {
+        assert!(if_none_match_precondition_fails(
+            r#""aaa", "bbb", "ccc""#,
+            Some("bbb")
+        ));
+    }
+
+    #[test]
+    fn if_none_match_multi_value_list_no_match_passes() {
+        assert!(!if_none_match_precondition_fails(
+            r#""aaa", "bbb", "ccc""#,
+            Some("zzz")
+        ));
+    }
+
+    #[test]
+    fn if_match_multi_value_list_matches_last_tag() {
+        assert!(!if_match_precondition_fails(
+            r#""aaa", "bbb", "ccc""#,
+            Some("ccc")
+        ));
+    }
+
+    #[test]
+    fn if_match_multi_value_list_no_match_fails() {
+        assert!(if_match_precondition_fails(
+            r#""aaa", "bbb", "ccc""#,
+            Some("zzz")
+        ));
+    }
+
+    #[test]
+    fn if_match_weak_tag_in_list_never_satisfies() {
+        // If-Match requires a strong comparison — a weak validator in the
+        // list must not satisfy it even if the underlying tag matches.
+        assert!(if_match_precondition_fails(
+            r#"W/"aaa", "bbb""#,
+            Some("aaa")
+        ));
     }
 }

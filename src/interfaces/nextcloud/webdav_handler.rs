@@ -5,13 +5,11 @@ use axum::{
 };
 use bytes::{Buf, Bytes};
 use chrono::Utc;
-use futures::stream::{self, Stream};
 use quick_xml::{
     Writer,
     events::{BytesEnd, BytesStart, BytesText, Event},
 };
 use std::collections::{HashMap, HashSet};
-use std::pin::Pin;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -32,9 +30,9 @@ use crate::domain::services::authorization::{Permission, Resource, Subject};
 use crate::infrastructure::services::path_resolver_service::ResolvedResource;
 use crate::infrastructure::services::webdav_dead_property_store::ResourceRef;
 use crate::interfaces::api::handlers::webdav_handler::{
-    PROPFIND_BATCH_SIZE, dead_props_for, enforce_native_lock, file_dead_props, files_dead_props_map, folder_dead_props,
-    if_match_precondition_fails, if_none_match_precondition_fails, parse_update_range,
-    folders_dead_props_map, streamed_file_dead_props,
+    PROPFIND_BATCH_SIZE, cas_write_patch, dead_props_for, enforce_native_lock, file_dead_props,
+    files_dead_props_map, folder_dead_props, folders_dead_props_map, if_match_precondition_fails,
+    if_none_match_precondition_fails, parse_update_range, splice_patch_streams,
 };
 use crate::interfaces::errors::AppError;
 use crate::interfaces::range_requests::{not_modified_response, range_response};
@@ -837,6 +835,13 @@ async fn handle_put(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<i64>().ok());
 
+    // Extract before consuming `req` into the body stream further down.
+    let if_header = req
+        .headers()
+        .get("If")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     // ── Conditional preconditions (RFC 7232 §3.1 / §3.2) ─────────────
     // Evaluated BEFORE body ingestion so a rejected PUT doesn't waste
     // bandwidth or disk I/O on a body the server is going to throw away.
@@ -863,6 +868,49 @@ async fn handle_put(
         && if_match_precondition_fails(value, current_etag)
     {
         return Ok(precondition_failed_response());
+    }
+
+    // ── Existence-check depth (RFC 4918 §9.7.1) ───────────────────────
+    // Mirrors the plain WebDAV surface's `handle_put`: PUT to an existing
+    // directory is 400, PUT under a missing parent is 409 (not the generic
+    // 500 a downstream `NotFound` would otherwise surface as).
+    if existing.is_none() {
+        if state
+            .applications
+            .folder_service
+            .get_folder_by_path(&internal_path, chroot.drive_id)
+            .await
+            .is_ok()
+        {
+            return Err(AppError::bad_request("Cannot PUT to a directory"));
+        }
+        let parent_path = internal_path
+            .rfind('/')
+            .map(|i| &internal_path[..i])
+            .unwrap_or("");
+        if !parent_path.is_empty() {
+            state
+                .applications
+                .folder_service
+                .get_folder_by_path(parent_path, chroot.drive_id)
+                .await
+                .map_err(|_| {
+                    AppError::conflict(format!("Parent folder not found: {}", parent_path))
+                })?;
+        }
+    }
+
+    // ── Active-lock guard (RFC 4918 §10.4 If: evaluation) ─────────────
+    // Shared with the plain WebDAV surface and with this surface's own
+    // `handle_patch`, so a LOCK taken via /webdav/ also protects the same
+    // file reached through /remote.php/dav/.
+    if let Some(resp) = enforce_native_lock(
+        &state.webdav_lock_store,
+        if_header.as_deref(),
+        &internal_path,
+        current_etag,
+    ) {
+        return Ok(resp);
     }
 
     // ── Direct PUT cap ───────────────────────────────────────────────
@@ -897,13 +945,35 @@ async fn handle_put(
     // using the lookup already done above for the precondition check.
     let existed = existing.is_some();
 
+    // ── Quota enforcement ─────────────────────────────────────────────
+    if let Some(storage_svc) = state.storage_usage_service.as_ref()
+        && let Err(err) = storage_svc
+            .check_storage_quota(session.user.id, ingested.size)
+            .await
+    {
+        discard_ingested(&state.core.dedup_service, &ingested).await;
+        tracing::warn!(
+            "⛔ NC WEBDAV PUT REJECTED (quota): user={}, file={}, size={}",
+            session.user.id,
+            internal_path,
+            ingested.size
+        );
+        return Err(AppError::new(
+            StatusCode::INSUFFICIENT_STORAGE,
+            err.message,
+            "QuotaExceeded",
+        ));
+    }
+
     // Single streaming path — handles both update and create internally,
     // swapping the file row onto the already-ingested blob.
     // AuthZ audit #6 (2026-07-12): route `_with_perms` errors through
     // `AppError::from` so authz denials surface as 404 (the anti-enum
     // shape) instead of a `map_err → internal_error` 500 that gives a
     // probing caller an "exists-but-denied" oracle. Also preserves
-    // `QuotaExceeded → 507`, `AlreadyExists → 409`, `InvalidInput → 400`.
+    // `QuotaExceeded → 507`, `AlreadyExists → 409`, `InvalidInput → 400` —
+    // matching this surface's own `handle_patch` and the plain WebDAV
+    // `handle_put`.
     let stored = upload_service
         .update_file_streaming_with_perms(
             &internal_path,
@@ -943,9 +1013,9 @@ async fn handle_put(
 /// pipeline `handle_put` uses ([`ingest_range_patch_to_cas`]) — unedited
 /// chunks on either side of the edit typically dedup for free.
 ///
-/// No active-lock guard here — the NC surface has no LOCK/UNLOCK dispatch
-/// arm at all (see `handle_options`'s doc comment), matching `handle_put`
-/// above, which has the same omission.
+/// Shares an active-lock guard with the plain WebDAV surface (see below) so
+/// a LOCK taken via `/webdav/` also protects the same file reached through
+/// `/remote.php/dav/`.
 async fn handle_patch(
     state: Arc<AppState>,
     req: Request<Body>,
@@ -1086,36 +1156,20 @@ async fn handle_patch(
     }
 
     // ── Splice prefix/suffix around the patched span ───────────────────
-    let prefix_stream: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> =
-        if start == 0 {
-            Box::pin(stream::empty())
-        } else {
-            Box::into_pin(
-                file_service
-                    .get_file_range_stream_with_perms(&file.id, session.user.id, 0, Some(start))
-                    .await
-                    .map_err(AppError::from)?,
-            )
-        };
-    let suffix_len = match end {
-        Some(end) if end + 1 < file.size => file.size - (end + 1),
-        _ => 0,
-    };
-    let suffix_stream: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> = match end
-    {
-        Some(end) if end + 1 < file.size => Box::into_pin(
-            file_service
-                .get_file_range_stream_with_perms(&file.id, session.user.id, end + 1, None)
-                .await
-                .map_err(AppError::from)?,
-        ),
-        _ => Box::pin(stream::empty()),
-    };
+    let (prefix_segment, suffix_segment) = splice_patch_streams(
+        file_service,
+        &file.id,
+        session.user.id,
+        start,
+        end,
+        file.size,
+    )
+    .await?;
     let filename = filename_from_path(subpath).to_string();
     let ingested = ingest_range_patch_to_cas(
-        (prefix_stream, start),
+        prefix_segment,
         req.into_body(),
-        (suffix_stream, suffix_len),
+        suffix_segment,
         &state.core.dedup_service,
         &filename,
         &claimed_type,
@@ -1126,27 +1180,8 @@ async fn handle_patch(
     )
     .await?;
 
-    // ── Quota enforcement ─────────────────────────────────────────────
-    if let Some(storage_svc) = state.storage_usage_service.as_ref()
-        && let Err(err) = storage_svc
-            .check_storage_quota(session.user.id, ingested.size)
-            .await
-    {
-        discard_ingested(&state.core.dedup_service, &ingested).await;
-        tracing::warn!(
-            "⛔ NC WEBDAV PATCH REJECTED (quota): user={}, file={}, size={}",
-            session.user.id,
-            internal_path,
-            ingested.size
-        );
-        return Err(AppError::new(
-            StatusCode::INSUFFICIENT_STORAGE,
-            err.message,
-            "QuotaExceeded",
-        ));
-    }
-
-    // ── Atomic store, compare-and-swap on the pre-splice content hash ──
+    // ── Quota enforcement + atomic store, compare-and-swap on the
+    // pre-splice content hash ─────────────────────────────────────────
     // `file.content_hash` was snapshotted before the (potentially slow)
     // splice + CAS-ingest above. Passing it as `expected_hash` makes the
     // write itself a compare-and-swap: the repository checks and applies
@@ -1156,19 +1191,17 @@ async fn handle_patch(
     // — each individually passing its own If-Match check against the
     // same stale snapshot, then blindly overwriting each other.
     let new_size = ingested.size;
-    let content_type = ingested.content_type.clone();
-    let stored = upload_service
-        .update_file_streaming_with_perms(
-            &internal_path,
-            chroot.drive_id,
-            ingested.stored(),
-            &content_type,
-            None,
-            session.user.id,
-            Some(&file.content_hash),
-        )
-        .await
-        .map_err(AppError::from)?;
+    let stored = cas_write_patch(
+        &state,
+        upload_service,
+        &internal_path,
+        chroot.drive_id,
+        &ingested,
+        session.user.id,
+        &file.content_hash,
+        "NC WEBDAV PATCH",
+    )
+    .await?;
 
     // Everything from `start` to the new EOF reflects the patch (the
     // untouched suffix, if any, may have shifted when the body's length
