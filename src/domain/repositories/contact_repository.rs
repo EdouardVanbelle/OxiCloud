@@ -76,6 +76,10 @@ pub trait ContactGroupRepository: Send + Sync + 'static {
     ) -> ContactRepositoryResult<()>;
     async fn get_contacts_in_group(&self, group_id: &Uuid)
     -> ContactRepositoryResult<Vec<Contact>>;
+    /// Membership count only — for group summaries that don't need the
+    /// contacts hydrated (each row carries the full vCard TEXT plus three
+    /// JSONB arrays; counting must not pay for any of that).
+    async fn count_contacts_in_group(&self, group_id: &Uuid) -> ContactRepositoryResult<i64>;
     async fn get_groups_for_contact(
         &self,
         contact_id: &Uuid,

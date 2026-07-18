@@ -79,6 +79,11 @@ const MAX_CONCURRENT_HASHES: usize = 2;
 
 pub struct ShareService {
     config: Arc<AppConfig>,
+    /// `AppConfig::base_url()` snapshot, taken once at construction —
+    /// the method re-reads `OXICLOUD_BASE_URL` from the environment (a
+    /// global env-lock + String build) and was being called per DTO row
+    /// in the share listings. Process-invariant, so snapshot it.
+    base_url: String,
     share_repository: Arc<SharePgRepository>,
     file_repository: Arc<FileBlobReadRepository>,
     folder_repository: Arc<FolderDbRepository>,
@@ -107,6 +112,7 @@ impl ShareService {
         authorization: Arc<PgAclEngine>,
     ) -> Self {
         Self {
+            base_url: config.base_url(),
             config,
             share_repository,
             file_repository,
@@ -204,7 +210,7 @@ impl ShareService {
             ));
         }
 
-        Ok(ShareDto::from_entity(&share, &self.config.base_url()))
+        Ok(ShareDto::from_entity(&share, &self.base_url))
     }
 
     pub fn issue_unlock_jwt(&self, share_token: &str) -> Result<String, DomainError> {
@@ -338,7 +344,7 @@ impl ShareUseCase for ShareService {
 
         // Return DTO with the requested expires_at (grant subquery on the share
         // row would return NULL at this point since INSERT ran before the grant).
-        let mut response = ShareDto::from_entity(&saved_share, &self.config.base_url());
+        let mut response = ShareDto::from_entity(&saved_share, &self.base_url);
         response.expires_at = dto.expires_at;
         Ok(response)
     }
@@ -354,7 +360,7 @@ impl ShareUseCase for ShareService {
         }
 
         // Convert the entity to DTO for the response
-        Ok(ShareDto::from_entity(&share, &self.config.base_url()))
+        Ok(ShareDto::from_entity(&share, &self.base_url))
     }
 
     async fn get_shared_link_by_token(&self, token: &str) -> Result<ShareDto, DomainError> {
@@ -380,7 +386,7 @@ impl ShareUseCase for ShareService {
         // Convert the entities to DTOs for the response
         let share_dtos = active_shares
             .iter()
-            .map(|s| ShareDto::from_entity(s, &self.config.base_url()))
+            .map(|s| ShareDto::from_entity(s, &self.base_url))
             .collect();
 
         Ok(share_dtos)
@@ -427,7 +433,7 @@ impl ShareUseCase for ShareService {
 
         // Use the requested expires_at for the response (subquery in update_share
         // runs before set_expiry_for_subject committed, so entity may lag).
-        let mut response = ShareDto::from_entity(&updated_share, &self.config.base_url());
+        let mut response = ShareDto::from_entity(&updated_share, &self.base_url);
         if dto.expires_at.is_some() {
             response.expires_at = dto.expires_at;
         }
@@ -462,7 +468,7 @@ impl ShareUseCase for ShareService {
         // Convert the entities to DTOs
         let share_dtos: Vec<ShareDto> = shares
             .iter()
-            .map(|s| ShareDto::from_entity(s, &self.config.base_url()))
+            .map(|s| ShareDto::from_entity(s, &self.base_url))
             .collect();
 
         // Create the paginated result
@@ -506,7 +512,7 @@ impl ShareUseCase for ShareService {
         }
 
         // Password verified (or not required) — return full share metadata
-        Ok(ShareDto::from_entity(&share, &self.config.base_url()))
+        Ok(ShareDto::from_entity(&share, &self.base_url))
     }
 
     async fn register_shared_link_access(&self, token: &str) -> Result<(), DomainError> {
@@ -540,7 +546,9 @@ mod tests {
 
     /// Test-only service that mirrors `ShareService` logic but accepts generic repos.
     struct ShareServiceForTest<SR, FR, FoR, PH> {
+        #[allow(dead_code)]
         config: Arc<AppConfig>,
+        base_url: String,
         share_repository: Arc<SR>,
         file_repository: Arc<FR>,
         folder_repository: Arc<FoR>,
@@ -563,6 +571,7 @@ mod tests {
             password_hasher: Arc<PH>,
         ) -> Self {
             Self {
+                base_url: config.base_url(),
                 config,
                 share_repository,
                 file_repository,
@@ -641,7 +650,7 @@ mod tests {
                 .save_share(&share)
                 .await
                 .map_err(|e| ShareServiceError::Repository(e.to_string()))?;
-            Ok(ShareDto::from_entity(&saved_share, &self.config.base_url()))
+            Ok(ShareDto::from_entity(&saved_share, &self.base_url))
         }
 
         async fn get_shared_link(
@@ -659,7 +668,7 @@ mod tests {
             if share.is_expired() {
                 return Err(ShareServiceError::Expired.into());
             }
-            Ok(ShareDto::from_entity(&share, &self.config.base_url()))
+            Ok(ShareDto::from_entity(&share, &self.base_url))
         }
 
         async fn get_shared_link_by_token(&self, token: &str) -> Result<ShareDto, DomainError> {
@@ -673,7 +682,7 @@ mod tests {
             if share.is_expired() {
                 return Err(ShareServiceError::Expired.into());
             }
-            Ok(ShareDto::from_entity(&share, &self.config.base_url()))
+            Ok(ShareDto::from_entity(&share, &self.base_url))
         }
 
         async fn get_shared_links_for_item(
@@ -690,7 +699,7 @@ mod tests {
             Ok(shares
                 .into_iter()
                 .filter(|s| !s.is_expired())
-                .map(|s| ShareDto::from_entity(&s, &self.config.base_url()))
+                .map(|s| ShareDto::from_entity(&s, &self.base_url))
                 .collect())
         }
 
@@ -720,7 +729,7 @@ mod tests {
                 .update_share(&share)
                 .await
                 .map_err(|e| ShareServiceError::Repository(e.to_string()))?;
-            Ok(ShareDto::from_entity(&updated, &self.config.base_url()))
+            Ok(ShareDto::from_entity(&updated, &self.base_url))
         }
 
         async fn delete_shared_link(
@@ -749,7 +758,7 @@ mod tests {
                 .map_err(|e| ShareServiceError::Repository(e.to_string()))?;
             let dtos = shares
                 .iter()
-                .map(|s| ShareDto::from_entity(s, &self.config.base_url()))
+                .map(|s| ShareDto::from_entity(s, &self.base_url))
                 .collect();
             Ok(PaginatedResponseDto::new(dtos, page, per_page, total))
         }
@@ -779,9 +788,9 @@ mod tests {
                             "Invalid share password",
                         ));
                     }
-                    Ok(ShareDto::from_entity(&share, &self.config.base_url()))
+                    Ok(ShareDto::from_entity(&share, &self.base_url))
                 }
-                None => Ok(ShareDto::from_entity(&share, &self.config.base_url())),
+                None => Ok(ShareDto::from_entity(&share, &self.base_url)),
             }
         }
 
@@ -913,15 +922,6 @@ mod tests {
             _user_id: Uuid,
         ) -> Result<(Vec<crate::domain::entities::file::File>, usize), DomainError> {
             Ok((Vec::new(), 0))
-        }
-
-        async fn count_files(
-            &self,
-            _folder_id: Option<&str>,
-            _criteria: &crate::application::dtos::search_dto::SearchCriteriaDto,
-            _user_id: Uuid,
-        ) -> Result<usize, DomainError> {
-            Ok(0)
         }
 
         async fn stream_files_in_subtree(

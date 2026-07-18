@@ -44,7 +44,17 @@ pub fn is_cookie_secure() -> bool {
     cookie_secure()
 }
 
+/// Memoised [`resolve_cookie_secure`]. The flag is a pure function of two
+/// process-invariant env vars, yet a single login used to re-resolve it
+/// ~4× (two auth cookies + the CSRF cookie + the handler's own probe) —
+/// each call paying the env-lock syscalls and re-emitting the same
+/// "⚠️ SECURITY" log line. Resolve once, log once.
 fn cookie_secure() -> bool {
+    static COOKIE_SECURE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *COOKIE_SECURE.get_or_init(resolve_cookie_secure)
+}
+
+fn resolve_cookie_secure() -> bool {
     if let Ok(v) = std::env::var("OXICLOUD_COOKIE_SECURE") {
         let secure = v == "true" || v == "1";
         if !secure {

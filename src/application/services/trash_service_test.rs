@@ -536,15 +536,6 @@ impl FileReadPort for MockFileRepository {
         Ok((Vec::new(), 0))
     }
 
-    async fn count_files(
-        &self,
-        _folder_id: Option<&str>,
-        _criteria: &crate::application::dtos::search_dto::SearchCriteriaDto,
-        _user_id: Uuid,
-    ) -> std::result::Result<usize, DomainError> {
-        Ok(0)
-    }
-
     async fn stream_files_in_subtree(
         &self,
         _folder_id: &str,

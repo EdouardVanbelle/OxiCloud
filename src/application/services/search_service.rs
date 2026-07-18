@@ -620,18 +620,30 @@ impl SearchUseCase for SearchService {
                 // Pre-compute once — avoids N heap allocations inside enrich_file/enrich_folder.
                 let query_lower = query.to_lowercase();
 
-                // Content-index candidates (first page only). Feature-off or an
-                // index failure yields an empty set — the search stays name-only.
-                let content_hits = self.lookup_content_hits(&criteria, user_id).await;
-
                 // For non-recursive searches, use efficient database-level pagination
                 // This avoids loading all files into memory
                 if !criteria.recursive {
-                    // Use database-level pagination
-                    let (files, total_file_count) = self
-                        .file_repository
-                        .search_files_paginated(criteria.folder_id.as_deref(), &criteria, user_id)
-                        .await?;
+                    // The content-index lookup (drive resolve + Tantivy +
+                    // ReBAC batch), the file page and the folder query are
+                    // mutually independent — overlap them so the search pays
+                    // ~max() instead of the serial sum (`suggest_with_perms`
+                    // already used this shape; ROUND10 brought it here).
+                    let (content_hits, files_page, folders_res) = tokio::join!(
+                        self.lookup_content_hits(&criteria, user_id),
+                        self.file_repository.search_files_paginated(
+                            criteria.folder_id.as_deref(),
+                            &criteria,
+                            user_id,
+                        ),
+                        self.folder_repository.search_folders(
+                            criteria.folder_id.as_deref(),
+                            criteria.name_contains.as_deref(),
+                            user_id,
+                            false,
+                        ),
+                    );
+                    let (files, total_file_count) = files_page?;
+                    let folders = folders_res?;
 
                     // Convert to DTOs and enrich with metadata — one fused
                     // pass, no intermediate Vec<FileDto> materialization.
@@ -639,17 +651,6 @@ impl SearchUseCase for SearchService {
                         .into_iter()
                         .map(|f| Self::enrich_file(FileDto::from(f), &query_lower))
                         .collect();
-
-                    // Get folders for this folder (non-recursive, filtered in SQL)
-                    let folders = self
-                        .folder_repository
-                        .search_folders(
-                            criteria.folder_id.as_deref(),
-                            criteria.name_contains.as_deref(),
-                            user_id,
-                            false,
-                        )
-                        .await?;
 
                     // For folders, apply sorting and pagination in memory (usually fewer folders)
                     let mut enriched_folders: Vec<SearchFolderResultDto> = folders
@@ -717,22 +718,25 @@ impl SearchUseCase for SearchService {
                 // ── Recursive search via ltree (single SQL query per entity type) ──
                 // Uses PostgreSQL ltree GiST index to find all files and folders
                 // in the subtree in O(1) queries, replacing the O(N) spawn-per-folder
-                // approach that could saturate the connection pool.
-                let (found_files, total_file_count) = self
-                    .file_repository
-                    .search_files_in_subtree(criteria.folder_id.as_deref(), &criteria, user_id)
-                    .await?;
-
-                // Get folders (SQL-filtered, user-scoped, recursive when applicable)
-                let found_folders: Vec<Folder> = self
-                    .folder_repository
-                    .search_folders(
+                // approach that could saturate the connection pool. The content
+                // lookup, subtree file query and folder query overlap (`join!`),
+                // same as the non-recursive branch.
+                let (content_hits, files_page, folders_res) = tokio::join!(
+                    self.lookup_content_hits(&criteria, user_id),
+                    self.file_repository.search_files_in_subtree(
+                        criteria.folder_id.as_deref(),
+                        &criteria,
+                        user_id,
+                    ),
+                    self.folder_repository.search_folders(
                         criteria.folder_id.as_deref(),
                         criteria.name_contains.as_deref(),
                         user_id,
                         true,
-                    )
-                    .await?;
+                    ),
+                );
+                let (found_files, total_file_count) = files_page?;
+                let found_folders: Vec<Folder> = folders_res?;
 
                 // ── Convert to DTOs and enrich with server-computed metadata ──
                 // Fused single pass: no intermediate DTO Vec materialization.

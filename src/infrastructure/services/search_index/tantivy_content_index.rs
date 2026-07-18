@@ -238,8 +238,10 @@ impl TantivyContentIndex {
     }
 
     /// Tokenize `raw` with the index analyzer (simple split + lowercase).
-    fn query_tokens(analyzer: &TextAnalyzer, raw: &str) -> Vec<String> {
-        let mut analyzer = analyzer.clone();
+    /// Takes the analyzer by value — the caller's per-search clone is the
+    /// only one needed; cloning the boxed tokenizer chain again here doubled
+    /// the per-query allocation for nothing.
+    fn query_tokens(mut analyzer: TextAnalyzer, raw: &str) -> Vec<String> {
         let mut tokens = Vec::new();
         let mut stream = analyzer.token_stream(raw);
         while stream.advance() && tokens.len() < MAX_QUERY_TOKENS {
@@ -337,7 +339,7 @@ impl TantivyContentIndex {
         raw_query: &str,
         limit: usize,
     ) -> Result<Vec<ContentHitDto>, DomainError> {
-        let tokens = Self::query_tokens(&analyzer, raw_query);
+        let tokens = Self::query_tokens(analyzer, raw_query);
         if tokens.is_empty() {
             return Ok(Vec::new());
         }

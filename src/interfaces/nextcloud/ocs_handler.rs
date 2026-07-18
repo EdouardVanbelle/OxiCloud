@@ -109,11 +109,11 @@ pub async fn handle_user_info(
     // than the raw UUID the wire form carries.
     let id = session.raw_username.clone();
     let displayname = if session.is_home() {
-        session.user.username.clone()
+        session.user.username.to_string()
     } else {
         match session.chroot.as_ref() {
             Some(chroot) => format!("{}@{}", session.user.username, chroot.name),
-            None => session.user.username.clone(),
+            None => session.user.username.to_string(),
         }
     };
 
@@ -356,7 +356,7 @@ pub async fn handle_sharees_search(
         .into_iter()
         .filter_map(|u| {
             let handle = u.username.clone()?;
-            if handle == user.username {
+            if handle.as_str() == &*user.username {
                 return None;
             }
             Some(json!({

@@ -21,18 +21,20 @@ impl RecentItemsPgRepository {
 
 impl RecentItemsRepositoryPort for RecentItemsPgRepository {
     async fn get_recent_items(&self, user_id: Uuid, limit: i32) -> Result<Vec<RecentItemDto>> {
+        // Binary UUID decode + app-side render (ROUND6 §10 pattern) — no
+        // server-side `::TEXT` casts, 16 B per id on the wire instead of 36.
         let rows = sqlx::query(
             r#"
             SELECT
-                ur.id::TEXT                                     AS "id",
-                ur.user_id::TEXT                                AS "user_id",
+                ur.id                                           AS "id",
+                ur.user_id                                      AS "user_id",
                 ur.item_id                                      AS "item_id",
                 ur.item_type                                    AS "item_type",
                 ur.accessed_at                                  AS "accessed_at",
                 COALESCE(f.name, fld.name)                      AS "item_name",
                 f.size                                          AS "item_size",
                 f.mime_type                                     AS "item_mime_type",
-                COALESCE(f.folder_id::TEXT, fld.parent_id::TEXT) AS "parent_id",
+                COALESCE(f.folder_id, fld.parent_id)            AS "parent_id",
                 CASE
                     WHEN ur.item_type = 'folder' THEN fld.path
                     WHEN ur.item_type = 'file'   THEN COALESCE(pfld.path || '/' || f.name, f.name)
@@ -67,15 +69,19 @@ impl RecentItemsRepositoryPort for RecentItemsPgRepository {
             .iter()
             .map(|row| {
                 RecentItemDto {
-                    id: row.get("id"),
-                    user_id: row.get("user_id"),
+                    id: row.get::<i32, _>("id").to_string(),
+                    user_id: row.get::<Uuid, _>("user_id").to_string(),
                     item_id: row.get("item_id"),
                     item_type: row.get("item_type"),
                     accessed_at: row.get("accessed_at"),
                     item_name: row.try_get("item_name").ok(),
                     item_size: row.try_get("item_size").ok(),
                     item_mime_type: row.try_get("item_mime_type").ok(),
-                    parent_id: row.try_get("parent_id").ok(),
+                    parent_id: row
+                        .try_get::<Option<Uuid>, _>("parent_id")
+                        .ok()
+                        .flatten()
+                        .map(|u| u.to_string()),
                     item_path: row.try_get("item_path").ok(),
                     // Temporary defaults; with_display_fields() computes the real values
                     icon_class: String::new(),

@@ -253,15 +253,23 @@ impl CalendarUseCase for CalendarService {
         update: UpdateEventDto,
         user_id: Uuid,
     ) -> Result<CalendarEventDto, DomainError> {
-        let event = self.calendar_storage.get_event(event_id).await?;
-        self.require_calendar_perm(&event.calendar_id, user_id, Permission::Update)
+        // Only the owning calendar id is needed for the gate — skip the
+        // full event hydration (`ical_data` can run to tens of KB).
+        let calendar_id = self
+            .calendar_storage
+            .calendar_id_for_event(event_id)
+            .await?;
+        self.require_calendar_perm(&calendar_id, user_id, Permission::Update)
             .await?;
         self.calendar_storage.update_event(event_id, update).await
     }
 
     async fn delete_event(&self, event_id: &str, user_id: Uuid) -> Result<(), DomainError> {
-        let event = self.calendar_storage.get_event(event_id).await?;
-        self.require_calendar_perm(&event.calendar_id, user_id, Permission::Delete)
+        let calendar_id = self
+            .calendar_storage
+            .calendar_id_for_event(event_id)
+            .await?;
+        self.require_calendar_perm(&calendar_id, user_id, Permission::Delete)
             .await?;
         self.calendar_storage.delete_event(event_id).await
     }

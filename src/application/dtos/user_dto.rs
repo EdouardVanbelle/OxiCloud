@@ -1,6 +1,8 @@
 use crate::domain::entities::user::User;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
+use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -247,12 +249,21 @@ pub struct UpgradeToInternalDto {
 }
 
 /// Authenticated current user data (for use in application services)
+///
+/// Built once per authenticated request in the auth middlewares.
+/// `username`/`email` are `Arc<str>` (refcount-bump clones from the cached
+/// `TokenClaims` / Basic-auth cache — JSON shape unchanged) and `role` is an
+/// inline `SmolStr` ("admin"/"user" fit the 23-byte inline buffer, so the
+/// per-request live-role render allocates nothing).
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct CurrentUser {
     pub id: Uuid,
-    pub username: String,
-    pub email: String,
-    pub role: String,
+    #[schema(value_type = String)]
+    pub username: Arc<str>,
+    #[schema(value_type = String)]
+    pub email: Arc<str>,
+    #[schema(value_type = String)]
+    pub role: SmolStr,
 }
 
 // ============================================================================

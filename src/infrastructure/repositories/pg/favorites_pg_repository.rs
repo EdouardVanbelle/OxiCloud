@@ -24,18 +24,21 @@ impl FavoritesPgRepository {
 
 impl FavoritesRepositoryPort for FavoritesPgRepository {
     async fn get_favorites(&self, user_id: Uuid) -> Result<Vec<FavoriteItemDto>> {
+        // `id`/`user_id`/`parent_id` decode as binary UUIDs (16 B on the wire,
+        // no server-side `::TEXT` cast) and render app-side — the ROUND6 §10
+        // pattern the two legacy listing methods here never picked up.
         let rows = sqlx::query(
             r#"
             SELECT
-                uf.id::TEXT                                     AS "id",
-                uf.user_id::TEXT                                AS "user_id",
+                uf.id                                           AS "id",
+                uf.user_id                                      AS "user_id",
                 uf.item_id                                      AS "item_id",
                 uf.item_type                                    AS "item_type",
                 uf.created_at                                   AS "created_at",
                 COALESCE(f.name, fld.name)                      AS "item_name",
                 f.size                                          AS "item_size",
                 f.mime_type                                     AS "item_mime_type",
-                COALESCE(f.folder_id::TEXT, fld.parent_id::TEXT) AS "parent_id",
+                COALESCE(f.folder_id, fld.parent_id)            AS "parent_id",
                 COALESCE(f.updated_at, fld.updated_at)          AS "modified_at",
                 CASE
                     WHEN uf.item_type = 'folder' THEN fld.path
@@ -70,15 +73,19 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
             .iter()
             .map(|row| {
                 FavoriteItemDto {
-                    id: row.get("id"),
-                    user_id: row.get("user_id"),
+                    id: row.get::<i32, _>("id").to_string(),
+                    user_id: row.get::<Uuid, _>("user_id").to_string(),
                     item_id: row.get("item_id"),
                     item_type: row.get("item_type"),
                     created_at: row.get("created_at"),
                     item_name: row.try_get("item_name").ok(),
                     item_size: row.try_get("item_size").ok(),
                     item_mime_type: row.try_get("item_mime_type").ok(),
-                    parent_id: row.try_get("parent_id").ok(),
+                    parent_id: row
+                        .try_get::<Option<Uuid>, _>("parent_id")
+                        .ok()
+                        .flatten()
+                        .map(|u| u.to_string()),
                     modified_at: row.try_get("modified_at").ok(),
                     item_path: row.try_get("item_path").ok(),
                     // Temporary defaults; with_display_fields() computes the real values

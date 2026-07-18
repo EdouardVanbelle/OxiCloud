@@ -27,6 +27,7 @@ use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use smol_str::SmolStr;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -109,8 +110,9 @@ pub async fn require_admin_user(
 pub enum LiveRole {
     /// The account exists and is active. Carries the caller's *current*
     /// role string (`"admin"` / `"user"`), which is authoritative and
-    /// supersedes the — possibly stale — JWT `role` claim.
-    Active(String),
+    /// supersedes the — possibly stale — JWT `role` claim. `SmolStr` so the
+    /// per-request render of the (≤23-byte) role never heap-allocates.
+    Active(SmolStr),
     /// The account is deactivated or deleted: the request must be rejected
     /// even though its token is still cryptographically valid.
     Revoked,
@@ -152,7 +154,7 @@ fn decide_live_role(
     claim_role: &str,
 ) -> LiveRole {
     match flags {
-        Ok(flags) if flags.active => LiveRole::Active(flags.role.to_string()),
+        Ok(flags) if flags.active => LiveRole::Active(SmolStr::new_static(flags.role.as_str())),
         Ok(_) => {
             audit_token_revoked(user_id, "deactivated");
             LiveRole::Revoked
@@ -170,7 +172,7 @@ fn decide_live_role(
                 error = %e,
                 "live-user re-check failed transiently; allowing request on the JWT claim role (fail-open)"
             );
-            LiveRole::Active(claim_role.to_string())
+            LiveRole::Active(SmolStr::new(claim_role))
         }
     }
 }
@@ -257,14 +259,14 @@ mod tests {
         let live = decide_live_role(Ok(flags(UserRole::Admin, true)), Uuid::nil(), "user");
         // The live record wins over the (stale) claim — a freshly promoted
         // user is admin even though their token still says "user".
-        assert_eq!(live, LiveRole::Active("admin".to_string()));
+        assert_eq!(live, LiveRole::Active(SmolStr::new_static("admin")));
     }
 
     #[test]
     fn active_user_yields_current_user_role() {
         // A demoted admin: token claim still "admin", live record "user".
         let live = decide_live_role(Ok(flags(UserRole::User, true)), Uuid::nil(), "admin");
-        assert_eq!(live, LiveRole::Active("user".to_string()));
+        assert_eq!(live, LiveRole::Active(SmolStr::new_static("user")));
     }
 
     #[test]
@@ -285,6 +287,6 @@ mod tests {
         // A DB blip must not lock everyone out: allow on the claim role.
         let err = DomainError::new(ErrorKind::InternalError, "User", "connection reset");
         let live = decide_live_role(Err(err), Uuid::nil(), "admin");
-        assert_eq!(live, LiveRole::Active("admin".to_string()));
+        assert_eq!(live, LiveRole::Active(SmolStr::new_static("admin")));
     }
 }

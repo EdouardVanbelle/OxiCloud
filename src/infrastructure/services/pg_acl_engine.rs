@@ -31,12 +31,13 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 use uuid::Uuid;
 
 use moka::future::Cache;
 use sqlx::PgPool;
+use tokio::sync::oneshot;
 
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::common::errors::DomainError;
@@ -218,6 +219,61 @@ pub struct PgAclEngine {
     /// Grant writes don't affect parentage — only the TTL applies (moves are
     /// an indirect path, same self-heal contract as `cascade_grant_cache`).
     file_parent_cache: Cache<Uuid, Option<Uuid>>,
+    /// Natural-batching collector for cold `file_parent_cache` misses — the
+    /// ROUND9 §10 deferred item. A shared N-photo album's cold first view
+    /// arrives as N near-simultaneous thumbnail requests, each missing the
+    /// parent memo and each paying a point `SELECT folder_id`.
+    ///
+    /// Leader-runs-inline shape: an idle miss marks itself leader (one
+    /// mutex op) and runs its point query exactly as before — the
+    /// SEQUENTIAL path gains no hop, no task, no extra latency (a
+    /// channel-task variant benchmarked at ~66 µs/miss of pure overhead and
+    /// was rejected). Misses arriving while a leader is in flight park a
+    /// oneshot in this queue; the leader drains them into ONE `= ANY($1)`
+    /// batch after its own query, so a K-wide herd collapses to ~2 queries.
+    /// If a leader future is dropped mid-flight, its guard wakes every
+    /// parked waiter to retry (and re-elect); waiters that exhaust retries
+    /// fall back to the inline point query — strictly additive.
+    parent_batch: Arc<std::sync::Mutex<Option<Vec<ParentWaiter>>>>,
+    /// Total parent-resolution queries actually issued (point + batches) —
+    /// exposed via [`Self::parent_query_count`] for benches/operators.
+    parent_queries: Arc<AtomicU64>,
+}
+
+/// One parked parent-resolution request: file id + reply slot. A dropped
+/// sender (leader cancelled) is the retry signal. Errors are shared behind
+/// `Arc` because `DomainError` carries a non-clonable source chain (same
+/// convention as the Basic-auth single-flight).
+type ParentWaiter = (
+    Uuid,
+    oneshot::Sender<Result<Option<Uuid>, Arc<DomainError>>>,
+);
+
+/// Upper bound on ids drained into one `= ANY` parent batch. A browser herd
+/// is O(100); this only guards pathological queue growth.
+const PARENT_BATCH_MAX: usize = 256;
+
+/// How many times a parked waiter re-runs the elect-or-park protocol after
+/// a leader vanished before giving up and querying inline itself.
+const PARENT_WAIT_RETRIES: usize = 3;
+
+/// RAII release of parent-resolution leadership. If the leader future is
+/// dropped at an await point (client disconnect cancels the request), this
+/// clears the in-flight marker and drops every parked waiter's sender —
+/// their `oneshot` recv errors and they re-run the election, so a vanished
+/// leader can never strand the queue.
+struct ParentLeaderGuard<'a> {
+    engine: &'a PgAclEngine,
+}
+
+impl Drop for ParentLeaderGuard<'_> {
+    fn drop(&mut self) {
+        let mut slot = match self.engine.parent_batch.lock() {
+            Ok(s) => s,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *slot = None;
+    }
 }
 
 impl PgAclEngine {
@@ -263,6 +319,8 @@ impl PgAclEngine {
                 .max_capacity(FILE_PARENT_CACHE_CAPACITY)
                 .time_to_live(FILE_PARENT_CACHE_TTL)
                 .build(),
+            parent_batch: Arc::new(std::sync::Mutex::new(None)),
+            parent_queries: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -341,6 +399,8 @@ impl PgAclEngine {
                 .max_capacity(1)
                 .time_to_live(Duration::from_secs(1))
                 .build(),
+            parent_batch: Arc::new(std::sync::Mutex::new(None)),
+            parent_queries: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -779,11 +839,16 @@ impl PgAclEngine {
         Ok(exists.is_some())
     }
 
-    /// Memoised `file_id → Option<parent folder_id>` point read backing the
+    /// Memoised `file_id → Option<parent folder_id>` read backing the
     /// file-cascade decomposition. `None` covers both a missing row and a
     /// NULL `folder_id` — in either case only the direct-file-grant branch
     /// can match (mirroring the historical UNION's `folder_id IS NOT NULL`
     /// guard).
+    ///
+    /// Cold misses run the leader-inline batching protocol (see
+    /// `parent_batch`): an idle miss queries inline exactly as before;
+    /// misses concurrent with an in-flight leader park and are answered by
+    /// the leader's single `= ANY` charity batch.
     async fn file_parent_folder_cached(
         &self,
         file_id: Uuid,
@@ -793,15 +858,221 @@ impl PgAclEngine {
             return Ok(parent);
         }
         counters.sql_queries.fetch_add(1, Ordering::Relaxed);
+
+        enum Elect {
+            Lead,
+            Park(oneshot::Receiver<Result<Option<Uuid>, Arc<DomainError>>>),
+            Overflow,
+        }
+        for _ in 0..=PARENT_WAIT_RETRIES {
+            // Elect-or-park. The guard lives only inside this block — the
+            // decision is acted on AFTER it drops, so no lock is ever held
+            // across an await (and the handler futures stay `Send`).
+            let outcome = {
+                let mut slot = self.parent_batch.lock().expect("parent_batch poisoned");
+                match slot.as_mut() {
+                    // A leader is in flight — park a oneshot in its queue.
+                    Some(queue) if queue.len() < PARENT_BATCH_MAX => {
+                        let (tx, rx) = oneshot::channel();
+                        queue.push((file_id, tx));
+                        Elect::Park(rx)
+                    }
+                    // Queue full — behave as if idle contention: inline below.
+                    Some(_) => Elect::Overflow,
+                    // Idle — become the leader.
+                    None => {
+                        *slot = Some(Vec::new());
+                        Elect::Lead
+                    }
+                }
+            };
+
+            match outcome {
+                Elect::Lead => return self.parent_leader_resolve(file_id).await,
+                Elect::Park(rx) => match rx.await {
+                    Ok(Ok(parent)) => return Ok(parent),
+                    Ok(Err(shared)) => {
+                        return Err(DomainError::new(
+                            shared.kind,
+                            shared.entity_type,
+                            shared.message.clone(),
+                        ));
+                    }
+                    // Leader vanished (cancelled mid-flight) — retry the
+                    // election; a fresh leader (possibly us) takes over.
+                    Err(_) => continue,
+                },
+                // Queue overflow: don't wait — resolve inline.
+                Elect::Overflow => break,
+            }
+        }
+
+        // Retries exhausted or queue overflow: the historical inline read.
+        self.parent_queries.fetch_add(1, Ordering::Relaxed);
+        let parent = Self::query_parent_point(&self.pool, file_id).await?;
+        self.file_parent_cache.insert(file_id, parent).await;
+        Ok(parent)
+    }
+
+    /// Leader half of the parent-resolution protocol: run own point query
+    /// inline (the exact pre-round-10 cost), then serve everything that
+    /// parked during it with ONE `= ANY` batch. A second wave arriving
+    /// during the charity batch is handed to a detached drainer task so the
+    /// leader's own response is never delayed by more than one batch.
+    ///
+    /// Cancellation-safe: `ParentLeaderGuard` releases leadership on drop
+    /// and wakes parked waiters (their `oneshot` senders drop → they retry
+    /// and re-elect).
+    async fn parent_leader_resolve(&self, file_id: Uuid) -> Result<Option<Uuid>, DomainError> {
+        let guard = ParentLeaderGuard { engine: self };
+
+        self.parent_queries.fetch_add(1, Ordering::Relaxed);
+        let own = Self::query_parent_point(&self.pool, file_id).await;
+        if let Ok(parent) = &own {
+            self.file_parent_cache.insert(file_id, *parent).await;
+        }
+
+        // Take the first charity wave (leave `Some(vec![])` so later
+        // arrivals keep parking while the batch runs).
+        let wave = {
+            let mut slot = self.parent_batch.lock().expect("parent_batch poisoned");
+            match slot.as_mut() {
+                Some(queue) if !queue.is_empty() => std::mem::take(queue),
+                _ => Vec::new(),
+            }
+        };
+        if !wave.is_empty() {
+            self.parent_queries.fetch_add(1, Ordering::Relaxed);
+            Self::serve_parent_wave(&self.pool, &self.file_parent_cache, wave).await;
+        }
+
+        // Release leadership — or, if a second wave parked during the
+        // charity batch, hand leadership to a detached drainer so the
+        // leader's own response isn't delayed further. The drainer loops:
+        // it keeps the slot marked in-flight (newer misses keep parking)
+        // and only clears it when the queue drains empty.
+        let second_wave = {
+            let mut slot = self.parent_batch.lock().expect("parent_batch poisoned");
+            match slot.as_mut() {
+                Some(queue) if !queue.is_empty() => Some(std::mem::take(queue)),
+                _ => {
+                    *slot = None; // idle again
+                    None
+                }
+            }
+        };
+        std::mem::forget(guard); // leadership released or handed to the drainer
+        if let Some(first) = second_wave {
+            let engine = self.clone_batch_handles();
+            tokio::spawn(async move {
+                let mut wave = first;
+                loop {
+                    engine.2.fetch_add(1, Ordering::Relaxed);
+                    Self::serve_parent_wave(&engine.0, &engine.1, wave).await;
+                    let mut slot = match engine.3.lock() {
+                        Ok(s) => s,
+                        Err(p) => p.into_inner(),
+                    };
+                    match slot.as_mut() {
+                        Some(queue) if !queue.is_empty() => {
+                            wave = std::mem::take(queue);
+                        }
+                        _ => {
+                            *slot = None;
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+        own
+    }
+
+    /// The `Arc`'d handles the detached drainer needs (pool, memo cache,
+    /// query counter, queue slot). Cloned individually because the drainer
+    /// outlives this call and the engine isn't guaranteed to sit behind an
+    /// `Arc` here.
+    #[allow(clippy::type_complexity)]
+    fn clone_batch_handles(
+        &self,
+    ) -> (
+        Arc<PgPool>,
+        Cache<Uuid, Option<Uuid>>,
+        Arc<AtomicU64>,
+        Arc<std::sync::Mutex<Option<Vec<ParentWaiter>>>>,
+    ) {
+        (
+            Arc::clone(&self.pool),
+            self.file_parent_cache.clone(),
+            Arc::clone(&self.parent_queries),
+            Arc::clone(&self.parent_batch),
+        )
+    }
+
+    /// Resolve one file's parent with the point query (shared by the
+    /// leader's own read and the no-batching fallback).
+    async fn query_parent_point(pool: &PgPool, file_id: Uuid) -> Result<Option<Uuid>, DomainError> {
         let parent: Option<Option<Uuid>> =
             sqlx::query_scalar("SELECT folder_id FROM storage.files WHERE id = $1")
                 .bind(file_id)
-                .fetch_optional(self.pool.as_ref())
+                .fetch_optional(pool)
                 .await
                 .map_err(|e| DomainError::internal_error("PgAcl", format!("file parent: {e}")))?;
-        let parent = parent.flatten();
-        self.file_parent_cache.insert(file_id, parent).await;
-        Ok(parent)
+        Ok(parent.flatten())
+    }
+
+    /// Serve a parked wave with one `= ANY` query: memoise every id
+    /// (requested-but-absent rows memoise as `None`, matching the point
+    /// read) and answer every oneshot. On error the shared failure is
+    /// fanned out instead.
+    async fn serve_parent_wave(
+        pool: &PgPool,
+        cache: &Cache<Uuid, Option<Uuid>>,
+        wave: Vec<ParentWaiter>,
+    ) {
+        let mut ids: Vec<Uuid> = Vec::with_capacity(wave.len());
+        for (id, _) in &wave {
+            if !ids.contains(id) {
+                ids.push(*id);
+            }
+        }
+        let fetched: Result<Vec<(Uuid, Option<Uuid>)>, sqlx::Error> =
+            sqlx::query_as("SELECT id, folder_id FROM storage.files WHERE id = ANY($1)")
+                .bind(&ids)
+                .fetch_all(pool)
+                .await;
+        match fetched {
+            Ok(rows) => {
+                let mut by_id: std::collections::HashMap<Uuid, Option<Uuid>> =
+                    rows.into_iter().collect();
+                for id in &ids {
+                    by_id.entry(*id).or_insert(None);
+                }
+                for (id, parent) in &by_id {
+                    cache.insert(*id, *parent).await;
+                }
+                for (id, reply) in wave {
+                    let parent = by_id.get(&id).copied().unwrap_or(None);
+                    let _ = reply.send(Ok(parent));
+                }
+            }
+            Err(e) => {
+                let shared = Arc::new(DomainError::internal_error(
+                    "PgAcl",
+                    format!("file parent batch: {e}"),
+                ));
+                for (_, reply) in wave {
+                    let _ = reply.send(Err(Arc::clone(&shared)));
+                }
+            }
+        }
+    }
+
+    /// Total parent-resolution queries actually issued (point + `= ANY`
+    /// batches). With batching, this is ≤ the number of cold misses — the
+    /// gap is the herd-collapse win. Exposed for benches and operators.
+    pub fn parent_query_count(&self) -> u64 {
+        self.parent_queries.load(Ordering::Relaxed)
     }
 
     /// Cache-aware wrapper over the File/Folder grant cascade. Serves the
@@ -843,56 +1114,71 @@ impl PgAclEngine {
             counters.cache_hit.fetch_add(1, Ordering::Relaxed);
             return Ok(allowed);
         }
-        let allowed = match resource {
-            Resource::Folder(id) => {
-                let (subject_types, subject_ids) =
-                    self.subject_match_set(subject, counters).await?;
-                self.folder_cascade_grant_exists(
-                    &subject_types,
-                    &subject_ids,
-                    permission,
-                    id,
-                    counters,
-                )
-                .await?
-            }
-            Resource::File(id) => {
-                // Ancestor half first — amortized to one query per FOLDER
-                // via the recursive Folder arm (its own cache entry).
-                let folder_allowed = match self.file_parent_folder_cached(id, counters).await? {
-                    Some(parent) => {
-                        Box::pin(self.cascade_grant_cached(
-                            subject,
-                            Resource::Folder(parent),
-                            permission,
-                            counters,
-                        ))
-                        .await?
-                    }
-                    None => false,
-                };
-                if folder_allowed {
-                    true
-                } else {
-                    let (subject_types, subject_ids) =
-                        self.subject_match_set(subject, counters).await?;
-                    self.file_direct_grant_exists(
-                        &subject_types,
-                        &subject_ids,
-                        permission,
-                        id,
-                        counters,
-                    )
-                    .await?
-                }
-            }
-            // Only File/Folder reach this helper (see `check_inner`).
-            _ => return Ok(false),
-        };
+        // Only File/Folder reach this helper (see `check_inner`); keep the
+        // defensive arm OUTSIDE the loader so it stays uncached, as before.
+        if !matches!(resource, Resource::Folder(_) | Resource::File(_)) {
+            return Ok(false);
+        }
+        // `try_get_with`: a cold herd on the same key — every photo of an
+        // album recursing into the SAME folder decision at once — coalesces
+        // into ONE loader run. The old get→compute→insert let K concurrent
+        // misses each run the ltree query (ROUND10; the ROUND3 auth-herd
+        // pattern). moka never caches loader errors, preserving the
+        // historical error semantics.
         self.cascade_grant_cache
-            .insert((subject, resource, permission), allowed)
-            .await;
-        Ok(allowed)
+            .try_get_with((subject, resource, permission), async {
+                match resource {
+                    Resource::Folder(id) => {
+                        let (subject_types, subject_ids) =
+                            self.subject_match_set(subject, counters).await?;
+                        self.folder_cascade_grant_exists(
+                            &subject_types,
+                            &subject_ids,
+                            permission,
+                            id,
+                            counters,
+                        )
+                        .await
+                    }
+                    Resource::File(id) => {
+                        // Ancestor half first — amortized to one query per
+                        // FOLDER via the recursive Folder arm (its own cache
+                        // entry + its own single-flight).
+                        let folder_allowed =
+                            match self.file_parent_folder_cached(id, counters).await? {
+                                Some(parent) => {
+                                    Box::pin(self.cascade_grant_cached(
+                                        subject,
+                                        Resource::Folder(parent),
+                                        permission,
+                                        counters,
+                                    ))
+                                    .await?
+                                }
+                                None => false,
+                            };
+                        if folder_allowed {
+                            Ok(true)
+                        } else {
+                            let (subject_types, subject_ids) =
+                                self.subject_match_set(subject, counters).await?;
+                            self.file_direct_grant_exists(
+                                &subject_types,
+                                &subject_ids,
+                                permission,
+                                id,
+                                counters,
+                            )
+                            .await
+                        }
+                    }
+                    _ => unreachable!("guarded above"),
+                }
+            })
+            .await
+            .map_err(|e: Arc<DomainError>| {
+                DomainError::new(e.kind, e.entity_type, e.message.clone())
+            })
     }
 
     /// Cached resolution of `(subject, drive_id) → Option<Role>` — the

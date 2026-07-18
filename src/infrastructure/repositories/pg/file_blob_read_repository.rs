@@ -1394,19 +1394,6 @@ impl FileReadPort for FileBlobReadRepository {
         Ok((files, total_count))
     }
 
-    /// Count files matching the search criteria (without loading them).
-    async fn count_files(
-        &self,
-        folder_id: Option<&str>,
-        criteria: &SearchCriteriaDto,
-        caller_id: Uuid,
-    ) -> Result<usize, DomainError> {
-        let (_, count) = self
-            .search_files_paginated(folder_id, criteria, caller_id)
-            .await?;
-        Ok(count)
-    }
-
     #[allow(clippy::type_complexity)]
     async fn suggest_files_by_name(
         &self,

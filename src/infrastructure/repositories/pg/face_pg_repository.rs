@@ -115,29 +115,70 @@ impl FaceRepository for FacePgRepository {
         if faces.is_empty() {
             return Ok(());
         }
-        let mut tx = self.pool.begin().await.map_err(|e| db_err("begin", e))?;
+        // One multi-row INSERT over parallel UNNEST arrays instead of one
+        // round-trip per face — a group photo yields many faces per indexed
+        // image. The `bbox` float4[] can't ride an array-of-arrays through
+        // unnest (PG flattens), so its 4 components travel as 4 parallel
+        // arrays and are reassembled server-side. A single statement is
+        // atomic on its own; the per-row transaction wrapper is gone.
+        let n = faces.len();
+        let mut ids = Vec::with_capacity(n);
+        let mut file_ids = Vec::with_capacity(n);
+        let mut user_ids = Vec::with_capacity(n);
+        let mut person_ids: Vec<Option<Uuid>> = Vec::with_capacity(n);
+        let (mut bx, mut by, mut bw, mut bh) = (
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+        );
+        let mut det_scores = Vec::with_capacity(n);
+        let mut qualities: Vec<Option<f32>> = Vec::with_capacity(n);
+        let mut embeddings = Vec::with_capacity(n);
+        let mut blob_hashes: Vec<Option<&str>> = Vec::with_capacity(n);
         for f in faces {
-            sqlx::query(
-                r#"
-                INSERT INTO faces.faces
-                    (id, file_id, user_id, person_id, bbox, det_score, quality, embedding, blob_hash)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                "#,
-            )
-            .bind(f.id)
-            .bind(f.file_id)
-            .bind(f.user_id)
-            .bind(f.person_id)
-            .bind(f.bbox.to_array())
-            .bind(f.det_score)
-            .bind(f.quality)
-            .bind(embedding_to_bytes(&f.embedding))
-            .bind(f.blob_hash.as_deref())
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| db_err("save_faces", e))?;
+            ids.push(f.id);
+            file_ids.push(f.file_id);
+            user_ids.push(f.user_id);
+            person_ids.push(f.person_id);
+            bx.push(f.bbox.x);
+            by.push(f.bbox.y);
+            bw.push(f.bbox.w);
+            bh.push(f.bbox.h);
+            det_scores.push(f.det_score);
+            qualities.push(f.quality);
+            embeddings.push(embedding_to_bytes(&f.embedding));
+            blob_hashes.push(f.blob_hash.as_deref());
         }
-        tx.commit().await.map_err(|e| db_err("commit", e))?;
+        sqlx::query(
+            r#"
+            INSERT INTO faces.faces
+                (id, file_id, user_id, person_id, bbox, det_score, quality, embedding, blob_hash)
+            SELECT t.id, t.file_id, t.user_id, t.person_id,
+                   ARRAY[t.bx, t.by, t.bw, t.bh]::real[],
+                   t.det_score, t.quality, t.embedding, t.blob_hash
+              FROM unnest($1::uuid[], $2::uuid[], $3::uuid[], $4::uuid[],
+                          $5::real[], $6::real[], $7::real[], $8::real[],
+                          $9::real[], $10::real[], $11::bytea[], $12::text[])
+                   AS t(id, file_id, user_id, person_id,
+                        bx, by, bw, bh, det_score, quality, embedding, blob_hash)
+            "#,
+        )
+        .bind(&ids)
+        .bind(&file_ids)
+        .bind(&user_ids)
+        .bind(&person_ids)
+        .bind(&bx)
+        .bind(&by)
+        .bind(&bw)
+        .bind(&bh)
+        .bind(&det_scores)
+        .bind(&qualities)
+        .bind(&embeddings)
+        .bind(&blob_hashes)
+        .execute(self.pool.as_ref())
+        .await
+        .map_err(|e| db_err("save_faces", e))?;
         Ok(())
     }
 

@@ -11,12 +11,20 @@ pub enum UserRole {
     User,
 }
 
+impl UserRole {
+    /// Canonical wire/DB spelling — the single source the `Display` impl
+    /// and every hot-path role render go through (no format machinery).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UserRole::Admin => "admin",
+            UserRole::User => "user",
+        }
+    }
+}
+
 impl std::fmt::Display for UserRole {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            UserRole::Admin => write!(f, "admin"),
-            UserRole::User => write!(f, "user"),
-        }
+        f.write_str(self.as_str())
     }
 }
 

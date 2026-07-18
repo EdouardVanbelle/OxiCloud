@@ -138,7 +138,7 @@ async fn main() {
     let mut ids = Vec::new();
     while let Some(r) = set.join_next().await {
         let (uid, uname, _, _) = r.expect("join").expect("verify_basic_auth");
-        assert_eq!(uname, username);
+        assert_eq!(&*uname, username.as_str());
         ids.push(uid);
     }
     assert!(ids.iter().all(|&u| u == user_id));

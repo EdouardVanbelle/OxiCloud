@@ -1102,9 +1102,9 @@ impl AuthApplicationService {
 
         Ok(crate::application::dtos::user_dto::CurrentUser {
             id: user.id(),
-            username: user.username().unwrap_or("").to_string(),
-            email: user.email().to_string(),
-            role: user.role().to_string(),
+            username: std::sync::Arc::from(user.username().unwrap_or("")),
+            email: std::sync::Arc::from(user.email()),
+            role: smol_str::SmolStr::new_static(user.role().as_str()),
         })
     }
 

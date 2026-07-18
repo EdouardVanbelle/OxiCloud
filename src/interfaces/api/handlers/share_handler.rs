@@ -489,7 +489,14 @@ async fn serve_share_file(
         }
     }
 
-    match retrieval.get_file_optimized(file_id, false, true).await {
+    // The metadata was already fetched at the top of this fn — hand the DTO
+    // to the `_preloaded` variant (as the authenticated download path does)
+    // instead of letting `get_file_optimized` re-run the same metadata query.
+    let file_size = file_dto.size;
+    match retrieval
+        .get_file_optimized_preloaded(file_id, file_dto, false, true)
+        .await
+    {
         Ok((_, content)) => match content {
             OptimizedFileContent::Bytes { data, .. } => Response::builder()
                 .status(StatusCode::OK)
@@ -510,7 +517,7 @@ async fn serve_share_file(
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, &*mime)
                 .header(header::CONTENT_DISPOSITION, &disposition)
-                .header(header::CONTENT_LENGTH, file_dto.size)
+                .header(header::CONTENT_LENGTH, file_size)
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::ETAG, &etag)
                 .header(

@@ -130,6 +130,11 @@
 	let suggestOpen = $state(false);
 	let suggestBusy = $state(false);
 	let suggestTimer: ReturnType<typeof setTimeout> | null = null;
+	// Stale-response guard (same family as the search page): the debounce
+	// spaces requests out but doesn't stop a SLOW earlier response from
+	// resolving after a newer one and overwriting its suggestions.
+	let suggestSeq = 0;
+	let suggestInflight: AbortController | null = null;
 
 	function goToResults() {
 		const q = searchQuery.trim();
@@ -149,24 +154,33 @@
 		if (suggestTimer) clearTimeout(suggestTimer);
 		const q = searchQuery.trim();
 		if (q.length < 2) {
+			suggestSeq++;
+			suggestInflight?.abort();
+			suggestInflight = null;
 			suggestions = [];
 			suggestOpen = false;
 			return;
 		}
 		suggestTimer = setTimeout(async () => {
+			const seq = ++suggestSeq;
+			suggestInflight?.abort();
+			const ctl = new AbortController();
+			suggestInflight = ctl;
 			suggestBusy = true;
 			try {
-				const r = await searchFiles(q, { recursive: true, limit: 6 });
+				const r = await searchFiles(q, { recursive: true, limit: 6, signal: ctl.signal });
+				if (seq !== suggestSeq) return; // superseded while awaiting
 				suggestions = [
 					...r.folders.slice(0, 3).map((item) => ({ kind: 'folder' as const, item })),
 					...r.files.slice(0, 6).map((item) => ({ kind: 'file' as const, item }))
 				];
 				suggestOpen = suggestions.length > 0;
 			} catch {
+				if (seq !== suggestSeq || ctl.signal.aborted) return;
 				suggestions = [];
 				suggestOpen = false;
 			} finally {
-				suggestBusy = false;
+				if (seq === suggestSeq) suggestBusy = false;
 			}
 		}, 250);
 	}

@@ -88,10 +88,26 @@ export function getFolderName(id: string): string | undefined {
 	return folderNames.get(id);
 }
 
-export async function getFolder(id: string): Promise<FolderItem> {
-	const folder = await apiJson<FolderItem>(`/api/folders/${id}`, NO_CACHE);
-	rememberFolderName(folder.id, folder.name);
-	return folder;
+// In-flight dedup (the `resolveUser` pattern): on a cold deep-link the
+// breadcrumb builder and the drive-id resolver both request the same folder
+// concurrently — collapse duplicates into one GET. Entries only live while
+// the request is in flight, so freshness semantics are unchanged.
+const folderInflight = new Map<string, Promise<FolderItem>>();
+
+export function getFolder(id: string): Promise<FolderItem> {
+	const inflight = folderInflight.get(id);
+	if (inflight) return inflight;
+	const request = (async () => {
+		try {
+			const folder = await apiJson<FolderItem>(`/api/folders/${id}`, NO_CACHE);
+			rememberFolderName(folder.id, folder.name);
+			return folder;
+		} finally {
+			folderInflight.delete(id);
+		}
+	})();
+	folderInflight.set(id, request);
+	return request;
 }
 
 /**

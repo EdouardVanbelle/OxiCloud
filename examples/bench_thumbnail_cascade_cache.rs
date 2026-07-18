@@ -475,6 +475,87 @@ async fn main() {
         );
     }
 
+    // ── ROUND10: the CONCURRENT cold herd ────────────────────────────
+    // A browser grid fires its thumbnail requests near-simultaneously, so
+    // the real cold first view is K in-flight checks, not a sequential
+    // loop. BEFORE (round-9 shape): every request pays its own parent
+    // point read — replicated below as K concurrent `SELECT folder_id`
+    // probes + the shared folder decision. AFTER: the engine's parent
+    // batcher drains the herd into ~2 queries.
+    {
+        // BEFORE replica: K concurrent point reads (the R9 per-request work).
+        let t = Instant::now();
+        let probes = s.files.iter().map(|&f| {
+            let pool = pool.clone();
+            async move {
+                let parent: Option<Option<Uuid>> =
+                    sqlx::query_scalar("SELECT folder_id FROM storage.files WHERE id = $1")
+                        .bind(f)
+                        .fetch_optional(pool.as_ref())
+                        .await
+                        .expect("point parent read");
+                parent.flatten()
+            }
+        });
+        let before_parents = futures::future::join_all(probes).await;
+        let el = t.elapsed();
+        println!(
+            "| {:<28} | {:>10.2} | {:>12.2} |",
+            "R9 herd (point read/file)",
+            el.as_secs_f64() * 1e3,
+            el.as_secs_f64() * 1e6 / thumbs as f64
+        );
+
+        // AFTER: fresh engine, all K checks in flight at once.
+        let herd_engine = fresh_engine(&pool);
+        let t = Instant::now();
+        let checks = s
+            .files
+            .iter()
+            .map(|&f| allowed(&herd_engine, s.recipient, f));
+        let results = futures::future::join_all(checks).await;
+        let el = t.elapsed();
+        let parent_queries = herd_engine.parent_query_count();
+        println!(
+            "| {:<28} | {:>10.2} | {:>12.2} |",
+            "AFTER herd (batched)",
+            el.as_secs_f64() * 1e3,
+            el.as_secs_f64() * 1e6 / thumbs as f64
+        );
+        println!(
+            "|   parent queries for the {thumbs}-thumb herd: {parent_queries} (was {thumbs})            |"
+        );
+
+        // Gates: every check allowed; the herd collapsed (≤8 queries for a
+        // 100-wide herd would already be a pass; typical is 2-3); and the
+        // batcher's answers match the point reads exactly.
+        if results.iter().any(|ok| !ok) {
+            eprintln!("SAFETY GATE FAILED: batched herd denied an allowed thumbnail");
+            cleanup(&pool, &s).await;
+            std::process::exit(1);
+        }
+        if parent_queries as usize >= thumbs / 4 {
+            eprintln!(
+                "PERF GATE FAILED: parent batcher issued {parent_queries} queries for a {thumbs}-thumb herd"
+            );
+            cleanup(&pool, &s).await;
+            std::process::exit(1);
+        }
+        for (i, &f) in s.files.iter().enumerate() {
+            let via_engine: Option<Option<Uuid>> =
+                sqlx::query_scalar("SELECT folder_id FROM storage.files WHERE id = $1")
+                    .bind(f)
+                    .fetch_optional(pool.as_ref())
+                    .await
+                    .expect("verify parent");
+            assert_eq!(
+                via_engine.flatten(),
+                before_parents[i],
+                "parent resolution must be identical"
+            );
+        }
+    }
+
     cleanup(&pool, &s).await;
     println!("\n(The check is never skipped — authz still runs on every thumbnail; only");
     println!(" the folder-cascade DECISION is memoised. BEFORE re-queries per request;");

@@ -339,9 +339,9 @@ pub async fn handle_oidc_login_completion(
 
     let current_user = CurrentUser {
         id: user_id,
-        username: username.to_string(),
-        email: user_dto.email.clone(),
-        role: user_dto.role.clone(),
+        username: std::sync::Arc::from(username),
+        email: std::sync::Arc::from(user_dto.email.as_str()),
+        role: smol_str::SmolStr::new(&user_dto.role),
     };
 
     let drives = match state
@@ -438,7 +438,7 @@ async fn complete_flow(
 
     let login_name = match drive_id {
         Some(uuid) => format!("{}~{}", user.username, uuid),
-        None => user.username.clone(),
+        None => user.username.to_string(),
     };
 
     let base_url = state.core.config.base_url();
@@ -550,9 +550,9 @@ pub async fn handle_drive_pick(
     };
     let user = CurrentUser {
         id: user_id,
-        username,
-        email: user_dto.email.clone(),
-        role: user_dto.role.clone(),
+        username: std::sync::Arc::from(username.as_str()),
+        email: std::sync::Arc::from(user_dto.email.as_str()),
+        role: smol_str::SmolStr::new(&user_dto.role),
     };
 
     let _folder = match state

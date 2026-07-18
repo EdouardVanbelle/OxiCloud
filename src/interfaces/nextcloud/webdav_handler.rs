@@ -1510,16 +1510,24 @@ fn build_nc_streaming_propfind(
         // ── <d:multistatus> + the folder's own entry ─────────────────
         // Collection hrefs MUST end in `/` (RFC 4918 §5.2 + strict
         // NC-client enforcement — see `nc_collection_href`).
-        let folder_favs = if let Some(fav) = fav_svc {
-            fav.batch_check_favorites(user_id, &[(folder.id.as_str(), "folder")])
-                .await
-                .unwrap_or_default()
-        } else {
-            HashSet::new()
-        };
-        let (_, folder_id_map) =
-            batch_resolve_ids(file_id_svc, &[], &[folder.id.as_str()]).await;
-        let folder_dead = folder_dead_props(&state.webdav_dead_props, &folder).await;
+        // Same three independent reads as the per-page child triple below,
+        // and on the critical path of EVERY folder PROPFIND's first byte —
+        // overlapped with `join!` (ROUND10; the header trio was left serial
+        // when ROUND9 converted the page loops).
+        let folder_id_arr = [folder.id.as_str()];
+        let (folder_favs, (_, folder_id_map), folder_dead) = tokio::join!(
+            async {
+                if let Some(fav) = fav_svc {
+                    fav.batch_check_favorites(user_id, &[(folder.id.as_str(), "folder")])
+                        .await
+                        .unwrap_or_default()
+                } else {
+                    HashSet::new()
+                }
+            },
+            batch_resolve_ids(file_id_svc, &[], &folder_id_arr),
+            folder_dead_props(&state.webdav_dead_props, &folder),
+        );
 
         let mut buf = Vec::with_capacity(4096);
         {
@@ -1756,7 +1764,8 @@ pub fn write_folder_response<W: std::io::Write>(
 
     // Nextcloud/ownCloud properties
     if let Some(id) = file_id {
-        write_text_element(xml, "oc:fileid", &id.to_string())?;
+        let mut buf = [0u8; 21];
+        write_text_element(xml, "oc:fileid", crate::common::fmt::i64_str(&mut buf, id))?;
     }
     if let Some(oid) = oc_id {
         write_text_element(xml, "oc:id", oid)?;
@@ -1770,9 +1779,18 @@ pub fn write_folder_response<W: std::io::Write>(
     // surface's `write_folder_standard_props` (see
     // `AppState::resolve_webdav_quota`).
     if let Some((used, available)) = quota {
-        write_text_element(xml, "d:quota-used-bytes", &used.to_string())?;
+        let mut buf = [0u8; 21];
+        write_text_element(
+            xml,
+            "d:quota-used-bytes",
+            crate::common::fmt::i64_str(&mut buf, used),
+        )?;
         if let Some(avail) = available {
-            write_text_element(xml, "d:quota-available-bytes", &avail.to_string())?;
+            write_text_element(
+                xml,
+                "d:quota-available-bytes",
+                crate::common::fmt::i64_str(&mut buf, avail),
+            )?;
         }
     }
     write_text_element(xml, "oc:owner-id", owner)?;
@@ -1858,7 +1876,8 @@ pub fn write_file_response<W: std::io::Write>(
 
     // Nextcloud/ownCloud properties
     if let Some(id) = file_id {
-        write_text_element(xml, "oc:fileid", &id.to_string())?;
+        let mut buf = [0u8; 21];
+        write_text_element(xml, "oc:fileid", crate::common::fmt::i64_str(&mut buf, id))?;
     }
     if let Some(oid) = oc_id {
         write_text_element(xml, "oc:id", oid)?;
@@ -1900,8 +1919,19 @@ pub fn write_file_response<W: std::io::Write>(
 
     write_text_element(xml, "nc:is-encrypted", "0")?;
     write_text_element(xml, "nc:mount-type", "")?;
-    write_text_element(xml, "nc:creation_time", &file.created_at.to_string())?;
-    write_text_element(xml, "nc:upload_time", &file.modified_at.to_string())?;
+    {
+        let mut buf = [0u8; 20];
+        write_text_element(
+            xml,
+            "nc:creation_time",
+            crate::common::fmt::u64_str(&mut buf, file.created_at),
+        )?;
+        write_text_element(
+            xml,
+            "nc:upload_time",
+            crate::common::fmt::u64_str(&mut buf, file.modified_at),
+        )?;
+    }
 
     xml.write_event(Event::End(BytesEnd::new("d:prop")))
         .xml_err()?;
@@ -1921,7 +1951,7 @@ pub fn write_file_response<W: std::io::Write>(
 /// (`common::fmt`) — the old per-row `to_rfc2822()` / `to_rfc3339()`
 /// ran chrono's format interpreter and allocated a String each.
 /// Out-of-range timestamps keep the chrono path, byte-identical.
-fn write_date_element<W: std::io::Write>(
+pub fn write_date_element<W: std::io::Write>(
     xml: &mut Writer<W>,
     tag: &str,
     secs: i64,
@@ -1946,7 +1976,7 @@ fn write_date_element<W: std::io::Write>(
 
 /// `d:getetag` with the HTTP quoting — one exactly-sized allocation
 /// instead of `format!`'s grow-from-empty.
-fn write_etag_element<W: std::io::Write>(
+pub fn write_etag_element<W: std::io::Write>(
     xml: &mut Writer<W>,
     tag: &str,
     etag: &str,

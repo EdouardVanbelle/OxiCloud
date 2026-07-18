@@ -25,6 +25,11 @@ pub trait CalendarEventRepository: Send + Sync + 'static {
     /// Finds a calendar event by its ID
     async fn find_event_by_id(&self, id: &Uuid) -> CalendarEventRepositoryResult<CalendarEvent>;
 
+    /// Narrow projection of `find_event_by_id` for authorization gates:
+    /// just the owning `calendar_id`, without dragging the full row —
+    /// notably `ical_data`, the raw iCalendar body — off the wire.
+    async fn find_calendar_id_by_event_id(&self, id: &Uuid) -> CalendarEventRepositoryResult<Uuid>;
+
     /// Cursor stream over every event of `calendar_id` in bundle order:
     /// rows sorted by `(first occurrence per UID, uid, master-first,
     /// start_time)` so a recurring master + its exception overrides

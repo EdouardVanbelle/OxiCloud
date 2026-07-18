@@ -24,6 +24,11 @@ use crate::domain::entities::user::User;
 
 /// Internal JWT claims structure for serialization.
 /// This is the actual JWT payload structure used by jsonwebtoken crate.
+///
+/// `username` / `email` deserialize straight into `Arc<str>` (serde `rc`,
+/// one allocation — same count as `String`) so the `TokenClaims` conversion
+/// below is a plain move and the port-level claims can hand refcount bumps
+/// to every consumer.
 #[derive(Debug, Serialize, Deserialize)]
 struct JwtClaims {
     /// Subject identifier - contains the user ID
@@ -35,9 +40,9 @@ struct JwtClaims {
     /// JWT unique ID for token tracking and revocation
     pub jti: String,
     /// Username for display and identification purposes
-    pub username: String,
+    pub username: Arc<str>,
     /// User email for communication and identification
-    pub email: String,
+    pub email: Arc<str>,
     /// User role for authorization checks
     pub role: String,
 }
@@ -80,8 +85,16 @@ impl From<JwtClaims> for TokenClaims {
 ///   unique-token flooding.
 /// - Expired tokens are never cached (decode itself rejects them first).
 pub struct JwtTokenService {
-    /// Secret key used for signing JWT tokens
-    jwt_secret: String,
+    /// Pre-built signing key — `EncodingKey::from_secret` copies the secret
+    /// into a fresh buffer, so building it per `generate_access_token` call
+    /// paid an allocation per login/refresh for a process-invariant value.
+    encoding_key: EncodingKey,
+    /// Pre-built verification key (same rationale, on the validation-cache
+    /// miss path — every new token and every token once per TTL window).
+    decoding_key: DecodingKey,
+    /// Pre-built HS256 validation config — `Validation::new` allocates a
+    /// `HashSet{"exp"}` + algorithm `Vec` on every call otherwise.
+    validation: Validation,
     /// Expiration time for access tokens in seconds
     access_token_expiry: i64,
     /// Expiration time for refresh tokens in seconds
@@ -125,7 +138,9 @@ impl JwtTokenService {
         );
 
         Self {
-            jwt_secret,
+            encoding_key: EncodingKey::from_secret(jwt_secret.as_bytes()),
+            decoding_key: DecodingKey::from_secret(jwt_secret.as_bytes()),
+            validation: Validation::new(Algorithm::HS256),
             access_token_expiry: access_token_expiry_secs,
             refresh_token_expiry: refresh_token_expiry_secs,
             validation_cache,
@@ -169,9 +184,9 @@ impl TokenServicePort for JwtTokenService {
             exp: now + self.access_token_expiry,
             iat: now,
             jti: Uuid::new_v4().to_string(),
-            username: user.username().unwrap_or("").to_string(),
-            email: user.email().to_string(),
-            role: format!("{}", user.role()),
+            username: Arc::from(user.username().unwrap_or("")),
+            email: Arc::from(user.email()),
+            role: user.role().as_str().to_string(),
         };
 
         // Log JWT claims for debugging
@@ -182,12 +197,7 @@ impl TokenServicePort for JwtTokenService {
             claims.iat
         );
 
-        encode(
-            &Header::default(),
-            &claims,
-            &EncodingKey::from_secret(self.jwt_secret.as_bytes()),
-        )
-        .map_err(|e| {
+        encode(&Header::default(), &claims, &self.encoding_key).map_err(|e| {
             tracing::error!("Error generating token: {}", e);
             DomainError::new(
                 ErrorKind::InternalError,
@@ -217,23 +227,18 @@ impl TokenServicePort for JwtTokenService {
         // ── 2. Slow-path: full HMAC-SHA256 verification ─────────
         self.cache_misses.fetch_add(1, Ordering::Relaxed);
 
-        let validation = Validation::new(Algorithm::HS256);
-
-        let token_data = decode::<JwtClaims>(
-            token,
-            &DecodingKey::from_secret(self.jwt_secret.as_bytes()),
-            &validation,
-        )
-        .map_err(|e| match e.kind() {
-            jsonwebtoken::errors::ErrorKind::ExpiredSignature => {
-                DomainError::new(ErrorKind::AccessDenied, "TokenService", "Token expired")
-            }
-            _ => DomainError::new(
-                ErrorKind::AccessDenied,
-                "TokenService",
-                format!("Invalid token: {}", e),
-            ),
-        })?;
+        let token_data = decode::<JwtClaims>(token, &self.decoding_key, &self.validation).map_err(
+            |e| match e.kind() {
+                jsonwebtoken::errors::ErrorKind::ExpiredSignature => {
+                    DomainError::new(ErrorKind::AccessDenied, "TokenService", "Token expired")
+                }
+                _ => DomainError::new(
+                    ErrorKind::AccessDenied,
+                    "TokenService",
+                    format!("Invalid token: {}", e),
+                ),
+            },
+        )?;
 
         let claims = Arc::new(TokenClaims::from(token_data.claims));
 
@@ -301,8 +306,8 @@ mod tests {
             .validate_token(&token)
             .expect("Should validate token");
         assert_eq!(claims.sub, user.id().to_string());
-        assert_eq!(Some(claims.username.as_str()), user.username());
-        assert_eq!(claims.email, user.email());
+        assert_eq!(Some(&*claims.username), user.username());
+        assert_eq!(&*claims.email, user.email());
     }
 
     #[test]

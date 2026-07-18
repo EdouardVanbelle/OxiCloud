@@ -230,6 +230,12 @@ impl ContactStoragePort for ContactStorageAdapter {
             .await
     }
 
+    async fn count_contacts_in_group(&self, group_id: &Uuid) -> Result<i64, DomainError> {
+        self.contact_group_repository
+            .count_contacts_in_group(group_id)
+            .await
+    }
+
     async fn get_groups_for_contact(
         &self,
         contact_id: &Uuid,

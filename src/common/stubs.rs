@@ -130,15 +130,6 @@ impl FileReadPort for StubFileReadPort {
         Ok((Vec::new(), 0))
     }
 
-    async fn count_files(
-        &self,
-        _folder_id: Option<&str>,
-        _criteria: &SearchCriteriaDto,
-        _user_id: Uuid,
-    ) -> Result<usize, DomainError> {
-        Ok(0)
-    }
-
     async fn stream_files_in_subtree(
         &self,
         _folder_id: &str,

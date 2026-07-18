@@ -336,18 +336,18 @@ impl FileManagementUseCase for FileManagementService {
                 Uuid::parse_str(file_id).map_err(|_| DomainError::not_found("File", file_id))?;
             let dst_folder_uuid = Uuid::parse_str(target_folder_id)
                 .map_err(|_| DomainError::not_found("Folder", target_folder_id))?;
-            let (src_drive_id, src_policies) = drive_repo
-                .get_drive_id_and_policies_for_file(file_uuid)
-                .await
-                .map_err(|e| {
-                    DomainError::internal_error("Drive", format!("source drive lookup: {e:?}"))
-                })?;
-            let dst_drive_id = drive_repo
-                .drive_id_for_folder(dst_folder_uuid)
-                .await
-                .map_err(|e| {
-                    DomainError::internal_error("Drive", format!("destination drive lookup: {e:?}"))
-                })?;
+            // Independent point reads — overlapped so the pre-move drive
+            // resolution pays one round-trip, not two (ROUND10).
+            let (src_res, dst_res) = tokio::join!(
+                drive_repo.get_drive_id_and_policies_for_file(file_uuid),
+                drive_repo.drive_id_for_folder(dst_folder_uuid),
+            );
+            let (src_drive_id, src_policies) = src_res.map_err(|e| {
+                DomainError::internal_error("Drive", format!("source drive lookup: {e:?}"))
+            })?;
+            let dst_drive_id = dst_res.map_err(|e| {
+                DomainError::internal_error("Drive", format!("destination drive lookup: {e:?}"))
+            })?;
             if src_drive_id != dst_drive_id {
                 src_policies.refuse_cross_drive_move(
                     crate::domain::entities::drive::CrossDriveMoveGateContext {

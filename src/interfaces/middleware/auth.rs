@@ -204,10 +204,14 @@ pub async fn auth_middleware(
                                 LiveRole::Active(role) => role,
                                 LiveRole::Revoked => return Err(AuthError::AccountInactive),
                             };
+                            // `username`/`email` are `Arc<str>` refcount
+                            // bumps out of the cached claims; `role` is an
+                            // inline SmolStr — the whole build is 1 alloc
+                            // (the `Arc::new`) instead of 4.
                             let current_user = Arc::new(CurrentUser {
                                 id: user_id,
-                                username: claims.username.clone(),
-                                email: claims.email.clone(),
+                                username: Arc::clone(&claims.username),
+                                email: Arc::clone(&claims.email),
                                 role,
                             });
                             request.extensions_mut().insert(current_user);
@@ -319,8 +323,8 @@ pub async fn auth_middleware(
                             LiveRole::Active(role) => {
                                 let current_user = Arc::new(CurrentUser {
                                     id: user_id,
-                                    username: claims.username.clone(),
-                                    email: claims.email.clone(),
+                                    username: Arc::clone(&claims.username),
+                                    email: Arc::clone(&claims.email),
                                     role,
                                 });
                                 request.extensions_mut().insert(current_user);

@@ -189,17 +189,6 @@ pub trait FileReadPort: Send + Sync + 'static {
             .await
     }
 
-    /// Count files matching the search criteria (without loading them).
-    ///
-    /// Used for pagination metadata without fetching the actual files.
-    /// Same drive-membership scoping as `search_files_paginated`.
-    async fn count_files(
-        &self,
-        folder_id: Option<&str>,
-        criteria: &SearchCriteriaDto,
-        caller_id: Uuid,
-    ) -> Result<usize, DomainError>;
-
     /// Return up to `limit` files whose name contains `query` (case-insensitive).
     ///
     /// Results are ordered by relevance (exact > starts-with > contains) so the

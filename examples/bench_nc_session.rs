@@ -117,9 +117,9 @@ fn fixture_folder() -> FolderDto {
 fn fixture_user(id: uuid::Uuid) -> CurrentUser {
     CurrentUser {
         id,
-        username: "alice.longname".to_string(),
-        email: "alice.longname@example.com".to_string(),
-        role: "user".to_string(),
+        username: Arc::from("alice.longname"),
+        email: Arc::from("alice.longname@example.com"),
+        role: smol_str::SmolStr::new_static("user"),
     }
 }
 

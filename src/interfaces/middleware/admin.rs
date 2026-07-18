@@ -8,6 +8,7 @@
 //! for audit / ownership purposes.
 
 use axum::http::{HeaderMap, StatusCode, header};
+use smol_str::SmolStr;
 use uuid::Uuid;
 
 use crate::application::ports::auth_ports::TokenServicePort;
@@ -26,7 +27,7 @@ use crate::interfaces::middleware::user::{LiveRole, resolve_live_role};
 pub async fn require_admin(
     state: &AppState,
     headers: &HeaderMap,
-) -> Result<(Uuid, String), AppError> {
+) -> Result<(Uuid, SmolStr), AppError> {
     let auth = state
         .auth_service
         .as_ref()
@@ -85,7 +86,7 @@ pub async fn require_admin(
 pub async fn require_authenticated(
     state: &AppState,
     headers: &HeaderMap,
-) -> Result<(Uuid, String), AppError> {
+) -> Result<(Uuid, SmolStr), AppError> {
     let auth = state
         .auth_service
         .as_ref()

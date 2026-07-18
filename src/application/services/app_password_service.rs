@@ -15,6 +15,7 @@ use crate::infrastructure::services::password_hasher::Argon2PasswordHasher;
 use chrono::{Duration, Utc};
 use moka::future::Cache;
 use rand_core::RngCore;
+use smol_str::SmolStr;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 use uuid::Uuid;
@@ -56,12 +57,17 @@ const BASIC_AUTH_CACHE_TTL_SECS: u64 = 300;
 const BASIC_AUTH_CACHE_MAX_ENTRIES: u64 = 10_000;
 
 /// Cached identity returned after a successful Basic Auth verification.
+///
+/// `Arc<str>` / inline `SmolStr` fields: moka's `get` clones the value, so
+/// with owned `String`s every warm Basic-auth request (all DAV traffic)
+/// paid 3 string copies just to read the cached identity. Now a hit is
+/// refcount bumps + a 24-byte memcpy.
 #[derive(Clone)]
 struct CachedBasicAuthResult {
     user_id: Uuid,
-    username: String,
-    email: String,
-    role: String,
+    username: Arc<str>,
+    email: Arc<str>,
+    role: SmolStr,
 }
 
 pub struct AppPasswordService {
@@ -299,7 +305,7 @@ impl AppPasswordService {
         &self,
         username: &str,
         password: &str,
-    ) -> Result<(Uuid, String, String, String), DomainError> {
+    ) -> Result<(Uuid, Arc<str>, Arc<str>, SmolStr), DomainError> {
         // ── 1. Compute cache key = blake3("username:password") ────────
         let cache_key: [u8; 32] =
             blake3::hash(format!("{}:{}", username, password).as_bytes()).into();
@@ -400,9 +406,9 @@ impl AppPasswordService {
                 // stores this value under the blake3 key on return.
                 return Ok(CachedBasicAuthResult {
                     user_id: user.id(),
-                    username: user.username().unwrap_or("").to_string(),
-                    email: user.email().to_string(),
-                    role: user.role().to_string(),
+                    username: Arc::from(user.username().unwrap_or("")),
+                    email: Arc::from(user.email()),
+                    role: SmolStr::new_static(user.role().as_str()),
                 });
             }
         }

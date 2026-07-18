@@ -213,6 +213,17 @@ impl CalendarEventRepository for CalendarEventPgRepository {
         Ok(events)
     }
 
+    async fn find_calendar_id_by_event_id(&self, id: &Uuid) -> CalendarEventRepositoryResult<Uuid> {
+        sqlx::query_scalar("SELECT calendar_id FROM caldav.calendar_events WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&*self.pool)
+            .await
+            .map_err(|e| {
+                DomainError::database_error(format!("Failed to get event calendar id: {}", e))
+            })?
+            .ok_or_else(|| DomainError::not_found("Calendar Event", id.to_string()))
+    }
+
     async fn find_event_by_id(&self, id: &Uuid) -> CalendarEventRepositoryResult<CalendarEvent> {
         let row = sqlx::query(
             r#"

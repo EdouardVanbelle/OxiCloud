@@ -544,17 +544,27 @@ impl PlaylistItemRepository for PlaylistItemPgRepository {
         playlist_id: &Uuid,
         item_ids: &[Uuid],
     ) -> PlaylistItemRepositoryResult<()> {
-        for (index, item_id) in item_ids.iter().enumerate() {
-            sqlx::query(
-                "UPDATE audio.playlist_items SET position = $2 WHERE id = $1 AND playlist_id = $3",
-            )
-            .bind(item_id)
-            .bind(index as i32)
-            .bind(playlist_id)
-            .execute(&*self.pool)
-            .await
-            .map_err(|e| DomainError::database_error(format!("Failed to reorder: {}", e)))?;
+        if item_ids.is_empty() {
+            return Ok(());
         }
+        // One UNNEST-driven UPDATE instead of one autocommit round-trip per
+        // track — a full drag-reorder of an N-track playlist was N statements
+        // (and non-atomic: a mid-loop failure left a half-applied order).
+        // `WITH ORDINALITY` numbers the ids in array order, 1-based, so
+        // `ord - 1` reproduces the historical 0-based positions.
+        sqlx::query(
+            r#"
+            UPDATE audio.playlist_items AS pi
+               SET position = (t.ord - 1)::int
+              FROM unnest($1::uuid[]) WITH ORDINALITY AS t(id, ord)
+             WHERE pi.id = t.id AND pi.playlist_id = $2
+            "#,
+        )
+        .bind(item_ids)
+        .bind(playlist_id)
+        .execute(&*self.pool)
+        .await
+        .map_err(|e| DomainError::database_error(format!("Failed to reorder: {}", e)))?;
         Ok(())
     }
 

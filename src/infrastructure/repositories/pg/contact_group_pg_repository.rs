@@ -177,6 +177,20 @@ impl ContactGroupRepository for ContactGroupPgRepository {
         Ok(())
     }
 
+    async fn count_contacts_in_group(&self, group_id: &Uuid) -> ContactRepositoryResult<i64> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM carddav.group_memberships WHERE group_id = $1")
+            .bind(group_id)
+            .fetch_one(self.pool.as_ref())
+            .await
+            .map_err(|e| {
+                DomainError::new(
+                    ErrorKind::InternalError,
+                    "ContactGroup",
+                    format!("Failed to count contacts in group: {}", e),
+                )
+            })
+    }
+
     async fn get_contacts_in_group(
         &self,
         group_id: &Uuid,

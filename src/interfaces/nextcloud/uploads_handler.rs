@@ -325,15 +325,16 @@ async fn handle_put_chunk(
         .map_err(|e| AppError::bad_request(format!("Invalid chunk path: {}", e)))?;
 
     let max_chunk = state.core.config.storage.chunk_max_bytes;
-    // A re-PUT of an existing chunk (client retry) makes the running
-    // session counter stale — drop it so the next gate rebuilds from disk.
-    let overwrite = tokio::fs::metadata(&chunk_path).await.is_ok();
     // No client-side integrity contract on the NC chunked surface — the
     // NC desktop client validates the assembled-file ETag against the
     // server-side `oc:checksums` after MOVE. So we skip per-chunk
     // hashing here (peak heap stays at ~one HTTP frame).
+    //
+    // Retry detection (a re-PUT makes the running session counter stale)
+    // rides on the open itself now — `created_fresh` from the `create_new`
+    // probe replaces the extra per-chunk `stat` this path used to issue.
     let streamed = stream_body_to_path(req.into_body(), &chunk_path, max_chunk, None).await?;
-    if overwrite {
+    if !streamed.created_fresh {
         nc.chunked_uploads
             .forget_session_bytes(&user.username, upload_id);
     } else {

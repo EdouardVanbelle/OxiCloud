@@ -96,6 +96,10 @@ pub trait CalendarStoragePort: Send + Sync + 'static {
     ) -> Result<CalendarEventDto, DomainError>;
     async fn delete_event(&self, event_id: &str) -> Result<(), DomainError>;
     async fn get_event(&self, event_id: &str) -> Result<CalendarEventDto, DomainError>;
+    /// Narrow projection for authz gates: the owning calendar of an event
+    /// without hydrating the full event row (notably `ical_data`, the raw
+    /// iCalendar body, which can run to tens of KB on recurring events).
+    async fn calendar_id_for_event(&self, event_id: &str) -> Result<String, DomainError>;
     /// Indexed single-row lookup by iCalendar UID — the CalDAV
     /// object-resource paths must use this instead of listing the whole
     /// calendar (every row + its `ical_data`) and filtering client-side.

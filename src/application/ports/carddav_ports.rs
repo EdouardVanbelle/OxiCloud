@@ -106,6 +106,9 @@ pub trait ContactStoragePort: Send + Sync + 'static {
         contact_id: &Uuid,
     ) -> Result<(), DomainError>;
     async fn get_contacts_in_group(&self, group_id: &Uuid) -> Result<Vec<Contact>, DomainError>;
+    /// Membership count without hydrating the contacts (vCard TEXT +
+    /// 3 JSONB parses per row) — for group summary DTOs.
+    async fn count_contacts_in_group(&self, group_id: &Uuid) -> Result<i64, DomainError>;
     async fn get_groups_for_contact(
         &self,
         contact_id: &Uuid,

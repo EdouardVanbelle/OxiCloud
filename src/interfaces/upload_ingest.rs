@@ -291,6 +291,10 @@ pub fn stream_from_files(
 pub struct StreamedToPath {
     /// Total bytes written.
     pub bytes_written: u64,
+    /// `true` when the destination did not exist before this call — the
+    /// open itself detects it (`create_new` + AlreadyExists fallback), so
+    /// retry-detection callers don't need a separate `stat` per chunk.
+    pub created_fresh: bool,
     /// Lowercase hex digest, populated only when `checksum_alg=Some(_)`
     /// was passed. The algorithm is identified by [`StreamedToPath::alg`].
     pub checksum_hex: Option<String>,
@@ -329,9 +333,32 @@ pub async fn stream_body_to_path(
     // per frame (benches/UPLOAD-SPOOL.md). Same capacity as the dedup
     // handler's spool loop. On the error paths below the partial file is
     // removed, so silently dropping unflushed buffer contents is fine.
-    let file = tokio::fs::File::create(path)
+    //
+    // `create_new` first: the common fresh-chunk case stays one open AND
+    // doubles as the retry probe (AlreadyExists → truncate-open), so callers
+    // that need overwrite detection no longer pay a separate stat per chunk.
+    let (file, created_fresh) = match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
         .await
-        .map_err(|e| AppError::internal_error(format!("Failed to open chunk file: {e}")))?;
+    {
+        Ok(f) => (f, true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let f = tokio::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(path)
+                .await
+                .map_err(|e| AppError::internal_error(format!("Failed to open chunk file: {e}")))?;
+            (f, false)
+        }
+        Err(e) => {
+            return Err(AppError::internal_error(format!(
+                "Failed to open chunk file: {e}"
+            )));
+        }
+    };
     let mut file = tokio::io::BufWriter::with_capacity(512 * 1024, file);
 
     let mut total_bytes: usize = 0;
@@ -377,6 +404,7 @@ pub async fn stream_body_to_path(
 
     Ok(StreamedToPath {
         bytes_written: total_bytes as u64,
+        created_fresh,
         checksum_hex: hasher.map(IncrementalHasher::finalize_hex),
         alg: checksum_alg,
     })

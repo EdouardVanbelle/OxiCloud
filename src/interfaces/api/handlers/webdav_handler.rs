@@ -259,6 +259,13 @@ struct DriveScope {
     db_path: String,
 }
 
+/// Borrow-only `s.strip_prefix(&format!("{prefix}/"))` — the prefix tests
+/// below run on EVERY native WebDAV verb, so they must not allocate a
+/// throwaway `{prefix}/` String per request.
+fn strip_prefix_slash<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    s.strip_prefix(prefix)?.strip_prefix('/')
+}
+
 async fn resolve_webdav_scope(
     state: &Arc<AppState>,
     user_id: Uuid,
@@ -292,8 +299,7 @@ async fn resolve_webdav_scope(
     if normalized == listing_marker {
         return Ok(WebdavTarget::ListDrives);
     }
-    let with_slash = format!("{}/", listing_marker);
-    if let Some(after_prefix) = normalized.strip_prefix(&with_slash) {
+    if let Some(after_prefix) = strip_prefix_slash(normalized, listing_marker) {
         if after_prefix.is_empty() {
             return Ok(WebdavTarget::ListDrives);
         }
@@ -316,7 +322,7 @@ async fn resolve_webdav_scope(
     let root_name = default.root_folder_name.as_str();
     let db_path = if normalized.is_empty() {
         root_name.to_string()
-    } else if normalized == root_name || normalized.starts_with(&format!("{}/", root_name)) {
+    } else if normalized == root_name || strip_prefix_slash(normalized, root_name).is_some() {
         // Pre-refactor bookmark already carried the drive-root prefix.
         normalized.to_string()
     } else {

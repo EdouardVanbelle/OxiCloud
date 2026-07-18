@@ -1005,11 +1005,12 @@ impl ContactUseCase for ContactService {
         self.require_address_book_read_or_public(group.address_book_id(), &user_id)
             .await?;
 
-        // Get the number of contacts in the group
-        let contacts = self.contact_storage.get_contacts_in_group(&id).await?;
+        // Count-only read: the summary DTO never looks at the contacts, so
+        // don't hydrate N full rows (vCard TEXT + 3 JSONB parses each).
+        let members = self.contact_storage.count_contacts_in_group(&id).await?;
 
         let mut dto = ContactGroupDto::from(group);
-        dto.members_count = Some(contacts.len() as i32);
+        dto.members_count = Some(members as i32);
 
         Ok(dto)
     }

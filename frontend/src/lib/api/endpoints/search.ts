@@ -19,6 +19,8 @@ export interface SearchOptions {
 	limit?: number;
 	offset?: number;
 	sortBy?: SortBy;
+	/** Abort the request when a newer search supersedes it. */
+	signal?: AbortSignal;
 }
 
 export function searchFiles(query: string, opts: SearchOptions = {}): Promise<SearchResults> {
@@ -38,7 +40,10 @@ export function searchFiles(query: string, opts: SearchOptions = {}): Promise<Se
 	params.append('limit', String(opts.limit ?? 100));
 	params.append('offset', String(opts.offset ?? 0));
 	params.append('sort_by', opts.sortBy ?? 'relevance');
-	return apiJson<SearchResults>(`/api/search?${params.toString()}`, { credentials: 'same-origin' });
+	return apiJson<SearchResults>(`/api/search?${params.toString()}`, {
+		credentials: 'same-origin',
+		signal: opts.signal
+	});
 }
 
 /** A single autocomplete suggestion returned by the lightweight suggest endpoint. */
@@ -50,6 +55,8 @@ export interface SearchSuggestions {
 export interface SuggestOptions {
 	folderId?: string;
 	limit?: number;
+	/** Abort the request when a newer keystroke supersedes it. */
+	signal?: AbortSignal;
 }
 
 /**
@@ -65,7 +72,8 @@ export function searchSuggest(
 	if (opts.folderId) params.append('folder_id', opts.folderId);
 	if (opts.limit != null) params.append('limit', String(opts.limit));
 	return apiJson<SearchSuggestions>(`/api/search/suggest?${params.toString()}`, {
-		credentials: 'same-origin'
+		credentials: 'same-origin',
+		signal: opts.signal
 	});
 }
 

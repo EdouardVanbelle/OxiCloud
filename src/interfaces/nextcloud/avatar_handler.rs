@@ -1,12 +1,31 @@
 use axum::{
     extract::{Path, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use base64::Engine;
+use bytes::Bytes;
 use std::sync::Arc;
 
 use crate::common::di::AppState;
+
+/// Transcoded-avatar memo: `blake3(stored data URI)` → PNG bytes.
+///
+/// The WebP→PNG transcode below is a full image decode + PNG encode (tens
+/// of ms of CPU) that used to run on EVERY avatar request once the
+/// client's 1 h cache lapsed — per client, per surface. Avatars are tiny
+/// and rarely change; 32 entries bounds the memo to a few MB.
+static AVATAR_PNG_CACHE: std::sync::OnceLock<moka::sync::Cache<[u8; 32], Bytes>> =
+    std::sync::OnceLock::new();
+
+fn avatar_png_cache() -> &'static moka::sync::Cache<[u8; 32], Bytes> {
+    AVATAR_PNG_CACHE.get_or_init(|| {
+        moka::sync::Cache::builder()
+            .max_capacity(32)
+            .time_to_live(std::time::Duration::from_secs(24 * 3600))
+            .build()
+    })
+}
 
 /// Re-encode WebP image bytes as PNG. Returns `None` on decode/encode
 /// failure (treated upstream as "fall through to SVG" — a bad stored
@@ -77,10 +96,11 @@ fn parse_data_uri(uri: &str) -> Option<(String, Vec<u8>)> {
 pub async fn handle_dav_avatar(
     state: State<Arc<AppState>>,
     Path((username, size_with_ext)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Response {
     let size_str = size_with_ext.strip_suffix(".png").unwrap_or(&size_with_ext);
     let size: u32 = size_str.parse().unwrap_or(64);
-    handle_avatar(state, Path((username, size))).await
+    handle_avatar(state, Path((username, size)), headers).await
 }
 
 /// GET /index.php/avatar/{user}/{size}
@@ -98,6 +118,7 @@ pub async fn handle_dav_avatar(
 pub async fn handle_avatar(
     State(state): State<Arc<AppState>>,
     Path((username, size)): Path<(String, u32)>,
+    headers: HeaderMap,
 ) -> Response {
     let size = size.clamp(16, 1024);
 
@@ -113,39 +134,66 @@ pub async fn handle_avatar(
             .get_user_by_username(&username)
             .await
         && let Some(image_uri) = user.image.as_deref()
-        && let Some((mime, bytes)) = parse_data_uri(image_uri)
     {
-        // WebP is OxiCloud's storage format of choice (smaller files,
-        // better quality at a given size) but NextCloud clients have
-        // patchy WebP support — older Qt-based desktop builds, some
-        // mobile image stacks. Transcode to PNG before serving on the
-        // NC surface so every client renders it. PNG is bigger on the
-        // wire but small enough at avatar dimensions that the
-        // tradeoff is worth it. Decode failure falls through to SVG.
-        let (final_mime, final_bytes): (&str, Vec<u8>) = if mime == "image/webp" {
-            match webp_to_png(&bytes) {
-                Some(png) => ("image/png", png),
-                None => return svg_initials_response(&username, size),
-            }
-        } else {
-            // Whatever MIME we stored (`image/png`, `image/jpeg`,
-            // `image/gif`) is universally supported by NC clients.
-            // The `mime` String is moved out via `.as_str()` here, so
-            // bind it locally to keep the borrow alive for the response.
-            (mime_as_static_str(&mime), bytes)
-        };
-        return (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, final_mime),
+        // Content-derived ETag over the STORED value — computable before
+        // any base64 decode or image work. NC desktop/mobile revalidate
+        // avatars every cache lapse (1 h) per surface; this endpoint used
+        // to re-decode (and for WebP re-transcode to PNG — a full image
+        // decode + encode) and re-ship the body every time (ROUND10).
+        let content_hash: [u8; 32] = blake3::hash(image_uri.as_bytes()).into();
+        let etag = format!(
+            "\"av-{}\"",
+            crate::common::fmt::hex_lower(&content_hash[..12])
+        );
+        if let Some(inm) = headers.get(header::IF_NONE_MATCH)
+            && let Ok(client_etag) = inm.to_str()
+            && (client_etag == etag || client_etag == "*")
+        {
+            return Response::builder()
+                .status(StatusCode::NOT_MODIFIED)
+                .header(header::CACHE_CONTROL, "public, max-age=3600")
+                .header(header::ETAG, etag)
+                .body(axum::body::Body::empty())
+                .unwrap();
+        }
+
+        if let Some((mime, bytes)) = parse_data_uri(image_uri) {
+            // WebP is OxiCloud's storage format of choice (smaller files,
+            // better quality at a given size) but NextCloud clients have
+            // patchy WebP support — older Qt-based desktop builds, some
+            // mobile image stacks. Transcode to PNG before serving on the
+            // NC surface so every client renders it. The transcode result
+            // is memoised by content hash — decode+encode ran per request
+            // before. Decode failure falls through to SVG.
+            let (final_mime, final_bytes): (&str, Bytes) = if mime == "image/webp" {
+                if let Some(png) = avatar_png_cache().get(&content_hash) {
+                    ("image/png", png)
+                } else {
+                    match webp_to_png(&bytes) {
+                        Some(png) => {
+                            let png = Bytes::from(png);
+                            avatar_png_cache().insert(content_hash, png.clone());
+                            ("image/png", png)
+                        }
+                        None => return svg_initials_response(&username, size),
+                    }
+                }
+            } else {
+                // Whatever MIME we stored (`image/png`, `image/jpeg`,
+                // `image/gif`) is universally supported by NC clients.
+                (mime_as_static_str(&mime), Bytes::from(bytes))
+            };
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, final_mime)
                 // Shorter cache than the SVG fallback because users can
                 // re-upload their picture at any time — the URL is the
                 // same so a long immutable cache would pin the old one.
-                (header::CACHE_CONTROL, "public, max-age=3600"),
-            ],
-            final_bytes,
-        )
-            .into_response();
+                .header(header::CACHE_CONTROL, "public, max-age=3600")
+                .header(header::ETAG, etag)
+                .body(axum::body::Body::from(final_bytes))
+                .unwrap();
+        }
     }
 
     svg_initials_response(&username, size)

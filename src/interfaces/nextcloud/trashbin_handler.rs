@@ -16,7 +16,7 @@ use crate::common::di::AppState;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::nextcloud::webdav_handler::{
     batch_resolve_ids, extract_nc_subpath_from_dest, format_oc_id, nc_id_of, nc_to_internal_path,
-    write_text_element,
+    write_date_element, write_etag_element, write_text_element,
 };
 
 const HEADER_DAV: HeaderName = HeaderName::from_static("dav");
@@ -445,11 +445,12 @@ fn write_trash_item_response<W: std::io::Write>(
     // d:displayname
     write_text_element(xml, "d:displayname", &item.name)?;
 
-    // d:getlastmodified
-    write_text_element(xml, "d:getlastmodified", &item.trashed_at.to_rfc2822())?;
+    // d:getlastmodified — stack-rendered (common::fmt), chrono fallback for
+    // out-of-range timestamps; byte-identical to the old `to_rfc2822()`.
+    write_date_element(xml, "d:getlastmodified", item.trashed_at.timestamp(), true)?;
 
-    // d:getetag
-    write_text_element(xml, "d:getetag", &format!("\"{}\"", item.original_id))?;
+    // d:getetag — exact-size quoted alloc instead of the format! interpreter.
+    write_etag_element(xml, "d:getetag", &item.original_id)?;
 
     // d:resourcetype
     if item.item_type == "folder" {
@@ -478,7 +479,8 @@ fn write_trash_item_response<W: std::io::Write>(
     // oc:fileid and oc:id — resolved up front in a batch query.
     let file_id = nc_id_of(id_map, &item.original_id);
     if let Some(id) = file_id {
-        write_text_element(xml, "oc:fileid", &id.to_string())?;
+        let mut ibuf = [0u8; 21];
+        write_text_element(xml, "oc:fileid", crate::common::fmt::i64_str(&mut ibuf, id))?;
         let oc_id = format_oc_id(id, file_id_svc);
         write_text_element(xml, "oc:id", &oc_id)?;
     }
@@ -491,11 +493,14 @@ fn write_trash_item_response<W: std::io::Write>(
     write_text_element(xml, "nc:trashbin-original-location", original_location)?;
 
     // nc:trashbin-deletion-time
-    write_text_element(
-        xml,
-        "nc:trashbin-deletion-time",
-        &item.trashed_at.timestamp().to_string(),
-    )?;
+    {
+        let mut ibuf = [0u8; 21];
+        write_text_element(
+            xml,
+            "nc:trashbin-deletion-time",
+            crate::common::fmt::i64_str(&mut ibuf, item.trashed_at.timestamp()),
+        )?;
+    }
 
     // oc:permissions — empty in trash
     write_text_element(xml, "oc:permissions", "")?;

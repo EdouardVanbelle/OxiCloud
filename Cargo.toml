@@ -37,7 +37,7 @@ chrono = { version = "0.4.45", features = ["serde"] }
 # component. If a spec conformance gap is found, we contribute upstream.
 ical = "0.11"
 http-body = "1.0.1"
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = "1.0.150"
 futures = "0.3.32"
 async-stream = "0.3.6"
@@ -348,6 +348,25 @@ required-features = ["bench"]
 [[example]]
 name = "bench_micro_allocs"
 path = "examples/bench_micro_allocs.rs"
+required-features = ["bench"]
+
+# Round-10 battery ────────────────────────────────────────────────────────────
+
+# Round-10 CPU/alloc micro-pack — auth identity build, basic-auth hit,
+# PROPFIND/trashbin int+date emits, webdav scope probe, base_url snapshot,
+# JWT verify-miss keys, cipher Arc, request-id. No Postgres.
+[[example]]
+name = "bench_round10_micro"
+path = "examples/bench_round10_micro.rs"
+required-features = ["bench"]
+
+# Round-10 query-shape pack — share download double-fetch, calendar-id narrow
+# read, contact-group COUNT, trash partial indexes, favorites/recents binary
+# UUID decode, save_faces UNNEST, playlist reorder UNNEST, search 3-query
+# join!, move drive-lookup join! (needs the dev Postgres up).
+[[example]]
+name = "bench_round10_queries"
+path = "examples/bench_round10_queries.rs"
 required-features = ["bench"]
 
 # Round-9 battery ─────────────────────────────────────────────────────────────

@@ -37,10 +37,21 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// Two-digit decimal pairs `"00" … "99"` — the same table-driven rendering
+/// `core::fmt` uses for integer `Display`. One lookup replaces a div+mod
+/// pair per two digits; ROUND10 adopted it after the naive div-by-10 loop
+/// benchmarked SLOWER than `u64::to_string()` (std already uses this LUT).
+const DEC_LUT: &[u8; 200] = b"0001020304050607080910111213141516171819\
+                              2021222324252627282930313233343536373839\
+                              4041424344454647484950515253545556575859\
+                              6061626364656667686970717273747576777879\
+                              8081828384858687888990919293949596979899";
+
 #[inline]
 fn push2(out: &mut [u8], pos: usize, v: u32) {
-    out[pos] = b'0' + (v / 10) as u8;
-    out[pos + 1] = b'0' + (v % 10) as u8;
+    let d = (v as usize) * 2;
+    out[pos] = DEC_LUT[d];
+    out[pos + 1] = DEC_LUT[d + 1];
 }
 
 #[inline]
@@ -142,32 +153,46 @@ pub fn rfc2822_utc(buf: &mut [u8; 31], secs: i64) -> Option<&str> {
     Some(std::str::from_utf8(&buf[..p]).expect("ascii"))
 }
 
+/// Backward two-digit-chunk render of `v` into the tail of `buf`;
+/// returns the first populated index. Shared core of
+/// [`u64_str`] / [`i64_str`].
+#[inline]
+fn digits_to_tail(buf: &mut [u8], mut v: u64) -> usize {
+    let mut pos = buf.len();
+    while v >= 100 {
+        let d = ((v % 100) as usize) * 2;
+        v /= 100;
+        pos -= 2;
+        buf[pos] = DEC_LUT[d];
+        buf[pos + 1] = DEC_LUT[d + 1];
+    }
+    if v >= 10 {
+        let d = (v as usize) * 2;
+        pos -= 2;
+        buf[pos] = DEC_LUT[d];
+        buf[pos + 1] = DEC_LUT[d + 1];
+    } else {
+        pos -= 1;
+        buf[pos] = b'0' + v as u8;
+    }
+    pos
+}
+
 /// `u64::to_string()` without the heap `String`: renders into `buf`,
 /// returns the populated tail slice.
-pub fn u64_str(buf: &mut [u8; 20], mut v: u64) -> &str {
-    let mut pos = buf.len();
-    loop {
-        pos -= 1;
-        buf[pos] = b'0' + (v % 10) as u8;
-        v /= 10;
-        if v == 0 {
-            break;
-        }
-    }
+pub fn u64_str(buf: &mut [u8; 20], v: u64) -> &str {
+    let pos = digits_to_tail(buf, v);
     std::str::from_utf8(&buf[pos..]).expect("ascii")
 }
 
 /// `i64::to_string()` without the heap `String` (quota bytes are `i64`).
 pub fn i64_str(buf: &mut [u8; 21], v: i64) -> &str {
-    let mut u = [0u8; 20];
-    let digits = u64_str(&mut u, v.unsigned_abs());
-    let neg = v < 0;
-    let start = 21 - digits.len() - usize::from(neg);
-    if neg {
-        buf[start] = b'-';
+    let mut pos = digits_to_tail(buf, v.unsigned_abs());
+    if v < 0 {
+        pos -= 1;
+        buf[pos] = b'-';
     }
-    buf[start + usize::from(neg)..].copy_from_slice(digits.as_bytes());
-    std::str::from_utf8(&buf[start..]).expect("ascii")
+    std::str::from_utf8(&buf[pos..]).expect("ascii")
 }
 
 /// Lower-case hex of `bytes` into one preallocated `String`.

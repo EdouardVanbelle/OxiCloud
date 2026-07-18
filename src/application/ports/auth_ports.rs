@@ -26,6 +26,13 @@ pub trait PasswordHasherPort: Send + Sync + 'static {
 }
 
 /// Claims contained in a JWT token
+///
+/// `username` / `email` are `Arc<str>` so the per-request `CurrentUser`
+/// build clones them with a refcount bump instead of copying the strings —
+/// the validation cache already hands the whole struct out behind an `Arc`,
+/// but the two display fields still had to be deep-cloned out of it on
+/// EVERY authenticated request (the "2 allocs/request" item deferred since
+/// ROUND6).
 #[derive(Debug, Clone)]
 pub struct TokenClaims {
     /// Subject identifier (user ID)
@@ -37,9 +44,9 @@ pub struct TokenClaims {
     /// JWT unique ID
     pub jti: String,
     /// Username
-    pub username: String,
+    pub username: Arc<str>,
     /// User email
-    pub email: String,
+    pub email: Arc<str>,
     /// User role
     pub role: String,
 }

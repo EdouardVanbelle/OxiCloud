@@ -56,7 +56,10 @@ const PLAINTEXT_EMIT_SIZE: usize = 64 * 1024;
 /// `BlobStorageBackend` decorator that encrypts blobs at rest.
 pub struct EncryptedBlobBackend {
     inner: Arc<dyn BlobStorageBackend>,
-    cipher: Aes256Gcm,
+    /// `Arc` so the per-op `clone()` handed to `offload_crypto` closures is
+    /// an atomic bump instead of copying the ~240-byte expanded AES-256
+    /// round-key schedule on every chunk read/write.
+    cipher: Arc<Aes256Gcm>,
 }
 
 impl EncryptedBlobBackend {
@@ -64,7 +67,8 @@ impl EncryptedBlobBackend {
     ///
     /// `key` must be exactly 32 bytes (AES-256).
     pub fn new(inner: Arc<dyn BlobStorageBackend>, key: &[u8; 32]) -> Self {
-        let cipher = Aes256Gcm::new_from_slice(key).expect("AES-256 key must be 32 bytes");
+        let cipher =
+            Arc::new(Aes256Gcm::new_from_slice(key).expect("AES-256 key must be 32 bytes"));
         Self { inner, cipher }
     }
 
