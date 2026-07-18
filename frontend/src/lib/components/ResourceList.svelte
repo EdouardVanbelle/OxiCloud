@@ -1,32 +1,38 @@
 <script lang="ts" module>
-	import type { ItemType } from '$lib/api/types';
+	import type { FileItem, FolderItem } from '$lib/api/types';
 
-	/** Normalised row passed to ResourceList; views map their items to this. */
-	export interface ResourceEntry {
-		id: string;
-		name: string;
-		kind: ItemType;
-		iconClass?: string;
-		path?: string | null;
-		size?: number | null;
+	/**
+	 * Per-item envelope info that isn't on `FileItem` / `FolderItem` itself
+	 * — supplied by the page in a `contextMap` keyed by item id.
+	 *
+	 * Example use-cases:
+	 * - `/trash`: `date = deletion_date`, `extras = { driveId, trashedAt }`.
+	 * - `/recent`: `date = accessed_at`, `ownerId = updated_by`.
+	 * - `/favorites`: `ownerId = created_by`.
+	 *
+	 * All fields are optional; ResourceList falls back to the equivalent
+	 * intrinsic on the item (`modified_at`, `created_by`) when absent.
+	 */
+	export interface ItemContext {
+		/**
+		 * Overrides `item.modified_at` for the date column + `modifiedAt`
+		 * group-by dimension. Accepts epoch (ms or s), an ISO string, or
+		 * `null` — same shape `formatDate` and the date-bucket helpers
+		 * already tolerate. `/trash` uses ISO strings; `/recent` uses
+		 * epoch ms.
+		 */
 		date?: number | string | null;
-		typeLabel?: string;
-		/** Owner user id — enables the owner column + vignette when `showOwner`. */
+		/** Overrides `item.created_by` for the owner column + vignette. */
 		ownerId?: string | null;
-		/** Owner display name (resolved by the page). */
-		ownerName?: string | null;
-		/** Per-entry favorite state for the star-toggle widget. */
-		isFavorite?: boolean;
-		/** Stable category key (Folder / Image / …) used by the `type` group-by. */
-		category?: string;
-		/** Modified timestamp (epoch seconds/ms or ISO) for the `modifiedAt` group-by. */
-		modifiedAt?: number | string | null;
+		/** Free-form extras that page-provided `bucketOf` / `contextActions` read. */
+		extras?: Record<string, string | number | null>;
 	}
 
 	/**
 	 * A group-by ("swimlane") dimension a page can offer. `orderBy` is sent to the
-	 * API; the optional `bucketOf` maps an entry to a section key, and `labelOf`
-	 * maps that key to a header label. Omitting `bucketOf` means a flat list.
+	 * API; the optional `bucketOf` maps an item + its context to a section key,
+	 * and `labelOf` maps that key to a header label. Omitting `bucketOf` means a
+	 * flat list.
 	 */
 	export interface GroupByDef {
 		key: string;
@@ -34,7 +40,7 @@
 		orderBy: string;
 		/** Optional icon for the dropdown option (defaults to the group glyph). */
 		icon?: string;
-		bucketOf?: (entry: ResourceEntry) => string | null;
+		bucketOf?: (item: FileItem | FolderItem, ctx?: ItemContext) => string | null;
 		labelOf?: (bucketKey: string) => string;
 	}
 
@@ -44,7 +50,16 @@
 		label: string;
 		icon: string;
 		danger?: boolean;
-		run: (entry: ResourceEntry) => void;
+		run: (item: FileItem | FolderItem, ctx?: ItemContext) => void;
+	}
+
+	/**
+	 * True when the item is a file. Uses structural narrowing on
+	 * `mime_type` (only present on `FileItem`) so callers can pattern
+	 * match without importing the discriminator manually.
+	 */
+	export function isFile(item: FileItem | FolderItem): item is FileItem {
+		return 'mime_type' in item;
 	}
 </script>
 
@@ -59,13 +74,40 @@
 	import VirtualList from '$lib/components/VirtualList.svelte';
 	import { t } from '$lib/i18n/index.svelte';
 	import { files as filesStore } from '$lib/stores/files.svelte';
+	import { preferences } from '$lib/stores/preferences.svelte';
 	import { formatBytes } from '$lib/utils/format';
 	import { formatDate, iconNameFromClass, fileIconKindClass } from '$lib/utils/display';
 	import { gridColumns } from '$lib/utils/grid';
+	import { fileThumbnailUrl } from '$lib/api/endpoints/files';
+	import {
+		canThumbnailClientSide,
+		preloadPdf,
+		queueGenerate as queueThumbnailGenerate
+	} from '$lib/utils/thumbnail';
 
 	interface Props {
 		title: string;
-		items: ResourceEntry[];
+		items: Array<FileItem | FolderItem>;
+		/**
+		 * Per-item envelope info keyed by `item.id`. See `ItemContext`
+		 * above. When absent, ResourceList uses the intrinsic item
+		 * fields (`modified_at`, `created_by`).
+		 */
+		contextMap?: Map<string, ItemContext>;
+		/**
+		 * Set of item ids the caller considers "favorite". When
+		 * provided, the star widget renders next to each row and
+		 * `onfavorite` is invoked on click. Kept as an external Set so
+		 * the page owns the source of truth (e.g. the favorites store).
+		 */
+		favoriteIds?: Set<string>;
+		/**
+		 * Resolve `userId → display name`. Optional; when absent
+		 * `UserVignette` falls back to its own internal resolution.
+		 * Accepts `null` for consistency with the useOwnerCache API
+		 * (returns `null` for a not-yet-resolved id).
+		 */
+		resolveOwnerName?: (userId: string) => string | null | undefined;
 		loading?: boolean;
 		error?: string | null;
 		/** Empty-state primary line. */
@@ -86,7 +128,7 @@
 		/** Override the date column header label (e.g. trash → "Remaining"). */
 		dateLabel?: string;
 		/** Custom renderer for the date cell (e.g. trash expiry chip). */
-		dateCell?: Snippet<[ResourceEntry]>;
+		dateCell?: Snippet<[FileItem | FolderItem, ItemContext | undefined]>;
 		/**
 		 * Optional per-bucket action button rendered alongside the swimlane
 		 * header label. Receives the bucket key (the value `bucketOf`
@@ -99,10 +141,21 @@
 		showOwner?: boolean;
 		/** Allow grid/list toggle (shares the app-wide view mode). */
 		showViewToggle?: boolean;
-		/** Show the dotfile-visibility eye toggle in the toolbar.
-		 * Opt-in per host page — surfaces that never filter dotfiles
-		 * (favorites, trash) leave this false so the button doesn't
-		 * appear to do nothing. Forwarded to ListToolbar. */
+		/** Show the dotfile-visibility eye toggle in the toolbar AND
+		 * apply the corresponding filter to `items` when
+		 * `preferences.hideDotfiles` is true. Opt-in per host page —
+		 * surfaces that never filter dotfiles (favorites, trash) leave
+		 * this false so the button doesn't appear AND the filter never
+		 * kicks in. Single flag governs both concerns so a page can't
+		 * accidentally expose the button without wiring the filter or
+		 * vice-versa.
+		 *
+		 * A host page that needs to surface "N items hidden" in its
+		 * empty state derives that count independently via the shared
+		 * `isDotfile` predicate in `$lib/utils/dotfileFilter` — no
+		 * count-out prop here (avoids a bindable whose $bindable
+		 * default is always shadowed by the effect that would sync it,
+		 * and keeps the component's API one-way-inbound). */
 		showDotfileToggle?: boolean;
 		/** Multi-select checkboxes + selection model. */
 		selectable?: boolean;
@@ -116,20 +169,74 @@
 		reversed?: boolean;
 		/** Called when group-by or direction changes; page should reload page 1. */
 		onreload?: (orderBy: string, reversed: boolean) => void;
-		onopen?: (entry: ResourceEntry) => void;
-		/** Per-entry favorite star toggle. */
-		onfavorite?: (entry: ResourceEntry) => void;
-		/** Selection changed (set of selected entry ids). */
+		onopen?: (item: FileItem | FolderItem) => void;
+		/** Per-item favorite star toggle. */
+		onfavorite?: (item: FileItem | FolderItem) => void;
+		/** Selection changed (set of selected item ids). */
 		onselectionchange?: (ids: Set<string>) => void;
-		actions?: Snippet<[ResourceEntry]>;
+		actions?: Snippet<[FileItem | FolderItem]>;
 		toolbar?: Snippet;
-		/** Batch toolbar shown when items are selected; receives selected entries. */
-		batchToolbar?: Snippet<[ResourceEntry[]]>;
+		/** Batch toolbar shown when items are selected; receives selected items. */
+		batchToolbar?: Snippet<[Array<FileItem | FolderItem>]>;
+		/**
+		 * Render `<img>` thumbnails on file rows and fall back to
+		 * client-side generation when the server doesn't have one
+		 * (image / PDF / video via `$lib/utils/thumbnail`). Default on
+		 * — every view that lists real files gets the same behaviour.
+		 * Set false for views that never benefit (empty states,
+		 * synthetic rows).
+		 */
+		enableThumbnails?: boolean;
+		/**
+		 * Enable per-row drag/drop hooks. Used by the files browser so
+		 * a folder row is a drop target and any row is draggable to
+		 * another folder or the breadcrumb. Pages that don't wire these
+		 * (trash, favorites, recent, shared-with-me) opt out of the
+		 * drag-drop UX entirely by leaving the callbacks unset.
+		 */
+		isDraggable?: (item: FileItem | FolderItem) => boolean;
+		isDropTarget?: (item: FileItem | FolderItem) => boolean;
+		/**
+		 * Which item id currently shows the drop-target highlight (page
+		 * owns the state so it can share it with breadcrumb / other drop
+		 * zones). Only meaningful when `isDropTarget` is provided.
+		 */
+		dropTargetId?: string | null;
+		onitemdragstart?: (e: DragEvent, item: FileItem | FolderItem) => void;
+		onitemdragover?: (e: DragEvent, item: FileItem | FolderItem) => void;
+		onitemdragleave?: (e: DragEvent, item: FileItem | FolderItem) => void;
+		onitemdrop?: (e: DragEvent, item: FileItem | FolderItem) => void;
+		/**
+		 * Override the list-view column header. When provided,
+		 * ResourceList renders this instead of its default header —
+		 * used by the files browser to expose clickable column-sort
+		 * buttons (name / size / type / modified). Pages that override
+		 * this typically also handle sorting on their side (pass
+		 * pre-sorted `items`) rather than relying on `onreload`.
+		 */
+		listHeader?: Snippet;
+		/**
+		 * Open the row on single click (default) vs. double click.
+		 * Files browser prefers double-click so single-click can drive
+		 * the shift-range selection model without accidentally
+		 * navigating.
+		 */
+		openOnDoubleClick?: boolean;
+		/**
+		 * Enable shift-click range selection. The row that was clicked
+		 * without shift becomes the anchor; the next shift-click
+		 * selects the range between anchor and target in visible order.
+		 * Requires `selectable`.
+		 */
+		shiftRangeSelect?: boolean;
 	}
 
 	let {
 		title,
 		items,
+		contextMap,
+		favoriteIds,
+		resolveOwnerName,
 		loading = false,
 		error = null,
 		emptyText,
@@ -159,10 +266,69 @@
 		onselectionchange,
 		actions,
 		toolbar,
-		batchToolbar
+		batchToolbar,
+		enableThumbnails = true,
+		isDraggable,
+		isDropTarget,
+		dropTargetId = null,
+		onitemdragstart,
+		onitemdragover,
+		onitemdragleave,
+		onitemdrop,
+		listHeader: listHeaderOverride,
+		openOnDoubleClick = false,
+		shiftRangeSelect = false
 	}: Props = $props();
 
-	const isEmpty = $derived(items.length === 0);
+	// ── Per-item accessors ────────────────────────────────────────────────────
+	// Every read of an item field goes through these helpers so the
+	// contextMap override for date + owner is centralised. Kept as
+	// module-level fns (not $derived) — they run on each row render;
+	// caching a Map on every items/contextMap change would be wasteful.
+	function ctxOf(id: string): ItemContext | undefined {
+		return contextMap?.get(id);
+	}
+	function dateOf(item: FileItem | FolderItem): number | string | null {
+		return ctxOf(item.id)?.date ?? item.modified_at;
+	}
+	function ownerIdOf(item: FileItem | FolderItem): string | null {
+		const ctx = ctxOf(item.id);
+		return ctx && 'ownerId' in ctx ? (ctx.ownerId ?? null) : (item.created_by ?? null);
+	}
+	function sizeOf(item: FileItem | FolderItem): number | null {
+		return isFile(item) ? item.size : null;
+	}
+	function mimeOf(item: FileItem | FolderItem): string | null {
+		return isFile(item) ? item.mime_type : null;
+	}
+	function iconClassOf(item: FileItem | FolderItem): string {
+		return item.icon_class;
+	}
+
+	// ── Dotfile filter ────────────────────────────────────────────────────────
+	// Two conditions gate the filter (both must be true):
+	//   1. Host page opted in via `showDotfileToggle` — so pages where
+	//      dotfiles are always visible (favorites, trash) never hide them
+	//      even if the user's global preference is on.
+	//   2. User preference is set to hide — read from the reactive
+	//      `preferences.hideDotfiles` getter, so a toolbar click flips
+	//      this list in real time without a reload.
+	// The `visibleItems` derived is what every downstream reader
+	// (bucketing, rendering, "all-selected", range-select) uses, so
+	// hidden rows disappear consistently across grid, list, and every
+	// group-by dimension. `selectedItems` and the reap-stale-selection
+	// effect stay on the raw `items` — selection persists across a
+	// display filter toggle, matching how file managers treat a
+	// filter-hide as "hidden, not gone".
+	const filterDotfiles = $derived(showDotfileToggle && preferences.hideDotfiles);
+	const visibleItems = $derived(
+		filterDotfiles ? items.filter((i) => !i.name.startsWith('.')) : items
+	);
+
+	// isEmpty tracks the VISIBLE list — an all-dotfile page with the
+	// filter on shows the empty state (the host page's `emptyHint` can
+	// reference `hiddenCount` to say "3 items hidden by the filter").
+	const isEmpty = $derived(visibleItems.length === 0);
 	const viewClass = $derived(
 		filesStore.viewMode === 'grid' ? 'files-grid-view' : 'files-list-view'
 	);
@@ -207,27 +373,29 @@
 	 * Partition the visible items into grouped sections when a `bucketOf` is
 	 * active. Server order is preserved within and across buckets (first-seen).
 	 */
-	const sections = $derived.by((): Array<{ key: string; label: string; rows: ResourceEntry[] }> => {
-		const bucketOf = activeGroup?.bucketOf;
-		if (!bucketOf) return [{ key: '', label: '', rows: items }];
-		const order: string[] = [];
-		// Transient bucketing map computed inside $derived.by — not reactive state.
-		// eslint-disable-next-line svelte/prefer-svelte-reactivity
-		const map = new Map<string, ResourceEntry[]>();
-		for (const entry of items) {
-			const k = bucketOf(entry) ?? '∅';
-			if (!map.has(k)) {
-				map.set(k, []);
-				order.push(k);
+	const sections = $derived.by(
+		(): Array<{ key: string; label: string; rows: Array<FileItem | FolderItem> }> => {
+			const bucketOf = activeGroup?.bucketOf;
+			if (!bucketOf) return [{ key: '', label: '', rows: visibleItems }];
+			const order: string[] = [];
+			// Transient bucketing map computed inside $derived.by — not reactive state.
+			// eslint-disable-next-line svelte/prefer-svelte-reactivity
+			const map = new Map<string, Array<FileItem | FolderItem>>();
+			for (const item of visibleItems) {
+				const k = bucketOf(item, ctxOf(item.id)) ?? '∅';
+				if (!map.has(k)) {
+					map.set(k, []);
+					order.push(k);
+				}
+				map.get(k)!.push(item);
 			}
-			map.get(k)!.push(entry);
+			return order.map((k) => ({
+				key: k,
+				label: activeGroup?.labelOf?.(k) ?? k,
+				rows: map.get(k)!
+			}));
 		}
-		return order.map((k) => ({
-			key: k,
-			label: activeGroup?.labelOf?.(k) ?? k,
-			rows: map.get(k)!
-		}));
-	});
+	);
 	const grouped = $derived(!!activeGroup?.bucketOf);
 
 	// ── Selection ─────────────────────────────────────────────────────────────
@@ -239,20 +407,74 @@
 		else selected.add(id);
 		onselectionchange?.(selected);
 	}
+
+	/**
+	 * Anchor id for shift-range selection. The row clicked without
+	 * shift becomes the anchor; the next shift-click selects every
+	 * row between anchor and target in visible order. Kept in module
+	 * state so it survives re-renders that don't drop the component.
+	 */
+	let selectionAnchor = $state<string | null>(null);
+	function selectRange(anchorId: string, targetId: string) {
+		// Range-select over the VISIBLE order — a shift-click can't reach
+		// a row the user can't see.
+		const order = visibleItems.map((i) => i.id);
+		const a = order.indexOf(anchorId);
+		const b = order.indexOf(targetId);
+		if (a < 0 || b < 0) return;
+		const [lo, hi] = a < b ? [a, b] : [b, a];
+		for (let i = lo; i <= hi; i++) selected.add(order[i]);
+		onselectionchange?.(selected);
+	}
+	/**
+	 * Left-click handler that either navigates (`onopen`) or manages
+	 * selection depending on modifiers + config. Returns `true` when
+	 * the click was consumed by selection, so callers can suppress the
+	 * open. Enabled only for `selectable + shiftRangeSelect` callers.
+	 */
+	function handleRowClick(e: MouseEvent, id: string): boolean {
+		if (!selectable || !shiftRangeSelect) return false;
+		if (e.shiftKey && selectionAnchor) {
+			e.preventDefault();
+			selectRange(selectionAnchor, id);
+			return true;
+		}
+		if (e.metaKey || e.ctrlKey) {
+			e.preventDefault();
+			toggleSelected(id);
+			selectionAnchor = id;
+			return true;
+		}
+		// Plain click: only sets the anchor; open (if any) still fires.
+		selectionAnchor = id;
+		return false;
+	}
 	function clearSelection() {
 		selected.clear();
 		onselectionchange?.(selected);
 	}
-	const allSelected = $derived(items.length > 0 && selected.size === items.length);
+	// "All-selected" means every VISIBLE row is selected — hiding
+	// dotfiles by preference shouldn't be confused with "not selected".
+	const allSelected = $derived(
+		visibleItems.length > 0 && visibleItems.every((i) => selected.has(i.id))
+	);
 	function toggleSelectAll() {
 		if (allSelected) clearSelection();
 		else {
 			selected.clear();
-			for (const i of items) selected.add(i.id);
+			// Select all VISIBLE rows only. A user hiding dotfiles then
+			// pressing select-all shouldn't sweep in the hidden files
+			// they can't see — that would be a footgun for destructive
+			// batch actions.
+			for (const i of visibleItems) selected.add(i.id);
 			onselectionchange?.(selected);
 		}
 	}
-	const selectedEntries = $derived(items.filter((i) => selected.has(i.id)));
+	// `selectedItems` and the reap-stale effect below stay on the RAW
+	// items — selection persists across a display-filter toggle, and
+	// stale-selection cleanup only fires when items truly leave the
+	// dataset (reload, delete, etc.), not when the filter hides them.
+	const selectedItems = $derived(items.filter((i) => selected.has(i.id)));
 
 	// Drop selection ids that are no longer present after a reload.
 	$effect(() => {
@@ -276,20 +498,20 @@
 	let ctxOpen = $state(false);
 	let ctxX = $state(0);
 	let ctxY = $state(0);
-	let ctxEntry = $state<ResourceEntry | null>(null);
+	let ctxItem = $state<FileItem | FolderItem | null>(null);
 
-	function openContext(e: MouseEvent, entry: ResourceEntry) {
+	function openContext(e: MouseEvent, item: FileItem | FolderItem) {
 		if (!contextActions?.length) return;
 		e.preventDefault();
 		e.stopPropagation();
-		ctxEntry = entry;
+		ctxItem = item;
 		ctxX = Math.min(e.clientX, window.innerWidth - 220);
 		ctxY = Math.min(e.clientY, window.innerHeight - (contextActions.length * 44 + 24));
 		ctxOpen = true;
 	}
 	function closeContext() {
 		ctxOpen = false;
-		ctxEntry = null;
+		ctxItem = null;
 	}
 
 	// ── Infinite scroll (IntersectionObserver) ────────────────────────────────
@@ -309,9 +531,10 @@
 		return () => obs.disconnect();
 	});
 
-	function ownerTitle(entry: ResourceEntry): string {
-		const owner = entry.ownerName ?? entry.ownerId ?? '';
-		const path = entry.path ?? '';
+	function ownerTitle(item: FileItem | FolderItem): string {
+		const ownerId = ownerIdOf(item);
+		const owner = ownerId ? (resolveOwnerName?.(ownerId) ?? ownerId) : '';
+		const path = item.path ?? '';
 		return [
 			owner && `${t('files.col_owner', 'Owner')}: ${owner}`,
 			path && `${t('files.col_path', 'Location')}: ${path}`
@@ -321,81 +544,131 @@
 	}
 </script>
 
-{#snippet row(entry: ResourceEntry)}
-	{@const iconName = entry.kind === 'folder' ? 'folder' : iconNameFromClass(entry.iconClass)}
+{#snippet row(item: FileItem | FolderItem)}
+	{@const kind = isFile(item) ? 'file' : 'folder'}
+	{@const iconName = kind === 'folder' ? 'folder' : iconNameFromClass(iconClassOf(item))}
+	{@const isFav = favoriteIds?.has(item.id) ?? false}
+	{@const ctx = ctxOf(item.id)}
+	{@const ownerId = ownerIdOf(item)}
+	{@const dateVal = dateOf(item)}
+	{@const sizeVal = sizeOf(item)}
+	{@const mimeVal = mimeOf(item)}
+	{@const draggable = isDraggable?.(item) ?? false}
+	{@const dropTarget = isDropTarget?.(item) ?? false}
 	<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 	<div
 		class="file-item"
-		class:file-item--selected={selectable && selected.has(entry.id)}
+		class:file-item--selected={selectable && selected.has(item.id)}
+		class:file-item--drop-target={dropTarget && dropTargetId === item.id}
 		role={onopen ? 'button' : undefined}
 		tabindex={onopen ? 0 : undefined}
-		aria-label={onopen ? entry.name : undefined}
-		data-testid={entry.name}
-		title={showOwner ? ownerTitle(entry) : undefined}
-		onclick={onopen ? () => onopen(entry) : undefined}
-		onkeydown={onopen ? (e) => e.key === 'Enter' && onopen(entry) : undefined}
-		oncontextmenu={contextActions?.length ? (e) => openContext(e, entry) : undefined}
+		aria-label={onopen ? item.name : undefined}
+		data-testid={item.name}
+		title={showOwner ? ownerTitle(item) : undefined}
+		{draggable}
+		ondragstart={draggable && onitemdragstart ? (e) => onitemdragstart(e, item) : undefined}
+		ondragover={dropTarget && onitemdragover ? (e) => onitemdragover(e, item) : undefined}
+		ondragleave={dropTarget && onitemdragleave ? (e) => onitemdragleave(e, item) : undefined}
+		ondrop={dropTarget && onitemdrop ? (e) => onitemdrop(e, item) : undefined}
+		onclick={onopen
+			? (e) => {
+					// Selection-first for shift/meta clicks; only "open" fires on a
+					// plain click when the click wasn't consumed by selection.
+					if (handleRowClick(e, item.id)) return;
+					if (!openOnDoubleClick) onopen(item);
+				}
+			: undefined}
+		ondblclick={onopen && openOnDoubleClick ? () => onopen(item) : undefined}
+		onkeydown={onopen ? (e) => e.key === 'Enter' && onopen(item) : undefined}
+		oncontextmenu={contextActions?.length ? (e) => openContext(e, item) : undefined}
 	>
 		{#if selectable}
 			<div class="select-cell" role="presentation" onclick={(e) => e.stopPropagation()}>
 				<input
 					type="checkbox"
 					aria-label={t('common.select', 'Select')}
-					data-testid={`resource-list-select-${entry.id}-checkbox`}
-					checked={selected.has(entry.id)}
-					onchange={() => toggleSelected(entry.id)}
+					data-testid={`resource-list-select-${item.id}-checkbox`}
+					checked={selected.has(item.id)}
+					onchange={() => toggleSelected(item.id)}
 				/>
 			</div>
 		{/if}
 		<div class="name-cell">
 			<span class="file-icon {fileIconKindClass(iconName)}">
+				<!-- Type icon always renders. When `enableThumbnails` is on
+				     and the item is a file with a supported mime, an
+				     `<img>` overlays the icon on success; onerror hides it
+				     (revealing the icon) and kicks off client-side
+				     generation for image / PDF / video so the next viewer
+				     hits the server-side thumbnail. -->
 				<Icon name={iconName} />
+				{#if enableThumbnails && kind === 'file' && mimeVal && canThumbnailClientSide( { id: item.id, name: item.name, mime_type: mimeVal } )}
+					<img
+						class="file-thumb"
+						src={fileThumbnailUrl(item.id)}
+						alt=""
+						loading="lazy"
+						onerror={(e) => {
+							const img = e.currentTarget as HTMLImageElement;
+							img.style.display = 'none';
+							if (mimeVal === 'application/pdf') preloadPdf();
+							void queueThumbnailGenerate(
+								{ id: item.id, name: item.name, mime_type: mimeVal },
+								(dataUrl) => {
+									img.src = dataUrl;
+									img.style.display = '';
+								}
+							);
+						}}
+					/>
+				{/if}
 			</span>
-			<span class="name-cell__text">{entry.name}</span>
+			<span class="name-cell__text">{item.name}</span>
 		</div>
 		{#if showOwner}
 			<div class="owner-cell">
-				{#if entry.ownerId}
-					<UserVignette userId={entry.ownerId} fallbackLabel={entry.ownerName ?? undefined} />
+				{#if ownerId}
+					<UserVignette userId={ownerId} fallbackLabel={resolveOwnerName?.(ownerId) ?? undefined} />
 				{:else}
-					<span class="owner-cell__placeholder">{entry.ownerName ?? '—'}</span>
+					<span class="owner-cell__placeholder">—</span>
 				{/if}
 			</div>
 		{/if}
-		{#if showPath}<div class="path-cell">{entry.path ?? ''}</div>{/if}
-		{#if showType}<div class="type-cell">{entry.typeLabel ?? ''}</div>{/if}
+		{#if showPath}<div class="path-cell">{item.path ?? ''}</div>{/if}
+		{#if showType}<div class="type-cell">{item.category ?? ''}</div>{/if}
 		{#if showSize}
-			<div class="size-cell">{entry.size != null ? formatBytes(entry.size) : '—'}</div>
+			<div class="size-cell">{sizeVal != null ? formatBytes(sizeVal) : '—'}</div>
 		{/if}
 		{#if showDate}
 			<div class="date-cell">
-				{#if dateCell}{@render dateCell(entry)}{:else}{formatDate(entry.date)}{/if}
+				{#if dateCell}{@render dateCell(item, ctx)}{:else}{formatDate(dateVal)}{/if}
 			</div>
 		{/if}
 		<div class="grid-meta">
-			{#if showDate && dateCell}<span class="grid-meta__chip">{@render dateCell(entry)}</span>{/if}
+			{#if showDate && dateCell}<span class="grid-meta__chip">{@render dateCell(item, ctx)}</span
+				>{/if}
 			<span class="grid-meta__line">
-				{#if entry.size != null}<span class="grid-meta__size">{formatBytes(entry.size)}</span>{/if}
-				{#if entry.date != null}<span class="grid-meta__date">{formatDate(entry.date)}</span>{/if}
+				{#if sizeVal != null}<span class="grid-meta__size">{formatBytes(sizeVal)}</span>{/if}
+				{#if dateVal != null}<span class="grid-meta__date">{formatDate(dateVal)}</span>{/if}
 			</span>
 		</div>
 		{#if onfavorite}
 			<button
 				class="rl-star"
-				class:rl-star--on={entry.isFavorite}
-				data-testid={`resource-list-favorite-${entry.id}-btn`}
-				title={entry.isFavorite
+				class:rl-star--on={isFav}
+				data-testid={`resource-list-favorite-${item.id}-btn`}
+				title={isFav
 					? t('files.unfavorite', 'Remove favorite')
 					: t('files.favorite', 'Add favorite')}
-				aria-pressed={!!entry.isFavorite}
+				aria-pressed={isFav}
 				onclick={(e) => {
 					e.stopPropagation();
-					onfavorite(entry);
-				}}><Icon name={entry.isFavorite ? 'star' : 'star-outline'} /></button
+					onfavorite(item);
+				}}><Icon name={isFav ? 'star' : 'star-outline'} /></button
 			>
 		{/if}
 		{#if actions}
-			<div class="action-cell">{@render actions(entry)}</div>
+			<div class="action-cell">{@render actions(item)}</div>
 		{/if}
 	</div>
 {/snippet}
@@ -435,7 +708,7 @@
 		<span class="rl-batch__count"
 			>{t('files.selected_count', { count: selected.size }, '{{count}} selected')}</span
 		>
-		<div class="rl-batch__actions">{@render batchToolbar(selectedEntries)}</div>
+		<div class="rl-batch__actions">{@render batchToolbar(selectedItems)}</div>
 	</div>
 {/if}
 
@@ -453,7 +726,7 @@
 	<div class="files-container" bind:clientWidth={gridWidth}>
 		{#if grouped}
 			<div class={viewClass} style="--files-list-columns: {columns}">
-				{@render listHeader()}
+				{#if listHeaderOverride}{@render listHeaderOverride()}{:else}{@render listHeader()}{/if}
 				{#each sections as section (section.key)}
 					<div class="rl-swimlane-header" role="rowheader">
 						<span class="rl-swimlane-header__label">{section.label}</span>
@@ -480,13 +753,13 @@
 			<!-- Flat list view: only the visible rows are mounted. The spacer keeps the
 			     full scroll height so the end-of-list sentinel still fires. -->
 			<div class="files-list-view" style="--files-list-columns: {columns}">
-				{@render listHeader()}
-				<VirtualList {items} rowHeight={56} key={(e) => e.id} {row} />
+				{#if listHeaderOverride}{@render listHeaderOverride()}{:else}{@render listHeader()}{/if}
+				<VirtualList items={visibleItems} rowHeight={56} key={(e) => e.id} {row} />
 			</div>
 		{:else}
 			<!-- Grid view: the windowed list's inner element IS the card grid. -->
 			<VirtualList
-				{items}
+				items={visibleItems}
 				columns={gridCols}
 				rowHeight={240}
 				windowClass="files-grid-view"
@@ -533,7 +806,7 @@
 	</div>
 {/snippet}
 
-{#if ctxOpen && ctxEntry && contextActions}
+{#if ctxOpen && ctxItem && contextActions}
 	<div
 		class="rl-ctx-scrim"
 		role="presentation"
@@ -554,9 +827,9 @@
 				role="menuitem"
 				data-testid={`resource-list-context-${action.key}-item`}
 				onclick={() => {
-					const e = ctxEntry!;
+					const target = ctxItem!;
 					closeContext();
-					action.run(e);
+					action.run(target, ctxOf(target.id));
 				}}
 			>
 				<Icon name={action.icon} />
@@ -626,6 +899,13 @@
 
 	.file-item--selected {
 		background: var(--color-accent-bg);
+	}
+
+	/* Drop-target highlight — mirrors the legacy files browser's cue when
+	   dragging a row over a folder row. */
+	.file-item--drop-target {
+		outline: 2px dashed var(--color-accent);
+		outline-offset: -2px;
 	}
 
 	/* ── Owner vignette ── */

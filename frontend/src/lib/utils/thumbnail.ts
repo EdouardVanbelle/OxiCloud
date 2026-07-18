@@ -22,6 +22,16 @@
 import type { FileItem } from '$lib/api/types';
 import { getCsrfHeaders } from '$lib/api/csrf';
 
+/**
+ * The subset of `FileItem` this module actually reads. Keeping
+ * `FileItem` as the canonical shape means the files browser passes
+ * its DTO through verbatim; ResourceList (which only carries
+ * `ResourceEntry`) builds an object with just these three fields and
+ * satisfies the same structural type — no widening cast, no parallel
+ * named type to maintain.
+ */
+type ThumbnailFile = Pick<FileItem, 'id' | 'name' | 'mime_type'>;
+
 const PDFJS_LIB_URL = '/vendors/pdf.min.mjs';
 const PDFJS_WORKER_URL = '/vendors/pdf.worker.min.mjs';
 
@@ -103,7 +113,7 @@ function blobToDataUrl(blob: Blob): Promise<string> {
 	});
 }
 
-async function sourceToBitmap(file: FileItem, source: string): Promise<ImageBitmap> {
+async function sourceToBitmap(file: ThumbnailFile, source: string): Promise<ImageBitmap> {
 	const mime = file.mime_type ?? '';
 	if (mime.startsWith('image/')) {
 		const response = await fetch(source);
@@ -147,7 +157,7 @@ async function sourceToBitmap(file: FileItem, source: string): Promise<ImageBitm
 }
 
 async function generate(
-	file: FileItem,
+	file: ThumbnailFile,
 	onIconGenerated?: (dataUrl: string) => void,
 	onPreviewGenerated?: (dataUrl: string) => void
 ): Promise<void> {
@@ -186,7 +196,7 @@ async function generate(
  * handle. Callers use this to decide whether to install the fallback
  * `onerror` handler on the `<img>` in the first place.
  */
-export function canThumbnailClientSide(file: FileItem): boolean {
+export function canThumbnailClientSide(file: ThumbnailFile): boolean {
 	const mime = file.mime_type ?? '';
 	return SUPPORTED_MIME_TYPE.some((re) => re.test(mime));
 }
@@ -221,7 +231,7 @@ export function preloadPdf(): void {
  * immediately, before the server round-trip completes.
  */
 export async function queueGenerate(
-	file: FileItem,
+	file: ThumbnailFile,
 	onIconGenerated?: (dataUrl: string) => void,
 	onPreviewGenerated?: (dataUrl: string) => void
 ): Promise<void> {

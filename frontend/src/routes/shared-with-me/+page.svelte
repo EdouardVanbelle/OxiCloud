@@ -5,12 +5,13 @@
 	import { onMount } from 'svelte';
 	import { dateBucket, resolveOwnerName, typeLabel } from '$lib/api/endpoints/favorites';
 	import { fetchSharedWithMe, type IncomingGrantItem } from '$lib/api/endpoints/grants';
-	import type { FileItem } from '$lib/api/types';
+	import type { FileItem, FolderItem } from '$lib/api/types';
 	import { lazyComponent } from '$lib/composables/lazyComponent.svelte';
 	import { useOwnerCache } from '$lib/composables/useOwnerCache.svelte';
 	import ResourceList, {
+		isFile,
 		type GroupByDef,
-		type ResourceEntry
+		type ItemContext
 	} from '$lib/components/ResourceList.svelte';
 	import { t } from '$lib/i18n/index.svelte';
 	import { session } from '$lib/stores/session.svelte';
@@ -31,36 +32,24 @@
 
 	const sharers = useOwnerCache(resolveOwnerName);
 
-	const byId = $derived(new Map(raw.map((it) => [it.resource.id, it])));
+	// Drive resources also surface in `/api/grants/incoming/resources`
+	// since the role_grants rewrite, but they don't belong in the
+	// file/folder ResourceList — they're reached through the drive
+	// picker / breadcrumb. Filter them out so the row UI keeps its
+	// file|folder type contract.
+	const fileFolderGrants = $derived(raw.filter((it) => it.resource_type !== 'drive'));
 
-	const entries = $derived(
-		// Drive resources also surface in `/api/grants/incoming/resources`
-		// since the role_grants rewrite, but they don't belong in the
-		// file/folder ResourceList — they're reached through the drive
-		// picker / breadcrumb. Filter them out here so the row UI keeps
-		// its file|folder type contract.
-		raw
-			.filter((it) => it.resource_type !== 'drive')
-			.map((it): ResourceEntry => {
-				const isFile = it.resource_type === 'file';
-				return {
-					id: it.resource.id,
-					name: it.resource.name,
-					kind: it.resource_type as 'file' | 'folder',
-					iconClass: it.resource.icon_class,
-					// The sharer becomes the "owner" surface — ResourceList renders
-					// `<UserVignette userId>` (avatar / name / external badge),
-					// resolved lazily via `/api/users/{id}`. `path` keeps the
-					// resource's real location so the row still shows where it
-					// lives, not a translated string.
-					ownerId: it.granted_by ?? null,
-					ownerName: sharers.name(it.granted_by),
-					path: it.resource.path,
-					size: isFile ? (it.resource as FileItem).size : null,
-					date: it.granted_at,
-					category: isFile ? it.resource.category : 'Folder'
-				};
-			})
+	// `granted_at` → `ctx.date`; `granted_by` overrides the owner column
+	// so the sharer shows up in the vignette (rather than the resource's
+	// intrinsic `created_by`, which is a stranger for grantees).
+	const items = $derived(fileFolderGrants.map((it) => it.resource as FileItem | FolderItem));
+	const contextMap = $derived(
+		new Map<string, ItemContext>(
+			fileFolderGrants.map((it) => [
+				it.resource.id,
+				{ date: it.granted_at, ownerId: it.granted_by ?? null } satisfies ItemContext
+			])
+		)
 	);
 
 	// Server-supported sort_by values (see grant_handler.rs:615):
@@ -75,21 +64,21 @@
 			key: 'sharedBy',
 			label: t('groupby.sharedBy', 'Shared by'),
 			orderBy: 'granted_by',
-			bucketOf: (e) => e.ownerId ?? null,
+			bucketOf: (_item, ctx) => ctx?.ownerId ?? null,
 			labelOf: (id) => sharers.label(id)
 		},
 		{
 			key: 'type',
 			label: t('groupby.type', 'Type'),
 			orderBy: 'type',
-			bucketOf: (e) => e.category ?? 'other',
+			bucketOf: (item) => item.category ?? 'other',
 			labelOf: (k) => typeLabel(k)
 		},
 		{
 			key: 'sharedAt',
 			label: t('groupby.sharedAt', 'Shared date'),
 			orderBy: 'granted_at',
-			bucketOf: (e) => dateBucket(e.date)
+			bucketOf: (_item, ctx) => dateBucket(ctx?.date)
 		}
 	];
 
@@ -128,16 +117,13 @@
 		if (viewerOpen) void fileViewer.load();
 	});
 
-	function open(entry: ResourceEntry) {
-		if (entry.kind === 'folder') {
-			goto(resolve(`/files/${entry.id}`));
+	function open(item: FileItem | FolderItem) {
+		if (!isFile(item)) {
+			goto(resolve(`/files/${item.id}`));
 			return;
 		}
-		const item = byId.get(entry.id);
-		if (item) {
-			viewerFile = item.resource as FileItem;
-			viewerOpen = true;
-		}
+		viewerFile = item;
+		viewerOpen = true;
 	}
 
 	onMount(() => load(true));
@@ -168,7 +154,9 @@
 
 <ResourceList
 	title={t('nav.shared_with_me', 'Shared with me')}
-	items={entries}
+	{items}
+	{contextMap}
+	resolveOwnerName={(id) => sharers.name(id)}
 	{loading}
 	{error}
 	emptyText={t('shared_with_me.empty', 'Nothing has been shared with you yet.')}

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { SvelteSet } from 'svelte/reactivity';
 	import Button from '$lib/components/Button.svelte';
 	import { useOwnerCache } from '$lib/composables/useOwnerCache.svelte';
 	import { errorToast } from '$lib/utils/errors';
@@ -17,12 +18,13 @@
 	import { fileDownloadUrl } from '$lib/api/endpoints/files';
 	import { renameFile, deleteFile } from '$lib/api/endpoints/files';
 	import { renameFolder, deleteFolder } from '$lib/api/endpoints/folders';
-	import type { FileItem } from '$lib/api/types';
+	import type { FileItem, FolderItem } from '$lib/api/types';
 	import { lazyComponent } from '$lib/composables/lazyComponent.svelte';
 	import ResourceList, {
+		isFile,
 		type ContextAction,
 		type GroupByDef,
-		type ResourceEntry
+		type ItemContext
 	} from '$lib/components/ResourceList.svelte';
 	import { confirmDialog, promptDialog } from '$lib/stores/dialogs.svelte';
 	import { t } from '$lib/i18n/index.svelte';
@@ -35,39 +37,27 @@
 	let reversed = $state(false);
 	const owners = useOwnerCache(resolveOwnerName);
 
-	const byId = $derived(new Map(raw.map((it) => [it.resource.id, it])));
-
-	// Favorites view DELIBERATELY ignores `preferences.hideDotfiles`.
-	// Rationale: favoriting is an explicit "I want to keep an eye on
-	// this" action by the user — hiding a starred item on a different
-	// listing page because it starts with `.` contradicts that intent.
-	// The hide preference is for reducing incidental clutter in
-	// algorithmic listings (files/recent/photos), not for overriding
-	// user-intentional pins. Trash follows the same principle for a
-	// safety-net reason; the general rule shaping up: explicit-action
-	// surfaces don't filter, algorithmic surfaces do.
-	const entries = $derived(
-		raw.map((it): ResourceEntry => {
-			const isFile = it.resource_type === 'file';
-			// §14 provenance: `created_by` names who put the item into
-			// the system (Files browser / Favorites / Shared semantic).
-			const ownerId = it.resource.created_by ?? null;
-			return {
-				id: it.resource.id,
-				name: it.resource.name,
-				kind: it.resource_type,
-				iconClass: it.resource.icon_class,
-				path: it.resource.path,
-				size: isFile ? (it.resource as FileItem).size : null,
-				date: it.favorited_at,
-				ownerId,
-				ownerName: owners.name(ownerId),
-				isFavorite: true,
-				category: isFile ? it.resource.category : 'Folder',
-				modifiedAt: it.resource.modified_at
-			};
-		})
+	// Favorites view DELIBERATELY doesn't set `showDotfileToggle` on
+	// the ResourceList below — favoriting is an explicit "I want to
+	// keep an eye on this" action by the user, and hiding a starred
+	// dotfile here would contradict that intent. The
+	// `preferences.hideDotfiles` toggle is for reducing incidental
+	// clutter in algorithmic listings (files / recent / photos), not
+	// for overriding user-intentional pins. Trash follows the same
+	// principle for a safety-net reason; the general rule: explicit-
+	// action surfaces don't filter, algorithmic surfaces do.
+	//
+	// ResourceList consumes raw `FileItem | FolderItem`; the favorites
+	// envelope contributes `favorited_at` via `date` in contextMap. All
+	// items on this page are favorites — pass every id in `favoriteIds`
+	// so the star widget lights up universally.
+	const items = $derived(raw.map((it) => it.resource as FileItem | FolderItem));
+	const contextMap = $derived(
+		new Map<string, ItemContext>(
+			raw.map((it) => [it.resource.id, { date: it.favorited_at } satisfies ItemContext])
+		)
 	);
+	const favoriteIds = $derived(new SvelteSet(items.map((i) => i.id)));
 
 	const groupBys: GroupByDef[] = [
 		{ key: '', label: t('files.name', 'Name'), orderBy: 'name', icon: 'arrow-up-a-z' },
@@ -75,33 +65,33 @@
 			key: 'owner',
 			label: t('groupby.owner', 'Owner'),
 			orderBy: 'owner',
-			bucketOf: (e) => e.ownerId ?? null,
+			bucketOf: (item) => item.created_by ?? null,
 			labelOf: (id) => owners.label(id)
 		},
 		{
 			key: 'type',
 			label: t('groupby.type', 'Type'),
 			orderBy: 'type',
-			bucketOf: (e) => e.category ?? 'other',
+			bucketOf: (item) => item.category ?? 'other',
 			labelOf: (k) => typeLabel(k)
 		},
 		{
 			key: 'size',
 			label: t('groupby.size', 'Size'),
 			orderBy: 'size',
-			bucketOf: (e) => sizeBucket(e.kind === 'folder' ? null : e.size)
+			bucketOf: (item) => sizeBucket(isFile(item) ? item.size : null)
 		},
 		{
 			key: 'favoriteDate',
 			label: t('groupby.favoriteDate', 'Favorite date'),
 			orderBy: 'favorited_at',
-			bucketOf: (e) => dateBucket(e.date)
+			bucketOf: (_item, ctx) => dateBucket(ctx?.date)
 		},
 		{
 			key: 'modifiedAt',
 			label: t('groupby.modifiedAt', 'Modified date'),
 			orderBy: 'modified_at',
-			bucketOf: (e) => dateBucket(e.modifiedAt)
+			bucketOf: (item) => dateBucket(item.modified_at)
 		}
 	];
 
@@ -144,22 +134,20 @@
 		if (shareOpen) void shareDialog.load();
 	});
 
-	function open(entry: ResourceEntry) {
-		if (entry.kind === 'folder') {
-			goto(resolve(`/files/${entry.id}`));
+	function open(item: FileItem | FolderItem) {
+		if (!isFile(item)) {
+			goto(resolve(`/files/${item.id}`));
 			return;
 		}
-		const item = byId.get(entry.id);
-		if (item) {
-			viewerFile = item.resource as FileItem;
-			viewerOpen = true;
-		}
+		viewerFile = item;
+		viewerOpen = true;
 	}
 
-	async function unfavorite(entry: ResourceEntry) {
+	async function unfavorite(item: FileItem | FolderItem) {
+		const kind = isFile(item) ? 'file' : 'folder';
 		try {
-			await removeFavorite(entry.kind, entry.id);
-			raw = raw.filter((i) => i.resource.id !== entry.id);
+			await removeFavorite(kind, item.id);
+			raw = raw.filter((i) => i.resource.id !== item.id);
 		} catch (e) {
 			errorToast(e);
 		}
@@ -172,44 +160,48 @@
 	let shareOpen = $state(false);
 	let shareTarget = $state<{ id: string; name: string; kind: 'file' | 'folder' } | null>(null);
 
-	async function rename(entry: ResourceEntry) {
+	function kindOf(item: FileItem | FolderItem): 'file' | 'folder' {
+		return isFile(item) ? 'file' : 'folder';
+	}
+
+	async function rename(item: FileItem | FolderItem) {
 		const name = await promptDialog({
 			title: t('common.rename', 'Rename'),
-			defaultValue: entry.name,
+			defaultValue: item.name,
 			confirmText: t('common.rename', 'Rename')
 		});
-		if (!name || name === entry.name) return;
+		if (!name || name === item.name) return;
 		try {
-			if (entry.kind === 'file') await renameFile(entry.id, name);
-			else await renameFolder(entry.id, name);
+			if (isFile(item)) await renameFile(item.id, name);
+			else await renameFolder(item.id, name);
 			await load(true, orderByForGroup());
 		} catch (e) {
 			errorToast(e);
 		}
 	}
 
-	async function remove(entry: ResourceEntry) {
+	async function remove(item: FileItem | FolderItem) {
 		const ok = await confirmDialog({
 			title: t('common.delete', 'Delete'),
-			message: t('files.confirm_delete', { name: entry.name }, 'Delete "{{name}}"?'),
+			message: t('files.confirm_delete', { name: item.name }, 'Delete "{{name}}"?'),
 			confirmText: t('common.delete', 'Delete'),
 			danger: true
 		});
 		if (!ok) return;
 		try {
-			if (entry.kind === 'file') await deleteFile(entry.id);
-			else await deleteFolder(entry.id);
-			raw = raw.filter((i) => i.resource.id !== entry.id);
+			if (isFile(item)) await deleteFile(item.id);
+			else await deleteFolder(item.id);
+			raw = raw.filter((i) => i.resource.id !== item.id);
 		} catch (e) {
 			errorToast(e);
 		}
 	}
 
-	function downloadEntry(entry: ResourceEntry) {
-		if (entry.kind !== 'file') return;
+	function downloadItem(item: FileItem | FolderItem) {
+		if (!isFile(item)) return;
 		const a = document.createElement('a');
-		a.href = fileDownloadUrl(entry.id);
-		a.download = entry.name;
+		a.href = fileDownloadUrl(item.id);
+		a.download = item.name;
 		document.body.appendChild(a);
 		a.click();
 		a.remove();
@@ -220,14 +212,14 @@
 			key: 'download',
 			label: t('common.download', 'Download'),
 			icon: 'download',
-			run: downloadEntry
+			run: downloadItem
 		},
 		{
 			key: 'share',
 			label: t('files.share', 'Share'),
 			icon: 'share-alt',
-			run: (e) => {
-				shareTarget = { id: e.id, name: e.name, kind: e.kind };
+			run: (item) => {
+				shareTarget = { id: item.id, name: item.name, kind: kindOf(item) };
 				shareOpen = true;
 			}
 		},
@@ -235,9 +227,9 @@
 			key: 'move',
 			label: t('files.move', 'Move'),
 			icon: 'arrows-alt',
-			run: (e) => {
+			run: (item) => {
 				moveItems = null;
-				moveTarget = { id: e.id, name: e.name, kind: e.kind };
+				moveTarget = { id: item.id, name: item.name, kind: kindOf(item) };
 				moveOpen = true;
 			}
 		},
@@ -247,14 +239,14 @@
 
 	// ── Selection + batch ─────────────────────────────────────────────────────
 	let selectedIds = $state<Set<string>>(new Set());
-	const selectedEntries = $derived(entries.filter((e) => selectedIds.has(e.id)));
+	const selectedItems = $derived(items.filter((i) => selectedIds.has(i.id)));
 
 	function batchTargets() {
-		return selectedEntries.map((e) => ({ id: e.id, name: e.name, kind: e.kind }));
+		return selectedItems.map((i) => ({ id: i.id, name: i.name, kind: kindOf(i) }));
 	}
 
 	function batchDownload() {
-		for (const e of selectedEntries) downloadEntry(e);
+		for (const i of selectedItems) downloadItem(i);
 	}
 
 	async function batchDelete() {
@@ -262,7 +254,7 @@
 			title: t('common.delete', 'Delete'),
 			message: t(
 				'files.confirm_delete_n',
-				{ count: selectedEntries.length },
+				{ count: selectedItems.length },
 				'Delete {{count}} item(s)?'
 			),
 			confirmText: t('common.delete', 'Delete'),
@@ -271,9 +263,9 @@
 		if (!ok) return;
 		try {
 			await Promise.all(
-				selectedEntries.map((e) => (e.kind === 'file' ? deleteFile(e.id) : deleteFolder(e.id)))
+				selectedItems.map((i) => (isFile(i) ? deleteFile(i.id) : deleteFolder(i.id)))
 			);
-			const removed = new Set(selectedEntries.map((e) => e.id));
+			const removed = new Set(selectedItems.map((i) => i.id));
 			raw = raw.filter((i) => !removed.has(i.resource.id));
 			selectedIds = new Set();
 		} catch (e) {
@@ -288,7 +280,10 @@
 
 <ResourceList
 	title={t('nav.favorites', 'Favorites')}
-	items={entries}
+	{items}
+	{contextMap}
+	{favoriteIds}
+	resolveOwnerName={(id) => owners.name(id)}
 	{loading}
 	{error}
 	emptyIcon="star"
