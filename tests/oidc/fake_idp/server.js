@@ -67,7 +67,12 @@ const configuration = {
     {
       client_id: 'oxicloud-test',
       client_secret: 'test-client-secret-not-used-in-prod',
-      redirect_uris: ['http://localhost:8087/api/auth/oidc/callback'],
+      // 8087: automated tests/oidc/oidc.hurl suite. 8090: human-run
+      // tests/oidc/run-manual-sso-only.sh (SSO-only auto-redirect check).
+      redirect_uris: [
+        'http://localhost:8087/api/auth/oidc/callback',
+        'http://localhost:8090/api/auth/oidc/callback',
+      ],
       grant_types: ['authorization_code'],
       response_types: ['code'],
       token_endpoint_auth_method: 'client_secret_post',

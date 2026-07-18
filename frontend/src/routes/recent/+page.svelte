@@ -18,16 +18,22 @@
 	} from '$lib/api/endpoints/favorites';
 	import { fileDownloadUrl, renameFile, deleteFile } from '$lib/api/endpoints/files';
 	import { renameFolder, deleteFolder } from '$lib/api/endpoints/folders';
-	import type { FileItem, ItemType } from '$lib/api/types';
+	import type { FileItem, FolderItem, ItemType } from '$lib/api/types';
 	import { lazyComponent } from '$lib/composables/lazyComponent.svelte';
 	import ResourceList, {
+		isFile,
 		type ContextAction,
 		type GroupByDef,
-		type ResourceEntry
+		type ItemContext
 	} from '$lib/components/ResourceList.svelte';
 	import { confirmDialog, promptDialog } from '$lib/stores/dialogs.svelte';
+	// `preferences.hideDotfiles` + `isDotfile` are read here only to
+	// derive `hiddenCount` for the empty-state message — the actual
+	// filter is inside ResourceList (gated on `showDotfileToggle`).
+	// `replaceSet` is from perf-round-6: `loadFavoriteIds` mutates
+	// the reactive SvelteSet in place instead of re-creating it.
 	import { preferences } from '$lib/stores/preferences.svelte';
-	import { filterDotfiles } from '$lib/utils/dotfileFilter';
+	import { isDotfile } from '$lib/utils/dotfileFilter';
 	import { replaceSet } from '$lib/utils/sets';
 	import { t } from '$lib/i18n/index.svelte';
 
@@ -42,39 +48,28 @@
 	// spares the other favorited rows' readers.
 	const favoriteIds = new SvelteSet<string>();
 
-	const byId = $derived(new Map(raw.map((it) => [it.resource.id, it])));
-
-	const allEntries = $derived(
-		raw.map((it): ResourceEntry => {
-			const isFile = it.resource_type === 'file';
-			// §14 provenance: Recent's mental model is "who touched this
-			// recently", so `updated_by` (the last mutator) is the right
-			// signal — distinct from Favorites/Files which use `created_by`.
-			const ownerId = it.resource.updated_by ?? null;
-			return {
-				id: it.resource.id,
-				name: it.resource.name,
-				kind: it.resource_type,
-				iconClass: it.resource.icon_class,
-				path: it.resource.path,
-				size: isFile ? (it.resource as FileItem).size : null,
-				date: it.accessed_at,
-				ownerId,
-				ownerName: owners.name(ownerId),
-				// Star state comes from the `favoriteIds` prop on ResourceList,
-				// NOT from the entry — reading the SvelteSet here subscribed
-				// this whole mapper to it, so one star click rebuilt all N
-				// entries + re-rendered every visible row (benches/ROUND11.md).
-				category: isFile ? it.resource.category : 'Folder',
-				modifiedAt: it.resource.modified_at
-			};
-		})
+	// Envelope shape: `accessed_at` → `ctx.date`, `updated_by` → `ctx.ownerId`
+	// (Recent's provenance semantic — "who touched this recently" — differs
+	// from Favorites'/Files' `created_by`).
+	//
+	// Dotfile hiding is delegated to ResourceList via `showDotfileToggle`
+	// — the component reads `preferences.hideDotfiles` and drops matching
+	// rows from every downstream reader (bucketing, rendering, select-
+	// all). The `hiddenCount` here is derived independently via the
+	// shared `isDotfile` predicate purely for the empty-state message
+	// below (distinguishes "genuinely empty" from "everything filtered").
+	const items = $derived(raw.map((it) => it.resource as FileItem | FolderItem));
+	const contextMap = $derived(
+		new Map<string, ItemContext>(
+			raw.map((it) => [
+				it.resource.id,
+				{ date: it.accessed_at, ownerId: it.resource.updated_by ?? null } satisfies ItemContext
+			])
+		)
 	);
-	const entries = $derived(filterDotfiles(allEntries, preferences.hideDotfiles));
-	// Count of items suppressed by the dotfile filter — surfaced in
-	// the empty-state hint below so a `.eslintrc`-only Recent doesn't
-	// read as "nothing here yet".
-	const hiddenCount = $derived(preferences.hideDotfiles ? allEntries.length - entries.length : 0);
+	const hiddenCount = $derived(
+		preferences.hideDotfiles ? items.filter((i) => isDotfile(i.name)).length : 0
+	);
 
 	const groupBys: GroupByDef[] = [
 		{ key: '', label: t('files.name', 'Name'), orderBy: 'name', icon: 'arrow-up-a-z' },
@@ -82,33 +77,33 @@
 			key: 'owner',
 			label: t('groupby.owner', 'Owner'),
 			orderBy: 'owner',
-			bucketOf: (e) => e.ownerId ?? null,
+			bucketOf: (_item, ctx) => ctx?.ownerId ?? null,
 			labelOf: (id) => owners.label(id)
 		},
 		{
 			key: 'type',
 			label: t('groupby.type', 'Type'),
 			orderBy: 'type',
-			bucketOf: (e) => e.category ?? 'other',
+			bucketOf: (item) => item.category ?? 'other',
 			labelOf: (k) => typeLabel(k)
 		},
 		{
 			key: 'size',
 			label: t('groupby.size', 'Size'),
 			orderBy: 'size',
-			bucketOf: (e) => sizeBucket(e.kind === 'folder' ? null : e.size)
+			bucketOf: (item) => sizeBucket(isFile(item) ? item.size : null)
 		},
 		{
 			key: 'accessedAt',
 			label: t('groupby.accessedAt', 'Accessed date'),
 			orderBy: 'accessed_at',
-			bucketOf: (e) => dateBucket(e.date)
+			bucketOf: (_item, ctx) => dateBucket(ctx?.date)
 		},
 		{
 			key: 'modifiedAt',
 			label: t('groupby.modifiedAt', 'Modified date'),
 			orderBy: 'modified_at',
-			bucketOf: (e) => dateBucket(e.modifiedAt)
+			bucketOf: (item) => dateBucket(item.modified_at)
 		}
 	];
 
@@ -164,29 +159,37 @@
 		if (shareOpen) void shareDialog.load();
 	});
 
-	function open(entry: ResourceEntry) {
-		if (entry.kind === 'folder') {
-			goto(resolve(`/files/${entry.id}`));
-			return;
-		}
-		const item = byId.get(entry.id);
-		if (item) {
-			viewerFile = item.resource as FileItem;
-			viewerOpen = true;
-		}
+	function kindOf(item: FileItem | FolderItem): ItemType {
+		return isFile(item) ? 'file' : 'folder';
 	}
 
-	async function toggleFavorite(entry: ResourceEntry) {
-		const isFav = favoriteIds.has(entry.id);
+	function open(item: FileItem | FolderItem) {
+		if (!isFile(item)) {
+			goto(resolve(`/files/${item.id}`));
+			return;
+		}
+		viewerFile = item;
+		viewerOpen = true;
+	}
+
+	// Callback signature is `FileItem | FolderItem` (ResourceList
+	// hands raw items to `onfavorite` — the pre-migration
+	// `ResourceEntry` shape is gone). Set mutation is in-place per
+	// perf-round-6: 1 000 toggles @ N=5 000 dropped from 771.9 ms
+	// to 1.9 ms by skipping the full-set copy that every reader of
+	// `favoriteIds` used to see.
+	async function toggleFavorite(item: FileItem | FolderItem) {
+		const isFav = favoriteIds.has(item.id);
+		const kind = kindOf(item);
 		// Optimistic in-place toggle, reverted on failure.
-		if (isFav) favoriteIds.delete(entry.id);
-		else favoriteIds.add(entry.id);
+		if (isFav) favoriteIds.delete(item.id);
+		else favoriteIds.add(item.id);
 		try {
-			if (isFav) await removeFavorite(entry.kind, entry.id);
-			else await addFavorite(entry.kind, entry.id);
+			if (isFav) await removeFavorite(kind, item.id);
+			else await addFavorite(kind, item.id);
 		} catch (e) {
-			if (isFav) favoriteIds.add(entry.id);
-			else favoriteIds.delete(entry.id);
+			if (isFav) favoriteIds.add(item.id);
+			else favoriteIds.delete(item.id);
 			errorToast(e);
 		}
 	}
@@ -214,44 +217,44 @@
 	let shareOpen = $state(false);
 	let shareTarget = $state<{ id: string; name: string; kind: ItemType } | null>(null);
 
-	async function rename(entry: ResourceEntry) {
+	async function rename(item: FileItem | FolderItem) {
 		const name = await promptDialog({
 			title: t('common.rename', 'Rename'),
-			defaultValue: entry.name,
+			defaultValue: item.name,
 			confirmText: t('common.rename', 'Rename')
 		});
-		if (!name || name === entry.name) return;
+		if (!name || name === item.name) return;
 		try {
-			if (entry.kind === 'file') await renameFile(entry.id, name);
-			else await renameFolder(entry.id, name);
+			if (isFile(item)) await renameFile(item.id, name);
+			else await renameFolder(item.id, name);
 			await load(true, orderByForGroup());
 		} catch (e) {
 			errorToast(e);
 		}
 	}
 
-	async function remove(entry: ResourceEntry) {
+	async function remove(item: FileItem | FolderItem) {
 		const ok = await confirmDialog({
 			title: t('common.delete', 'Delete'),
-			message: t('files.confirm_delete', { name: entry.name }, 'Delete "{{name}}"?'),
+			message: t('files.confirm_delete', { name: item.name }, 'Delete "{{name}}"?'),
 			confirmText: t('common.delete', 'Delete'),
 			danger: true
 		});
 		if (!ok) return;
 		try {
-			if (entry.kind === 'file') await deleteFile(entry.id);
-			else await deleteFolder(entry.id);
-			raw = raw.filter((i) => i.resource.id !== entry.id);
+			if (isFile(item)) await deleteFile(item.id);
+			else await deleteFolder(item.id);
+			raw = raw.filter((i) => i.resource.id !== item.id);
 		} catch (e) {
 			errorToast(e);
 		}
 	}
 
-	function downloadEntry(entry: ResourceEntry) {
-		if (entry.kind !== 'file') return;
+	function downloadItem(item: FileItem | FolderItem) {
+		if (!isFile(item)) return;
 		const a = document.createElement('a');
-		a.href = fileDownloadUrl(entry.id);
-		a.download = entry.name;
+		a.href = fileDownloadUrl(item.id);
+		a.download = item.name;
 		document.body.appendChild(a);
 		a.click();
 		a.remove();
@@ -262,14 +265,14 @@
 			key: 'download',
 			label: t('common.download', 'Download'),
 			icon: 'download',
-			run: downloadEntry
+			run: downloadItem
 		},
 		{
 			key: 'share',
 			label: t('files.share', 'Share'),
 			icon: 'share-alt',
-			run: (e) => {
-				shareTarget = { id: e.id, name: e.name, kind: e.kind };
+			run: (item) => {
+				shareTarget = { id: item.id, name: item.name, kind: kindOf(item) };
 				shareOpen = true;
 			}
 		},
@@ -277,9 +280,9 @@
 			key: 'move',
 			label: t('files.move', 'Move'),
 			icon: 'arrows-alt',
-			run: (e) => {
+			run: (item) => {
 				moveItems = null;
-				moveTarget = { id: e.id, name: e.name, kind: e.kind };
+				moveTarget = { id: item.id, name: item.name, kind: kindOf(item) };
 				moveOpen = true;
 			}
 		},
@@ -288,21 +291,22 @@
 	];
 
 	// ── Selection + batch ─────────────────────────────────────────────────────
-	// The selected entries come in through the batchToolbar snippet param —
-	// ResourceList already derives them (O(selection), not O(N)); the old
-	// host-side `entries.filter(...)` shadow re-ran a second full scan per
-	// toggle, and its id mirror is gone with it (the component prunes its
-	// own selection when items reload) — benches/ROUND11.md.
+	// Selected items arrive via the batchToolbar snippet param —
+	// ResourceList already derives them (O(selection), not O(N)); a
+	// host-side `items.filter(...)` shadow would re-run a second full scan
+	// per selection toggle, and its id mirror is unnecessary (the component
+	// prunes its own selection when items reload) — benches/ROUND11.md §S1.
+	type Selectable = FileItem | FolderItem;
 
-	function batchTargets(sel: ResourceEntry[]) {
-		return sel.map((e) => ({ id: e.id, name: e.name, kind: e.kind }));
+	function batchTargets(sel: Selectable[]) {
+		return sel.map((i) => ({ id: i.id, name: i.name, kind: kindOf(i) }));
 	}
 
-	function batchDownload(sel: ResourceEntry[]) {
-		for (const e of sel) downloadEntry(e);
+	function batchDownload(sel: Selectable[]) {
+		for (const i of sel) downloadItem(i);
 	}
 
-	async function batchDelete(sel: ResourceEntry[]) {
+	async function batchDelete(sel: Selectable[]) {
 		const ok = await confirmDialog({
 			title: t('common.delete', 'Delete'),
 			message: t('files.confirm_delete_n', { count: sel.length }, 'Delete {{count}} item(s)?'),
@@ -311,10 +315,8 @@
 		});
 		if (!ok) return;
 		try {
-			await Promise.all(
-				sel.map((e) => (e.kind === 'file' ? deleteFile(e.id) : deleteFolder(e.id)))
-			);
-			const removed = new Set(sel.map((e) => e.id));
+			await Promise.all(sel.map((i) => (isFile(i) ? deleteFile(i.id) : deleteFolder(i.id))));
+			const removed = new Set(sel.map((i) => i.id));
 			raw = raw.filter((i) => !removed.has(i.resource.id));
 		} catch (e) {
 			errorToast(e);
@@ -331,7 +333,10 @@
 
 <ResourceList
 	title={t('nav.recent', 'Recent')}
-	items={entries}
+	{items}
+	{contextMap}
+	{favoriteIds}
+	resolveOwnerName={(id) => owners.name(id)}
 	{loading}
 	{error}
 	emptyIcon={hiddenCount > 0 ? 'eye-slash' : 'clock'}
@@ -349,7 +354,6 @@
 	onloadmore={() => load(false, orderByForGroup())}
 	onopen={open}
 	onfavorite={toggleFavorite}
-	{favoriteIds}
 	showOwner
 	showDotfileToggle
 	selectable
@@ -363,7 +367,7 @@
 	}}
 >
 	{#snippet toolbar()}
-		{#if entries.length > 0}
+		{#if items.length > 0}
 			<Button icon="broom" data-testid="recent-clear-btn" onclick={clearAll}
 				>{t('recent.clear', 'Clear recent')}</Button
 			>

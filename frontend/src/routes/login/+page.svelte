@@ -249,6 +249,19 @@
 		}
 	}
 
+	// Shared by onMount step 4 and onSetup: true + navigates away iff OIDC is
+	// the only login method. Centralised so the guard can't drift between the
+	// two call sites (only the `?error=` loop-guard, checked at onMount time,
+	// doesn't apply post-setup — a freshly created admin can't have bounced
+	// off the IdP yet).
+	function tryAutoRedirectToIdp(): boolean {
+		if (oidc.enabled && oidc.password_login_enabled === false && oidc.authorize_endpoint) {
+			window.location.replace(oidc.authorize_endpoint);
+			return true;
+		}
+		return false;
+	}
+
 	async function onSetup(e: SubmitEvent) {
 		e.preventDefault();
 		setupError = '';
@@ -260,10 +273,14 @@
 		busy = true;
 		try {
 			await setupAdmin(setupEmail, setupPassword);
-			setupSuccess = t('auth.admin_success', 'Administrator created. You can now sign in.');
 			setupEmail = setupPassword = setupConfirm = '';
 			// Admin now exists — fold the setup affordance away and return to login.
 			setupAvailable = false;
+			// OIDC-only: the login page would immediately redirect on the next
+			// visit anyway — skip the "you can now sign in" detour and forward
+			// straight to the IdP instead of leaving a dead-end local form.
+			if (tryAutoRedirectToIdp()) return;
+			setupSuccess = t('auth.admin_success', 'Administrator created. You can now sign in.');
 			setTimeout(() => {
 				mode = 'login';
 				setupSuccess = '';
@@ -322,6 +339,12 @@
 		oidc = providers;
 		setupAvailable = !status.initialized;
 		if (setupAvailable) mode = 'setup';
+
+		// 4) Auto-redirect: when OIDC is the only auth method, skip the login page.
+		//    Guard against loops: if the IdP returned ?error=, fall through to the UI.
+		if (!setupAvailable && !page.url.searchParams.has('error') && tryAutoRedirectToIdp()) {
+			return;
+		}
 
 		booting = false;
 	});

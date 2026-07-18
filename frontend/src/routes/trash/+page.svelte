@@ -11,11 +11,12 @@
 		restoreTrashItem
 	} from '$lib/api/endpoints/trash';
 	import { dateBucket, sizeBucket, typeLabel } from '$lib/api/endpoints/favorites';
-	import type { Drive, FileItem, TrashResourceItem } from '$lib/api/types';
+	import type { Drive, FileItem, FolderItem, TrashResourceItem } from '$lib/api/types';
 	import Icon from '$lib/icons/Icon.svelte';
 	import ResourceList, {
+		isFile,
 		type GroupByDef,
-		type ResourceEntry
+		type ItemContext
 	} from '$lib/components/ResourceList.svelte';
 	import { confirmDialog } from '$lib/stores/dialogs.svelte';
 	import { t } from '$lib/i18n/index.svelte';
@@ -30,33 +31,32 @@
 	let groupBy = $state('remainingDays');
 	let reversed = $state(false);
 
-	// Trash view DELIBERATELY ignores `preferences.hideDotfiles`.
-	// Rationale: trash is a safety net — hiding items here would let
-	// an accidentally-trashed dotfile ride the retention timer to
-	// permanent deletion without ever being visible for recovery.
-	// The hide preference is UI cosmetics elsewhere; here it would
-	// become a footgun. Same reasoning applies to any future
-	// "review before destructive action" surface.
-	const entries = $derived(
-		raw.map((it): ResourceEntry => {
-			const isFile = it.resource_type === 'file';
-			return {
-				id: it.resource.id,
-				name: it.resource.name,
-				kind: it.resource_type,
-				iconClass: it.resource.icon_class,
-				path: it.resource.path,
-				size: isFile ? (it.resource as FileItem).size : null,
-				// `date` carries the deletion date — rendered as an expiry chip.
-				date: it.deletion_date,
-				category: isFile ? it.resource.category : 'Folder',
-				modifiedAt: it.trashed_at,
-				// D2b: surface drive_id so the Drive group-by can bucket by it.
-				// Reuses the existing `ownerId` slot on ResourceEntry — both
-				// represent a UUID the listing pivots on; no new field needed.
-				ownerId: it.drive_id
-			};
-		})
+	// Trash view DELIBERATELY doesn't set `showDotfileToggle` on the
+	// ResourceList below. Trash is a safety net — hiding items here
+	// would let an accidentally-trashed dotfile ride the retention
+	// timer to permanent deletion without ever being visible for
+	// recovery. The `preferences.hideDotfiles` toggle is UI cosmetics
+	// elsewhere; here it would become a footgun. Same reasoning
+	// applies to any future "review before destructive action" surface.
+	//
+	// Items go to ResourceList as raw `FileItem | FolderItem`; the trash
+	// envelope's extra fields (`deletion_date`, `trashed_at`, `drive_id`)
+	// travel through `contextMap`, which page-provided group-by / render
+	// callbacks read via the `ctx` parameter.
+	const items = $derived(raw.map((it) => it.resource as FileItem | FolderItem));
+	const contextMap = $derived(
+		new Map<string, ItemContext>(
+			raw.map((it) => [
+				it.resource.id,
+				{
+					date: it.deletion_date,
+					extras: {
+						driveId: it.drive_id,
+						trashedAt: it.trashed_at
+					}
+				}
+			])
+		)
 	);
 
 	// "Drive" group rank: default-personal first, then secondary personal, then
@@ -89,33 +89,39 @@
 			key: 'drive',
 			label: t('trash.groupby.drive', 'Drive'),
 			orderBy: 'name',
-			bucketOf: (e) => (e.ownerId ? driveBucketKey(e.ownerId) : null),
+			bucketOf: (_item, ctx) => {
+				const driveId = ctx?.extras?.driveId;
+				return typeof driveId === 'string' ? driveBucketKey(driveId) : null;
+			},
 			labelOf: driveBucketLabel
 		},
 		{
 			key: 'remainingDays',
 			label: t('trash.groupby.remaining_days', 'Remaining days'),
 			orderBy: 'deletion_date',
-			bucketOf: (e) => remainingDaysBucket(e.date)
+			bucketOf: (_item, ctx) => remainingDaysBucket(ctx?.date)
 		},
 		{
 			key: 'type',
 			label: t('groupby.type', 'Type'),
 			orderBy: 'type',
-			bucketOf: (e) => e.category ?? 'other',
+			bucketOf: (item) => item.category ?? 'other',
 			labelOf: (k) => typeLabel(k)
 		},
 		{
 			key: 'size',
 			label: t('groupby.size', 'Size'),
 			orderBy: 'size',
-			bucketOf: (e) => sizeBucket(e.kind === 'folder' ? null : e.size)
+			bucketOf: (item) => sizeBucket(isFile(item) ? item.size : null)
 		},
 		{
 			key: 'trashedTime',
 			label: t('trash.groupby.trashed_time', 'Trashed time'),
 			orderBy: 'trashed_at',
-			bucketOf: (e) => dateBucket(e.modifiedAt)
+			bucketOf: (_item, ctx) => {
+				const t = ctx?.extras?.trashedAt;
+				return dateBucket(typeof t === 'number' ? t : null);
+			}
 		}
 	];
 
@@ -149,9 +155,9 @@
 		await load(true, orderByForGroup());
 	}
 
-	async function restore(entry: ResourceEntry) {
+	async function restore(item: FileItem | FolderItem) {
 		try {
-			await restoreTrashItem(entry.id);
+			await restoreTrashItem(item.id);
 			ui.notify(t('trash.restored', 'Restored'), 'success');
 			await reloadFromTop();
 		} catch (e) {
@@ -159,7 +165,7 @@
 		}
 	}
 
-	async function purge(entry: ResourceEntry) {
+	async function purge(item: FileItem | FolderItem) {
 		const ok = await confirmDialog({
 			title: t('trash.delete', 'Delete permanently'),
 			message: t('trash.confirm_delete', 'Permanently delete this item? This cannot be undone.'),
@@ -168,7 +174,7 @@
 		});
 		if (!ok) return;
 		try {
-			await deleteTrashItem(entry.id);
+			await deleteTrashItem(item.id);
 			await reloadFromTop();
 		} catch (e) {
 			errorToast(e);
@@ -258,7 +264,8 @@
 
 <ResourceList
 	title={t('nav.trash', 'Trash')}
-	items={entries}
+	{items}
+	{contextMap}
 	{loading}
 	{error}
 	emptyIcon="trash"
@@ -276,15 +283,15 @@
 	}}
 >
 	{#snippet toolbar()}
-		{#if entries.length > 0}
+		{#if items.length > 0}
 			<button class="btn btn-danger" data-testid="trash-empty-btn" onclick={purgeAll}>
 				<Icon name="trash" />
 				{t('trash.empty_action', 'Empty trash')}
 			</button>
 		{/if}
 	{/snippet}
-	{#snippet dateCell(entry)}
-		{@const chip = expiryChip(entry.date)}
+	{#snippet dateCell(_item, ctx)}
+		{@const chip = expiryChip(ctx?.date)}
 		<span class="expiry-chip expiry-chip--{chip.tier}">
 			<Icon name={chip.icon} class="expiry-chip__icon" />
 			{chip.label}
@@ -307,20 +314,20 @@
 			{/if}
 		{/if}
 	{/snippet}
-	{#snippet actions(entry)}
+	{#snippet actions(item)}
 		<button
 			class="btn-action"
-			data-testid={`trash-restore-btn-${entry.id}`}
+			data-testid={`trash-restore-btn-${item.id}`}
 			title={t('trash.restore', 'Restore')}
-			onclick={() => restore(entry)}
+			onclick={() => restore(item)}
 		>
 			<Icon name="undo" />
 		</button>
 		<button
 			class="btn-action btn-action--delete"
-			data-testid={`trash-delete-btn-${entry.id}`}
+			data-testid={`trash-delete-btn-${item.id}`}
 			title={t('trash.delete', 'Delete permanently')}
-			onclick={() => purge(entry)}
+			onclick={() => purge(item)}
 		>
 			<Icon name="trash" />
 		</button>

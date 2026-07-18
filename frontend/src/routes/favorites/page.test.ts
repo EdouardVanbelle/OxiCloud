@@ -14,6 +14,10 @@ vi.mock('$lib/api/endpoints/favorites', () => ({
 }));
 vi.mock('$lib/api/endpoints/files', () => ({
 	fileDownloadUrl: () => '/dl',
+	// ResourceList uses this to build the `<img class="file-thumb">`
+	// src for the fallback path; tests don't render actual thumbnails
+	// but the module import needs to succeed.
+	fileThumbnailUrl: () => '/thumb.png',
 	renameFile: vi.fn(),
 	deleteFile: vi.fn()
 }));

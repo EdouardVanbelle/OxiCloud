@@ -923,12 +923,44 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         next: axum::middleware::Next,
     ) -> axum::response::Response {
         let mut res = next.run(req).await;
+        // A 304 Not Modified carries no entity headers (no Content-Type) since
+        // there's no body — `is_html` would read `None` and misclassify it as
+        // "not html", attaching the strict headerless CSP below. Browsers merge
+        // a 304's headers into the cached document's effective response, so
+        // that stray header would then stack with (and defeat) the SPA's own
+        // hash-based `<meta>` CSP on every revalidated repeat visit — this was
+        // a real bug (see git blame): a browser tab reopened at `/login` after
+        // the first, freshly-fetched visit got permanently stuck behind the
+        // boot spinner because its now-conditionally-cached `200` picked up an
+        // extra hash-less `script-src 'self'` header from the 304 that
+        // revalidated it, blocking the app's own inline hydration script.
+        // Nothing to add on a 304 regardless — its headers must only carry
+        // caching metadata, never a fresh policy decision.
+        if res.status() == axum::http::StatusCode::NOT_MODIFIED {
+            return res;
+        }
         let is_html = res
             .headers()
             .get(axum::http::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| v.starts_with("text/html"));
-        if !is_html {
+        if is_html {
+            // `no-store` (not just `no-cache`) on the SPA shell: Chrome/Firefox/
+            // Safari all treat `no-store` as an explicit opt-out of the
+            // back-forward cache (bfcache), which is a full in-memory snapshot
+            // of the page that bypasses HTTP revalidation entirely — `no-cache`
+            // alone does NOT prevent it. Without this, a shell instance loaded
+            // before a deploy can be resurrected byte-for-byte (old inline
+            // hydration script + old CSP hash) after navigating away and back —
+            // e.g. the OIDC login round-trip's two full-page navigations — and
+            // the resurrected page's old CSP `<meta>` no longer matches assets
+            // referenced by the current build, leaving the app permanently
+            // stuck behind the boot spinner until a hard reload.
+            res.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store"),
+            );
+        } else {
             res.headers_mut().insert(
                 axum::http::header::CONTENT_SECURITY_POLICY,
                 HeaderValue::from_static(
