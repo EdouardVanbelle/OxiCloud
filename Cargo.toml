@@ -350,6 +350,23 @@ name = "bench_micro_allocs"
 path = "examples/bench_micro_allocs.rs"
 required-features = ["bench"]
 
+# Round-7 battery ─────────────────────────────────────────────────────────────
+
+# Range-seek per-request authz duplication — the per-seek require the range
+# branch used to run (warm CPU + cold drive-resolve query) vs 0 after routing
+# through the non-perms range read (needs the dev Postgres up).
+[[example]]
+name = "bench_range_seek_authz"
+path = "examples/bench_range_seek_authz.rs"
+required-features = ["bench"]
+
+# `/api/folders/{id}/resources` row→DTO mapping — per-row name clone vs move
+# (pure CPU; counting allocator).
+[[example]]
+name = "bench_resource_row_map"
+path = "examples/bench_resource_row_map.rs"
+required-features = ["bench"]
+
 # Round-6 battery ─────────────────────────────────────────────────────────────
 
 # CardDAV whole-book REPORT/PROPFIND — buffered double-residency vs cursor

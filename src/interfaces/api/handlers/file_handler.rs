@@ -712,13 +712,15 @@ impl FileHandler {
                     let disposition =
                         Self::content_disposition(&file_dto.name, &file_dto.mime_type, &params);
 
+                    // `file_dto` was already Read-authorized (and the access
+                    // recorded) by `get_file_with_perms` above — every seek in
+                    // a media/PDF scrub is a separate Range request, so
+                    // re-authorizing + re-notifying per seek doubled that work
+                    // for nothing. Use the non-perms range read, matching the
+                    // share-landing and WebDAV range paths which authorize once
+                    // then stream (benches/ROUND7.md).
                     match retrieval
-                        .get_file_range_preloaded_with_perms(
-                            &file_dto,
-                            auth_user.id,
-                            start,
-                            Some(end + 1),
-                        )
+                        .get_file_range_preloaded(&file_dto, start, Some(end + 1))
                         .await
                     {
                         Ok(content) => {

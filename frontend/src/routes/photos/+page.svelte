@@ -17,6 +17,12 @@
 	import { filterDotfiles } from '$lib/utils/dotfileFilter';
 	import { dateTimeFormatFor } from '$lib/utils/display';
 	import { isVideo, photoTimestamp } from '$lib/utils/media';
+	import {
+		PhotoTimeline,
+		type GroupMode,
+		type LayoutMode,
+		type PhotoRow
+	} from '$lib/utils/photoTimeline';
 
 	type Tab = 'moments' | 'places' | 'people';
 	let tab = $state<Tab>('moments');
@@ -49,8 +55,6 @@
 	/** Usable content width of the grid, for the justified layout. */
 	let gridWidth = $state(0);
 
-	type GroupMode = 'day' | 'month' | 'year';
-	type LayoutMode = 'square' | 'justified';
 	const GROUP_KEY = 'oxi-photos-group';
 	const LAYOUT_KEY = 'oxi-photos-layout';
 	let groupMode = $state<GroupMode>('month');
@@ -64,18 +68,10 @@
 		else if (tab === 'people') void peopleView.load();
 	});
 
-	/** EXIF-aware timestamp (seconds → ms), matching the OLD grouping logic. */
-	function bucketKey(d: Date): string {
-		const y = d.getFullYear();
-		if (groupMode === 'year') return `${y}`;
-		const m = `${d.getMonth() + 1}`.padStart(2, '0');
-		if (groupMode === 'month') return `${y}-${m}`;
-		return `${y}-${m}-${`${d.getDate()}`.padStart(2, '0')}`;
-	}
-
-	function bucketLabel(d: Date): string {
-		if (groupMode === 'year') return `${d.getFullYear()}`;
-		if (groupMode === 'month')
+	/** Locale-aware label for a bucket's representative date. */
+	function bucketLabel(d: Date, mode: GroupMode): string {
+		if (mode === 'year') return `${d.getFullYear()}`;
+		if (mode === 'month')
 			return dateTimeFormatFor(undefined, { year: 'numeric', month: 'long' }).format(d);
 		return dateTimeFormatFor(undefined, {
 			weekday: 'long',
@@ -85,132 +81,32 @@
 		}).format(d);
 	}
 
-	const groups = $derived.by(() => {
-		const out: Array<{ key: string; label: string; photos: PhotoItem[] }> = [];
-		// Transient scratch map built inside $derived.by and discarded — not reactive state.
-		// eslint-disable-next-line svelte/prefer-svelte-reactivity
-		const index = new Map<string, number>();
-		for (const p of visibleItems) {
-			const d = new Date(photoTimestamp(p));
-			const key = bucketKey(d);
-			let i = index.get(key);
-			if (i === undefined) {
-				i = out.length;
-				index.set(key, i);
-				out.push({ key, label: bucketLabel(d), photos: [] });
-			}
-			out[i].photos.push(p);
-		}
-		return out;
-	});
-
-	interface JustifiedTile {
-		file: PhotoItem;
-		w: number;
-		h: number;
-	}
-
-	/**
-	 * Pack files into justified rows (Flickr-style): each full row is scaled to
-	 * fill `width` while preserving every tile's aspect ratio. Missing dimensions
-	 * fall back to 1:1.
-	 */
-	function justifiedRows(
-		files: PhotoItem[],
-		width: number
-	): Array<{ height: number; tiles: JustifiedTile[] }> {
-		const gap = 8;
-		const target = window.matchMedia('(max-width: 768px)').matches ? 150 : 200;
-		const rows: Array<{ height: number; tiles: JustifiedTile[] }> = [];
-		let cur: Array<{ file: PhotoItem; aspect: number }> = [];
-		let aspectSum = 0;
-		for (const file of files) {
-			let aspect = file.width && file.height ? file.width / file.height : 1;
-			if (!Number.isFinite(aspect) || aspect <= 0) aspect = 1;
-			aspect = Math.min(Math.max(aspect, 0.4), 3);
-			cur.push({ file, aspect });
-			aspectSum += aspect;
-			const rowWidth = aspectSum * target + (cur.length - 1) * gap;
-			if (rowWidth >= width) {
-				const h = (width - (cur.length - 1) * gap) / aspectSum;
-				rows.push({
-					height: Math.round(h),
-					tiles: cur.map((tt) => ({
-						file: tt.file,
-						w: Math.max(1, Math.round(tt.aspect * h)),
-						h: Math.round(h)
-					}))
-				});
-				cur = [];
-				aspectSum = 0;
-			}
-		}
-		if (cur.length) {
-			rows.push({
-				height: target,
-				tiles: cur.map((tt) => ({
-					file: tt.file,
-					w: Math.max(1, Math.round(tt.aspect * target)),
-					h: target
-				}))
-			});
-		}
-		return rows;
-	}
-
 	// ── Virtualized row model ────────────────────────────────────────────────
-	// Flatten the groups into a single list of fixed-height rows (a date header
-	// or a strip of sized tiles), so VirtualRows can window the whole timeline —
-	// only the rows near the viewport are mounted, regardless of library size.
-	const SQUARE_GAP = 4; // .25rem, matches the old grid gap
-	const SQUARE_MIN = 144; // 9rem minmax floor
-	const JUSTIFIED_GAP = 8; // .photos-jrow margin-bottom
-	const HEADER_H = 44;
-
-	type PhotoRow =
-		| { kind: 'header'; key: string; height: number; label: string; count: number }
-		| { kind: 'tiles'; key: string; height: number; gap: number; tiles: JustifiedTile[] };
-
-	const photoRows = $derived.by<PhotoRow[]>(() => {
-		const W = gridWidth;
-		if (W <= 0) return [];
-		const rows: PhotoRow[] = [];
-		const cols = Math.max(1, Math.floor((W + SQUARE_GAP) / (SQUARE_MIN + SQUARE_GAP)));
-		const cell = (W - (cols - 1) * SQUARE_GAP) / cols;
-		for (const g of groups) {
-			rows.push({
-				kind: 'header',
-				key: `h:${g.key}`,
-				height: HEADER_H,
-				label: g.label,
-				count: g.photos.length
-			});
-			if (layoutMode === 'justified') {
-				const jrows = justifiedRows(g.photos, W);
-				for (let ri = 0; ri < jrows.length; ri++) {
-					rows.push({
-						kind: 'tiles',
-						key: `${g.key}:j${ri}`,
-						height: jrows[ri].height + JUSTIFIED_GAP,
-						gap: JUSTIFIED_GAP,
-						tiles: jrows[ri].tiles
-					});
-				}
-			} else {
-				for (let i = 0; i < g.photos.length; i += cols) {
-					const tiles = g.photos.slice(i, i + cols).map((file) => ({ file, w: cell, h: cell }));
-					rows.push({
-						kind: 'tiles',
-						key: `${g.key}:s${i}`,
-						height: cell + SQUARE_GAP,
-						gap: SQUARE_GAP,
-						tiles
-					});
-				}
-			}
-		}
-		return rows;
-	});
+	// Flatten the date groups into a single list of fixed-height rows (a header
+	// or a strip of sized tiles) that VirtualRows windows. Because pages arrive
+	// newest-first, each append only extends the last group or adds new ones, so
+	// PhotoTimeline re-buckets only the fresh page and re-lays-out only the
+	// groups that changed — a full scroll stays O(N), not O(N²) (the old
+	// `groups`→`photoRows` derive chain re-grouped + re-packed the whole library
+	// on every 60-item page). See photoGrouping.bench.test.ts.
+	// `sync` mutates the timeline's (non-reactive) internal group/row caches and
+	// returns the flat rows. Driven from `$derived.by` for idempotence: if the
+	// deps re-fire without an actual append, `sync` sees a non-growing list and
+	// safely full-rebuilds — same output as the pure `buildPhotoRows`.
+	const timeline = new PhotoTimeline();
+	const photoRows = $derived.by<PhotoRow[]>(() =>
+		timeline.sync(visibleItems, {
+			groupMode,
+			layoutMode,
+			width: gridWidth,
+			mobile:
+				typeof window !== 'undefined' &&
+				typeof window.matchMedia === 'function' &&
+				window.matchMedia('(max-width: 768px)').matches,
+			timestampOf: photoTimestamp,
+			labelOf: bucketLabel
+		})
+	);
 
 	async function loadMore() {
 		if (loading || exhausted) return;

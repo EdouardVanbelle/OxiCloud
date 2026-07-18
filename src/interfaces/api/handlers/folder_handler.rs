@@ -476,7 +476,9 @@ pub async fn list_folder_resources(
                         let dto = FolderDto {
                             etag: resource_id.clone(),
                             id: resource_id,
-                            name: row.name.clone(),
+                            // Folders use fixed icon classes (below), so `name`
+                            // is never borrowed again — move it instead of cloning.
+                            name: row.name,
                             path: String::new(), // cleared — share recipients must not see hierarchy
                             parent_id: row.parent_id.map(|u| u.to_string()),
                             drive_id: row.drive_id,
@@ -514,20 +516,26 @@ pub async fn list_folder_resources(
                         } else {
                             File::compute_etag(&content_hash, modified_at_u)
                         };
+                        // Compute the name-derived icon/category classes first
+                        // (they borrow `&row.name`), so `name` can be moved into
+                        // the DTO below instead of cloned — one fewer String
+                        // alloc per file row (benches/ROUND7.md).
+                        let icon_class = intern_display(icon_class_for(&row.name, mime));
+                        let icon_special_class =
+                            intern_display(icon_special_class_for(&row.name, mime));
+                        let category = intern_display(category_for(&row.name, mime));
                         let dto = FileDto {
                             id: row.id.to_string(),
-                            name: row.name.clone(),
+                            name: row.name,
                             path: String::new(),
                             size: size_bytes,
                             mime_type: intern_mime(mime),
                             folder_id: row.parent_id.map(|u| u.to_string()),
                             created_at: row.created_at.timestamp() as u64,
                             modified_at: row.modified_at.timestamp() as u64,
-                            icon_class: intern_display(icon_class_for(&row.name, mime)),
-                            icon_special_class: intern_display(icon_special_class_for(
-                                &row.name, mime,
-                            )),
-                            category: intern_display(category_for(&row.name, mime)),
+                            icon_class,
+                            icon_special_class,
+                            category,
                             size_formatted: format_file_size(size_bytes),
                             sort_date: None,
                             content_hash,

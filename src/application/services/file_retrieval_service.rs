@@ -287,22 +287,6 @@ impl FileRetrievalService {
         Ok(files.into_iter().map(FileDto::from).collect())
     }
 
-    /// Range read that first consults the RAM content cache (see
-    /// [`Self::get_file_range_preloaded`]).
-    pub async fn get_file_range_preloaded_with_perms(
-        &self,
-        dto: &FileDto,
-        caller_id: Uuid,
-        start: u64,
-        end: Option<u64>,
-    ) -> Result<RangeContent, DomainError> {
-        self.require_file(&dto.id, Permission::Read, caller_id)
-            .await?;
-        // Same throttled Recent recording as the streaming variant.
-        self.notify_file_accessed(caller_id, &dto.id);
-        self.get_file_range_preloaded(dto, start, end).await
-    }
-
     /// Range read for HTTP Range Requests, cache-aware.
     ///
     /// Media players and PDF viewers fetch these files *exclusively* through
