@@ -4,9 +4,7 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use super::cursor::{CursorListResponse, CursorQuery, PageCursor};
-use super::display_helpers::{
-    category_for, format_file_size, icon_class_for, icon_special_class_for,
-};
+use super::display_helpers::{classify_display, format_file_size};
 use super::grant_dto::{ResourceContentDto, ResourceTypeDto};
 use crate::domain::services::authorization::ResourceKind;
 
@@ -84,9 +82,10 @@ impl FavoriteItemDto {
                 .item_mime_type
                 .as_deref()
                 .unwrap_or("application/octet-stream");
-            self.icon_class = icon_class_for(name, mime).to_string();
-            self.icon_special_class = icon_special_class_for(name, mime).to_string();
-            self.category = category_for(name, mime).to_string();
+            let classes = classify_display(name, mime);
+            self.icon_class = classes.icon_class.to_string();
+            self.icon_special_class = classes.icon_special_class.to_string();
+            self.category = classes.category.to_string();
             self.size_formatted = format_file_size(self.item_size.unwrap_or(0) as u64);
         }
         self

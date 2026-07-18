@@ -246,36 +246,34 @@
 	];
 
 	// ── Selection + batch ─────────────────────────────────────────────────────
-	let selectedIds = $state<Set<string>>(new Set());
-	const selectedEntries = $derived(entries.filter((e) => selectedIds.has(e.id)));
+	// Selected entries arrive via the batchToolbar snippet param —
+	// ResourceList derives them once (O(selection)); the old host-side
+	// `entries.filter(...)` shadow re-ran a second full O(N) scan per
+	// selection toggle, and its id mirror is gone with it (the component
+	// prunes its own selection when items reload) — benches/ROUND11.md.
 
-	function batchTargets() {
-		return selectedEntries.map((e) => ({ id: e.id, name: e.name, kind: e.kind }));
+	function batchTargets(sel: ResourceEntry[]) {
+		return sel.map((e) => ({ id: e.id, name: e.name, kind: e.kind }));
 	}
 
-	function batchDownload() {
-		for (const e of selectedEntries) downloadEntry(e);
+	function batchDownload(sel: ResourceEntry[]) {
+		for (const e of sel) downloadEntry(e);
 	}
 
-	async function batchDelete() {
+	async function batchDelete(sel: ResourceEntry[]) {
 		const ok = await confirmDialog({
 			title: t('common.delete', 'Delete'),
-			message: t(
-				'files.confirm_delete_n',
-				{ count: selectedEntries.length },
-				'Delete {{count}} item(s)?'
-			),
+			message: t('files.confirm_delete_n', { count: sel.length }, 'Delete {{count}} item(s)?'),
 			confirmText: t('common.delete', 'Delete'),
 			danger: true
 		});
 		if (!ok) return;
 		try {
 			await Promise.all(
-				selectedEntries.map((e) => (e.kind === 'file' ? deleteFile(e.id) : deleteFolder(e.id)))
+				sel.map((e) => (e.kind === 'file' ? deleteFile(e.id) : deleteFolder(e.id)))
 			);
-			const removed = new Set(selectedEntries.map((e) => e.id));
+			const removed = new Set(sel.map((e) => e.id));
 			raw = raw.filter((i) => !removed.has(i.resource.id));
-			selectedIds = new Set();
 		} catch (e) {
 			errorToast(e);
 		}
@@ -308,18 +306,19 @@
 		cursor = undefined;
 		load(true, orderBy, rev);
 	}}
-	onselectionchange={(ids) => (selectedIds = ids)}
 >
-	{#snippet batchToolbar()}
-		<Button icon="download" data-testid="favorites-batch-download-btn" onclick={batchDownload}
-			>{t('common.download', 'Download')}</Button
+	{#snippet batchToolbar(sel)}
+		<Button
+			icon="download"
+			data-testid="favorites-batch-download-btn"
+			onclick={() => batchDownload(sel)}>{t('common.download', 'Download')}</Button
 		>
 		<Button
 			icon="arrows-alt"
 			data-testid="favorites-batch-move-btn"
 			onclick={() => {
 				moveTarget = null;
-				moveItems = batchTargets();
+				moveItems = batchTargets(sel);
 				moveOpen = true;
 			}}>{t('files.move', 'Move')}</Button
 		>
@@ -327,7 +326,7 @@
 			variant="danger"
 			icon="trash"
 			data-testid="favorites-batch-delete-btn"
-			onclick={batchDelete}>{t('common.delete', 'Delete')}</Button
+			onclick={() => batchDelete(sel)}>{t('common.delete', 'Delete')}</Button
 		>
 	{/snippet}
 </ResourceList>
@@ -342,10 +341,7 @@
 		bind:open={moveOpen}
 		item={moveTarget}
 		items={moveItems}
-		onmoved={() => {
-			selectedIds = new Set();
-			load(true, orderByForGroup());
-		}}
+		onmoved={() => load(true, orderByForGroup())}
 	/>
 {/if}
 {#if shareDialog.component}

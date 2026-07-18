@@ -35,12 +35,12 @@ fn ocs_err(statuscode: u16, message: &str) -> serde_json::Value {
 }
 
 pub async fn handle_capabilities_v1(State(state): State<Arc<AppState>>) -> Response {
-    tracing::info!("[NC] capabilities v1 requested, returning payload");
+    tracing::debug!("[NC] capabilities v1 requested, returning payload");
     capabilities_response(&state, 1)
 }
 
 pub async fn handle_capabilities_v2(State(state): State<Arc<AppState>>) -> Response {
-    tracing::info!("[NC] capabilities v2 requested, returning payload");
+    tracing::debug!("[NC] capabilities v2 requested, returning payload");
     capabilities_response(&state, 2)
 }
 

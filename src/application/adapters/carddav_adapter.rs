@@ -797,9 +797,24 @@ impl CardDavAdapter {
                     ("DAV:", "getlastmodified") => {
                         xml_writer
                             .write_event(Event::Start(BytesStart::new("D:getlastmodified")))?;
-                        xml_writer.write_event(Event::Text(BytesText::new(
-                            &contact.updated_at.to_rfc2822(),
-                        )))?;
+                        // Stack render (ROUND10 §13, byte-identical to
+                        // chrono) with the chrono fallback for
+                        // out-of-range timestamps — per-contact on the
+                        // multiget/PROPFIND path.
+                        let mut lm_buf = [0u8; 31];
+                        match crate::common::fmt::rfc2822_utc(
+                            &mut lm_buf,
+                            contact.updated_at.timestamp(),
+                        ) {
+                            Some(s) => {
+                                xml_writer.write_event(Event::Text(BytesText::new(s)))?;
+                            }
+                            None => {
+                                xml_writer.write_event(Event::Text(BytesText::new(
+                                    &contact.updated_at.to_rfc2822(),
+                                )))?;
+                            }
+                        }
                         xml_writer.write_event(Event::End(BytesEnd::new("D:getlastmodified")))?;
                     }
                     ("urn:ietf:params:xml:ns:carddav", "address-data") => {

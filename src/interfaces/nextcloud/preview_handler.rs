@@ -144,7 +144,16 @@ pub async fn handle_preview(
     // compared it, so every revalidation re-ran the whole pipeline and
     // re-shipped the body (ROUND10). Authz already passed above; a 304
     // must never skip the Read check.
-    let etag = format!("\"thumb-{}-{:?}\"", object_id, thumb_size);
+    let etag = {
+        let s = thumb_size.as_str();
+        let mut e = String::with_capacity(9 + object_id.len() + s.len());
+        e.push_str("\"thumb-");
+        e.push_str(&object_id);
+        e.push('-');
+        e.push_str(s);
+        e.push('"');
+        e
+    };
     if let Some(inm) = headers.get(header::IF_NONE_MATCH)
         && let Ok(client_etag) = inm.to_str()
         && (client_etag == etag || client_etag == "*")

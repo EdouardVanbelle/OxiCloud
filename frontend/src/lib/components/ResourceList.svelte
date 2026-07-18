@@ -119,6 +119,15 @@
 		onopen?: (entry: ResourceEntry) => void;
 		/** Per-entry favorite star toggle. */
 		onfavorite?: (entry: ResourceEntry) => void;
+		/**
+		 * Live favorite-id set for the star state. When provided, the star
+		 * reads membership here instead of `entry.isFavorite`, so a toggle
+		 * repaints one star instead of forcing the host to rebuild every
+		 * entry object (the Recent page paid a full O(N) re-map + re-render
+		 * per star click through its `favoriteIds.has()` inside the entry
+		 * mapper — see benches/ROUND11.md).
+		 */
+		favoriteIds?: ReadonlySet<string> | null;
 		/** Selection changed (set of selected entry ids). */
 		onselectionchange?: (ids: Set<string>) => void;
 		actions?: Snippet<[ResourceEntry]>;
@@ -156,6 +165,7 @@
 		onreload,
 		onopen,
 		onfavorite,
+		favoriteIds = null,
 		onselectionchange,
 		actions,
 		toolbar,
@@ -252,7 +262,22 @@
 			onselectionchange?.(selected);
 		}
 	}
-	const selectedEntries = $derived(items.filter((i) => selected.has(i.id)));
+	// Index rebuilt only when `items` changes; the projection below is then
+	// O(k · log k) in the selection size k instead of the old O(N) full-list
+	// `items.filter(...)` re-scan on every toggle (O(N²)-ish across a
+	// shift-range gesture once the batch toolbar was mounted). Item order is
+	// preserved via the index sort so the toolbar sees the same array the
+	// filter produced.
+	const itemIndexById = $derived(new Map(items.map((i, idx) => [i.id, idx])));
+	const selectedEntries = $derived.by(() => {
+		const picked: { idx: number; item: ResourceEntry }[] = [];
+		for (const id of selected) {
+			const idx = itemIndexById.get(id);
+			if (idx !== undefined) picked.push({ idx, item: items[idx] });
+		}
+		picked.sort((a, b) => a.idx - b.idx);
+		return picked.map((p) => p.item);
+	});
 
 	// Drop selection ids that are no longer present after a reload.
 	$effect(() => {
@@ -380,18 +405,19 @@
 			</span>
 		</div>
 		{#if onfavorite}
+			{@const starred = favoriteIds ? favoriteIds.has(entry.id) : !!entry.isFavorite}
 			<button
 				class="rl-star"
-				class:rl-star--on={entry.isFavorite}
+				class:rl-star--on={starred}
 				data-testid={`resource-list-favorite-${entry.id}-btn`}
-				title={entry.isFavorite
+				title={starred
 					? t('files.unfavorite', 'Remove favorite')
 					: t('files.favorite', 'Add favorite')}
-				aria-pressed={!!entry.isFavorite}
+				aria-pressed={starred}
 				onclick={(e) => {
 					e.stopPropagation();
 					onfavorite(entry);
-				}}><Icon name={entry.isFavorite ? 'star' : 'star-outline'} /></button
+				}}><Icon name={starred ? 'star' : 'star-outline'} /></button
 			>
 		{/if}
 		{#if actions}

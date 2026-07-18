@@ -171,53 +171,71 @@ async fn handle_propfind_session(
     // `handle_assemble`'s destination-URL parsing. Storage-side keying
     // stays on `user.username` — upload sessions are per-user, not
     // per-drive.
-    let session_href = format!(
-        "/remote.php/dav/uploads/{}/{}/",
-        session.raw_username, upload_id
-    );
-    let session_last_modified =
-        chrono::DateTime::<chrono::Utc>::from_timestamp(listing.session_mtime as i64, 0)
-            .unwrap_or_else(chrono::Utc::now)
-            .to_rfc2822();
+    // `write!` formats every element straight into a pre-sized `body`; the
+    // old `push_str(&format!(…))` chain allocated a throwaway String per
+    // element per chunk plus growth reallocations from `String::new()`, and
+    // ran the chrono format interpreter per chunk (benches/ROUND11.md §4:
+    // 2.3-2.6x, allocs 2582 → 772 on a 256-chunk session).
+    use std::fmt::Write as _;
 
-    let mut body = String::new();
+    /// `<d:getlastmodified>` via the stack renderer; chrono fallback for
+    /// out-of-range timestamps (same shape as `nextcloud/webdav_handler`).
+    /// RFC 2822 output contains no XML-special characters by construction.
+    fn write_lastmodified(body: &mut String, secs: i64) {
+        let mut buf = [0u8; 31];
+        match crate::common::fmt::rfc2822_utc(&mut buf, secs) {
+            Some(s) => {
+                let _ = write!(body, "<d:getlastmodified>{}</d:getlastmodified>", s);
+            }
+            None => {
+                let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
+                    .unwrap_or_else(chrono::Utc::now)
+                    .to_rfc2822();
+                let _ = write!(
+                    body,
+                    "<d:getlastmodified>{}</d:getlastmodified>",
+                    xml_escape(&dt)
+                );
+            }
+        }
+    }
+
+    let mut body = String::with_capacity(256 + listing.chunks.len() * 256);
     body.push_str(r#"<?xml version="1.0" encoding="utf-8"?>"#);
     body.push_str(r#"<d:multistatus xmlns:d="DAV:">"#);
 
     // Session collection itself.
     body.push_str("<d:response>");
-    body.push_str(&format!("<d:href>{}</d:href>", xml_escape(&session_href)));
+    let _ = write!(
+        body,
+        "<d:href>/remote.php/dav/uploads/{}/{}/</d:href>",
+        xml_escape(&session.raw_username),
+        xml_escape(upload_id)
+    );
     body.push_str("<d:propstat><d:prop>");
     body.push_str("<d:resourcetype><d:collection/></d:resourcetype>");
-    body.push_str(&format!(
-        "<d:getlastmodified>{}</d:getlastmodified>",
-        xml_escape(&session_last_modified)
-    ));
+    write_lastmodified(&mut body, listing.session_mtime as i64);
     body.push_str("</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>");
     body.push_str("</d:response>");
 
     // One entry per chunk file.
     for chunk in &listing.chunks {
-        let chunk_href = format!(
-            "/remote.php/dav/uploads/{}/{}/{}",
-            session.raw_username, upload_id, chunk.name
-        );
-        let chunk_modified = chrono::DateTime::<chrono::Utc>::from_timestamp(chunk.mtime as i64, 0)
-            .unwrap_or_else(chrono::Utc::now)
-            .to_rfc2822();
-
         body.push_str("<d:response>");
-        body.push_str(&format!("<d:href>{}</d:href>", xml_escape(&chunk_href)));
+        let _ = write!(
+            body,
+            "<d:href>/remote.php/dav/uploads/{}/{}/{}</d:href>",
+            xml_escape(&session.raw_username),
+            xml_escape(upload_id),
+            xml_escape(&chunk.name)
+        );
         body.push_str("<d:propstat><d:prop>");
         body.push_str("<d:resourcetype/>");
-        body.push_str(&format!(
+        let _ = write!(
+            body,
             "<d:getcontentlength>{}</d:getcontentlength>",
             chunk.size
-        ));
-        body.push_str(&format!(
-            "<d:getlastmodified>{}</d:getlastmodified>",
-            xml_escape(&chunk_modified)
-        ));
+        );
+        write_lastmodified(&mut body, chunk.mtime as i64);
         body.push_str("</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>");
         body.push_str("</d:response>");
     }

@@ -625,7 +625,10 @@ impl FileBlobReadRepository {
             SELECT count(*)              AS n,
                    avg(fm.longitude)     AS clng,
                    avg(fm.latitude)      AS clat,
-                   min(fm.file_id::text) AS sample_id
+                   -- Cast once per cluster, not once per row: uuid byte
+                   -- order == canonical-text order, so the chosen sample
+                   -- is identical (benches/ROUND11.md §Q4).
+                   min(fm.file_id)::text AS sample_id
               FROM storage.file_metadata fm
               JOIN storage.files fi ON fi.id = fm.file_id
              WHERE fi.drive_id IN (
@@ -921,7 +924,7 @@ impl FileReadPort for FileBlobReadRepository {
         .map_err(|e| DomainError::internal_error("FileBlobRead", format!("path: {e}")))?
         .ok_or_else(|| DomainError::not_found("File", id))?;
 
-        Ok(StoragePath::from_folder_and_name(row.1.as_deref(), &row.0).0)
+        Ok(StoragePath::from_folder_and_name(row.1.as_deref(), &row.0))
     }
 
     async fn get_parent_folder_id(

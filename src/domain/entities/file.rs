@@ -16,7 +16,6 @@ pub struct FileParts {
     pub id: String,
     pub name: String,
     pub storage_path: StoragePath,
-    pub path_string: String,
     pub size: u64,
     pub mime_type: String,
     pub folder_id: Option<String>,
@@ -48,11 +47,10 @@ pub struct File {
     /// Name of the file including extension
     name: String,
 
-    /// Path to the file in the domain model
+    /// Path to the file in the domain model. Owns the canonical joined
+    /// string; `path_string()` borrows it (the separate duplicate field
+    /// was removed in ROUND11 §20 along with per-segment allocations).
     storage_path: StoragePath,
-
-    /// String representation of the path for API compatibility
-    path_string: String,
 
     /// Size of the file in bytes
     size: u64,
@@ -99,7 +97,6 @@ impl Default for File {
             id: "stub-id".to_string(),
             name: "stub-file.txt".to_string(),
             storage_path: StoragePath::from_string("/"),
-            path_string: "/".to_string(),
             size: 0,
             mime_type: "application/octet-stream".to_string(),
             folder_id: None,
@@ -132,14 +129,10 @@ impl File {
             .unwrap_or_default()
             .as_secs();
 
-        // Store the path string for serialization compatibility
-        let path_string = storage_path.to_path_string();
-
         Ok(Self {
             id,
             name,
             storage_path,
-            path_string,
             size,
             mime_type,
             folder_id,
@@ -165,14 +158,10 @@ impl File {
             return Err(FileError::InvalidFileName(format!("{name}: {reason}")));
         }
 
-        // Store the path string for serialization compatibility
-        let path_string = storage_path.to_path_string();
-
         Ok(Self {
             id,
             name,
             storage_path,
-            path_string,
             size: 0,                            // Folders have zero size
             mime_type: "directory".to_string(), // Standard MIME type for directories
             folder_id: parent_id,
@@ -257,14 +246,10 @@ impl File {
             return Err(FileError::InvalidFileName(format!("{name}: {reason}")));
         }
 
-        // Store the path string for serialization compatibility
-        let path_string = storage_path.to_path_string();
-
         Ok(Self {
             id,
             name,
             storage_path,
-            path_string,
             size,
             mime_type,
             folder_id,
@@ -304,7 +289,7 @@ impl File {
         created_by: Option<Uuid>,
         updated_by: Option<Uuid>,
     ) -> FileResult<Self> {
-        let (storage_path, path_string) = StoragePath::from_folder_and_name(folder_path, &name);
+        let storage_path = StoragePath::from_folder_and_name(folder_path, &name);
 
         let name = normalize_storage_name_owned(name);
         if let Err(reason) = validate_storage_name(&name) {
@@ -315,7 +300,6 @@ impl File {
             id,
             name,
             storage_path,
-            path_string,
             size,
             mime_type,
             folder_id,
@@ -336,7 +320,6 @@ impl File {
             id: self.id,
             name: self.name,
             storage_path: self.storage_path,
-            path_string: self.path_string,
             size: self.size,
             mime_type: self.mime_type,
             folder_id: self.folder_id,
@@ -438,7 +421,7 @@ impl File {
     }
 
     pub fn path_string(&self) -> &str {
-        &self.path_string
+        self.storage_path.as_str()
     }
 
     pub fn size(&self) -> u64 {
@@ -487,8 +470,9 @@ impl File {
         created_at: u64,
         modified_at: u64,
     ) -> Self {
-        // Create storage_path from string
-        let storage_path = StoragePath::from_string(&path);
+        // Adopt the DTO path (canonical inputs are reused with zero
+        // copies; non-canonical ones are normalized like from_string did).
+        let storage_path = StoragePath::from_joined(path);
 
         // Create directly without validation to avoid errors in DTO
         // conversions. Still NFC-normalize so even DTO-reconstructed
@@ -499,7 +483,6 @@ impl File {
             id,
             name,
             storage_path,
-            path_string: path,
             size,
             mime_type,
             folder_id,
@@ -536,7 +519,6 @@ impl File {
         // Consume `self` and mutate in place — only the path, name and mtime
         // change; id / mime_type / folder_id / blob_hash are carried over
         // without the per-field clone the old `&self` builder paid.
-        self.path_string = new_storage_path.to_path_string();
         self.storage_path = new_storage_path;
         self.name = new_name;
         self.modified_at = now;
@@ -561,7 +543,6 @@ impl File {
             .as_secs();
 
         // Consume `self`: only the path, folder_id and mtime change.
-        self.path_string = new_storage_path.to_path_string();
         self.storage_path = new_storage_path;
         self.folder_id = folder_id;
         self.modified_at = now;

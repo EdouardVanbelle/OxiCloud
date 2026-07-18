@@ -30,7 +30,7 @@
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
-use aes_gcm::aead::{Aead, AeadInPlace, KeyInit, OsRng};
+use aes_gcm::aead::{AeadInPlace, KeyInit, OsRng};
 use aes_gcm::{AeadCore, Aes256Gcm, Nonce};
 use bytes::Bytes;
 use std::sync::Arc;
@@ -43,6 +43,9 @@ use crate::domain::errors::DomainError;
 
 /// Nonce size for AES-256-GCM (96 bits = 12 bytes).
 const NONCE_SIZE: usize = 12;
+
+/// AES-256-GCM authentication tag length appended after the ciphertext.
+const TAG_SIZE: usize = 16;
 
 /// Payloads at or above this size run crypto on the blocking pool; below
 /// it the `spawn_blocking` round-trip costs more than the AES work itself.
@@ -82,16 +85,23 @@ impl EncryptedBlobBackend {
 }
 
 /// Encrypt `data` into the on-disk layout: `[12-byte nonce][ciphertext + tag]`.
+///
+/// Single output buffer, mirroring the read side's `decrypt_in_place`:
+/// the payload is copied exactly once and encrypted in place with the tag
+/// appended. The old shape let `cipher.encrypt` allocate a full ciphertext
+/// `Vec` and then copied it a second time behind the nonce — one extra
+/// allocation + a full-size memcpy on every encrypted chunk write
+/// (benches/ROUND11.md §15; output bytes identical for a given nonce).
 fn encrypt_bytes(cipher: &Aes256Gcm, data: &[u8]) -> Result<Bytes, DomainError> {
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-    let ciphertext = cipher
-        .encrypt(&nonce, data)
+    let mut out = Vec::with_capacity(NONCE_SIZE + data.len() + TAG_SIZE);
+    out.extend_from_slice(nonce.as_slice());
+    out.extend_from_slice(data);
+    let tag = cipher
+        .encrypt_in_place_detached(&nonce, b"", &mut out[NONCE_SIZE..])
         .map_err(|e| DomainError::internal_error("Encryption", format!("encrypt failed: {e}")))?;
-
-    let mut encrypted = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
-    encrypted.extend_from_slice(nonce.as_slice());
-    encrypted.extend_from_slice(&ciphertext);
-    Ok(Bytes::from(encrypted))
+    out.extend_from_slice(&tag);
+    Ok(Bytes::from(out))
 }
 
 /// Decrypt the on-disk layout `[nonce][ciphertext + tag]` **in place**.
@@ -322,6 +332,13 @@ impl BlobStorageBackend for EncryptedBlobBackend {
 }
 
 /// Collect a byte stream into a single `Vec<u8>`.
+///
+/// Modern blobs are CDC chunks (≤ `CDC_MAX_CHUNK` + nonce/tag overhead),
+/// delivered here as small reader frames — growing from `Vec::new()` paid
+/// ~log₂(n) reallocations + a wasted ~0.75×-size memcpy per read. Reserving
+/// one chunk's worth up front on the first frame makes the common case a
+/// single allocation; legacy whole-file blobs beyond that fall back to
+/// normal doubling (benches/ROUND11.md §16: 9 → 1 allocs on a 1 MiB blob).
 async fn collect_stream(stream: BlobStream) -> Result<Vec<u8>, DomainError> {
     use futures::StreamExt;
     let mut stream = stream;
@@ -329,6 +346,14 @@ async fn collect_stream(stream: BlobStream) -> Result<Vec<u8>, DomainError> {
     while let Some(chunk) = stream.next().await {
         let bytes = chunk
             .map_err(|e| DomainError::internal_error("Encryption", format!("stream read: {e}")))?;
+        if buf.capacity() == 0 {
+            buf.reserve(
+                (crate::infrastructure::services::dedup_service::CDC_MAX_CHUNK
+                    + NONCE_SIZE
+                    + TAG_SIZE)
+                    .max(bytes.len()),
+            );
+        }
         buf.extend_from_slice(&bytes);
     }
     Ok(buf)

@@ -113,7 +113,7 @@ impl From<Folder> for FolderDto {
         Self {
             id: parts.id,
             name: parts.name,
-            path: parts.path_string,
+            path: parts.storage_path.into_joined(),
             parent_id: parts.parent_id,
             drive_id: parts.drive_id,
             created_at: parts.created_at,

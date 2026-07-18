@@ -482,7 +482,7 @@ fn gate_file(name: &str, folder_path: Option<&str>) -> bool {
     );
     match (b, a) {
         (Ok(b), Ok(a)) => {
-            let seg_a: Vec<String> = a.storage_path().segments().to_vec();
+            let seg_a: Vec<String> = a.storage_path().segments().map(str::to_string).collect();
             if b.name != a.name()
                 || b.path_string != a.path_string()
                 || b.storage_path.segments != seg_a
@@ -539,7 +539,7 @@ fn gate_folder(name: &str, path: &str) -> bool {
     );
     match (b, a) {
         (Ok(b), Ok(a)) => {
-            let seg_a: Vec<String> = a.storage_path().segments().to_vec();
+            let seg_a: Vec<String> = a.storage_path().segments().map(str::to_string).collect();
             if b.name != a.name()
                 || b.path_string != a.path_string()
                 || b.storage_path.segments != seg_a

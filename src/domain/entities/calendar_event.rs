@@ -22,6 +22,25 @@ pub use super::entity_errors::CalendarEventError;
  * Represents a calendar event or appointment that can be synced via CalDAV.
  * Follows the iCalendar format (RFC 5545) for compatibility with CalDAV clients.
  */
+/// Owned decomposition of a [`CalendarEvent`] (see
+/// [`CalendarEvent::into_parts`]).
+pub struct CalendarEventParts {
+    pub id: Uuid,
+    pub calendar_id: Uuid,
+    pub summary: String,
+    pub description: Option<String>,
+    pub location: Option<String>,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+    pub all_day: bool,
+    pub rrule: Option<String>,
+    pub recurrence_id: Option<DateTime<Utc>>,
+    pub ical_uid: String,
+    pub ical_data: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CalendarEvent {
     /// Unique identifier for the event
@@ -454,6 +473,30 @@ impl CalendarEvent {
     /// Returns the time when the event was last modified
     pub fn updated_at(&self) -> &DateTime<Utc> {
         &self.updated_at
+    }
+
+    /// Decompose into owned parts for DTO conversion — the `File`/`Folder`/
+    /// `Contact` pattern. Moving the owned `String`s (most importantly the
+    /// unbounded `ical_data` blob, ~11 KB with attendees/VALARMs) replaces
+    /// the per-event deep copies `CalendarEventDto::from` used to make via
+    /// getters (benches/ROUND11.md §19).
+    pub fn into_parts(self) -> CalendarEventParts {
+        CalendarEventParts {
+            id: self.id,
+            calendar_id: self.calendar_id,
+            summary: self.summary,
+            description: self.description,
+            location: self.location,
+            start_time: self.start_time,
+            end_time: self.end_time,
+            all_day: self.all_day,
+            rrule: self.rrule,
+            recurrence_id: self.recurrence_id,
+            ical_uid: self.ical_uid,
+            ical_data: self.ical_data,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
     }
 
     /// Returns the duration of the event

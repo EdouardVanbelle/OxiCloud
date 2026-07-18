@@ -8,8 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::application::dtos::display_helpers::{
-    category_for, format_file_size, icon_class_for, icon_special_class_for, intern_display,
-    intern_mime,
+    classify_display, format_file_size, intern_display, intern_mime,
 };
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::{
@@ -520,10 +519,10 @@ pub async fn list_folder_resources(
                         // (they borrow `&row.name`), so `name` can be moved into
                         // the DTO below instead of cloned — one fewer String
                         // alloc per file row (benches/ROUND7.md).
-                        let icon_class = intern_display(icon_class_for(&row.name, mime));
-                        let icon_special_class =
-                            intern_display(icon_special_class_for(&row.name, mime));
-                        let category = intern_display(category_for(&row.name, mime));
+                        let classes = classify_display(&row.name, mime);
+                        let icon_class = intern_display(classes.icon_class);
+                        let icon_special_class = intern_display(classes.icon_special_class);
+                        let category = intern_display(classes.category);
                         let dto = FileDto {
                             id: row.id.to_string(),
                             name: row.name,

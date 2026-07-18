@@ -41,21 +41,30 @@ pub enum ErrorKind {
     Conflict,
 }
 
+impl ErrorKind {
+    /// Stable human-readable name; `Display` delegates here so the two can
+    /// never drift. Being `&'static` it lets the HTTP error path borrow the
+    /// value instead of allocating per response (benches/ROUND11.md §9).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ErrorKind::NotFound => "Not Found",
+            ErrorKind::AlreadyExists => "Already Exists",
+            ErrorKind::InvalidInput => "Invalid Input",
+            ErrorKind::AccessDenied => "Access Denied",
+            ErrorKind::Timeout => "Timeout",
+            ErrorKind::InternalError => "Internal Error",
+            ErrorKind::NotImplemented => "Not Implemented",
+            ErrorKind::UnsupportedOperation => "Unsupported Operation",
+            ErrorKind::DatabaseError => "Database Error",
+            ErrorKind::QuotaExceeded => "Quota Exceeded",
+            ErrorKind::Conflict => "Conflict",
+        }
+    }
+}
+
 impl Display for ErrorKind {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            ErrorKind::NotFound => write!(f, "Not Found"),
-            ErrorKind::AlreadyExists => write!(f, "Already Exists"),
-            ErrorKind::InvalidInput => write!(f, "Invalid Input"),
-            ErrorKind::AccessDenied => write!(f, "Access Denied"),
-            ErrorKind::Timeout => write!(f, "Timeout"),
-            ErrorKind::InternalError => write!(f, "Internal Error"),
-            ErrorKind::NotImplemented => write!(f, "Not Implemented"),
-            ErrorKind::UnsupportedOperation => write!(f, "Unsupported Operation"),
-            ErrorKind::DatabaseError => write!(f, "Database Error"),
-            ErrorKind::QuotaExceeded => write!(f, "Quota Exceeded"),
-            ErrorKind::Conflict => write!(f, "Conflict"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -91,11 +100,14 @@ impl DomainError {
     /// Creates an entity not found error
     pub fn not_found<S: Into<String>>(entity_type: &'static str, entity_id: S) -> Self {
         let id = entity_id.into();
+        // Message first, then move the id — the old `Some(id.clone())`
+        // paid an extra allocation on every 404 construction.
+        let message = format!("{} not found: {}", entity_type, id);
         Self {
             kind: ErrorKind::NotFound,
             entity_type,
-            entity_id: Some(id.clone()),
-            message: format!("{} not found: {}", entity_type, id),
+            entity_id: Some(id),
+            message,
             source: None,
         }
     }
@@ -103,11 +115,12 @@ impl DomainError {
     /// Creates an entity already exists error
     pub fn already_exists<S: Into<String>>(entity_type: &'static str, entity_id: S) -> Self {
         let id = entity_id.into();
+        let message = format!("{} already exists: {}", entity_type, id);
         Self {
             kind: ErrorKind::AlreadyExists,
             entity_type,
-            entity_id: Some(id.clone()),
-            message: format!("{} already exists: {}", entity_type, id),
+            entity_id: Some(id),
+            message,
             source: None,
         }
     }

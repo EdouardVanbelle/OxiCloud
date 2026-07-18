@@ -46,8 +46,23 @@ async fn get_version() -> AxumJson<serde_json::Value> {
     }))
 }
 
-async fn get_openapi_spec() -> AxumJson<utoipa::openapi::OpenApi> {
-    AxumJson(super::ApiDoc::openapi())
+/// Pre-serialized OpenAPI spec. `ApiDoc::openapi()` reconstructs the whole
+/// 171 KiB paths/schemas tree and re-serializes it per request (2.8 ms /
+/// 12 474 allocs); the spec is process-invariant, so serialize once and
+/// hand back a `Bytes` refcount bump (~18 ns — benches/ROUND11.md).
+static OPENAPI_BODY: std::sync::OnceLock<bytes::Bytes> = std::sync::OnceLock::new();
+
+async fn get_openapi_spec() -> axum::response::Response {
+    let body = OPENAPI_BODY.get_or_init(|| {
+        bytes::Bytes::from(
+            serde_json::to_vec(&super::ApiDoc::openapi()).expect("openapi spec serializes"),
+        )
+    });
+    axum::response::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(body.clone()))
+        .expect("static openapi response")
 }
 
 use crate::interfaces::api::handlers::admin_handler;

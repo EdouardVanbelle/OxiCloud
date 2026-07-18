@@ -76,10 +76,25 @@ pub fn validate_storage_name(name: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Represents a storage path in the domain (Value Object)
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Represents a storage path in the domain (Value Object).
+///
+/// Stored as the single **canonical joined form**: `"/"` for the root, or
+/// `/seg(/seg)*` with every segment safe (non-empty, not `.`/`..`, no
+/// `/`). Round 11 replaced the old `segments: Vec<String>` representation
+/// — one heap `String` per component built on EVERY hydrated listing row
+/// even though the DTO path only ever consumed the joined form — with this
+/// one-allocation shape; segment views are derived on demand
+/// (benches/ROUND11.md §20: 4 000 → 1 000 allocs on a 500-row page).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoragePath {
-    segments: Vec<String>,
+    /// Canonical joined rendering (`Display`'s output).
+    joined: String,
+}
+
+impl Default for StoragePath {
+    fn default() -> Self {
+        Self::root()
+    }
 }
 
 impl StoragePath {
@@ -88,20 +103,30 @@ impl StoragePath {
         !s.is_empty() && s != "." && s != ".." && !s.contains('/')
     }
 
+    /// Builds the canonical joined form from an iterator of raw segments,
+    /// silently dropping unsafe ones. `cap` pre-sizes the buffer.
+    fn build<'a>(segments: impl Iterator<Item = &'a str>, cap: usize) -> Self {
+        let mut joined = String::with_capacity(cap);
+        for seg in segments.filter(|s| Self::is_safe_segment(s)) {
+            joined.push('/');
+            joined.push_str(seg);
+        }
+        if joined.is_empty() {
+            joined.push('/');
+        }
+        Self { joined }
+    }
+
     /// Creates a new storage path, silently dropping any traversal segments
     pub fn new(segments: Vec<String>) -> Self {
-        Self {
-            segments: segments
-                .into_iter()
-                .filter(|s| Self::is_safe_segment(s))
-                .collect(),
-        }
+        let cap = segments.iter().map(|s| s.len() + 1).sum();
+        Self::build(segments.iter().map(String::as_str), cap)
     }
 
     /// Creates an empty path (root)
     pub fn root() -> Self {
         Self {
-            segments: Vec::new(),
+            joined: "/".to_string(),
         }
     }
 
@@ -110,81 +135,38 @@ impl StoragePath {
     /// Traversal segments (`.`, `..`) are silently stripped to prevent
     /// path-traversal attacks.
     pub fn from_string(path: &str) -> Self {
-        let segments = path
-            .split('/')
-            .filter(|s| Self::is_safe_segment(s))
-            .map(|s| s.to_string())
-            .collect();
-        Self { segments }
+        Self::build(path.split('/'), path.len() + 1)
     }
 
     /// One-pass builder for PG listing rows: materialized folder path +
-    /// file name → `(StoragePath, path_string)`.
+    /// file name → the canonical joined path.
     ///
-    /// Replaces the old per-row chain
-    /// `StoragePath::from_string(&format!("{fp}/{name}"))` +
-    /// `storage_path.to_string()`, which allocated a joined temporary,
-    /// split it back into per-segment `String`s, and then re-joined those
-    /// segments (via `join` + `write!`) into the `path_string` the DTOs
-    /// actually serve. Here both representations are built in a single
-    /// pass with exactly one `String` for the joined form and no
-    /// intermediate temporaries.
-    ///
-    /// Byte-equivalence with the old chain holds because concatenating
-    /// with a `/` separator distributes over `split('/')`:
+    /// Byte-equivalence with the historical segment chain holds because
+    /// concatenating with a `/` separator distributes over `split('/')`:
     /// `(fp + "/" + name).split('/') == fp.split('/') ⧺ name.split('/')`,
     /// and the joined form is exactly `Display`'s `/`-prefixed rendering
     /// of the surviving segments (root renders as `"/"`).
-    pub fn from_folder_and_name(folder_path: Option<&str>, file_name: &str) -> (Self, String) {
+    pub fn from_folder_and_name(folder_path: Option<&str>, file_name: &str) -> Self {
         let fp = folder_path.unwrap_or("");
-        // Upper bounds: every byte of both inputs survives at most once,
-        // plus one leading '/' per segment (≤ segment count) — sizing to
-        // input length + 2 covers the worst case without a second scan.
-        let mut joined = String::with_capacity(fp.len() + file_name.len() + 2);
-        let mut segments: Vec<String> =
-            Vec::with_capacity(fp.bytes().filter(|&b| b == b'/').count() + 2);
-        for seg in fp
-            .split('/')
-            .chain(file_name.split('/'))
-            .filter(|s| Self::is_safe_segment(s))
-        {
-            joined.push('/');
-            joined.push_str(seg);
-            segments.push(seg.to_string());
-        }
-        if segments.is_empty() {
-            joined.push('/');
-        }
-        (Self { segments }, joined)
+        Self::build(
+            fp.split('/').chain(file_name.split('/')),
+            fp.len() + file_name.len() + 2,
+        )
     }
 
-    /// One-pass splitter for a pre-joined materialized path (the
-    /// `storage.folders.path` column) → `(StoragePath, path_string)`.
+    /// Wrapper for a pre-joined materialized path (the
+    /// `storage.folders.path` column).
     ///
-    /// When the input is already in canonical joined form (leading `/`,
-    /// no empty/`.`/`..` segments, no trailing `/`) — which is every row
-    /// the repository writes — the input `String` is reused as the
-    /// `path_string` with zero copies. Non-canonical inputs fall back to
-    /// the filtering rebuild and produce exactly what
-    /// `from_string(&path).to_string()` used to.
-    pub fn from_joined(path: String) -> (Self, String) {
+    /// When the input is already canonical (leading `/`, no empty/`.`/`..`
+    /// segments, no trailing `/`) — which is every row the repository
+    /// writes — the input `String` is adopted with zero copies.
+    /// Non-canonical inputs fall back to the filtering rebuild and produce
+    /// exactly what `from_string(&path)` yields.
+    pub fn from_joined(path: String) -> Self {
         if Self::is_canonical_joined(&path) {
-            let segments: Vec<String> = if path.len() == 1 {
-                Vec::new()
-            } else {
-                path[1..].split('/').map(str::to_string).collect()
-            };
-            return (Self { segments }, path);
+            return Self { joined: path };
         }
-        // Fallback: identical to the old from_string + to_string pair.
-        let segments: Vec<String> = path
-            .split('/')
-            .filter(|s| Self::is_safe_segment(s))
-            .map(str::to_string)
-            .collect();
-        let sp = Self { segments };
-        let joined = sp.to_path_string();
-        (sp, joined)
+        Self::from_string(&path)
     }
 
     /// `true` when `path` is exactly `Display`'s canonical rendering of
@@ -202,99 +184,99 @@ impl StoragePath {
 
     /// Creates a path from a PathBuf
     pub fn from(path_buf: PathBuf) -> Self {
-        let segments = path_buf
-            .components()
-            .filter_map(|c| match c {
-                std::path::Component::Normal(os_str) => Some(os_str.to_string_lossy().to_string()),
-                _ => None,
-            })
-            .collect();
-        Self { segments }
+        let mut joined = String::new();
+        for c in path_buf.components() {
+            if let std::path::Component::Normal(os_str) = c {
+                let seg = os_str.to_string_lossy();
+                if Self::is_safe_segment(&seg) {
+                    joined.push('/');
+                    joined.push_str(&seg);
+                }
+            }
+        }
+        if joined.is_empty() {
+            joined.push('/');
+        }
+        Self { joined }
     }
 
     /// Appends a segment to the path, consuming `self` so the existing
-    /// segment buffer is reused instead of deep-cloned.
+    /// buffer is reused instead of deep-cloned.
     ///
     /// Traversal segments (`.`, `..`) and segments containing `/` are
     /// silently ignored to prevent path-traversal attacks.
     pub fn join(mut self, segment: &str) -> Self {
         if Self::is_safe_segment(segment) {
-            self.segments.push(segment.to_string());
+            if self.joined == "/" {
+                self.joined.clear();
+            }
+            self.joined.push('/');
+            self.joined.push_str(segment);
         }
         self
     }
 
     /// Gets the file name (last segment)
     pub fn file_name(&self) -> Option<String> {
-        self.segments.last().cloned()
+        if self.joined == "/" {
+            None
+        } else {
+            self.joined.rsplit('/').next().map(str::to_string)
+        }
     }
 
     /// Gets the parent directory path
     pub fn parent(&self) -> Option<Self> {
-        if self.segments.is_empty() {
-            None
-        } else {
-            let parent_segments = self.segments[..self.segments.len() - 1].to_vec();
-            Some(Self {
-                segments: parent_segments,
-            })
+        if self.joined == "/" {
+            return None;
         }
+        let cut = self.joined.rfind('/').expect("canonical path has '/'");
+        Some(if cut == 0 {
+            Self::root()
+        } else {
+            Self {
+                joined: self.joined[..cut].to_string(),
+            }
+        })
     }
 
     /// Checks if the path is empty (is the root)
     pub fn is_empty(&self) -> bool {
-        self.segments.is_empty()
+        self.joined == "/"
     }
 }
 
 impl std::fmt::Display for StoragePath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.segments.is_empty() {
-            return f.write_str("/");
-        }
-        // Write segments directly — the old `self.segments.join("/")`
-        // allocated a full joined temporary inside every `format!`/
-        // `to_string` of a path.
-        for seg in &self.segments {
-            f.write_str("/")?;
-            f.write_str(seg)?;
-        }
-        Ok(())
+        f.write_str(&self.joined)
     }
 }
 
 impl StoragePath {
-    /// The canonical joined form (`Display`'s output) in exactly one
-    /// pre-sized allocation.
-    ///
-    /// `to_string()` routes through `Display` into an unsized `String`
-    /// that grows geometrically (multiple reallocs + copies for typical
-    /// path lengths). Entity constructors call this once per row on
-    /// every listing, so the sized single-alloc variant is the default
-    /// there.
+    /// The canonical joined form as an owned `String` (one memcpy).
     pub fn to_path_string(&self) -> String {
-        if self.segments.is_empty() {
-            return "/".to_string();
-        }
-        let mut s = String::with_capacity(self.segments.iter().map(|seg| seg.len() + 1).sum());
-        for seg in &self.segments {
-            s.push('/');
-            s.push_str(seg);
-        }
-        s
+        self.joined.clone()
     }
 
-    /// Returns the path representation as a string
+    /// Consume `self`, yielding the canonical joined `String` with zero
+    /// copies. This is the row→entity→DTO hand-off path.
+    pub fn into_joined(self) -> String {
+        self.joined
+    }
+
+    /// Returns the path representation as a string (canonical joined form).
     pub fn as_str(&self) -> &str {
-        // Note: The implementation should really store the string,
-        // but here we do a temporary implementation that always returns "/"
-        // This is only used for the get_folder_path_str implementation
-        "/"
+        &self.joined
     }
 
-    /// Gets the path segments
-    pub fn segments(&self) -> &[String] {
-        &self.segments
+    /// Iterates the path segments (derived views over the joined form).
+    pub fn segments(&self) -> impl Iterator<Item = &str> {
+        let inner = if self.joined == "/" {
+            ""
+        } else {
+            &self.joined[1..]
+        };
+        inner.split('/').filter(|s| !s.is_empty())
     }
 }
 
@@ -305,7 +287,10 @@ mod tests {
     #[test]
     fn test_storage_path_from_string() {
         let path = StoragePath::from_string("folder/subfolder/file.txt");
-        assert_eq!(path.segments(), &["folder", "subfolder", "file.txt"]);
+        assert_eq!(
+            path.segments().collect::<Vec<_>>(),
+            &["folder", "subfolder", "file.txt"]
+        );
         assert_eq!(path.to_string(), "/folder/subfolder/file.txt");
     }
 
@@ -341,19 +326,19 @@ mod tests {
     #[test]
     fn test_from_string_strips_dot_dot() {
         let path = StoragePath::from_string("../../etc/passwd");
-        assert_eq!(path.segments(), &["etc", "passwd"]);
+        assert_eq!(path.segments().collect::<Vec<_>>(), &["etc", "passwd"]);
     }
 
     #[test]
     fn test_from_string_strips_single_dot() {
         let path = StoragePath::from_string("folder/./file.txt");
-        assert_eq!(path.segments(), &["folder", "file.txt"]);
+        assert_eq!(path.segments().collect::<Vec<_>>(), &["folder", "file.txt"]);
     }
 
     #[test]
     fn test_from_string_strips_mixed_traversal() {
         let path = StoragePath::from_string("a/../b/./c/../../d");
-        assert_eq!(path.segments(), &["a", "b", "c", "d"]);
+        assert_eq!(path.segments().collect::<Vec<_>>(), &["a", "b", "c", "d"]);
     }
 
     #[test]
@@ -366,13 +351,13 @@ mod tests {
     #[test]
     fn test_new_strips_traversal_segments() {
         let path = StoragePath::new(vec!["..".into(), "etc".into(), ".".into(), "passwd".into()]);
-        assert_eq!(path.segments(), &["etc", "passwd"]);
+        assert_eq!(path.segments().collect::<Vec<_>>(), &["etc", "passwd"]);
     }
 
     #[test]
     fn test_new_strips_empty_segments() {
         let path = StoragePath::new(vec!["a".into(), "".into(), "b".into()]);
-        assert_eq!(path.segments(), &["a", "b"]);
+        assert_eq!(path.segments().collect::<Vec<_>>(), &["a", "b"]);
     }
 
     #[test]
@@ -380,14 +365,14 @@ mod tests {
         let base = StoragePath::from_string("folder");
         let joined = base.join("..");
         // ".." is silently ignored — path stays unchanged
-        assert_eq!(joined.segments(), &["folder"]);
+        assert_eq!(joined.segments().collect::<Vec<_>>(), &["folder"]);
     }
 
     #[test]
     fn test_join_rejects_single_dot() {
         let base = StoragePath::from_string("folder");
         let joined = base.join(".");
-        assert_eq!(joined.segments(), &["folder"]);
+        assert_eq!(joined.segments().collect::<Vec<_>>(), &["folder"]);
     }
 
     #[test]
@@ -395,7 +380,7 @@ mod tests {
         let base = StoragePath::from_string("folder");
         let joined = base.join("sub/../../etc/passwd");
         // Segment contains '/' → silently ignored
-        assert_eq!(joined.segments(), &["folder"]);
+        assert_eq!(joined.segments().collect::<Vec<_>>(), &["folder"]);
     }
 
     #[test]
@@ -404,8 +389,8 @@ mod tests {
         // PathBuf Component::Normal only yields the normal parts
         // On most platforms this strips . and ..
         // but regardless, our from() only accepts Component::Normal
-        assert!(!path.segments().contains(&"..".to_string()));
-        assert!(!path.segments().contains(&".".to_string()));
+        assert!(!path.segments().any(|s| s == ".."));
+        assert!(!path.segments().any(|s| s == "."));
     }
 
     // ── NFC normalization tests ─────────────────────────────────

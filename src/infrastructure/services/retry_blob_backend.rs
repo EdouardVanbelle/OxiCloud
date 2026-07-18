@@ -57,14 +57,20 @@ impl RetryBlobBackend {
 }
 
 /// Execute an async closure with exponential backoff retry.
-async fn retry_async<F, Fut, T>(
+///
+/// `name` is a lazy label: the success path (the overwhelmingly common
+/// case) never materializes it, so per-op `format!("op({hash})")`
+/// allocations only happen on an actual retry (benches/ROUND11.md §14:
+/// 64.5 → 0.7 ns, −2 allocs per blob op).
+async fn retry_async<F, Fut, T, L>(
     policy: &RetryPolicy,
-    name: &str,
+    name: L,
     mut f: F,
 ) -> Result<T, DomainError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, DomainError>>,
+    L: Fn() -> String,
 {
     let mut attempt = 0u32;
     let mut backoff = policy.initial_backoff;
@@ -78,7 +84,7 @@ where
                     "Retry {}/{} for {} after error: {} (backoff {:?})",
                     attempt,
                     policy.max_retries,
-                    name,
+                    name(),
                     e,
                     backoff
                 );
@@ -112,10 +118,14 @@ impl BlobStorageBackend for RetryBlobBackend {
         let inner = self.inner.clone();
         let policy = self.policy.clone();
         Box::pin(async move {
-            retry_async(&policy, "initialize", || {
-                let inner = inner.clone();
-                async move { inner.initialize().await }
-            })
+            retry_async(
+                &policy,
+                || "initialize".to_string(),
+                || {
+                    let inner = inner.clone();
+                    async move { inner.initialize().await }
+                },
+            )
             .await
         })
     }
@@ -130,12 +140,16 @@ impl BlobStorageBackend for RetryBlobBackend {
         let hash = hash.to_string();
         let path = source_path.to_path_buf();
         Box::pin(async move {
-            retry_async(&policy, &format!("put_blob({hash})"), || {
-                let inner = inner.clone();
-                let hash = hash.clone();
-                let path = path.clone();
-                async move { inner.put_blob(&hash, &path).await }
-            })
+            retry_async(
+                &policy,
+                || format!("put_blob({hash})"),
+                || {
+                    let inner = inner.clone();
+                    let hash = hash.clone();
+                    let path = path.clone();
+                    async move { inner.put_blob(&hash, &path).await }
+                },
+            )
             .await
         })
     }
@@ -149,12 +163,16 @@ impl BlobStorageBackend for RetryBlobBackend {
         let policy = self.policy.clone();
         let hash = hash.to_string();
         Box::pin(async move {
-            retry_async(&policy, &format!("put_blob_from_bytes({hash})"), || {
-                let inner = inner.clone();
-                let hash = hash.clone();
-                let data = data.clone();
-                async move { inner.put_blob_from_bytes(&hash, data).await }
-            })
+            retry_async(
+                &policy,
+                || format!("put_blob_from_bytes({hash})"),
+                || {
+                    let inner = inner.clone();
+                    let hash = hash.clone();
+                    let data = data.clone();
+                    async move { inner.put_blob_from_bytes(&hash, data).await }
+                },
+            )
             .await
         })
     }
@@ -174,7 +192,7 @@ impl BlobStorageBackend for RetryBlobBackend {
         Box::pin(async move {
             retry_async(
                 &policy,
-                &format!("put_blob_from_bytes_unsynced({hash})"),
+                || format!("put_blob_from_bytes_unsynced({hash})"),
                 || {
                     let inner = inner.clone();
                     let hash = hash.clone();
@@ -205,11 +223,15 @@ impl BlobStorageBackend for RetryBlobBackend {
         let policy = self.policy.clone();
         let hash = hash.to_string();
         Box::pin(async move {
-            retry_async(&policy, &format!("get_blob_stream({hash})"), || {
-                let inner = inner.clone();
-                let hash = hash.clone();
-                async move { inner.get_blob_stream(&hash).await }
-            })
+            retry_async(
+                &policy,
+                || format!("get_blob_stream({hash})"),
+                || {
+                    let inner = inner.clone();
+                    let hash = hash.clone();
+                    async move { inner.get_blob_stream(&hash).await }
+                },
+            )
             .await
         })
     }
@@ -225,11 +247,15 @@ impl BlobStorageBackend for RetryBlobBackend {
         let policy = self.policy.clone();
         let hash = hash.to_string();
         Box::pin(async move {
-            retry_async(&policy, &format!("get_blob_range({hash})"), || {
-                let inner = inner.clone();
-                let hash = hash.clone();
-                async move { inner.get_blob_range_stream(&hash, start, end).await }
-            })
+            retry_async(
+                &policy,
+                || format!("get_blob_range({hash})"),
+                || {
+                    let inner = inner.clone();
+                    let hash = hash.clone();
+                    async move { inner.get_blob_range_stream(&hash, start, end).await }
+                },
+            )
             .await
         })
     }
@@ -242,11 +268,15 @@ impl BlobStorageBackend for RetryBlobBackend {
         let policy = self.policy.clone();
         let hash = hash.to_string();
         Box::pin(async move {
-            retry_async(&policy, &format!("delete_blob({hash})"), || {
-                let inner = inner.clone();
-                let hash = hash.clone();
-                async move { inner.delete_blob(&hash).await }
-            })
+            retry_async(
+                &policy,
+                || format!("delete_blob({hash})"),
+                || {
+                    let inner = inner.clone();
+                    let hash = hash.clone();
+                    async move { inner.delete_blob(&hash).await }
+                },
+            )
             .await
         })
     }
@@ -259,11 +289,15 @@ impl BlobStorageBackend for RetryBlobBackend {
         let policy = self.policy.clone();
         let hash = hash.to_string();
         Box::pin(async move {
-            retry_async(&policy, &format!("blob_exists({hash})"), || {
-                let inner = inner.clone();
-                let hash = hash.clone();
-                async move { inner.blob_exists(&hash).await }
-            })
+            retry_async(
+                &policy,
+                || format!("blob_exists({hash})"),
+                || {
+                    let inner = inner.clone();
+                    let hash = hash.clone();
+                    async move { inner.blob_exists(&hash).await }
+                },
+            )
             .await
         })
     }
@@ -276,11 +310,15 @@ impl BlobStorageBackend for RetryBlobBackend {
         let policy = self.policy.clone();
         let hash = hash.to_string();
         Box::pin(async move {
-            retry_async(&policy, &format!("blob_size({hash})"), || {
-                let inner = inner.clone();
-                let hash = hash.clone();
-                async move { inner.blob_size(&hash).await }
-            })
+            retry_async(
+                &policy,
+                || format!("blob_size({hash})"),
+                || {
+                    let inner = inner.clone();
+                    let hash = hash.clone();
+                    async move { inner.blob_size(&hash).await }
+                },
+            )
             .await
         })
     }
@@ -293,10 +331,14 @@ impl BlobStorageBackend for RetryBlobBackend {
         let inner = self.inner.clone();
         let policy = self.policy.clone();
         Box::pin(async move {
-            retry_async(&policy, "health_check", || {
-                let inner = inner.clone();
-                async move { inner.health_check().await }
-            })
+            retry_async(
+                &policy,
+                || "health_check".to_string(),
+                || {
+                    let inner = inner.clone();
+                    async move { inner.health_check().await }
+                },
+            )
             .await
         })
     }

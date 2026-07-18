@@ -381,15 +381,19 @@ impl SearchService {
         // log it) — never leak. Batched: one drive-resolution query for
         // the whole page instead of up to CONTENT_HITS_LIMIT sequential
         // point SELECTs (benches/SEARCH-REBAC.md).
-        let mut hit_ids = Vec::with_capacity(hits.len());
-        for hit in &hits {
+        // Parse each hit id ONCE and carry the pair through the verify loop
+        // — the old shape re-parsed every `file_id` a second time below
+        // (benches/ROUND11.md §12: 1.6x on a 100-hit page).
+        let mut pairs = Vec::with_capacity(hits.len());
+        for hit in hits {
             match Uuid::parse_str(&hit.file_id) {
-                Ok(u) => hit_ids.push(u),
+                Ok(u) => pairs.push((hit, u)),
                 Err(_) => {
                     tracing::warn!("Content-index hit had non-UUID file_id: {}", hit.file_id);
                 }
             }
         }
+        let hit_ids: Vec<Uuid> = pairs.iter().map(|(_, u)| *u).collect();
         let allowed = match authz
             .check_files_read_batch(Subject::User(user_id), &hit_ids)
             .await
@@ -400,11 +404,8 @@ impl SearchService {
                 return Vec::new();
             }
         };
-        let mut verified = Vec::with_capacity(hits.len());
-        for hit in hits {
-            let Ok(file_uuid) = Uuid::parse_str(&hit.file_id) else {
-                continue; // already warned above
-            };
+        let mut verified = Vec::with_capacity(pairs.len());
+        for (hit, file_uuid) in pairs {
             if allowed.contains(&file_uuid) {
                 verified.push(hit);
             } else {
@@ -692,13 +693,24 @@ impl SearchUseCase for SearchService {
 
                     let folder_start = start_idx.min(folder_count);
                     let folder_end = end_idx.min(folder_count);
-                    let paginated_folders = enriched_folders[folder_start..folder_end].to_vec();
+                    // Move the page out of the owned vecs instead of
+                    // deep-cloning the slice — the source is dropped right
+                    // after (benches/ROUND11.md §11: −300 allocs per page).
+                    let paginated_folders: Vec<_> = enriched_folders
+                        .into_iter()
+                        .skip(folder_start)
+                        .take(folder_end - folder_start)
+                        .collect();
 
                     let file_start = start_idx.saturating_sub(folder_count);
                     let file_end = end_idx
                         .saturating_sub(folder_count)
                         .min(enriched_files.len());
-                    let paginated_files = enriched_files[file_start..file_end].to_vec();
+                    let paginated_files: Vec<_> = enriched_files
+                        .into_iter()
+                        .skip(file_start)
+                        .take(file_end - file_start)
+                        .collect();
 
                     let elapsed_ms = start.elapsed().as_millis() as u64;
 
@@ -783,13 +795,24 @@ impl SearchUseCase for SearchService {
 
                 let folder_start = start_idx.min(folder_count);
                 let folder_end = end_idx.min(folder_count);
-                let paginated_folders = enriched_folders[folder_start..folder_end].to_vec();
+                // Move the page out instead of deep-cloning the slice — the
+                // recursive branch's vecs can hold the whole subtree match
+                // set, all dropped right after (benches/ROUND11.md §11).
+                let paginated_folders: Vec<_> = enriched_folders
+                    .into_iter()
+                    .skip(folder_start)
+                    .take(folder_end - folder_start)
+                    .collect();
 
                 let file_start = start_idx.saturating_sub(folder_count);
                 let file_end = end_idx
                     .saturating_sub(folder_count)
                     .min(enriched_files.len());
-                let paginated_files = enriched_files[file_start..file_end].to_vec();
+                let paginated_files: Vec<_> = enriched_files
+                    .into_iter()
+                    .skip(file_start)
+                    .take(file_end - file_start)
+                    .collect();
 
                 let elapsed_ms = start.elapsed().as_millis() as u64;
 

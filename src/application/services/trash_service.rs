@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::application::dtos::cursor::PageCursor;
 use crate::application::dtos::display_helpers::{
-    category_for, format_file_size, icon_class_for, icon_special_class_for,
+    classify_display, format_file_size, intern_display, intern_mime,
 };
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
@@ -115,25 +115,31 @@ impl TrashService {
                 "folder-icon".to_string(),
             ),
             TrashedItemType::File => {
-                let name = item.name();
-                // Use empty MIME type to leverage extension fallback
-                let category = category_for(name, "").to_string();
-                let icon_class = icon_class_for(name, "").to_string();
-                let icon_special_class = icon_special_class_for(name, "").to_string();
-                (category, icon_class, icon_special_class)
+                // Use empty MIME type to leverage extension fallback; one
+                // fused pass lowers the extension once instead of three
+                // times (benches/ROUND11.md §21).
+                let classes = classify_display(item.name(), "");
+                (
+                    classes.category.to_string(),
+                    classes.icon_class.to_string(),
+                    classes.icon_special_class.to_string(),
+                )
             }
         };
 
+        // Move the owned Strings out of the consumed item — the getter
+        // `.to_string()` clones paid 2 extra allocations per trash row.
+        let parts = item.into_parts();
         TrashedItemDto {
-            id: item.id().to_string(),
-            original_id: item.original_id().to_string(),
-            item_type: match item.item_type() {
+            id: parts.id.to_string(),
+            original_id: parts.original_id.to_string(),
+            item_type: match parts.item_type {
                 TrashedItemType::File => "file".to_string(),
                 TrashedItemType::Folder => "folder".to_string(),
             },
-            name: item.name().to_string(),
-            original_path: item.original_path().to_string(),
-            trashed_at: item.trashed_at(),
+            name: parts.name,
+            original_path: parts.original_path,
+            trashed_at: parts.trashed_at,
             days_until_deletion,
             category,
             icon_class,
@@ -906,18 +912,19 @@ fn row_to_item_dto(row: TrashResourceRow) -> TrashResourceItemDto {
         } else {
             File::compute_etag(&content_hash, modified_at_u)
         };
+        let classes = classify_display(&row.name, mime);
         let dto = FileDto {
             id: row.resource_id.to_string(),
             name: row.name.clone(),
             path,
             size: size_bytes,
-            mime_type: std::sync::Arc::from(mime),
+            mime_type: intern_mime(mime),
             folder_id: row.parent_id.map(|u| u.to_string()),
             created_at: row.resource_created_at.timestamp() as u64,
             modified_at: modified_at_u,
-            icon_class: std::sync::Arc::from(icon_class_for(&row.name, mime)),
-            icon_special_class: std::sync::Arc::from(icon_special_class_for(&row.name, mime)),
-            category: std::sync::Arc::from(category_for(&row.name, mime)),
+            icon_class: intern_display(classes.icon_class),
+            icon_special_class: intern_display(classes.icon_special_class),
+            category: intern_display(classes.category),
             size_formatted: format_file_size(size_bytes),
             sort_date: None,
             content_hash,

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { errorMessage, errorToast } from '$lib/utils/errors';
+	import { dateTimeFormatFor } from '$lib/utils/display';
 	import {
 		clearPluginLogs,
 		createUser,
@@ -101,7 +102,10 @@
 		if (hours < 24) return t('admin.time_hour_ago', { n: hours }, '{{n}} h ago');
 		const days = Math.round(hours / 24);
 		if (days < 30) return t('admin.time_day_ago', { n: days }, '{{n}} d ago');
-		return new Date(dateStr).toLocaleDateString();
+		// `toLocaleDateString()` constructs a fresh Intl.DateTimeFormat per
+		// call; the no-options cached formatter is the exact equivalent
+		// (both default to numeric year/month/day in the default locale).
+		return dateTimeFormatFor(undefined).format(new Date(dateStr));
 	}
 
 	/** Quota unit options (bytes per unit) for the quota/create modals. */

@@ -23,17 +23,30 @@ use crate::common::errors::DomainError;
 use crate::domain::entities::face::Person;
 use crate::infrastructure::repositories::pg::FacePgRepository;
 
-/// Cosine similarity of two equal-length vectors. Embeddings are produced
-/// L2-normalized, so this is ~a dot product; we normalize anyway for safety.
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
+/// Squared L2 norm, accumulated in the same order `cosine` used to, so
+/// the precomputed-norm path is bit-identical to the old per-pair one.
+fn norm_sq(v: &[f32]) -> f32 {
+    let mut n = 0.0f32;
+    for &x in v {
+        n += x * x;
+    }
+    n
+}
+
+/// Cosine similarity of two equal-length vectors given their precomputed
+/// squared norms. Embeddings are produced L2-normalized, so this is ~a dot
+/// product; we normalize anyway for safety. The O(N²) recluster pair loop
+/// used to re-accumulate BOTH norms on every pair — precomputing them once
+/// per face keeps only the dot product in the hot loop while the final
+/// `dot / (√na · √nb)` expression (and the zero guards) stay exactly as
+/// before, so results are bit-identical (benches/ROUND11.md §17).
+fn cosine_with_norms(a: &[f32], b: &[f32], na: f32, nb: f32) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
-    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
+    let mut dot = 0.0f32;
     for (&x, &y) in a.iter().zip(b.iter()) {
         dot += x * y;
-        na += x * x;
-        nb += y * y;
     }
     if na == 0.0 || nb == 0.0 {
         return 0.0;
@@ -102,10 +115,13 @@ impl PeopleService {
             return Ok(0);
         }
 
+        let norms: Vec<f32> = faces.iter().map(|f| norm_sq(&f.embedding)).collect();
         let mut uf = UnionFind::new(n);
         for i in 0..n {
             for j in (i + 1)..n {
-                if cosine(&faces[i].embedding, &faces[j].embedding) >= self.cluster_threshold {
+                if cosine_with_norms(&faces[i].embedding, &faces[j].embedding, norms[i], norms[j])
+                    >= self.cluster_threshold
+                {
                     uf.union(i, j);
                 }
             }
@@ -117,13 +133,19 @@ impl PeopleService {
             groups.entry(root).or_default().push(i);
         }
 
+        // Accumulate every (face, person) change and apply them in ONE
+        // UNNEST batch at the end — the old per-face `assign_person` loop
+        // issued up to F sequential UPDATE round-trips per recluster
+        // (benches/ROUND11.md §Q5; the ROUND10 `save_faces` pattern). The
+        // final column state is identical.
+        let mut assignments: Vec<(Uuid, Option<Uuid>)> = Vec::new();
         let mut created = 0usize;
         for idxs in groups.into_values() {
             if idxs.len() < self.min_faces {
                 // Too small to be a person — leave/reset these faces unassigned.
                 for &i in &idxs {
                     if faces[i].person_id.is_some() {
-                        self.repo.assign_person(faces[i].id, None).await?;
+                        assignments.push((faces[i].id, None));
                     }
                 }
                 continue;
@@ -151,9 +173,7 @@ impl PeopleService {
             };
             for &i in &idxs {
                 if faces[i].person_id != Some(person_id) {
-                    self.repo
-                        .assign_person(faces[i].id, Some(person_id))
-                        .await?;
+                    assignments.push((faces[i].id, Some(person_id)));
                 }
             }
             let _ = self
@@ -161,6 +181,7 @@ impl PeopleService {
                 .set_person_cover(person_id, faces[idxs[0]].id)
                 .await;
         }
+        self.repo.assign_person_batch(&assignments).await?;
 
         Ok(created)
     }

@@ -5,10 +5,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use super::display_helpers::{
-    category_for, format_file_size, icon_class_for, icon_special_class_for, intern_display,
-    intern_mime,
-};
+use super::display_helpers::{classify_display, format_file_size, intern_display, intern_mime};
 
 /// DTO for file responses
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -105,17 +102,17 @@ impl From<File> for FileDto {
         // Display fields come from closed static tables and MIME values
         // repeat massively across rows — intern instead of allocating a
         // fresh Arc<str> per row (`Arc::from(&str)` always allocs+copies).
-        let icon_class = intern_display(icon_class_for(&parts.name, &parts.mime_type));
-        let icon_special_class =
-            intern_display(icon_special_class_for(&parts.name, &parts.mime_type));
-        let category = intern_display(category_for(&parts.name, &parts.mime_type));
+        let classes = classify_display(&parts.name, &parts.mime_type);
+        let icon_class = intern_display(classes.icon_class);
+        let icon_special_class = intern_display(classes.icon_special_class);
+        let category = intern_display(classes.category);
         let size_formatted = format_file_size(parts.size);
         let mime_type = intern_mime(&parts.mime_type);
 
         Self {
             id: parts.id,
             name: parts.name,
-            path: parts.path_string,
+            path: parts.storage_path.into_joined(),
             size: parts.size,
             mime_type,
             folder_id: parts.folder_id,

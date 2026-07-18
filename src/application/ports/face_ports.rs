@@ -62,6 +62,15 @@ pub trait FaceRepository: Send + Sync + 'static {
         person_id: Option<Uuid>,
     ) -> Result<(), DomainError>;
 
+    /// Batch variant of [`Self::assign_person`]: apply every
+    /// `(face_id, person_id)` pair in one statement. Reclustering an
+    /// F-face library used to issue F sequential UPDATE round-trips
+    /// (benches/ROUND11.md §Q5 — the ROUND10 `save_faces` UNNEST pattern).
+    async fn assign_person_batch(
+        &self,
+        assignments: &[(Uuid, Option<Uuid>)],
+    ) -> Result<(), DomainError>;
+
     // ── persons ────────────────────────────────────────────────────
     async fn create_person(&self, person: &Person) -> Result<(), DomainError>;
     async fn persons_for_user(&self, user_id: Uuid) -> Result<Vec<Person>, DomainError>;

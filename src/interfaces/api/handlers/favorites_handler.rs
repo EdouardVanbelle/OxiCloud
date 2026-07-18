@@ -10,8 +10,7 @@ use tracing::info;
 use utoipa::ToSchema;
 
 use crate::application::dtos::display_helpers::{
-    category_for, format_file_size, icon_class_for, icon_special_class_for, intern_display,
-    intern_mime,
+    classify_display, format_file_size, intern_display, intern_mime,
 };
 use crate::application::dtos::favorites_dto::{
     FavoritesResourceItemDto, FavoritesResourcesDto, FavoritesResourcesQuery,
@@ -247,10 +246,10 @@ pub async fn list_favorites_resources(
                         };
                         // Name-derived display classes borrow `row.name`;
                         // compute them before the name moves into the DTO.
-                        let icon_class = intern_display(icon_class_for(&row.name, mime));
-                        let icon_special_class =
-                            intern_display(icon_special_class_for(&row.name, mime));
-                        let category = intern_display(category_for(&row.name, mime));
+                        let classes = classify_display(&row.name, mime);
+                        let icon_class = intern_display(classes.icon_class);
+                        let icon_special_class = intern_display(classes.icon_special_class);
+                        let category = intern_display(classes.category);
                         let dto = FileDto {
                             id: row.resource_id.to_string(),
                             name: row.name,

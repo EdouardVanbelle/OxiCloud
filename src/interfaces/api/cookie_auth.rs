@@ -141,8 +141,10 @@ pub fn append_clear_cookies(headers: &mut HeaderMap) {
     }
 }
 
-/// Extract a named cookie value from the `Cookie` request header.
-pub fn extract_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+/// Extract a named cookie value from the `Cookie` request header,
+/// borrowing from the header map. Callers that only compare or parse the
+/// value (CSRF check) avoid the per-request copy.
+pub fn extract_cookie_str<'h>(headers: &'h HeaderMap, name: &str) -> Option<&'h str> {
     let cookie_header = headers.get(axum::http::header::COOKIE)?;
     let cookie_str = cookie_header.to_str().ok()?;
 
@@ -151,11 +153,16 @@ pub fn extract_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
         if let Some(val) = pair.strip_prefix(name) {
             let val = val.strip_prefix('=')?;
             if !val.is_empty() {
-                return Some(val.to_string());
+                return Some(val);
             }
         }
     }
     None
+}
+
+/// Extract a named cookie value from the `Cookie` request header.
+pub fn extract_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    extract_cookie_str(headers, name).map(str::to_string)
 }
 
 // ────────────────────────────────────────────────────────────

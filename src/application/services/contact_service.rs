@@ -263,27 +263,32 @@ impl ContactService {
     }
 
     fn generate_vcard(&self, contact: &Contact) -> String {
+        // `write!` formats straight into `vcard`; the old
+        // `push_str(&format!(…))` allocated a throwaway String per emitted
+        // line (benches/ROUND11.md §10: 766 → 357 ns, 21 → 5 allocs).
+        use std::fmt::Write as _;
         let mut vcard = String::from("BEGIN:VCARD\r\nVERSION:3.0\r\n");
 
         // UID
-        vcard.push_str(&format!("UID:{}\r\n", contact.uid()));
+        let _ = write!(vcard, "UID:{}\r\n", contact.uid());
 
         // Name fields
         if let Some(full_name) = contact.full_name() {
-            vcard.push_str(&format!("FN:{}\r\n", full_name));
+            let _ = write!(vcard, "FN:{}\r\n", full_name);
         }
 
-        let last_name = contact.last_name().unwrap_or_default().to_string();
-        let first_name = contact.first_name().unwrap_or_default().to_string();
-        vcard.push_str(&format!("N:{};{};;;\r\n", last_name, first_name));
+        let last_name = contact.last_name().unwrap_or_default();
+        let first_name = contact.first_name().unwrap_or_default();
+        let _ = write!(vcard, "N:{};{};;;\r\n", last_name, first_name);
 
         // Email addresses
         for email in contact.email() {
-            vcard.push_str(&format!(
+            let _ = write!(
+                vcard,
                 "EMAIL;TYPE={}:{}\r\n",
                 email.r#type.to_uppercase(),
                 email.email
-            ));
+            );
         }
 
         // Phone numbers
@@ -295,49 +300,51 @@ impl ContactService {
                 "fax" => "FAX",
                 _ => "OTHER",
             };
-            vcard.push_str(&format!("TEL;TYPE={}:{}\r\n", tel_type, phone.number));
+            let _ = write!(vcard, "TEL;TYPE={}:{}\r\n", tel_type, phone.number);
         }
 
         // Addresses
         for addr in contact.address() {
             let addr_type = addr.r#type.to_uppercase();
-            let street = addr.street.clone().unwrap_or_default();
-            let city = addr.city.clone().unwrap_or_default();
-            let state = addr.state.clone().unwrap_or_default();
-            let postal_code = addr.postal_code.clone().unwrap_or_default();
-            let country = addr.country.clone().unwrap_or_default();
+            let street = addr.street.as_deref().unwrap_or_default();
+            let city = addr.city.as_deref().unwrap_or_default();
+            let state = addr.state.as_deref().unwrap_or_default();
+            let postal_code = addr.postal_code.as_deref().unwrap_or_default();
+            let country = addr.country.as_deref().unwrap_or_default();
 
-            vcard.push_str(&format!(
+            let _ = write!(
+                vcard,
                 "ADR;TYPE={}:;;{};{};{};{};{}\r\n",
                 addr_type, street, city, state, postal_code, country
-            ));
+            );
         }
 
         // Organization
         if let Some(org) = contact.organization() {
-            vcard.push_str(&format!("ORG:{}\r\n", org));
+            let _ = write!(vcard, "ORG:{}\r\n", org);
         }
 
         // Title
         if let Some(title) = contact.title() {
-            vcard.push_str(&format!("TITLE:{}\r\n", title));
+            let _ = write!(vcard, "TITLE:{}\r\n", title);
         }
 
         // Notes
         if let Some(notes) = contact.notes() {
-            vcard.push_str(&format!("NOTE:{}\r\n", notes));
+            let _ = write!(vcard, "NOTE:{}\r\n", notes);
         }
 
         // Birthday
         if let Some(birthday) = contact.birthday() {
-            vcard.push_str(&format!("BDAY:{}\r\n", birthday.format("%Y%m%d")));
+            let _ = write!(vcard, "BDAY:{}\r\n", birthday.format("%Y%m%d"));
         }
 
         // Revision (last update)
-        vcard.push_str(&format!(
+        let _ = write!(
+            vcard,
             "REV:{}\r\n",
             contact.updated_at().format("%Y%m%dT%H%M%SZ")
-        ));
+        );
 
         vcard.push_str("END:VCARD\r\n");
 

@@ -404,7 +404,18 @@ impl FileHandler {
         // (file_id, size, format) triple.  If the browser already has it, return
         // 304 with zero I/O or DB work. Format is in the ETag so a client that
         // switched codecs doesn't get a stale 304.
-        let etag = format!("\"thumb-{}-{:?}-{:?}\"", id, thumb_size, format);
+        let etag = {
+            let (s, f) = (thumb_size.as_str(), format.as_str());
+            let mut e = String::with_capacity(9 + id.len() + s.len() + f.len());
+            e.push_str("\"thumb-");
+            e.push_str(&id);
+            e.push('-');
+            e.push_str(s);
+            e.push('-');
+            e.push_str(f);
+            e.push('"');
+            e
+        };
         if let Some(if_none_match) = headers.get(header::IF_NONE_MATCH)
             && let Ok(val) = if_none_match.to_str()
             && (val == etag || val == "*")
@@ -776,9 +787,15 @@ impl FileHandler {
 
         // Use the ownership-scoped optimized download.
         // Ownership was already verified by get_file_owned above,
-        // so we can safely use the preloaded variant.
+        // so we can safely use the preloaded variant. Capture the two
+        // fields the stream arm needs (one Arc bump + a u64 copy) and MOVE
+        // the DTO in — the old `file_dto.clone()` deep-copied all 7 owned
+        // Strings on every download, purely to read mime/size afterwards
+        // (benches/ROUND11.md §1).
+        let dto_mime = file_dto.mime_type.clone();
+        let dto_size = file_dto.size;
         match retrieval
-            .get_file_optimized_preloaded(&id, file_dto.clone(), accept_webp, prefer_original)
+            .get_file_optimized_preloaded(&id, file_dto, accept_webp, prefer_original)
             .await
         {
             Ok((_file, content)) => match content {
@@ -788,9 +805,9 @@ impl FileHandler {
                     .into_response(),
                 OptimizedFileContent::Stream(pinned_stream) => Response::builder()
                     .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, &*file_dto.mime_type)
+                    .header(header::CONTENT_TYPE, &*dto_mime)
                     .header(header::CONTENT_DISPOSITION, &disposition)
-                    .header(header::CONTENT_LENGTH, file_dto.size)
+                    .header(header::CONTENT_LENGTH, dto_size)
                     .header(header::ETAG, &etag)
                     .header(
                         header::CACHE_CONTROL,

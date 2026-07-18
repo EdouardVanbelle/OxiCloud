@@ -139,7 +139,7 @@ mod before {
         FileDto {
             id: parts.id,
             name: parts.name,
-            path: parts.path_string,
+            path: parts.storage_path.into_joined(),
             size: parts.size,
             mime_type,
             folder_id: parts.folder_id,

@@ -496,7 +496,11 @@ impl SubjectGroupService {
                         .list_transitive_users(child_id)
                         .await
                         .map_err(map_repo_err)?;
-                    !child_users.is_empty() && users_before.iter().all(|u| child_users.contains(u))
+                    // Set probe instead of an O(|before|·|child|) slice scan
+                    // (benches/ROUND11.md §13: 5.7x at 500×500).
+                    let child_set: std::collections::HashSet<&uuid::Uuid> =
+                        child_users.iter().collect();
+                    !child_users.is_empty() && users_before.iter().all(|u| child_set.contains(u))
                 }
             };
             if would_be_empty {

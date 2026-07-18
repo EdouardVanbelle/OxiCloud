@@ -20,6 +20,10 @@ tower-http = { version = "0.6.11", features = ["fs", "compression-gzip", "compre
 flate2 = "1.1.9"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# Round-11: moves log formatting+write off the async workers. `lossy(false)`
+# so audit lines are never dropped (emitters block only when the 128k-line
+# channel is full — backpressure, not loss). See benches/ROUND11.md.
+tracing-appender = "0.2"
 chrono = { version = "0.4.45", features = ["serde"] }
 # RFC 5545 iCalendar parser + emitter.
 #
@@ -348,6 +352,34 @@ required-features = ["bench"]
 [[example]]
 name = "bench_micro_allocs"
 path = "examples/bench_micro_allocs.rs"
+required-features = ["bench"]
+
+# Round-11 battery ────────────────────────────────────────────────────────────
+
+# Round-11 CPU/alloc micro-pack — download DTO hand-off, Last-Modified stack
+# render, status.php/openapi.json memoization, upload-session PROPFIND emit,
+# rate-limiter single-op, CSRF/ETag/recent-id micro-allocs, 4xx body, vCard
+# emit, search page move, cosine norms, encrypted write in-place, StoragePath
+# joined-only materialization. No Postgres.
+[[example]]
+name = "bench_round11_micro"
+path = "examples/bench_round11_micro.rs"
+required-features = ["bench"]
+
+# Round-11 query-shape pack — deferred-upload 3→1 CTE, Calendar/AddressBook/
+# Playlist direct-grant cache, expand_user join!, geo min-cast, recluster
+# UNNEST batch (needs the dev Postgres up).
+[[example]]
+name = "bench_round11_queries"
+path = "examples/bench_round11_queries.rs"
+required-features = ["bench"]
+
+# Round-11 log-writer benchmark — sync stdout fmt layer vs tracing-appender
+# non_blocking(lossy=false) under 4-worker emit contention, fast + slow
+# writer profiles. Run once per arm via BENCH_LOG_ARM. No Postgres.
+[[example]]
+name = "bench_log_writer"
+path = "examples/bench_log_writer.rs"
 required-features = ["bench"]
 
 # Round-10 battery ────────────────────────────────────────────────────────────

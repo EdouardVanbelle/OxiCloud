@@ -188,6 +188,50 @@ fn ext_of(name: &str) -> Option<&str> {
     Some(after_dot)
 }
 
+/// Longest extension any classifier table matches ("appimage", "markdown"
+/// — 8 bytes). Longer extensions can only ever hit the `_` arms, so they
+/// skip the buffer entirely.
+const MAX_CLASSIFIED_EXT: usize = 16;
+
+/// Lowercase `ext` into `buf` without heap allocation. Returns `None` for
+/// extensions longer than any table entry — the caller must then take the
+/// same default arm `ext.to_ascii_lowercase()` would have fallen into.
+fn lower_ext_into<'b>(ext: &str, buf: &'b mut [u8; MAX_CLASSIFIED_EXT]) -> Option<&'b str> {
+    let bytes = ext.as_bytes();
+    if bytes.len() > MAX_CLASSIFIED_EXT {
+        return None;
+    }
+    for (i, b) in bytes.iter().enumerate() {
+        buf[i] = b.to_ascii_lowercase();
+    }
+    // ASCII-lowercasing bytes keeps UTF-8 validity (non-ASCII bytes pass
+    // through untouched).
+    std::str::from_utf8(&buf[..bytes.len()]).ok()
+}
+
+/// The three display classifications for one `(name, mime)` pair.
+pub struct DisplayClass {
+    pub icon_class: &'static str,
+    pub icon_special_class: &'static str,
+    pub category: &'static str,
+}
+
+/// Run all three classifiers over one `(name, mime)` pair, lowering the
+/// extension **once into a stack buffer** instead of each classifier
+/// allocating its own `to_ascii_lowercase()` String on the fallback path
+/// (generic/empty MIME rows — common for code and unknown types). Each
+/// decision tree is byte-for-byte the classifier it replaces
+/// (benches/ROUND11.md §21 gates the equivalence over a corpus).
+pub fn classify_display(name: &str, mime: &str) -> DisplayClass {
+    let mut buf = [0u8; MAX_CLASSIFIED_EXT];
+    let ext = ext_of(name).and_then(|e| lower_ext_into(e, &mut buf));
+    DisplayClass {
+        icon_class: icon_class_with_ext(mime, ext),
+        icon_special_class: icon_special_class_with_ext(mime, ext),
+        category: category_with_ext(mime, ext),
+    }
+}
+
 // ─── Icon class (FontAwesome) ────────────────────────────────────────
 
 /// Returns the FontAwesome icon class for a file, considering both MIME
@@ -196,6 +240,12 @@ fn ext_of(name: &str) -> Option<&str> {
 /// Use this instead of the old `mime_to_icon_class` whenever the filename
 /// is available.
 pub fn icon_class_for(name: &str, mime: &str) -> &'static str {
+    let mut buf = [0u8; MAX_CLASSIFIED_EXT];
+    let ext = ext_of(name).and_then(|e| lower_ext_into(e, &mut buf));
+    icon_class_with_ext(mime, ext)
+}
+
+fn icon_class_with_ext(mime: &str, ext: Option<&str>) -> &'static str {
     // 1. Try specific MIME matches first
     match mime {
         "application/pdf" => return "fas fa-file-pdf",
@@ -273,8 +323,8 @@ pub fn icon_class_for(name: &str, mime: &str) -> &'static str {
     }
 
     // 3. Extension-based fallback (for application/octet-stream, empty, etc.)
-    if let Some(ext) = ext_of(name) {
-        return match ext.to_ascii_lowercase().as_str() {
+    if let Some(ext) = ext {
+        return match ext {
             "pdf" => "fas fa-file-pdf",
             "doc" | "docx" | "odt" | "rtf" => "fas fa-file-word",
             "xls" | "xlsx" | "ods" | "csv" => "fas fa-file-excel",
@@ -311,6 +361,12 @@ pub fn icon_class_for(name: &str, mime: &str) -> &'static str {
 /// The returned class maps to CSS rules in `style.css` that set colours,
 /// backgrounds and decorative pseudo-elements per file type.
 pub fn icon_special_class_for(name: &str, mime: &str) -> &'static str {
+    let mut buf = [0u8; MAX_CLASSIFIED_EXT];
+    let ext = ext_of(name).and_then(|e| lower_ext_into(e, &mut buf));
+    icon_special_class_with_ext(mime, ext)
+}
+
+fn icon_special_class_with_ext(mime: &str, ext: Option<&str>) -> &'static str {
     // 1. Specific MIME matches
     match mime {
         "application/pdf" => return "pdf-icon",
@@ -390,8 +446,8 @@ pub fn icon_special_class_for(name: &str, mime: &str) -> &'static str {
     }
 
     // 3. Extension-based fallback
-    if let Some(ext) = ext_of(name) {
-        return match ext.to_ascii_lowercase().as_str() {
+    if let Some(ext) = ext {
+        return match ext {
             "pdf" => "pdf-icon",
             "doc" | "docx" | "odt" | "rtf" => "doc-icon",
             "xls" | "xlsx" | "ods" | "csv" => "spreadsheet-icon",
@@ -437,6 +493,12 @@ pub fn icon_special_class_for(name: &str, mime: &str) -> &'static str {
 
 /// Returns a human-readable category label, considering MIME + extension.
 pub fn category_for(name: &str, mime: &str) -> &'static str {
+    let mut buf = [0u8; MAX_CLASSIFIED_EXT];
+    let ext = ext_of(name).and_then(|e| lower_ext_into(e, &mut buf));
+    category_with_ext(mime, ext)
+}
+
+fn category_with_ext(mime: &str, ext: Option<&str>) -> &'static str {
     // 1. Specific MIME matches
     match mime {
         "application/pdf" => return "PDF",
@@ -489,8 +551,8 @@ pub fn category_for(name: &str, mime: &str) -> &'static str {
     }
 
     // 3. Extension fallback
-    if let Some(ext) = ext_of(name) {
-        return match ext.to_ascii_lowercase().as_str() {
+    if let Some(ext) = ext {
+        return match ext {
             "pdf" => "PDF",
             "doc" | "docx" | "odt" | "rtf" | "txt" => "Document",
             "xls" | "xlsx" | "ods" | "csv" => "Spreadsheet",

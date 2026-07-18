@@ -295,6 +295,28 @@ impl FaceRepository for FacePgRepository {
         Ok(())
     }
 
+    async fn assign_person_batch(
+        &self,
+        assignments: &[(Uuid, Option<Uuid>)],
+    ) -> Result<(), DomainError> {
+        if assignments.is_empty() {
+            return Ok(());
+        }
+        let (face_ids, person_ids): (Vec<Uuid>, Vec<Option<Uuid>>) =
+            assignments.iter().cloned().unzip();
+        sqlx::query(
+            "UPDATE faces.faces f SET person_id = u.pid
+               FROM (SELECT unnest($1::uuid[]) AS fid, unnest($2::uuid[]) AS pid) u
+              WHERE f.id = u.fid",
+        )
+        .bind(&face_ids)
+        .bind(&person_ids)
+        .execute(self.pool.as_ref())
+        .await
+        .map_err(|e| db_err("assign_person_batch", e))?;
+        Ok(())
+    }
+
     async fn create_person(&self, person: &Person) -> Result<(), DomainError> {
         sqlx::query(
             r#"

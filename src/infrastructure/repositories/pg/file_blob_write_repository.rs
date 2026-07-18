@@ -812,42 +812,84 @@ impl FileWritePort for FileBlobWriteRepository {
         size: u64,
         caller_id: Uuid,
     ) -> Result<(File, PathBuf), DomainError> {
-        let drive_id = self.resolve_parent_drive(folder_id.as_deref()).await?;
-
         // For deferred registration we use a placeholder hash.
         // The write-behind cache will call update_file_content later.
         let placeholder_hash = "0000000000000000000000000000000000000000000000000000000000000000";
 
         // Post-D7: `user_id` omitted from the INSERT column list.
-        // §14: `created_by = $8 = updated_by = caller_id`.
-        let row = retry_on_deadlock("files.insert_deferred", || {
-            sqlx::query_as::<_, (String, i64, i64, Option<Uuid>, Option<Uuid>)>(
-                r#"
-                INSERT INTO storage.files
-                    (name, folder_id, drive_id, blob_hash, size,
-                     mime_type, category_order, created_by, updated_by)
-                VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $8)
-                RETURNING id::text,
-                          EXTRACT(EPOCH FROM created_at)::bigint,
-                          EXTRACT(EPOCH FROM updated_at)::bigint,
-                          created_by,
-                          updated_by
-                "#,
-            )
-            .bind(&name)
-            .bind(&folder_id)
-            .bind(drive_id)
-            .bind(placeholder_hash)
-            .bind(size as i64)
-            .bind(&content_type)
-            .bind(category_order_for(&name, &content_type))
-            .bind(caller_id)
-            .fetch_one(self.pool.as_ref())
-        })
-        .await
-        .map_err(|e| DomainError::internal_error("FileBlobWrite", format!("deferred: {e}")))?;
+        // §14: `created_by = <caller> = updated_by`.
+        //
+        // With a parent folder this is the SAME single-round-trip `WITH
+        // parent AS (…) INSERT … RETURNING` template `persist_file` uses:
+        // the old shape ran three queries per uploaded file — parent drive
+        // SELECT, INSERT, parent path SELECT — with the first and third
+        // re-reading the identical folders row (benches/ROUND11.md
+        // §Q1: 3 → 1 round-trips on the default REST upload path).
+        let (row, folder_path) = if let Some(fid) = folder_id.as_deref() {
+            let row = retry_on_deadlock("files.insert_deferred", || {
+                sqlx::query_as::<_, (String, String, i64, i64, Option<Uuid>, Option<Uuid>)>(
+                    r#"
+                    WITH parent AS (
+                        SELECT id, drive_id, path FROM storage.folders WHERE id = $2::uuid
+                    )
+                    INSERT INTO storage.files
+                        (name, folder_id, drive_id, blob_hash, size,
+                         mime_type, category_order, created_by, updated_by)
+                    SELECT $1, parent.id, parent.drive_id, $3, $4, $5, $6, $7, $7
+                      FROM parent
+                    RETURNING id::text,
+                              (SELECT path FROM parent),
+                              EXTRACT(EPOCH FROM created_at)::bigint,
+                              EXTRACT(EPOCH FROM updated_at)::bigint,
+                              created_by,
+                              updated_by
+                    "#,
+                )
+                .bind(&name)
+                .bind(fid)
+                .bind(placeholder_hash)
+                .bind(size as i64)
+                .bind(&content_type)
+                .bind(category_order_for(&name, &content_type))
+                .bind(caller_id)
+                .fetch_optional(self.pool.as_ref())
+            })
+            .await
+            .map_err(|e| DomainError::internal_error("FileBlobWrite", format!("deferred: {e}")))?
+            // 0 rows ⇒ the parent folder doesn't exist — same not-found the
+            // old `resolve_parent_drive` first query produced.
+            .ok_or_else(|| DomainError::not_found("Folder", fid))?;
+            ((row.0, row.2, row.3, row.4, row.5), Some(row.1))
+        } else {
+            let drive_id = self.resolve_parent_drive(None).await?;
+            let row = retry_on_deadlock("files.insert_deferred", || {
+                sqlx::query_as::<_, (String, i64, i64, Option<Uuid>, Option<Uuid>)>(
+                    r#"
+                    INSERT INTO storage.files
+                        (name, folder_id, drive_id, blob_hash, size,
+                         mime_type, category_order, created_by, updated_by)
+                    VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $7)
+                    RETURNING id::text,
+                              EXTRACT(EPOCH FROM created_at)::bigint,
+                              EXTRACT(EPOCH FROM updated_at)::bigint,
+                              created_by,
+                              updated_by
+                    "#,
+                )
+                .bind(&name)
+                .bind(drive_id)
+                .bind(placeholder_hash)
+                .bind(size as i64)
+                .bind(&content_type)
+                .bind(category_order_for(&name, &content_type))
+                .bind(caller_id)
+                .fetch_one(self.pool.as_ref())
+            })
+            .await
+            .map_err(|e| DomainError::internal_error("FileBlobWrite", format!("deferred: {e}")))?;
+            (row, None)
+        };
 
-        let folder_path = self.lookup_folder_path(folder_id.as_deref()).await?;
         let file = Self::row_to_file(
             row.0.clone(),
             name,

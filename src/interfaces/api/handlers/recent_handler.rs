@@ -8,8 +8,7 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::application::dtos::display_helpers::{
-    category_for, format_file_size, icon_class_for, icon_special_class_for, intern_display,
-    intern_mime,
+    classify_display, format_file_size, intern_display, intern_mime,
 };
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
@@ -57,8 +56,10 @@ pub async fn record_item_access(
             .into_response();
     }
 
+    let mut id_buf = [0u8; 36];
+    let item_id_str: &str = item_id.as_hyphenated().encode_lower(&mut id_buf);
     match recent_service
-        .record_item_access(user_id, &item_id.to_string(), &item_type)
+        .record_item_access(user_id, item_id_str, &item_type)
         .await
     {
         Ok(_) => {
@@ -100,8 +101,10 @@ pub async fn remove_from_recent(
 ) -> impl IntoResponse {
     let user_id = auth_user.id;
 
+    let mut id_buf = [0u8; 36];
+    let item_id_str: &str = item_id.as_hyphenated().encode_lower(&mut id_buf);
     match recent_service
-        .remove_from_recent(user_id, &item_id.to_string(), &item_type)
+        .remove_from_recent(user_id, item_id_str, &item_type)
         .await
     {
         Ok(removed) => {
@@ -261,10 +264,10 @@ pub async fn list_recent_resources(
                         };
                         // Name-derived display classes borrow `row.name`;
                         // compute them before the name moves into the DTO.
-                        let icon_class = intern_display(icon_class_for(&row.name, mime));
-                        let icon_special_class =
-                            intern_display(icon_special_class_for(&row.name, mime));
-                        let category = intern_display(category_for(&row.name, mime));
+                        let classes = classify_display(&row.name, mime);
+                        let icon_class = intern_display(classes.icon_class);
+                        let icon_special_class = intern_display(classes.icon_special_class);
+                        let category = intern_display(classes.category);
                         let dto = FileDto {
                             id: row.resource_id.to_string(),
                             name: row.name,

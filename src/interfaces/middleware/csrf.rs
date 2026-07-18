@@ -39,16 +39,17 @@ pub async fn csrf_middleware(request: Request, next: Next) -> Result<Response, R
         return Ok(next.run(request).await);
     }
 
-    // Extract the CSRF token from the cookie.
-    let cookie_token =
-        cookie_auth::extract_cookie_value(request.headers(), cookie_auth::CSRF_COOKIE);
+    // Extract the CSRF token from the cookie (borrow-only).
+    let cookie_token = cookie_auth::extract_cookie_str(request.headers(), cookie_auth::CSRF_COOKIE);
 
-    // Extract the CSRF token from the request header.
+    // Extract the CSRF token from the request header. Borrow-only:
+    // `String: PartialEq<&str>` covers the comparison, so materializing an
+    // owned copy per state-changing request was a pure waste
+    // (benches/ROUND11.md §6: 15.7 → 1.3 ns, −1 alloc).
     let header_token = request
         .headers()
         .get(cookie_auth::CSRF_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .and_then(|v| v.to_str().ok());
 
     match (cookie_token, header_token) {
         (Some(c), Some(h)) if !c.is_empty() && c == h => {

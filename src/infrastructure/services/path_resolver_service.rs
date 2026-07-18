@@ -10,7 +10,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::application::dtos::display_helpers::{
-    category_for, format_file_size, icon_class_for, icon_special_class_for,
+    classify_display, format_file_size, intern_display, intern_mime,
 };
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
@@ -197,18 +197,19 @@ impl PathResolverService {
                 let hash = blob_hash.unwrap_or_default();
                 let modified_at_u = modified_at as u64;
                 let etag = File::compute_etag(&hash, modified_at_u);
+                let classes = classify_display(&name, &mime);
                 Ok(ResolvedResource::File(FileDto {
                     id,
                     name: name.clone(),
                     path: res_path,
                     size: sz,
-                    mime_type: Arc::from(&*mime),
+                    mime_type: intern_mime(&mime),
                     folder_id,
                     created_at: created_at as u64,
                     modified_at: modified_at_u,
-                    icon_class: Arc::from(icon_class_for(&name, &mime)),
-                    icon_special_class: Arc::from(icon_special_class_for(&name, &mime)),
-                    category: Arc::from(category_for(&name, &mime)),
+                    icon_class: intern_display(classes.icon_class),
+                    icon_special_class: intern_display(classes.icon_special_class),
+                    category: intern_display(classes.category),
                     size_formatted: format_file_size(sz),
                     sort_date: None,
                     content_hash: hash,

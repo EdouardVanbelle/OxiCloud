@@ -3,6 +3,8 @@
 //! This module contains error types specific to the HTTP/API layer.
 //! These errors handle the conversion from domain errors to HTTP responses.
 
+use std::borrow::Cow;
+
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -13,25 +15,28 @@ use crate::domain::errors::{DomainError, ErrorKind};
 /// Error type for HTTP/API responses.
 ///
 /// This struct represents errors that will be returned to HTTP clients.
-/// It contains the HTTP status code, a user-friendly message, and an error type identifier.
+/// It contains the HTTP status code, a user-friendly message, and an error
+/// type identifier. `error_type` is a `Cow`: every built-in constructor and
+/// the `DomainError` conversion use a `&'static str` from a closed set, so
+/// the common 4xx path allocates nothing for it (benches/ROUND11.md §9).
 #[derive(Debug)]
 pub struct AppError {
     pub status_code: StatusCode,
     pub message: String,
-    pub error_type: String,
+    pub error_type: Cow<'static, str>,
 }
 
-/// JSON response structure for errors.
-///
-/// Both `error` and `message` carry the same content for backwards compatibility:
-/// - Legacy ad-hoc handlers returned `{"error": "..."}` (frontend reads `.error`)
-/// - AppError returned `{"message": "..."}` (admin panel reads `.message`)
+/// JSON response structure for errors, borrowing from the `AppError` it
+/// renders — `error` and `message` intentionally serialize the SAME string
+/// for backwards compatibility (legacy handlers returned `{"error": …}`,
+/// AppError returned `{"message": …}`); serializing one buffer twice
+/// replaces the old per-response deep clone.
 #[derive(Serialize)]
-pub struct ErrorResponse {
-    pub status: String,
-    pub error: String,
-    pub message: String,
-    pub error_type: String,
+pub struct ErrorResponse<'a> {
+    pub status: &'a str,
+    pub error: &'a str,
+    pub message: &'a str,
+    pub error_type: &'a str,
 }
 
 impl AppError {
@@ -39,7 +44,7 @@ impl AppError {
     pub fn new(
         status_code: StatusCode,
         message: impl Into<String>,
-        error_type: impl Into<String>,
+        error_type: impl Into<Cow<'static, str>>,
     ) -> Self {
         Self {
             status_code,
@@ -131,7 +136,7 @@ impl From<DomainError> for AppError {
         Self {
             status_code,
             message: err.message,
-            error_type: err.kind.to_string(),
+            error_type: Cow::Borrowed(err.kind.as_str()),
         }
     }
 }
@@ -144,25 +149,26 @@ impl IntoResponse for AppError {
         // Log the full error server-side for debugging, return a generic
         // message to the client. Other status codes (including 5xx like
         // 501, 503, 507) keep their intentionally user-facing messages.
-        let client_message = if status == StatusCode::INTERNAL_SERVER_ERROR {
+        let client_message: &str = if status == StatusCode::INTERNAL_SERVER_ERROR {
             tracing::error!(
                 error_type = %self.error_type,
                 "Internal server error: {}",
                 self.message
             );
-            "An internal error occurred. Please try again later.".to_string()
+            "An internal error occurred. Please try again later."
         } else {
-            self.message
+            &self.message
         };
 
+        let status_line = status.to_string();
         let error_response = ErrorResponse {
-            status: status.to_string(),
-            error: client_message.clone(),
+            status: &status_line,
+            error: client_message,
             message: client_message,
-            error_type: self.error_type,
+            error_type: &self.error_type,
         };
 
-        let body = Json(error_response);
+        let body = Json(&error_response);
         (status, body).into_response()
     }
 }

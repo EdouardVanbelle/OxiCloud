@@ -17,7 +17,6 @@ pub struct FolderParts {
     pub id: String,
     pub name: String,
     pub storage_path: StoragePath,
-    pub path_string: String,
     pub parent_id: Option<String>,
     /// Drive that owns this folder. See [`Folder::drive_id`].
     pub drive_id: Uuid,
@@ -40,11 +39,9 @@ pub struct Folder {
     /// Name of the folder
     name: String,
 
-    /// Path to the folder in the domain model
+    /// Path to the folder in the domain model. Owns the canonical joined
+    /// string; `path_string()` borrows it (ROUND11 §20).
     storage_path: StoragePath,
-
-    /// String representation of the path (for API compatibility)
-    path_string: String,
 
     /// Parent folder ID (None if it's a root folder)
     parent_id: Option<String>,
@@ -94,7 +91,6 @@ impl Default for Folder {
             id: "stub-id".to_string(),
             name: "stub-folder".to_string(),
             storage_path: StoragePath::from_string("/"),
-            path_string: "/".to_string(),
             parent_id: None,
             drive_id: Uuid::nil(),
             created_at: 0,
@@ -130,13 +126,10 @@ impl Folder {
             .unwrap_or_default()
             .as_secs();
 
-        let path_string = storage_path.to_path_string();
-
         Ok(Self {
             id,
             name,
             storage_path,
-            path_string,
             parent_id,
             drive_id: Uuid::nil(),
             created_at: now,
@@ -226,13 +219,10 @@ impl Folder {
             return Err(FolderError::InvalidFolderName(format!("{name}: {reason}")));
         }
 
-        let path_string = storage_path.to_path_string();
-
         Ok(Self {
             id,
             name,
             storage_path,
-            path_string,
             parent_id,
             drive_id,
             created_at,
@@ -270,13 +260,12 @@ impl Folder {
             return Err(FolderError::InvalidFolderName(format!("{name}: {reason}")));
         }
 
-        let (storage_path, path_string) = StoragePath::from_joined(path);
+        let storage_path = StoragePath::from_joined(path);
 
         Ok(Self {
             id,
             name,
             storage_path,
-            path_string,
             parent_id,
             drive_id,
             created_at,
@@ -296,7 +285,6 @@ impl Folder {
             id: self.id,
             name: self.name,
             storage_path: self.storage_path,
-            path_string: self.path_string,
             parent_id: self.parent_id,
             drive_id: self.drive_id,
             created_at: self.created_at,
@@ -321,7 +309,7 @@ impl Folder {
     }
 
     pub fn path_string(&self) -> &str {
-        &self.path_string
+        self.storage_path.as_str()
     }
 
     pub fn parent_id(&self) -> Option<&str> {
@@ -445,8 +433,8 @@ impl Folder {
         created_at: u64,
         modified_at: u64,
     ) -> Self {
-        // Create storage_path from the string
-        let storage_path = StoragePath::from_string(&path);
+        // Adopt the DTO path (canonical inputs reused with zero copies).
+        let storage_path = StoragePath::from_joined(path);
 
         // Create directly without validation to avoid errors in DTO
         // conversions. Still NFC-normalize so DTO-reconstructed
@@ -460,7 +448,6 @@ impl Folder {
             id,
             name,
             storage_path,
-            path_string: path,
             parent_id,
             // DTO round-trips lose drive_id (FolderDto carries it,
             // but the legacy `from_dto` signature predates this
@@ -495,9 +482,6 @@ impl Folder {
             None => StoragePath::from_string(&new_name),
         };
 
-        // Update string representation
-        let new_path_string = new_storage_path.to_path_string();
-
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -507,7 +491,6 @@ impl Folder {
             id: self.id.clone(),
             name: new_name,
             storage_path: new_storage_path,
-            path_string: new_path_string,
             parent_id: self.parent_id.clone(),
             drive_id: self.drive_id,
             created_at: self.created_at,
@@ -535,9 +518,6 @@ impl Folder {
             None => StoragePath::from_string(&self.name), // Root
         };
 
-        // Update string representation
-        let new_path_string = new_storage_path.to_path_string();
-
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -547,7 +527,6 @@ impl Folder {
             id: self.id.clone(),
             name: self.name.clone(),
             storage_path: new_storage_path,
-            path_string: new_path_string,
             parent_id,
             drive_id: self.drive_id,
             created_at: self.created_at,
@@ -562,12 +541,9 @@ impl Folder {
     pub fn get_absolute_path<P: AsRef<std::path::Path>>(&self, root_path: P) -> std::path::PathBuf {
         let mut result = std::path::PathBuf::from(root_path.as_ref());
 
-        // Skip leading '/' from path_string to avoid creating absolute path incorrectly
-        let relative_path = if self.path_string.starts_with('/') {
-            &self.path_string[1..]
-        } else {
-            &self.path_string
-        };
+        // Skip leading '/' to avoid creating an absolute path incorrectly
+        let path_string = self.storage_path.as_str();
+        let relative_path = path_string.strip_prefix('/').unwrap_or(path_string);
 
         if !relative_path.is_empty() {
             result.push(relative_path);

@@ -117,6 +117,16 @@ const CASCADE_GRANT_CACHE_CAPACITY: u64 = 100_000;
 /// invalidation tree". Short enough that any such change takes effect in <1 min.
 const CASCADE_GRANT_CACHE_TTL: Duration = Duration::from_secs(30);
 
+/// `direct_grant_cache` bound/TTL: memoises the Calendar / AddressBook /
+/// Playlist `role_grants` point decision — the only `check()` arms that had
+/// NO result cache, re-run on every CalDAV/CardDAV/music request by clients
+/// that poll continuously. Same invalidation contract as
+/// `cascade_grant_cache`: grant writes on these resource types flush the
+/// whole cache; group/expiry churn self-heals within the TTL
+/// (benches/ROUND11.md §Q2).
+const DIRECT_GRANT_CACHE_CAPACITY: u64 = 100_000;
+const DIRECT_GRANT_CACHE_TTL: Duration = Duration::from_secs(30);
+
 /// `file_parent_cache` bound/TTL: `file_id → Option<folder_id>` point rows
 /// (~50 B each) resolved on the file-cascade path so an N-file album pays
 /// ONE folder-cascade query instead of N (ROUND9). Parentage changes only
@@ -212,6 +222,11 @@ pub struct PgAclEngine {
     /// only positively-or-negatively for at most the TTL. A revoke via
     /// `clear_role` flushes immediately; anything missed self-heals in ≤30 s.
     cascade_grant_cache: Cache<(Subject, Resource, Permission), bool>,
+
+    /// Memoised Calendar/AddressBook/Playlist direct-grant decision (the
+    /// top-level resources with no cascade parent). See
+    /// `DIRECT_GRANT_CACHE_CAPACITY` for the contract.
+    direct_grant_cache: Cache<(Subject, Resource, Permission), bool>,
     /// `file_id → Option<parent folder_id>` memo for the file-cascade
     /// decomposition (see `cascade_grant_cached`): resolving the parent lets
     /// a whole folder's files share ONE folder-cascade decision, so a shared
@@ -315,6 +330,10 @@ impl PgAclEngine {
                 .max_capacity(CASCADE_GRANT_CACHE_CAPACITY)
                 .time_to_live(CASCADE_GRANT_CACHE_TTL)
                 .build(),
+            direct_grant_cache: Cache::builder()
+                .max_capacity(DIRECT_GRANT_CACHE_CAPACITY)
+                .time_to_live(DIRECT_GRANT_CACHE_TTL)
+                .build(),
             file_parent_cache: Cache::builder()
                 .max_capacity(FILE_PARENT_CACHE_CAPACITY)
                 .time_to_live(FILE_PARENT_CACHE_TTL)
@@ -392,6 +411,10 @@ impl PgAclEngine {
                 .time_to_live(Duration::from_secs(1))
                 .build(),
             cascade_grant_cache: Cache::builder()
+                .max_capacity(1)
+                .time_to_live(Duration::from_secs(1))
+                .build(),
+            direct_grant_cache: Cache::builder()
                 .max_capacity(1)
                 .time_to_live(Duration::from_secs(1))
                 .build(),
@@ -568,26 +591,38 @@ impl PgAclEngine {
         // belong to the Internal virtual group. Unknown user (no row) is
         // treated as external to fail closed: a deleted or bogus user_id
         // must not gain implicit Internal membership.
+        //
+        // The `is_external` point read and the recursive groups CTE are
+        // independent — `join!` overlaps their round-trips on every cold
+        // expansion instead of paying them serially (benches/ROUND11.md
+        // §Q3; the ROUND9/10 pattern).
         counters.sql_queries.fetch_add(1, Ordering::Relaxed);
-        let is_external: bool =
-            sqlx::query_scalar("SELECT is_external FROM auth.users WHERE id = $1")
+        let is_external_fut = async {
+            sqlx::query_scalar::<_, bool>("SELECT is_external FROM auth.users WHERE id = $1")
                 .bind(user_id)
                 .fetch_optional(self.pool.as_ref())
                 .await
                 .map_err(|e| {
                     DomainError::internal_error("PgAcl", format!("lookup is_external: {e}"))
-                })?
-                .unwrap_or(true);
-
-        if !is_external {
+                })
+                .map(|row| row.unwrap_or(true))
+        };
+        let groups_fut = async {
+            match &self.group_repo {
+                Some(repo) => {
+                    counters.sql_queries.fetch_add(1, Ordering::Relaxed);
+                    repo.groups_for_user(user_id).await.map(Some).map_err(|e| {
+                        DomainError::internal_error("PgAcl", format!("groups_for_user: {e}"))
+                    })
+                }
+                None => Ok(None),
+            }
+        };
+        let (is_external, direct) = tokio::join!(is_external_fut, groups_fut);
+        if !is_external? {
             set.insert(INTERNAL_GROUP_ID);
         }
-
-        if let Some(repo) = &self.group_repo {
-            counters.sql_queries.fetch_add(1, Ordering::Relaxed);
-            let direct = repo.groups_for_user(user_id).await.map_err(|e| {
-                DomainError::internal_error("PgAcl", format!("groups_for_user: {e}"))
-            })?;
+        if let Some(direct) = direct? {
             set.extend(direct);
         }
 
@@ -1099,6 +1134,48 @@ impl PgAclEngine {
     /// (on File/Folder grant writes — it holds file AND folder decisions in
     /// the same map) and the 30 s TTL (indirect changes, incl. moves for the
     /// parent memo) keep it fresh. See the `cascade_grant_cache` field doc.
+    /// Cached wrapper for the Calendar/AddressBook/Playlist direct-grant
+    /// decision (`try_get_with`: a cold herd on one key coalesces into ONE
+    /// loader run, the ROUND10 single-flight pattern; loader errors are
+    /// never cached). `resource_type` is the `role_grants.resource_type`
+    /// discriminant for `resource`.
+    async fn direct_grant_cached(
+        &self,
+        subject: Subject,
+        resource: Resource,
+        permission: Permission,
+        resource_type: &'static str,
+        id: Uuid,
+        counters: &QueryCounters,
+    ) -> Result<bool, DomainError> {
+        if let Some(allowed) = self
+            .direct_grant_cache
+            .get(&(subject, resource, permission))
+            .await
+        {
+            counters.cache_hit.fetch_add(1, Ordering::Relaxed);
+            return Ok(allowed);
+        }
+        self.direct_grant_cache
+            .try_get_with((subject, resource, permission), async {
+                let (subject_types, subject_ids) =
+                    self.subject_match_set(subject, counters).await?;
+                self.direct_grant_exists(
+                    &subject_types,
+                    &subject_ids,
+                    permission,
+                    resource_type,
+                    id,
+                    counters,
+                )
+                .await
+            })
+            .await
+            .map_err(|e: Arc<DomainError>| {
+                DomainError::internal_error("PgAcl", format!("direct grant load: {e}"))
+            })
+    }
+
     async fn cascade_grant_cached(
         &self,
         subject: Subject,
@@ -1493,24 +1570,13 @@ impl PgAclEngine {
             // round-trip — no drive_role_cache short-circuit (no
             // drive), no cascade.
             Resource::Calendar(id) => {
-                let (subject_types, subject_ids) =
-                    self.subject_match_set(subject, counters).await?;
-                self.direct_grant_exists(
-                    &subject_types,
-                    &subject_ids,
-                    permission,
-                    "calendar",
-                    id,
-                    counters,
-                )
-                .await
+                self.direct_grant_cached(subject, resource, permission, "calendar", id, counters)
+                    .await
             }
             Resource::AddressBook(id) => {
-                let (subject_types, subject_ids) =
-                    self.subject_match_set(subject, counters).await?;
-                self.direct_grant_exists(
-                    &subject_types,
-                    &subject_ids,
+                self.direct_grant_cached(
+                    subject,
+                    resource,
                     permission,
                     "address_book",
                     id,
@@ -1519,17 +1585,8 @@ impl PgAclEngine {
                 .await
             }
             Resource::Playlist(id) => {
-                let (subject_types, subject_ids) =
-                    self.subject_match_set(subject, counters).await?;
-                self.direct_grant_exists(
-                    &subject_types,
-                    &subject_ids,
-                    permission,
-                    "playlist",
-                    id,
-                    counters,
-                )
-                .await
+                self.direct_grant_cached(subject, resource, permission, "playlist", id, counters)
+                    .await
             }
         }
     }
@@ -2874,6 +2931,13 @@ impl AuthorizationEngine for PgAclEngine {
         if matches!(resource, Resource::File(_) | Resource::Folder(_)) {
             self.invalidate_cascade_grant_cache_all().await;
         }
+        // Same immediacy contract for the memoised top-level decisions.
+        if matches!(
+            resource,
+            Resource::Calendar(_) | Resource::AddressBook(_) | Resource::Playlist(_)
+        ) {
+            self.direct_grant_cache.invalidate_all();
+        }
 
         Self::row_to_grant(row)
     }
@@ -2902,6 +2966,14 @@ impl AuthorizationEngine for PgAclEngine {
         // now, not in ≤30 s — flush the cascade cache (see `set_role`).
         if matches!(resource, Resource::File(_) | Resource::Folder(_)) {
             self.invalidate_cascade_grant_cache_all().await;
+        }
+        // A revoked calendar/address-book/playlist grant must fail the next
+        // check now, not in ≤30 s (see `set_role`).
+        if matches!(
+            resource,
+            Resource::Calendar(_) | Resource::AddressBook(_) | Resource::Playlist(_)
+        ) {
+            self.direct_grant_cache.invalidate_all();
         }
 
         Ok(())

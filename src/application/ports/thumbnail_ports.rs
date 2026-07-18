@@ -21,6 +21,19 @@ pub enum ThumbnailSize {
 }
 
 impl ThumbnailSize {
+    /// Stable name, byte-identical to the derived `Debug` output. Used by
+    /// the thumbnail/preview ETags on the hottest revalidation path — a
+    /// `&'static str` push beats routing through the `Debug` machinery
+    /// (benches/ROUND11.md §7) while keeping every already-cached client
+    /// ETag valid.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ThumbnailSize::Icon => "Icon",
+            ThumbnailSize::Preview => "Preview",
+            ThumbnailSize::Large => "Large",
+        }
+    }
+
     /// Get the maximum dimension for this size.
     pub fn max_dimension(&self) -> u32 {
         match self {
@@ -64,6 +77,15 @@ pub enum ThumbnailFormat {
 }
 
 impl ThumbnailFormat {
+    /// Stable name, byte-identical to the derived `Debug` output (see
+    /// [`ThumbnailSize::as_str`] — same ETag-stability contract).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ThumbnailFormat::Webp => "Webp",
+            ThumbnailFormat::Jpeg => "Jpeg",
+        }
+    }
+
     /// On-disk file extension for this format (no dot).
     pub fn ext(self) -> &'static str {
         match self {
