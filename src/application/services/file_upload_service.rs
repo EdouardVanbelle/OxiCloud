@@ -457,6 +457,44 @@ impl FileUploadUseCase for FileUploadService {
         Ok(dto)
     }
 
+    /// AuthZ audit #17 — `Create` on target folder is re-verified here
+    /// so mid-session grant revocations take effect at finalize. When
+    /// `folder_id` is `None` the write lands at drive-root; the drive
+    /// resolution for that case isn't plumbed through the chunked-
+    /// upload session (`UploadSession.folder_id` alone), so we fall
+    /// back to the pre-audit behaviour there. That drive-root path is
+    /// tracked separately as part of the D0 folder-id-walking work;
+    /// closing it here would require session-scoped drive_id.
+    async fn upload_file_streaming_with_perms(
+        &self,
+        name: String,
+        folder_id: Option<String>,
+        content_type: String,
+        blob: StoredBlob,
+        caller_id: Uuid,
+    ) -> Result<FileDto, DomainError> {
+        if let Some(fid) = folder_id.as_deref() {
+            let Some(authz) = &self.authorization else {
+                return Err(DomainError::internal_error(
+                    "FileUpload",
+                    "upload_file_streaming_with_perms called without authorization engine wired",
+                ));
+            };
+            let folder_uuid = Uuid::parse_str(fid)
+                .map_err(|_| DomainError::not_found("Folder", fid.to_string()))?;
+            authz
+                .require(
+                    Subject::User(caller_id),
+                    Permission::Create,
+                    Resource::Folder(folder_uuid),
+                )
+                .await?;
+        }
+
+        self.upload_file_streaming(name, folder_id, content_type, blob, caller_id)
+            .await
+    }
+
     /// Swap the content of the file at `path` to an already-ingested blob,
     /// creating the file when it doesn't exist (WebDAV/NextCloud/WOPI PUT).
     ///

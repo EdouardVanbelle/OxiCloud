@@ -9,9 +9,10 @@ OxiCloud provides authenticated file and folder search with simple query paramet
 | `GET` | `/api/search/` | Simple search using query parameters |
 | `POST` | `/api/search/advanced` | Advanced search with a JSON body |
 | `GET` | `/api/search/suggest` | Lightweight autocomplete suggestions |
-| `DELETE` | `/api/search/cache` | Clear the search results cache |
+| `DELETE` | `/api/admin/search/cache` | Flush the shared search results cache (admin only) |
 
-All search endpoints require authentication.
+All search endpoints require authentication. The cache flush is
+additionally restricted to administrators — see [Result Caching](#result-caching).
 
 ## Simple Search Parameters
 
@@ -59,7 +60,10 @@ Search results are cached in memory using the search criteria and user ID as the
 
 - Cache TTL: 5 minutes
 - Max entries: 1000
-- Manual invalidation: `DELETE /api/search/cache`
+- Manual invalidation: `DELETE /api/admin/search/cache` — admin-only.
+  The endpoint calls `invalidate_all()` on the shared moka cache, so
+  one call cold-starts every subsequent search for every tenant; it's
+  an operator debug lever, not a per-user affordance.
 
 ## Feature Flag
 

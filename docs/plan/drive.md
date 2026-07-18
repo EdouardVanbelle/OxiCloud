@@ -2037,8 +2037,8 @@ PR:
 4. `tests/api/storage_cleanup_check.sh` clean.
 5. No new `cargo clippy` warnings.
 6. Tantivy index returns no cross-drive results for any caller.
-7. `/api/dedup/stats` shows blob ref-counts consistent with the
-   number of files referencing each blob across all drives.
+7. `/api/admin/dedup/stats` shows blob ref-counts consistent with
+   the number of files referencing each blob across all drives.
 
 ## UI design — outline for D1 and D3
 

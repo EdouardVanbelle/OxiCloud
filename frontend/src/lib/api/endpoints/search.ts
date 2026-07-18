@@ -69,9 +69,14 @@ export function searchSuggest(
 	});
 }
 
-/** Clear the server-side search cache (`DELETE /api/search/cache`). */
+/**
+ * Clear the shared server-side search cache
+ * (`DELETE /api/admin/search/cache`). Admin-only — moved from
+ * `/api/search/cache` on 2026-07-17 because the underlying
+ * `invalidate_all()` touches every tenant (see AuthZ audit #14).
+ */
 export async function clearSearchCache(): Promise<void> {
-	const res = await apiFetch('/api/search/cache', {
+	const res = await apiFetch('/api/admin/search/cache', {
 		method: 'DELETE',
 		credentials: 'same-origin'
 	});

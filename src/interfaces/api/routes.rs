@@ -52,6 +52,11 @@ async fn get_openapi_spec() -> AxumJson<utoipa::openapi::OpenApi> {
 
 use crate::interfaces::api::handlers::admin_handler;
 use crate::interfaces::api::handlers::batch_handler::{self, BatchHandlerState};
+// `chunked_upload_handler::*` are marked `#[deprecated]` (prefer
+// `/api/files/delta/*`); the router still needs to reference them
+// until clients migrate. See the `chunked_upload_router` block
+// below for the local `#[allow(deprecated)]`.
+#[allow(deprecated)]
 use crate::interfaces::api::handlers::chunked_upload_handler::{
     cancel_upload, complete_upload, create_upload, get_upload_status, upload_chunk,
 };
@@ -70,7 +75,7 @@ use crate::interfaces::api::handlers::i18n_handler::{
     get_locales, get_translations_by_locale, translate,
 };
 use crate::interfaces::api::handlers::search_handler::{
-    clear_search_cache, search_files_get, search_files_post, suggest_files,
+    search_files_get, search_files_post, suggest_files,
 };
 use crate::interfaces::api::handlers::trash_handler;
 
@@ -275,8 +280,11 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
             .route("/suggest", get(suggest_files))
             // Advanced search with full criteria object
             .route("/advanced", post(search_files_post))
-            // Clear search cache
-            .route("/cache", delete(clear_search_cache))
+            // `DELETE /api/search/cache` used to live here as a per-user-
+            // reachable endpoint. It's an operator-only debug lever
+            // (moka `invalidate_all()` — nukes every tenant), so it
+            // moved to `/api/admin/search/cache` where the URL declares
+            // intent. AuthZ audit #14 (2026-07-16).
             .with_state(app_state.clone())
     } else {
         Router::new()
@@ -365,6 +373,13 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     // Create routes for chunked uploads (large files >10MB).
     // All five handlers are free functions — see chunked_upload_handler.rs for why
     // #[utoipa::path] cannot be applied to ChunkedUploadHandler impl methods directly.
+    //
+    // Each handler carries `#[deprecated]` so utoipa marks the OpenAPI paths
+    // deprecated (Swagger UI shows the strikethrough + banner) and existing
+    // callers get a compile-time nudge to migrate to `/api/files/delta/*`.
+    // The route registration itself has to keep referencing them until the
+    // clients migrate off, so we suppress the local `deprecated` lint here.
+    #[allow(deprecated)]
     let chunked_upload_router = Router::new()
         .route("/", post(create_upload))
         .route("/{upload_id}", axum::routing::patch(upload_chunk))
@@ -376,18 +391,19 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     // Create routes for deduplication endpoints.
     // All handlers are free functions — see dedup_handler.rs for why
     // #[utoipa::path] cannot be applied to DedupHandler impl methods directly.
-    use super::handlers::dedup_handler::{
-        check_hash, check_hashes_batch, get_blob, get_stats, recalculate_stats,
-    };
+    use super::handlers::dedup_handler::{check_hash, check_hashes_batch, get_blob};
     let dedup_router = Router::new()
         .route("/check/{hash}", get(check_hash))
         .route("/check-batch", post(check_hashes_batch))
-        .route("/stats", get(get_stats))
         .route("/blob/{hash}", get(get_blob))
-        // NOTE: remove_reference is intentionally NOT exposed as a public
-        // endpoint — ref_count management is an internal concern handled
-        // automatically when files are deleted via the file API.
-        .route("/recalculate", post(recalculate_stats))
+        // NOTE: `remove_reference` is intentionally NOT exposed as a
+        // public endpoint — ref_count management is an internal concern
+        // handled automatically when files are deleted via the file API.
+        //
+        // `/stats` and `/recalculate` moved to `/api/admin/dedup/*`
+        // (AuthZ audit #24/#25, 2026-07-17) so the middleware admin
+        // gate covers them by construction. See
+        // `admin_handler::admin_routes()`.
         .with_state(app_state.clone());
 
     let mut router = Router::new()
@@ -598,8 +614,19 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     // NOTE: CalDAV and CardDAV routes are mounted at top-level (/caldav, /carddav)
     // in main.rs for protocol compliance, NOT under /api.
 
-    // Admin settings routes (protected by admin_guard inside the handler)
-    let admin_router = admin_handler::admin_routes().with_state(app_state.clone());
+    // Admin settings routes — the whole subtree is admin-only by
+    // construction. The `require_admin` layer runs AFTER the outer
+    // `auth_middleware` (main.rs::protected_api), so it can rely on
+    // `CurrentUser` already being in the request extensions. Any new
+    // route added to `admin_handler::admin_routes()` inherits the
+    // gate automatically — implementors no longer have to remember
+    // to call `require_admin(&state, &headers).await?` inline, and a
+    // forgotten call can't silently expose a non-admin surface.
+    let admin_router = admin_handler::admin_routes()
+        .layer(axum::middleware::from_fn(
+            crate::interfaces::middleware::auth::require_admin,
+        ))
+        .with_state(app_state.clone());
     router = router.nest("/admin", admin_router);
 
     // ReBAC subject-group management. All mutating routes are admin-gated;

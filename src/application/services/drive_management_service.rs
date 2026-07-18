@@ -480,6 +480,11 @@ impl DriveManagementService {
     /// supplied is overwritten. Returns the post-merge typed view.
     /// Audit emits `drive.policy_changed` with the post-merge bag for
     /// steady-state observability.
+    ///
+    /// Ed's call, 2026-07-17: intentional deviation from the AGENTS.md
+    /// "AuthZ in service layer" rule for this specific endpoint —
+    /// the handler-layer admin check stays, this method stays trusting.
+    /// See memory `feedback_drive_policies_admin_at_handler`.
     pub async fn update_policies(
         &self,
         caller_id: Uuid,

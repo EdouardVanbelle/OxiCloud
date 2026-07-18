@@ -581,7 +581,7 @@ impl FolderUseCase for FolderService {
             )
             .await?;
 
-        let folder = self
+        let renamed = self
             .folder_storage
             .rename_folder(id, dto.name, caller_id)
             .await
@@ -592,7 +592,26 @@ impl FolderUseCase for FolderService {
                 )
             })?;
 
-        Ok(FolderDto::from(folder))
+        // Root folders double as the drive's display name (see the
+        // `required_perm` branch above and `drive_pg_repository.rs`
+        // `readable_cache` + `default_drive_cache` docs).
+        // `drives.name` is sourced from `folders.name` of the root
+        // folder, so a rename affects BOTH caches — every user's
+        // readable-drive list AND the per-user default-drive lookup.
+        // Both are 30 s TTL; without the invalidation, `GET /api/drives`
+        // returns the stale name for up to that window after a root
+        // rename. Surfaced by `tests/api/drives_membership.hurl`
+        // Step 23. Regression from commit `12dc648c` ("perf: round 4 —
+        // drive-selector cache") which added the caches without
+        // wiring the root-rename invalidation.
+        if folder.parent_id().is_none()
+            && let Some(drive_repo) = &self.drive_repo
+        {
+            drive_repo.invalidate_readable_all();
+            drive_repo.invalidate_default_drive_all();
+        }
+
+        Ok(FolderDto::from(renamed))
     }
 
     /// Moves a folder to a new parent. Requires `Update` on the source and

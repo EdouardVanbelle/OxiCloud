@@ -188,6 +188,29 @@ pub trait DriveRepository: Send + Sync + 'static {
     /// content first so a single click can't wipe a populated drive.
     async fn is_empty(&self, drive_id: Uuid) -> Result<bool, DriveRepositoryError>;
 
+    /// Drop the cached readable-drive list for one user. Called by
+    /// service-layer code paths that mutate state affecting a specific
+    /// caller's drive listing (grant writes, membership changes) but
+    /// don't reach through the drive-repo itself. Default no-op — the
+    /// no-cache stubs need no plumbing.
+    async fn invalidate_readable_for_user(&self, _user_id: Uuid) {}
+
+    /// Drop every cached readable-drive list. Called when the affected
+    /// user set is unknown at this layer — group-subject grants, drive
+    /// deletion, policy edits, root-folder renames (drive.name is
+    /// sourced from the root folder, so a rename affects the listing
+    /// for every user with a grant on the drive). Default no-op.
+    fn invalidate_readable_all(&self) {}
+
+    /// Drop every entry in the "default drive per user" cache. Called
+    /// from paths that mutate a drive's display name or its root
+    /// folder id at the concrete cache level (root-folder rename is
+    /// the only one today). Same class of bug as
+    /// `invalidate_readable_all` — the cache holds a `DriveWithRootName`
+    /// with `root_folder_name` baked in, so a rename would otherwise
+    /// stay stale for the cache TTL. Default no-op.
+    fn invalidate_default_drive_all(&self) {}
+
     /// Hard-delete a drive: its `role_grants` rows, its root folder,
     /// and the drive row itself, in one transaction. Caller is
     /// responsible for ensuring `is_empty` first; this method does

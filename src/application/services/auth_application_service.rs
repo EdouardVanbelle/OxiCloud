@@ -1924,6 +1924,59 @@ impl AuthApplicationService {
         ))
     }
 
+    /// Username-keyed sibling of [`Self::get_user_profile`], routing every
+    /// lookup through the same visibility check as the user-profile REST
+    /// endpoint. Preserves the anti-enum shape end-to-end: whether the
+    /// username doesn't exist OR the caller has no visibility path, the
+    /// response is `NotFound`.
+    ///
+    /// AuthZ audit #11 (2026-07-12): NextCloud OCS user-provisioning
+    /// (`nextcloud/ocs_handler.rs::user_provisioning_response`) used to
+    /// resolve `userid` via bare `get_user_by_username`, gated only by a
+    /// bespoke `caller.role == "admin"` shortcut. Admins bypassed the
+    /// `expose_system_users` gate; non-admins got a `403 Insufficient
+    /// privileges` for any cross-user probe (leaking existence via the
+    /// differential vs a genuine 404); zero audit lines. This wrapper
+    /// closes all three.
+    ///
+    /// The username→id resolution happens here so the target isn't
+    /// leaked through the audit line as a plaintext username on failure:
+    /// the `target_username_not_found` event carries the string
+    /// (unavoidable — we resolved it, we log it), but every other
+    /// downstream event keys off `target_id` after resolution, matching
+    /// the id-based endpoint.
+    pub async fn get_user_profile_by_username_with_perms(
+        &self,
+        caller_id: Uuid,
+        username: &str,
+        expose_system_users: bool,
+        pool: &sqlx::PgPool,
+    ) -> Result<UserDto, DomainError> {
+        let target = match self.user_storage.get_user_by_username(username).await {
+            Ok(u) => u,
+            Err(e) if e.kind == ErrorKind::NotFound => {
+                tracing::info!(
+                    target: "audit",
+                    event = "user_profile.rejected",
+                    reason = "target_username_not_found",
+                    caller_id = %caller_id,
+                    target_username = %username,
+                    "👮🏻‍♂️ user-profile rejected: username '{}' does not exist (caller {})",
+                    username,
+                    caller_id,
+                );
+                return Err(DomainError::new(
+                    ErrorKind::NotFound,
+                    "User",
+                    "User not found",
+                ));
+            }
+            Err(e) => return Err(e),
+        };
+        self.get_user_profile(caller_id, target.id(), expose_system_users, pool)
+            .await
+    }
+
     // New method to get user by username - needed for admin user handling
     pub async fn get_user_by_username(&self, username: &str) -> Result<UserDto, DomainError> {
         let user = self.user_storage.get_user_by_username(username).await?;

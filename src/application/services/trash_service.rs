@@ -662,22 +662,25 @@ impl TrashUseCase for TrashService {
     async fn empty_trash_for_drive(&self, user_id: Uuid, drive_id: Uuid) -> Result<()> {
         // Per-drive trash empty — the Drive group-by on `/trash` exposes
         // this as a per-row affordance so multi-drive owners can clear
-        // one drive without touching the others. Refuses with
-        // `NotFound` (anti-enum) when the caller lacks Delete on the
-        // named drive — same shape as the user-facing drive listing
-        // would emit for an unknown id.
-        let allowed = self.drives_with_delete_for(user_id).await?;
-        if !allowed.contains(&drive_id) {
-            tracing::info!(
-                target: "audit",
-                event = "trash.empty_drive_rejected",
-                reason = "no_delete_on_drive",
-                user_id = %user_id,
-                drive_id = %drive_id,
-                "👮🏻‍♂️ refused per-drive empty — caller lacks Delete on this drive",
-            );
-            return Err(DomainError::not_found("Drive", drive_id.to_string()));
-        }
+        // one drive without touching the others.
+        //
+        // Route through `authz.require(Delete, Drive)` so the denial
+        // shape stays consistent with every other write verb: 403 when
+        // the caller has Read on the drive (viewer/editor holding no
+        // Delete), 404 when they don't (anti-enum). Before 2026-07-16
+        // this method rolled its own `drives_with_delete_for` check +
+        // hardcoded `NotFound` — that predated the graduated-denial
+        // engine change and returned 404 unconditionally even for a
+        // Viewer who could see the drive in `/api/drives`. The engine
+        // now emits `authz.denied` with `visibility="visible"|"hidden"`
+        // and the standard mapping renders it as 403 or 404.
+        self.authz
+            .require(
+                Subject::User(user_id),
+                Permission::Delete,
+                Resource::Drive(drive_id),
+            )
+            .await?;
         info!("Emptying trash for drive {} (user {})", drive_id, user_id);
         self.clear_trash_in(&[drive_id], user_id).await
     }

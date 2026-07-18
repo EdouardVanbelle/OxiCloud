@@ -6,7 +6,7 @@ use axum::{
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::application::ports::file_ports::{FileRetrievalUseCase, FileUploadUseCase};
+use crate::application::ports::file_ports::FileUploadUseCase;
 use crate::application::ports::storage_ports::StorageUsagePort;
 use crate::common::di::AppState;
 use crate::common::mime_detect::filename_from_path;
@@ -402,8 +402,6 @@ async fn handle_assemble(
         .map_err(|e| AppError::internal_error(format!("Failed to list chunks: {}", e)))?;
 
     let upload_service = &state.applications.file_upload_service;
-    let file_service = &state.applications.file_retrieval_service;
-    let folder_service = &state.applications.folder_service;
 
     // Path-based lookups below scope by `drive_id`. The NC session's
     // chroot is always populated for path-scoped handlers (see
@@ -433,64 +431,41 @@ async fn handle_assemble(
     .await?;
     let content_type = ingested.content_type.clone();
 
-    // Check if file exists (update vs create).
-    let existing = file_service
-        .get_file_by_path(&internal_path, drive_id)
-        .await;
-
-    let etag: Option<String> = if existing.is_ok() {
-        let dto = upload_service
-            .update_file_streaming_with_perms(
-                &internal_path,
-                drive_id,
-                ingested.stored(),
-                &content_type,
-                oc_mtime,
-                user.id,
-            )
-            .await
-            .map_err(|e| AppError::internal_error(format!("Failed to update file: {}", e)))?;
-
-        Some(dto.etag)
-    } else {
-        // New-file branch: resolve the parent folder by path and register
-        // the file row against the already-ingested blob.
-        let (parent_sub, filename) = match dest_subpath.rsplit_once('/') {
-            Some((p, n)) => (p, n),
-            None => ("", dest_subpath.as_str()),
-        };
-        let parent_internal =
-            crate::interfaces::nextcloud::webdav_handler::nc_to_internal_path(chroot, parent_sub)?;
-        let parent_internal = parent_internal.trim_end_matches('/');
-
-        use crate::application::ports::folder_ports::FolderUseCase;
-        let parent_folder = match folder_service
-            .get_folder_by_path(parent_internal, drive_id)
-            .await
-        {
-            Ok(folder) => folder,
-            Err(e) => {
-                discard_ingested(&state.core.dedup_service, &ingested).await;
-                return Err(AppError::internal_error(format!(
-                    "Parent folder lookup failed: {}",
-                    e
-                )));
-            }
-        };
-
-        let dto = upload_service
-            .upload_file_streaming(
-                filename.to_string(),
-                Some(parent_folder.id),
-                content_type.to_string(),
-                ingested.stored(),
-                user.id,
-            )
-            .await
-            .map_err(|e| AppError::internal_error(format!("Failed to create file: {}", e)))?;
-
-        Some(dto.etag)
+    // AuthZ audit #12 (2026-07-12): the previous shape branched on
+    // file existence — `update_file_streaming_with_perms` on the
+    // overwrite path (correct), plain `upload_file_streaming` on
+    // the create path (NO `authz.require`). Viewer/Commenter on a
+    // shared drive could MKCOL → PUT chunks → MOVE and land a
+    // brand-new file, skipping the `Create`-on-parent-folder gate.
+    //
+    // `update_file_streaming_with_perms` handles both branches
+    // atomically: `Update` on the existing file OR `Create` on the
+    // parent folder / drive root (per the service's own internal
+    // fork). Funneling everything through the one method also
+    // deletes the duplicated parent-folder lookup that used to
+    // live here.
+    //
+    // AuthZ audit #2 (2026-07-12): route DomainError through
+    // `AppError::from` so authz denials keep the graduated 403/404
+    // shape instead of collapsing into 500.
+    let dto = match upload_service
+        .update_file_streaming_with_perms(
+            &internal_path,
+            drive_id,
+            ingested.stored(),
+            &content_type,
+            oc_mtime,
+            user.id,
+        )
+        .await
+    {
+        Ok(dto) => dto,
+        Err(e) => {
+            discard_ingested(&state.core.dedup_service, &ingested).await;
+            return Err(AppError::from(e));
+        }
     };
+    let etag: Option<String> = Some(dto.etag);
 
     // Cleanup session.
     let _ = nc.chunked_uploads.cleanup(&user.username, upload_id).await;

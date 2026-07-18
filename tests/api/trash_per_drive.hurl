@@ -190,8 +190,12 @@ HTTP 404
 
 # ─────────────────────────────────────────────────────────────
 # Step 9 — Provision a Viewer of the shared drive (`tpd_viewer`),
-#          then assert the per-drive empty refuses for Viewer / Editor
-#          / non-member callers. Each refusal is 404 (anti-enum).
+#          then assert the per-drive empty refuses for Viewer /
+#          Editor / non-member callers. Graduated denial (see
+#          [[project_authz_require_graduated_denial]]): the Viewer
+#          and Editor tests get 403 because they hold Read on the
+#          drive; the non-member fallback keeps the 404 anti-enum
+#          shape (no Read = no existence oracle).
 # ─────────────────────────────────────────────────────────────
 POST {{base_url}}/api/admin/users
 Authorization: Bearer {{admin_token}}
@@ -249,17 +253,19 @@ Authorization: Bearer {{owner_token}}
 HTTP 204
 
 
-# Test 4 — Viewer cannot empty the drive's trash.
+# Test 4 — Viewer cannot empty the drive's trash. Viewer has Read
+#          on the drive → graduated denial returns 403.
 DELETE {{base_url}}/api/trash/drive/{{shared_drive_id}}
 Authorization: Bearer {{viewer_token}}
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
 # Step 10 — Test 5: Editor cannot either.
 #           Promote tpd_viewer to Editor; same refusal. Confirms
-#           `Delete` isn't in the Editor bundle.
+#           `Delete` isn't in the Editor bundle. Editor has Read →
+#           graduated denial returns 403.
 # ─────────────────────────────────────────────────────────────
 PATCH {{base_url}}/api/drives/{{shared_drive_id}}/members/user/{{viewer_user_id}}
 Authorization: Bearer {{owner_token}}
@@ -272,7 +278,7 @@ HTTP 200
 DELETE {{base_url}}/api/trash/drive/{{shared_drive_id}}
 Authorization: Bearer {{viewer_token}}
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
@@ -313,6 +319,74 @@ Authorization: Bearer {{owner_token}}
 HTTP 200
 [Asserts]
 jsonpath "$.items[*].drive_id" contains "{{shared_drive_id}}"
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 11b — Regression pin for AuthZ audit #10 (2026-07-12).
+#            `POST /api/trash/{id}/restore` and `DELETE /api/trash/{id}`
+#            once did `err_str.contains("not found")` to decide "already
+#            gone" vs real failure — an authz denial (which returns a
+#            `NotFound`-shaped DomainError to preserve anti-enum on the
+#            listing side) matched the substring and got synthesised
+#            into a 200 `{"success": true}` response. Response lied;
+#            no mutation happened.
+#
+#            Post-fix: both handlers route through
+#            `AppError::from(e).into_response()`, so authz denials
+#            surface as the graduated 403 / 404 shape and body is
+#            never a success envelope.
+#
+#            The Editor (from Step 10 promotion) holds Read on the
+#            canary — graduated denial returns 403 with a
+#            `AccessDenied`-shape body, NOT a success envelope. If a
+#            future refactor reintroduces the substring hack this
+#            assertion trips before it lands in prod.
+# ─────────────────────────────────────────────────────────────
+GET {{base_url}}/api/trash/resources
+Authorization: Bearer {{viewer_token}}
+
+HTTP 200
+[Captures]
+# The shared drive's trash holds exactly one item at this point (the
+# canary owner trashed after Step 9), so `$.items[0]` is unambiguous
+# — no filter needed. `TrashResourceItemDto` wraps the underlying
+# resource in `.resource` (untagged File | Folder | Drive enum) and
+# the trash key equals the original resource id (see
+# `storage.trash_items` view), so `.resource.id` is exactly what
+# `POST /api/trash/{id}/restore` and `DELETE /api/trash/{id}` accept.
+# The `[?(...)]` + `nth 0` shape (see the sibling
+# feedback_hurl_jsonpath_filter_empty memory) collapses on a single
+# match and returns a scalar hurl can't index, so we avoid it here.
+canary_trash_id: jsonpath "$.items[0].resource.id"
+
+
+POST {{base_url}}/api/trash/{{canary_trash_id}}/restore
+Authorization: Bearer {{viewer_token}}
+
+HTTP 403
+[Asserts]
+body not contains "\"success\":true"
+
+
+DELETE {{base_url}}/api/trash/{{canary_trash_id}}
+Authorization: Bearer {{viewer_token}}
+
+HTTP 403
+[Asserts]
+body not contains "\"success\":true"
+
+
+# The canary is still there — the two Editor attempts didn't mutate.
+GET {{base_url}}/api/trash/resources
+Authorization: Bearer {{owner_token}}
+
+HTTP 200
+[Asserts]
+# Owner sees TWO trash items at this point — the shared drive's
+# canary (from Step 9) plus their personal drive's leftover from
+# Step 4 (owner emptied only the shared drive's trash at Step 6).
+# `contains` avoids depending on the sort order between them.
+jsonpath "$.items[*].resource.id" contains "{{canary_trash_id}}"
 
 
 # ─────────────────────────────────────────────────────────────

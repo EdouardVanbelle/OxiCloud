@@ -25,10 +25,11 @@ use crate::domain::repositories::drive_repository::{
 /// policy edits — all of which invalidate explicitly below), yet it is
 /// re-resolved on EVERY NextCloud request (basic-auth chroot), every
 /// native `/webdav` request (Mode-B scope resolution) and every WOPI
-/// call. 30 s mirrors `drive_role_cache` in `pg_acl_engine.rs` and bounds
-/// the one non-invalidated staleness source: a root-folder *rename*,
-/// which doesn't pass through this repository. Measured in
-/// `benches/CHROOT-CACHE.md`.
+/// call. 30 s mirrors `drive_role_cache` in `pg_acl_engine.rs`. Root-
+/// folder renames — which don't pass through this repository directly
+/// — invalidate via the `DriveRepository::invalidate_default_drive_all`
+/// trait hook called from `folder_service::rename_folder_with_perms`
+/// when `parent_id IS NULL`. Measured in `benches/CHROOT-CACHE.md`.
 const DEFAULT_DRIVE_CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// One entry per active user; entries are small (a `Drive` + a name).
@@ -56,11 +57,19 @@ pub struct DrivePgRepository {
     /// through this repository or `DriveManagementService` invalidates
     /// explicitly (per-user when the subject is a User, whole cache for
     /// Group subjects, whose transitive membership is not resolvable
-    /// here). Residual staleness — a root-folder rename or a grant
-    /// written by a path that can't reach this cache — is bounded by
-    /// the same 30 s TTL the sibling caches accept; actual permission
-    /// enforcement is unaffected (the ACL engine re-checks per
-    /// operation with its own invalidation).
+    /// here). Root-folder renames — which update `drive.name` because it
+    /// reads through `folders.name` of the root row — also invalidate,
+    /// via the trait's `invalidate_readable_all` hook called from
+    /// `folder_service::rename_folder_with_perms` when
+    /// `parent_id IS NULL`. That path was missed by the perf commit
+    /// that introduced this cache (`12dc648c`) and surfaced by
+    /// `drives_membership.hurl` Step 23; the trait hook closes it
+    /// without folder_service knowing about the concrete moka cache.
+    ///
+    /// Residual staleness — a grant written by a path that can't reach
+    /// this cache — is bounded by the same 30 s TTL the sibling caches
+    /// accept; actual permission enforcement is unaffected (the ACL
+    /// engine re-checks per operation with its own invalidation).
     readable_cache: Cache<Uuid, Arc<Vec<DriveWithRootName>>>,
 }
 
@@ -91,6 +100,15 @@ impl DrivePgRepository {
     /// one join per active caller.
     pub fn invalidate_readable_all(&self) {
         self.readable_cache.invalidate_all();
+    }
+
+    /// Drop every cached `default_drive_cache` entry. Exposed as a
+    /// `pub` sibling of the whole-cache invalidators above so trait
+    /// callers holding a `dyn DriveRepository` can trigger the same
+    /// cleanup path (e.g. `folder_service` on root-folder rename —
+    /// see `impl DriveRepository` below).
+    pub fn invalidate_default_drive_all(&self) {
+        self.default_drive_cache.invalidate_all();
     }
 
     fn map_sqlx_err(context: &'static str, e: sqlx::Error) -> DriveRepositoryError {
@@ -212,6 +230,22 @@ impl DrivePgRepository {
 
 #[async_trait::async_trait]
 impl DriveRepository for DrivePgRepository {
+    async fn invalidate_readable_for_user(&self, user_id: Uuid) {
+        // Delegate to the inherent method — the trait forwarding lets
+        // callers holding a `dyn DriveRepository` (e.g. `folder_service`
+        // on a root-folder rename) trigger invalidation without knowing
+        // about the concrete cache.
+        DrivePgRepository::invalidate_readable_for_user(self, user_id).await;
+    }
+
+    fn invalidate_readable_all(&self) {
+        DrivePgRepository::invalidate_readable_all(self);
+    }
+
+    fn invalidate_default_drive_all(&self) {
+        DrivePgRepository::invalidate_default_drive_all(self);
+    }
+
     async fn create_personal_drive_atomic(
         &self,
         owner_id: Uuid,

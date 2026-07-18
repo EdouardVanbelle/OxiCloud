@@ -135,19 +135,40 @@ async fn user_provisioning_response(
 ) -> Response {
     let statuscode = if ocs_version == 1 { 100 } else { 200 };
 
-    // Only allow users to view their own profile, unless they are admin.
-    if user.username != userid && user.role != "admin" {
-        return Json(ocs_err(403, "Insufficient privileges")).into_response();
-    }
-
+    // AuthZ audit #11 (2026-07-12): the pre-fix path here rolled its
+    // own gate ("caller is `userid`, else must be admin") and then
+    // called bare `get_user_by_username` — bypassing every visibility
+    // rule the id-keyed `/api/users/{id}` endpoint enforces. Cross-user
+    // probes returned 403 (leaking existence via the differential vs a
+    // genuine 404 for missing users); admins bypassed
+    // `expose_system_users`; no audit line ever fired.
+    //
+    // Now routing through `get_user_profile_by_username_with_perms`,
+    // which delegates to the same visibility engine as the REST
+    // endpoint (self / shared-grant / expose_system_users / admin
+    // paths, all audit-logged on denial). The OCS wire shape stays
+    // `ocs_err(404, ...)` for every denied case — the NC client can't
+    // tell "no such user" from "you can't see this user" from "you're
+    // not admin" apart, which is the anti-enum invariant.
     let auth_service = match state.auth_service.as_ref() {
         Some(svc) => &svc.auth_application_service,
         None => {
             return Json(ocs_err(997, "Authentication not configured")).into_response();
         }
     };
+    let Some(pool) = state.db_pool.as_ref() else {
+        return Json(ocs_err(997, "Database pool not available")).into_response();
+    };
 
-    let user_dto = match auth_service.get_user_by_username(&userid).await {
+    let user_dto = match auth_service
+        .get_user_profile_by_username_with_perms(
+            user.id,
+            &userid,
+            state.core.config.features.expose_system_users,
+            pool,
+        )
+        .await
+    {
         Ok(u) => u,
         Err(_) => {
             return Json(ocs_err(404, "User not found")).into_response();

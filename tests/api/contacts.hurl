@@ -455,6 +455,115 @@ Authorization: Bearer {{bob_token}}
 HTTP 403
 
 
+# ─────────────────────────────────────────────────────────────
+# Step 21d–21g — Regression pin for AuthZ audit #13 (2026-07-12).
+#
+# `ContactService::delete_contact` used to `authz.require(Update)`
+# on the address book instead of `Delete`. Editor role bundle
+# (Read + Comment + Create + Update) satisfies Update → any
+# Editor grantee on a shared address book could delete individual
+# contacts. Fix: swap the required Permission on delete_contact
+# + delete_group to `Delete`. Sibling `CalendarService::delete_event`
+# was the ground-truth pattern.
+#
+# The pin promotes Bob to Editor (so his bundle includes Update
+# but NOT Delete — exactly the pre-fix bypass condition), seeds a
+# canary contact as Alice, has Bob attempt DELETE, then confirms
+# Alice still sees the contact. Pre-fix would 204; post-fix 403.
+# ─────────────────────────────────────────────────────────────
+
+# 21d — Promote Bob from Viewer to Editor.
+PUT {{base_url}}/api/grants/role
+Authorization: Bearer {{token}}
+Content-Type: application/json
+{
+  "subject":  { "type": "user",         "id": "{{bob_user_id}}" },
+  "resource": { "type": "address_book", "id": "{{share_book_id}}" },
+  "role":     "editor"
+}
+
+HTTP 200
+
+
+# 21e — Alice seeds a canary contact in the shared book.
+POST {{base_url}}/api/address-books/{{share_book_id}}/contacts
+Authorization: Bearer {{token}}
+Content-Type: application/json
+{
+  "full_name": "audit-13 delete-permission canary"
+}
+
+HTTP 201
+[Captures]
+audit13_contact_id: jsonpath "$.id"
+
+
+# 21f — Bob (Editor) DELETE the canary → 403. Editor has Read
+# so graduated denial fires with `visibility=visible`. Pre-fix
+# this returned 204 because `require(Update)` succeeded on the
+# Editor bundle.
+DELETE {{base_url}}/api/address-books/{{share_book_id}}/contacts/{{audit13_contact_id}}
+Authorization: Bearer {{bob_token}}
+
+HTTP 403
+
+
+# 21g — Alice re-fetches to confirm the canary is still there
+# (Bob's DELETE really was refused, not just responded to).
+GET {{base_url}}/api/address-books/{{share_book_id}}/contacts/{{audit13_contact_id}}
+Authorization: Bearer {{token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$.id" == "{{audit13_contact_id}}"
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 21h–21i — Regression pin for AuthZ audit #19 (2026-07-12).
+#
+# `ContactService::create_contact` + `create_contact_from_vcard`
+# + `create_group` used to `authz.require(Update)` on the address
+# book, which the Contributor bundle (Read + Create) does NOT
+# satisfy — so Contributor grantees were blocked from adding
+# contacts via REST or CardDAV PUT despite holding the intended
+# Create permission. Not a bypass, an over-restrictive gate.
+# Fix: `Permission::Create`. Sibling `#13` above closed the
+# mirror bug on the delete verbs.
+#
+# The pin demotes Bob from Editor (Step 21d) to Contributor —
+# Contributor is the minimal role that MUST succeed post-fix and
+# FAILED pre-fix. Bob then POSTs a contact via REST; pre-fix this
+# 403'd, post-fix returns 201.
+# ─────────────────────────────────────────────────────────────
+
+# 21h — Demote Bob from Editor to Contributor.
+PUT {{base_url}}/api/grants/role
+Authorization: Bearer {{token}}
+Content-Type: application/json
+{
+  "subject":  { "type": "user",         "id": "{{bob_user_id}}" },
+  "resource": { "type": "address_book", "id": "{{share_book_id}}" },
+  "role":     "contributor"
+}
+
+HTTP 200
+
+
+# 21i — Bob (Contributor) creates a contact → 201. Pre-fix, the
+# service required Update which Contributor's bundle doesn't hold,
+# so this 403'd and the CardDAV surface was equally blocked.
+POST {{base_url}}/api/address-books/{{share_book_id}}/contacts
+Authorization: Bearer {{bob_token}}
+Content-Type: application/json
+{
+  "full_name": "audit-19 contributor-can-create canary"
+}
+
+HTTP 201
+[Captures]
+audit19_contact_id: jsonpath "$.id"
+
+
 # Step 22 — Alice revokes the grant.
 DELETE {{base_url}}/api/grants/{{share_grant_id}}
 Authorization: Bearer {{token}}

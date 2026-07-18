@@ -111,16 +111,25 @@ HTTP 201
 small_file_id: jsonpath "$.id"
 
 
-# Confirm `drives.used_bytes` reflects the new file. The hook is
-# fire-and-forget on a tokio task, so the SQL UPDATE may not have
-# landed by the time `POST /api/files/upload` returned. Retry the
-# `GET /api/drives` until the cached value catches up — bounded
-# wait keeps a slow CI machine from flaking.
+# Force freshness on `drives.used_bytes`:
+#   1. The fire-and-forget delta hook may not have landed yet
+#      (200 ms delay to let the tokio task register — see
+#      `bug_trigger_sweep_vs_spawn_hook_race`).
+#   2. Force a reconciliation sweep. That's the ONLY path that
+#      invalidates `readable_cache` / `default_drive_cache` after
+#      Ed's 2026-07-17 design call: the sweep is the escape hatch
+#      for tests / operators that need immediate cache freshness;
+#      per-write invalidation would nuke the cache on every upload.
+POST {{base_url}}/api/admin/internal/trigger-sweep
+Authorization: Bearer {{admin_token}}
+[Options]
+delay: 200ms
+
+HTTP 200
+
+
 GET {{base_url}}/api/drives
 Authorization: Bearer {{owner_token}}
-[Options]
-retry: 10
-retry-interval: 200ms
 
 HTTP 200
 [Asserts]
@@ -145,13 +154,19 @@ file: file,fixtures/hello-copy.txt; text/plain
 HTTP 201
 
 
-# `used_bytes` climbs to 64 (32 + 32). Same retry shape as the
-# first assertion since the second delta is also fire-and-forget.
+# `used_bytes` climbs to 64 (32 + 32). Same trigger-sweep pattern
+# as the first assertion — the delta is fire-and-forget and the
+# listing cache lags until the sweep invalidates it.
+POST {{base_url}}/api/admin/internal/trigger-sweep
+Authorization: Bearer {{admin_token}}
+[Options]
+delay: 200ms
+
+HTTP 200
+
+
 GET {{base_url}}/api/drives
 Authorization: Bearer {{owner_token}}
-[Options]
-retry: 10
-retry-interval: 200ms
 
 HTTP 200
 [Asserts]
@@ -173,7 +188,18 @@ HTTP 507
 
 # `used_bytes` is unchanged — the failed upload didn't charge the
 # drive. (Cumulative usage is still 64; the 5 MiB write never
-# registered a row.)
+# registered a row.) Trigger the sweep again to guarantee cache
+# freshness — the 5 MiB attempt was refused pre-write so no
+# delta was queued, but the previous sweep's invalidation was
+# consumed by the intervening GET which re-populated the cache
+# with the pre-refused-write value. Sweep + re-check for
+# determinism.
+POST {{base_url}}/api/admin/internal/trigger-sweep
+Authorization: Bearer {{admin_token}}
+
+HTTP 200
+
+
 GET {{base_url}}/api/drives
 Authorization: Bearer {{owner_token}}
 
@@ -211,13 +237,17 @@ HTTP 201
 
 
 # Unlimited drive's `used_bytes` climbs to the file's exact size
-# (5 MiB = 5_242_880 bytes). Same retry block because the delta
-# hook is fire-and-forget here too.
+# (5 MiB = 5_242_880 bytes). Trigger-sweep pattern (see above).
+POST {{base_url}}/api/admin/internal/trigger-sweep
+Authorization: Bearer {{admin_token}}
+[Options]
+delay: 200ms
+
+HTTP 200
+
+
 GET {{base_url}}/api/drives
 Authorization: Bearer {{owner_token}}
-[Options]
-retry: 10
-retry-interval: 200ms
 
 HTTP 200
 [Asserts]
@@ -384,7 +414,15 @@ HTTP 200
 
 
 # `used_bytes` on the tight drive is unchanged — the two refused
-# operations above never wrote anything.
+# operations above never wrote anything. Trigger-sweep so the
+# check reads live SQL (see the class doc on the earlier
+# sweep + GET pair for the design rationale).
+POST {{base_url}}/api/admin/internal/trigger-sweep
+Authorization: Bearer {{admin_token}}
+
+HTTP 200
+
+
 GET {{base_url}}/api/drives
 Authorization: Bearer {{owner_token}}
 

@@ -26,6 +26,22 @@
 
 
 # ─────────────────────────────────────────────────────────────
+# Pre-setup — anonymous request pin.
+#
+# `DELETE /api/admin/search/cache` with NO credentials must land as
+# 401 Unauthorized (from `auth_middleware`, before the admin gate
+# even runs). Kept at the very top of the file so no earlier
+# request has populated any auth state that could accidentally
+# authenticate this request. `[Options] cookie-storage-clear` was
+# tried earlier but isn't supported in Hurl 8.0.1, so we rely on
+# ordering instead — this DELETE runs FIRST, before any login.
+# ─────────────────────────────────────────────────────────────
+DELETE {{base_url}}/api/admin/search/cache
+
+HTTP 401
+
+
+# ─────────────────────────────────────────────────────────────
 # Setup — admin login + bob (re-)provisioning
 # ─────────────────────────────────────────────────────────────
 POST {{base_url}}/api/auth/login
@@ -249,6 +265,39 @@ jsonpath "$.has_more" == false
 jsonpath "$.hidden_count" not exists
 jsonpath "$.filtered" not exists
 jsonpath "$.total" not exists
+
+
+# ─────────────────────────────────────────────────────────────
+# 6b — Regression pin for AuthZ audit #14 (2026-07-12).
+#      `DELETE /api/admin/search/cache` calls moka `invalidate_all()`
+#      on the shared results cache — one call cold-starts every
+#      subsequent search for every tenant. Pre-fix, this lived at
+#      `/api/search/cache` gated only by the top-level auth
+#      middleware: any authenticated caller (including external /
+#      magic-link accounts) could DELETE it in a loop and hold the
+#      results cache empty indefinitely (sustained DoS). Fix: gate
+#      on `require_admin` AND move the URL to `/api/admin/...` so
+#      the taxonomy declares the intent up front. Moved 2026-07-17.
+#
+#      Bob (regular user) → 403; missing token → 401; admin → 200.
+#      The 200 confirms the admin path still works (no regression
+#      on the operator debug lever the endpoint remains for).
+# ─────────────────────────────────────────────────────────────
+DELETE {{base_url}}/api/admin/search/cache
+Authorization: Bearer {{bob_token}}
+
+HTTP 403
+
+
+# The unauthenticated 401 case is pinned at the top of the file
+# (before any login has run) — see the pre-setup block. Placing it
+# there instead of here avoids relying on Hurl's cookie / auth
+# behaviour, which `cookie-storage-clear` (unsupported in 8.0.1)
+# would otherwise be needed to reset.
+DELETE {{base_url}}/api/admin/search/cache
+Authorization: Bearer {{admin_token}}
+
+HTTP 200
 
 
 # ─────────────────────────────────────────────────────────────

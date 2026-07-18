@@ -188,9 +188,14 @@ impl ChunkedUploadHandler {
 
         // ── Permission pre-check: caller must have Create on the target
         // folder BEFORE we allocate a session and accept chunks. The
-        // upload service re-checks at finalize time, but failing here
-        // avoids wasting client+server resources on chunks that will be
-        // rejected. None = caller's root namespace, no check needed.
+        // upload service re-checks at finalize via
+        // `upload_file_streaming_with_perms` (AuthZ audit #17 fix,
+        // 2026-07-16) so a grant revoked mid-session is caught. This
+        // pre-check is the fail-fast: it avoids wasting client+server
+        // resources on chunks that will be rejected anyway. `None`
+        // means the write lands at drive-root — that path is currently
+        // unchecked (session doesn't carry `drive_id`; tracked with the
+        // folder-id-walking follow-up).
         if let Some(ref fid) = request.folder_id
             && let Err(err) = state
                 .applications
@@ -441,9 +446,17 @@ impl ChunkedUploadHandler {
         }
 
         // Register the file row against the ingested blob.
+        //
+        // AuthZ audit #17 (2026-07-12): swapped `upload_file_streaming` →
+        // `upload_file_streaming_with_perms` so `Create` on the target
+        // folder is re-verified at finalize. Session creation already
+        // pre-checked (line ~198), but that was potentially hours or
+        // days ago; app-passwords keep sessions valid indefinitely.
+        // Without the finalize re-check, a grant revoked mid-session
+        // stayed effective until the last chunk landed.
         let size = ingested.size;
         match upload_service
-            .upload_file_streaming(
+            .upload_file_streaming_with_perms(
                 parts.filename.clone(),
                 parts.folder_id.clone(),
                 ingested.content_type.clone(),
@@ -478,7 +491,12 @@ impl ChunkedUploadHandler {
             }
             Err(e) => {
                 tracing::error!("Failed to create file from chunked upload: {:?}", e);
-                AppError::internal_error(format!("Failed to create file: {}", e)).into_response()
+                // AuthZ audit #2 (2026-07-12) — route DomainError through
+                // `AppError::from` so graduated denial from
+                // `upload_file_streaming_with_perms` keeps the 403/404
+                // shape instead of collapsing into a 500. Sibling
+                // `cancel_upload_impl` at :514 already uses this pattern.
+                AppError::from(e).into_response()
             }
         }
     }
@@ -519,9 +537,15 @@ impl ChunkedUploadHandler {
 // routes.rs calls these free functions directly.
 // TODO: collapse back into the impl block after a utoipa upgrade resolves the issue.
 
+/// **Deprecated.** Prefer `/api/files/delta/*` — hash-first negotiation,
+/// resumable, chunked. The `/api/uploads/*` family stays for backward
+/// compatibility with existing clients but receives no new features.
 #[utoipa::path(
     post,
     path = "/api/uploads",
+    description = "**Deprecated.** Prefer the delta-upload surface at `/api/files/delta/*` \
+(hash-first negotiation, resumable, chunked). The `/api/uploads/*` family is kept for \
+backward compatibility with existing clients but is no longer receiving new features.",
     request_body(content = CreateUploadRequest, content_type = "application/json", description = "Upload session parameters"),
     responses(
         (status = 201, description = "Upload session created", body = crate::application::ports::chunked_upload_ports::CreateUploadResponseDto),
@@ -531,6 +555,7 @@ impl ChunkedUploadHandler {
     tag = "uploads",
     security(("bearerAuth" = []))
 )]
+#[deprecated(note = "prefer /api/files/delta/*")]
 pub async fn create_upload(
     state: State<Arc<AppState>>,
     auth_user: AuthUser,
@@ -539,9 +564,11 @@ pub async fn create_upload(
     ChunkedUploadHandler::create_upload_impl(state, auth_user, request).await
 }
 
+/// **Deprecated.** Prefer `/api/files/delta/*` — see `create_upload`.
 #[utoipa::path(
     patch,
     path = "/api/uploads/{upload_id}",
+    description = "**Deprecated.** See `POST /api/uploads` for the migration note.",
     params(
         ("upload_id" = String, Path, description = "Upload session ID"),
         ("chunk_index" = usize, Query, description = "Zero-based chunk index"),
@@ -570,6 +597,7 @@ pub async fn create_upload(
     tag = "uploads",
     security(("bearerAuth" = []))
 )]
+#[deprecated(note = "prefer /api/files/delta/*")]
 pub async fn upload_chunk(
     State(state): State<Arc<AppState>>,
     auth_user: AuthUser,
@@ -683,9 +711,11 @@ pub async fn upload_chunk(
     .into_response()
 }
 
+/// **Deprecated.** Prefer `/api/files/delta/*` — see `create_upload`.
 #[utoipa::path(
     head,
     path = "/api/uploads/{upload_id}",
+    description = "**Deprecated.** See `POST /api/uploads` for the migration note.",
     params(
         ("upload_id" = String, Path, description = "Upload session ID"),
     ),
@@ -696,6 +726,7 @@ pub async fn upload_chunk(
     tag = "uploads",
     security(("bearerAuth" = []))
 )]
+#[deprecated(note = "prefer /api/files/delta/*")]
 pub async fn get_upload_status(
     state: State<Arc<AppState>>,
     auth_user: AuthUser,
@@ -704,9 +735,11 @@ pub async fn get_upload_status(
     ChunkedUploadHandler::get_upload_status_impl(state, auth_user, path).await
 }
 
+/// **Deprecated.** Prefer `/api/files/delta/*` — see `create_upload`.
 #[utoipa::path(
     post,
     path = "/api/uploads/{upload_id}/complete",
+    description = "**Deprecated.** See `POST /api/uploads` for the migration note.",
     params(
         ("upload_id" = String, Path, description = "Upload session ID"),
     ),
@@ -731,6 +764,7 @@ pub async fn get_upload_status(
     tag = "uploads",
     security(("bearerAuth" = []))
 )]
+#[deprecated(note = "prefer /api/files/delta/*")]
 pub async fn complete_upload(
     state: State<Arc<AppState>>,
     auth_user: AuthUser,
@@ -744,9 +778,11 @@ pub async fn complete_upload(
     ChunkedUploadHandler::complete_upload_impl(state, auth_user, path, req).await
 }
 
+/// **Deprecated.** Prefer `/api/files/delta/*` — see `create_upload`.
 #[utoipa::path(
     delete,
     path = "/api/uploads/{upload_id}",
+    description = "**Deprecated.** See `POST /api/uploads` for the migration note.",
     params(
         ("upload_id" = String, Path, description = "Upload session ID"),
     ),
@@ -757,6 +793,7 @@ pub async fn complete_upload(
     tag = "uploads",
     security(("bearerAuth" = []))
 )]
+#[deprecated(note = "prefer /api/files/delta/*")]
 pub async fn cancel_upload(
     state: State<Arc<AppState>>,
     auth_user: AuthUser,

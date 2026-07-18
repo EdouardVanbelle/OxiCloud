@@ -392,6 +392,13 @@ fn dav_basic_auth_challenge(message: &'static str) -> Response {
 /// `CurrentUser` is the *live* role resolved by `auth_middleware` (see
 /// [`resolve_live_role`]), not the JWT claim, so a demotion is honoured
 /// here within the flags-cache TTL.
+///
+/// Denial shapes distinguish authn from authz:
+///   - `CurrentUser` present, role != "admin" → 403 Forbidden.
+///   - `CurrentUser` absent → 401 Unauthorized. Should not happen in
+///     practice (auth_middleware guards against it), but the
+///     defensive fallback returns the honest shape: "we don't know
+///     who you are" is 401, not "we know you and refuse" (403).
 pub async fn require_admin(request: Request, next: Next) -> Response {
     // Get the CurrentUser inserted by auth_middleware
     if let Some(current_user) = request.extensions().get::<Arc<CurrentUser>>() {
@@ -407,18 +414,16 @@ pub async fn require_admin(request: Request, next: Next) -> Response {
             role = %current_user.role,
             "👮🏻‍♂️ admin-only route denied for non-admin caller"
         );
-    } else {
-        tracing::info!(
-            target: "audit",
-            event = "authz.admin_denied",
-            reason = "unauthenticated",
-            "👮🏻‍♂️ admin-only route reached with no authenticated user"
-        );
+        return AuthError::AccessDenied("Admin role required".to_string()).into_response();
     }
 
-    // Access denied
-    let error = AuthError::AccessDenied("Admin role required".to_string());
-    error.into_response()
+    tracing::info!(
+        target: "audit",
+        event = "authz.admin_denied",
+        reason = "unauthenticated",
+        "👮🏻‍♂️ admin-only route reached with no authenticated user"
+    );
+    AuthError::TokenNotProvided.into_response()
 }
 
 #[cfg(test)]

@@ -130,15 +130,27 @@ file: file,fixtures/hello.txt; text/plain
 HTTP 201
 
 
-# Wait for the drive-side fire-and-forget delta to settle.
-# Acts as the synchronisation point: by the time `drives.used_bytes`
-# reflects the upload, the sibling user-side delta task spawned in
-# the same call has had its chance to run too.
+# Force freshness on `drives.used_bytes`:
+#   1. 200 ms delay to let the fire-and-forget tokio task from the
+#      upload above land its SQL write (see
+#      `bug_trigger_sweep_vs_spawn_hook_race`).
+#   2. Trigger the reconciliation sweep — the ONLY path that
+#      invalidates `readable_cache` / `default_drive_cache` after
+#      Ed's 2026-07-17 design call (per-write invalidation would
+#      nuke the cache on every upload, defeating the point). Also
+#      acts as the synchronisation point for the user-envelope
+#      assertion below — the sweep is the authoritative
+#      ground-truth for both drive- and user-side counters.
+POST {{base_url}}/api/admin/internal/trigger-sweep
+Authorization: Bearer {{admin_token}}
+[Options]
+delay: 200ms
+
+HTTP 200
+
+
 GET {{base_url}}/api/drives
 Authorization: Bearer {{owner_token}}
-[Options]
-retry: 10
-retry-interval: 200ms
 
 HTTP 200
 [Asserts]

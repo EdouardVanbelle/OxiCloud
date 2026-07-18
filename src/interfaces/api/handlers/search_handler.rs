@@ -1,7 +1,7 @@
 use axum::{
     extract::{Json, Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use serde_json::json;
 use tracing::{error, info};
@@ -11,6 +11,7 @@ use crate::application::dtos::search_dto::{
 };
 use crate::application::ports::inbound::SearchUseCase;
 use crate::common::di::AppState;
+use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::AuthUser;
 use std::sync::Arc;
 
@@ -187,40 +188,57 @@ impl SearchHandler {
         }
     }
 
-    /// DELETE /search/cache — clears the search results cache.
+    /// `DELETE /admin/search/cache` — flush the shared moka search
+    /// results cache. Admin-only.
+    ///
+    /// AuthZ audit #14 (2026-07-12): pre-fix this endpoint lived at
+    /// `/api/search/cache` and required only a valid JWT — any
+    /// authenticated user (external / magic-link included) could
+    /// DELETE it in a loop and keep the results cache cold indefinitely
+    /// (sustained DoS on every subsequent `/api/search` query). Now
+    /// mounted at `/api/admin/search/cache`, gated by the
+    /// `require_admin` middleware layer on the `/api/admin` nest point.
+    /// The handler no longer needs an inline authz call — reaching
+    /// this code implies `AuthUser` is admin by construction. Audit
+    /// line on success so operator-driven flushes are traceable in
+    /// security reviews.
     pub(super) async fn clear_search_cache_impl(
         State(state): State<Arc<AppState>>,
-    ) -> impl IntoResponse {
+        auth_user: AuthUser,
+    ) -> Result<Response, AppError> {
+        let caller_id = auth_user.id;
         info!("API: Clearing search cache");
 
-        let search_service = match &state.applications.search_service {
-            Some(service) => service,
-            None => {
-                error!("Search service not available");
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({ "error": "Search service is not available" })),
-                )
-                    .into_response();
-            }
+        let Some(search_service) = &state.applications.search_service else {
+            error!("Search service not available");
+            return Ok((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "Search service is not available" })),
+            )
+                .into_response());
         };
 
         match search_service.clear_search_cache().await {
             Ok(_) => {
-                info!("Search cache cleared successfully");
-                (
+                tracing::info!(
+                    target: "audit",
+                    event = "search.cache_cleared",
+                    caller_id = %caller_id,
+                    "🧹 search results cache flushed by admin",
+                );
+                Ok((
                     StatusCode::OK,
                     Json(json!({ "message": "Search cache cleared successfully" })),
                 )
-                    .into_response()
+                    .into_response())
             }
             Err(err) => {
                 error!("Error clearing search cache: {}", err);
-                (
+                Ok((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({ "error": "Error clearing search cache" })),
                 )
-                    .into_response()
+                    .into_response())
             }
         }
     }
@@ -368,14 +386,19 @@ pub async fn suggest_files(
 
 #[utoipa::path(
     delete,
-    path = "/api/search/cache",
+    path = "/api/admin/search/cache",
     responses(
         (status = 200, description = "Cache cleared"),
+        (status = 401, description = "Missing or invalid token"),
+        (status = 403, description = "Caller is not an admin"),
         (status = 503, description = "Search service unavailable"),
     ),
     security(("bearerAuth" = [])),
-    tag = "search"
+    tag = "admin"
 )]
-pub async fn clear_search_cache(state: State<Arc<AppState>>) -> impl IntoResponse {
-    SearchHandler::clear_search_cache_impl(state).await
+pub async fn clear_search_cache(
+    state: State<Arc<AppState>>,
+    auth_user: AuthUser,
+) -> Result<Response, AppError> {
+    SearchHandler::clear_search_cache_impl(state, auth_user).await
 }

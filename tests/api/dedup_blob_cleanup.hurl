@@ -14,7 +14,7 @@
 #      (proves blob NOT prematurely deleted — bug 3 detection)
 #   4. Permanently delete file 2 → blob and thumbnail cleaned up
 #
-# NOTE: The /api/dedup/stats endpoint counts CDC chunk rows in
+# NOTE: The /api/admin/dedup/stats endpoint counts CDC chunk rows in
 #       storage.blobs and derives bytes_saved from chunk_manifests.
 #       Both tables may be 0 when the CDC path is disabled or the
 #       server uses the legacy blob path — so we avoid stats-based

@@ -332,23 +332,57 @@ async fn put_file(
     };
 
     // ── Atomic store: swap the file row onto the ingested blob ──
-    // `drive_id` scopes the path-based lookups in `update_file_streaming`
-    // post-D0. WOPI tokens carry the user UUID in `claims.sub`; we resolve
-    // that to the caller's default drive (WOPI today is a single-drive
-    // editing surface — no drive marker travels in the token).
+    // `drive_id` scopes the path-based lookups in
+    // `update_file_streaming_with_perms` post-D0.
+    //
+    // AuthZ audit #18 (2026-07-12): the pre-fix path resolved
+    // `drive_id` via `find_default_for_user(claims_sub_uuid)` —
+    // ALWAYS the caller's own default personal drive, regardless of
+    // where the file actually lived. Shared-drive edits either
+    // misrouted the write into the caller's personal drive (if the
+    // filename happened to collide with a personal-drive path) or
+    // 500'd on the parent-folder lookup. Resolve from the file's
+    // own parent folder instead — one PK probe, returns the drive
+    // the file genuinely belongs to. Also unlocks shared-drive WOPI
+    // editing.
     let claims_sub_uuid = match uuid::Uuid::parse_str(&claims.sub) {
         Ok(u) => u,
         Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
     };
+    let Some(folder_id_str) = file.folder_id.as_deref() else {
+        // Files always live under a folder (drive-root files use the
+        // drive-root folder id). A `None` here means the file entity
+        // is malformed — safest is a 500.
+        tracing::error!(
+            "WOPI PutFile: file {} has no parent folder id — cannot resolve drive",
+            file_id
+        );
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let folder_uuid = match uuid::Uuid::parse_str(folder_id_str) {
+        Ok(u) => u,
+        Err(_) => {
+            tracing::error!(
+                "WOPI PutFile: file {} parent folder id '{}' is not a UUID",
+                file_id,
+                folder_id_str
+            );
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
     let drive_id = match state
         .app_state
         .drive_repo
-        .find_default_for_user(claims_sub_uuid)
+        .drive_id_for_folder(folder_uuid)
         .await
     {
-        Ok(d) => d.drive.id,
+        Ok(id) => id,
         Err(e) => {
-            tracing::error!("WOPI PutFile: default-drive lookup failed: {:?}", e);
+            tracing::error!(
+                "WOPI PutFile: drive-id lookup for folder {} failed: {:?}",
+                folder_uuid,
+                e
+            );
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
