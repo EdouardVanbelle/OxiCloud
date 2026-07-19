@@ -816,13 +816,15 @@ async fn build_streaming_propfind_response(
                 let mut chunk = Vec::with_capacity(batch.len() * 800);
                 {
                     let mut w = Writer::new(&mut chunk);
+                    // One href buffer reused across the page instead of a fresh
+                    // `format!` String per child (benches/ROUND19.md §M6).
+                    let mut href = String::new();
                     for subfolder in batch.iter() {
                         let child_dead = dead_props_for(&subfolder.id, &subfolder_deads);
-                        let href = format!(
-                            "{}{}/",
-                            base_href,
-                            utf8_percent_encode(&subfolder.name, PATH_SEGMENT_ENCODE_SET)
-                        );
+                        href.clear();
+                        href.push_str(&base_href);
+                        href.extend(utf8_percent_encode(&subfolder.name, PATH_SEGMENT_ENCODE_SET));
+                        href.push('/');
                         WebDavAdapter::write_folder_entry_with_dead_props(&mut w, subfolder, &propfind_request, &href, child_dead, quota)
                             .map_err(|e| std::io::Error::other(e.to_string()))?;
                     }
@@ -861,13 +863,13 @@ async fn build_streaming_propfind_response(
                 let mut chunk = Vec::with_capacity(batch_len * 800);
                 {
                     let mut w = Writer::new(&mut chunk);
+                    // One href buffer reused across the page (benches/ROUND19.md §M6).
+                    let mut href = String::new();
                     for file in batch.iter() {
                         let child_dead = dead_props_for(&file.id, &file_deads);
-                        let href = format!(
-                            "{}{}",
-                            base_href,
-                            utf8_percent_encode(&file.name, PATH_SEGMENT_ENCODE_SET)
-                        );
+                        href.clear();
+                        href.push_str(&base_href);
+                        href.extend(utf8_percent_encode(&file.name, PATH_SEGMENT_ENCODE_SET));
                         WebDavAdapter::write_file_entry_with_dead_props(&mut w, file, &propfind_request, &href, child_dead)
                             .map_err(|e| std::io::Error::other(e.to_string()))?;
                     }

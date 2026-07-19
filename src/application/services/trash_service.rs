@@ -866,13 +866,16 @@ fn build_trash_cursor(row: &TrashResourceRow, order_by: &str, reverse: bool) -> 
 
 /// Convert a raw repository row into the API DTO.
 fn row_to_item_dto(row: TrashResourceRow) -> TrashResourceItemDto {
-    let path = row.path.clone().unwrap_or_default();
+    // `row` is owned and dropped at fn end, so move its String fields into the
+    // DTO instead of cloning (the favorites / recent / folder row mappers
+    // already move these same fields — trash was missed). benches/ROUND19.md §M4.
+    let path = row.path.unwrap_or_default();
     if row.resource_type == "folder" {
         let resource_id = row.resource_id.to_string();
         let dto = FolderDto {
             etag: resource_id.clone(),
             id: resource_id,
-            name: row.name.clone(),
+            name: row.name,
             path,
             parent_id: row.parent_id.map(|u| u.to_string()),
             // D2b: the trash listing query now SELECTs `drive_id` (the
@@ -906,7 +909,7 @@ fn row_to_item_dto(row: TrashResourceRow) -> TrashResourceItemDto {
         // match GET/HEAD/PROPFIND ETags — a client restoring a
         // file may conditional-request it immediately after.
         let modified_at_u = row.modified_at.timestamp() as u64;
-        let content_hash = row.blob_hash.clone().unwrap_or_default();
+        let content_hash = row.blob_hash.unwrap_or_default();
         let etag = if content_hash.is_empty() {
             String::new()
         } else {
@@ -915,7 +918,7 @@ fn row_to_item_dto(row: TrashResourceRow) -> TrashResourceItemDto {
         let classes = classify_display(&row.name, mime);
         let dto = FileDto {
             id: row.resource_id.to_string(),
-            name: row.name.clone(),
+            name: row.name,
             path,
             size: size_bytes,
             mime_type: intern_mime(mime),

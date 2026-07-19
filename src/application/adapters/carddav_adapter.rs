@@ -950,16 +950,16 @@ pub fn contact_to_vcard(contact: &ContactDto) -> String {
     if let Some(fn_name) = &contact.full_name {
         let _ = write!(vcard, "FN:{}\r\n", fn_name);
     } else {
-        // FN is mandatory in vCard 3.0
+        // FN is mandatory in vCard 3.0. Write the borrowed trim slice directly
+        // instead of copying it into a second owned String (benches/ROUND19.md §V1).
         let fn_name = format!(
             "{} {}",
             contact.first_name.as_deref().unwrap_or(""),
             contact.last_name.as_deref().unwrap_or(""),
-        )
-        .trim()
-        .to_string();
-        if !fn_name.is_empty() {
-            let _ = write!(vcard, "FN:{}\r\n", fn_name);
+        );
+        let trimmed = fn_name.trim();
+        if !trimmed.is_empty() {
+            let _ = write!(vcard, "FN:{}\r\n", trimmed);
         } else {
             vcard.push_str("FN:Unknown\r\n");
         }
@@ -1006,7 +1006,15 @@ pub fn contact_to_vcard(contact: &ContactDto) -> String {
         let _ = write!(vcard, "TITLE:{}\r\n", title);
     }
     if let Some(notes) = &contact.notes {
-        let _ = write!(vcard, "NOTE:{}\r\n", notes.replace('\n', "\\n"));
+        // Only a multi-line note needs the escaping copy; a note with no newline
+        // writes its borrowed slice directly (benches/ROUND19.md §V1).
+        if notes.contains('\n') {
+            let _ = write!(vcard, "NOTE:{}\r\n", notes.replace('\n', "\\n"));
+        } else {
+            vcard.push_str("NOTE:");
+            vcard.push_str(notes);
+            vcard.push_str("\r\n");
+        }
     }
     if let Some(bday) = &contact.birthday {
         let _ = write!(vcard, "BDAY:{}\r\n", bday.format("%Y-%m-%d"));
@@ -1015,11 +1023,24 @@ pub fn contact_to_vcard(contact: &ContactDto) -> String {
         let _ = write!(vcard, "PHOTO;VALUE=URI:{}\r\n", photo);
     }
 
-    let _ = write!(
-        vcard,
-        "REV:{}\r\n",
-        contact.updated_at.format("%Y%m%dT%H%M%SZ")
-    );
+    // REV via the stack renderer — chrono's `.format("%Y%m%dT%H%M%SZ")` runs the
+    // strftime interpreter and allocates per contact (benches/ROUND19.md §V2:
+    // 11.8× faster, 3→0 allocs). Out-of-range falls back to chrono.
+    let mut rev_buf = [0u8; 16];
+    match crate::common::fmt::compact_ical_utc(&mut rev_buf, contact.updated_at.timestamp()) {
+        Some(rev) => {
+            vcard.push_str("REV:");
+            vcard.push_str(rev);
+            vcard.push_str("\r\n");
+        }
+        None => {
+            let _ = write!(
+                vcard,
+                "REV:{}\r\n",
+                contact.updated_at.format("%Y%m%dT%H%M%SZ")
+            );
+        }
+    }
     vcard.push_str("END:VCARD\r\n");
 
     vcard

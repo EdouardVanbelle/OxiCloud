@@ -641,8 +641,13 @@ impl SearchUseCase for SearchService {
         criteria: SearchCriteriaDto,
         user_id: Uuid,
     ) -> Result<Arc<SearchResultsDto>> {
-        let user_id_str = user_id.to_string();
-        let cache_key = Self::create_cache_key(&criteria, &user_id_str);
+        // Stack-encode the UUID (36 ASCII bytes) instead of `to_string()` — the
+        // hasher sees the identical byte sequence, so the u64 key is unchanged,
+        // but the per-request heap `String` is gone (the fn doc even claims
+        // "zero-allocation hashing"). See benches/ROUND19.md §M5.
+        let mut user_id_buf = [0u8; uuid::fmt::Hyphenated::LENGTH];
+        let user_id_str = user_id.hyphenated().encode_lower(&mut user_id_buf);
+        let cache_key = Self::create_cache_key(&criteria, user_id_str);
 
         // Single-flight: collapse N identical concurrent searches into ONE
         // execution. `try_get_with` serves the cached result on a hit and, on a

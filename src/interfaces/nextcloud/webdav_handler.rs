@@ -1609,14 +1609,18 @@ fn build_nc_streaming_propfind(
                 let mut chunk = Vec::with_capacity(batch_len * 1024);
                 {
                     let mut xml = Writer::new(&mut chunk);
+                    // One href buffer reused across the page instead of a fresh
+                    // format! String per child (benches/ROUND19.md §M6).
+                    let mut href = String::new();
                     for file in batch.iter() {
                         let dead = dead_props_for(&file.id, &file_deads);
                         // Only the name varies per row — the encoded
                         // username + parent prefix is computed once
                         // outside the loops (the old `nc_href` call
                         // re-encoded both for every child).
-                        let href =
-                            format!("{}{}", child_href_prefix, urlencoding::encode(&file.name));
+                        href.clear();
+                        href.push_str(&child_href_prefix);
+                        href.push_str(&urlencoding::encode(&file.name));
                         let fid = nc_id_of(&file_id_map, &file.id);
                         let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
                         write_file_response(&mut xml, file, &href, (fid, oc_id.as_deref()), &username, &favs, dead)
@@ -1671,12 +1675,16 @@ fn build_nc_streaming_propfind(
                 let mut chunk = Vec::with_capacity(batch.len() * 1024);
                 {
                     let mut xml = Writer::new(&mut chunk);
+                    // One href buffer reused across the page (benches/ROUND19.md §M6).
+                    let mut href = String::new();
                     for sf in batch.iter() {
                         let dead = dead_props_for(&sf.id, &sub_deads);
                         // Collections carry the trailing slash; prefix
                         // precomputed once like the file loop above.
-                        let href =
-                            format!("{}{}/", child_href_prefix, urlencoding::encode(&sf.name));
+                        href.clear();
+                        href.push_str(&child_href_prefix);
+                        href.push_str(&urlencoding::encode(&sf.name));
+                        href.push('/');
                         let fid = nc_id_of(&sub_id_map, &sf.id);
                         let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
                         write_folder_response(&mut xml, sf, &href, (fid, oc_id.as_deref()), &username, &favs, quota, dead)

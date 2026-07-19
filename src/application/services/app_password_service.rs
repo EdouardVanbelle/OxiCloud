@@ -307,8 +307,20 @@ impl AppPasswordService {
         password: &str,
     ) -> Result<(Uuid, Arc<str>, Arc<str>, SmolStr), DomainError> {
         // ── 1. Compute cache key = blake3("username:password") ────────
-        let cache_key: [u8; 32] =
-            blake3::hash(format!("{}:{}", username, password).as_bytes()).into();
+        // Stream the parts into an incremental hasher instead of
+        // `blake3::hash(format!("{username}:{password}").as_bytes())` — the
+        // `format!` heap-allocated one throw-away `String` per request (this
+        // runs before the cache lookup, so even cache hits paid it), and DAV
+        // sync clients hammer Basic auth on every request. Byte-identical key:
+        // blake3 is a stream hash, so `hash(a || ":" || b)` == feeding the same
+        // bytes in order (benches/ROUND19.md §M1).
+        let cache_key: [u8; 32] = {
+            let mut h = blake3::Hasher::new();
+            h.update(username.as_bytes());
+            h.update(b":");
+            h.update(password.as_bytes());
+            h.finalize().into()
+        };
 
         // ── 2. Single-flight cache lookup ─────────────────────────────
         // Concurrent misses on the same credential coalesce into ONE

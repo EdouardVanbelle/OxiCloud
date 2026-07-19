@@ -210,6 +210,37 @@ pub fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
+/// `chrono::DateTime<Utc>::format("%Y%m%dT%H%M%SZ")` for a whole-second
+/// timestamp: the compact iCal/vCard UTC form `20260717T114714Z` (16 bytes)
+/// written into `buf`.
+///
+/// This is the `DTSTAMP` / `REV` / `CREATED` / `LAST-MODIFIED` stamp emitted
+/// per contact in every CardDAV vCard (`contact_to_vcard` / `generate_vcard`)
+/// and per event on the calendar create path. chrono's `.format("%Y%m%dT%H%M%SZ")`
+/// builds a `DelayedFormat` that re-parses the strftime spec (`StrftimeItems`)
+/// and formats six zero-padded fields through `core::fmt` on every call — the
+/// exact interpreter cost [`rfc3339_utc`] / [`rfc2822_utc`] were added to
+/// remove, but neither covers this compact no-separator form.
+///
+/// Returns `None` when `secs` is outside the fixed-width range —
+/// callers fall back to chrono.
+pub fn compact_ical_utc(buf: &mut [u8; 16], secs: i64) -> Option<&str> {
+    if !(0..=MAX_4DIGIT_YEAR_SECS).contains(&secs) {
+        return None;
+    }
+    let (_days, y, m, d, hh, mm, ss) = split(secs);
+    push4(buf, 0, y);
+    push2(buf, 4, m);
+    push2(buf, 6, d);
+    buf[8] = b'T';
+    push2(buf, 9, hh);
+    push2(buf, 11, mm);
+    push2(buf, 13, ss);
+    buf[15] = b'Z';
+    // SAFETY-free: every byte written above is ASCII.
+    Some(std::str::from_utf8(&buf[..]).expect("ascii"))
+}
+
 /// Append the upper-cased form of `s` to `buf` without a temporary `String`.
 ///
 /// Byte-identical to `buf.push_str(&s.to_uppercase())` — same
@@ -306,12 +337,28 @@ mod tests {
     }
 
     #[test]
+    fn compact_ical_matches_chrono() {
+        for &secs in &CASES {
+            let dt = Utc.timestamp_opt(secs, 0).unwrap();
+            let mut buf = [0u8; 16];
+            assert_eq!(
+                compact_ical_utc(&mut buf, secs).expect("in range"),
+                dt.format("%Y%m%dT%H%M%SZ").to_string(),
+                "secs={secs}"
+            );
+        }
+    }
+
+    #[test]
     fn out_of_range_falls_back() {
         let mut b3 = [0u8; 25];
         let mut b2 = [0u8; 31];
+        let mut bc = [0u8; 16];
         assert!(rfc3339_utc(&mut b3, -1).is_none());
         assert!(rfc2822_utc(&mut b2, -1).is_none());
+        assert!(compact_ical_utc(&mut bc, -1).is_none());
         assert!(rfc3339_utc(&mut b3, MAX_4DIGIT_YEAR_SECS + 1).is_none());
+        assert!(compact_ical_utc(&mut bc, MAX_4DIGIT_YEAR_SECS + 1).is_none());
     }
 
     #[test]
@@ -335,8 +382,13 @@ mod tests {
             let dt = Utc.timestamp_opt(secs, 0).unwrap();
             let mut b3 = [0u8; 25];
             let mut b2 = [0u8; 31];
+            let mut bc = [0u8; 16];
             assert_eq!(rfc3339_utc(&mut b3, secs).unwrap(), dt.to_rfc3339());
             assert_eq!(rfc2822_utc(&mut b2, secs).unwrap(), dt.to_rfc2822());
+            assert_eq!(
+                compact_ical_utc(&mut bc, secs).unwrap(),
+                dt.format("%Y%m%dT%H%M%SZ").to_string()
+            );
             secs += 22_380; // 6h13m — walks through all times of day + weekdays
         }
     }

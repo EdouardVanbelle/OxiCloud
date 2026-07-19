@@ -87,7 +87,7 @@ impl NcSession {
 ///
 /// Returns `None` for anything that doesn't follow this shape (notably
 /// the OCS surfaces, where there is no `{user}` segment to compare).
-fn extract_url_user(path: &str) -> Option<String> {
+fn extract_url_user(path: &str) -> Option<std::borrow::Cow<'_, str>> {
     let mut segments = path.split('/');
     if !segments.next()?.is_empty() {
         return None;
@@ -103,7 +103,11 @@ fn extract_url_user(path: &str) -> Option<String> {
     if user_seg.is_empty() {
         return None;
     }
-    urlencoding::decode(user_seg).ok().map(|s| s.into_owned())
+    // Keep the `Cow` — a plain-ASCII username decodes to `Cow::Borrowed`, so the
+    // common path allocates nothing; only a percent-encoded username owns. The
+    // old `.into_owned()` forced a `String` on EVERY path-scoped NC DAV request
+    // (benches/ROUND19.md §M7). The caller compares by slice.
+    urlencoding::decode(user_seg).ok()
 }
 
 /// Axum extractor: the shared handle to the request's [`NcSession`].
@@ -151,7 +155,7 @@ impl<S: Send + Sync> FromRequestParts<S> for SharedNcSession {
             .ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
 
         if let Some(url_user) = extract_url_user(parts.uri.path())
-            && url_user != session.raw_username
+            && url_user.as_ref() != session.raw_username.as_str()
         {
             return Err(StatusCode::FORBIDDEN.into_response());
         }

@@ -339,12 +339,22 @@ impl ContactService {
             let _ = write!(vcard, "BDAY:{}\r\n", birthday.format("%Y%m%d"));
         }
 
-        // Revision (last update)
-        let _ = write!(
-            vcard,
-            "REV:{}\r\n",
-            contact.updated_at().format("%Y%m%dT%H%M%SZ")
-        );
+        // Revision (last update) — stack renderer, see benches/ROUND19.md §V2.
+        let mut rev_buf = [0u8; 16];
+        match crate::common::fmt::compact_ical_utc(&mut rev_buf, contact.updated_at().timestamp()) {
+            Some(rev) => {
+                vcard.push_str("REV:");
+                vcard.push_str(rev);
+                vcard.push_str("\r\n");
+            }
+            None => {
+                let _ = write!(
+                    vcard,
+                    "REV:{}\r\n",
+                    contact.updated_at().format("%Y%m%dT%H%M%SZ")
+                );
+            }
+        }
 
         vcard.push_str("END:VCARD\r\n");
 
