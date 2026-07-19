@@ -10,7 +10,6 @@ use axum::{
 };
 use serde_json::json;
 use std::sync::Arc;
-use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 
 /// Liveness probe — returns 200 if the process is running, no DB check.
@@ -672,12 +671,14 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     // them on every overlapping request.
     router = router.route("/{*rest}", any(api_not_found));
 
-    // Compression is applied once, globally, in `main.rs` with a content-type
-    // aware predicate that skips already-compressed media. Re-applying it here
-    // would double-wrap `/api`: this inner layer (no predicate) would compress
-    // media downloads, burning CPU for ~0 gain and stripping `Content-Length`.
-    // So this router only adds tracing; compression is the global layer's job.
-    router.layer(TraceLayer::new_for_http())
+    // No per-router layers: the global `TraceLayer` + request-id stack in
+    // `main.rs` wraps the whole app (this `/api` router is nested into it),
+    // so a second `TraceLayer` here just double-wrapped every `/api`
+    // request in a redundant span + response-future poll (benches/ROUND13.md
+    // §H1). Compression is likewise the global layer's job — re-applying it
+    // here (no predicate) would compress media downloads, burning CPU for
+    // ~0 gain and stripping `Content-Length`.
+    router
 }
 
 /// Catch-all 404 for unknown `/api/*` paths. Pure log-anchoring

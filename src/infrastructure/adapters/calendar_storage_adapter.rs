@@ -39,6 +39,14 @@ impl CalendarStorageAdapter {
             event_repository,
         }
     }
+
+    /// Delegates to [`CalendarPgRepository::has_owned_calendar`] — the
+    /// `EXISTS` short-circuit used by the login provisioning hook instead
+    /// of hydrating every owned calendar to test emptiness
+    /// (benches/ROUND13.md §Q2).
+    pub async fn has_owned_calendar(&self, owner_id: Uuid) -> Result<bool, DomainError> {
+        self.calendar_repository.has_owned_calendar(owner_id).await
+    }
 }
 
 impl CalendarStoragePort for CalendarStorageAdapter {

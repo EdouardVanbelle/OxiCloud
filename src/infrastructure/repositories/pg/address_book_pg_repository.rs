@@ -16,6 +16,23 @@ impl AddressBookPgRepository {
     pub fn new(pool: Arc<PgPool>) -> Self {
         Self { pool }
     }
+
+    /// `EXISTS` short-circuit for the login provisioning hook — the old
+    /// `get_address_books_by_owner(..).is_empty()` hydrated every owned
+    /// `AddressBook` row on EVERY login just to test emptiness (the ROUND9
+    /// §7 COUNT→EXISTS pattern; benches/ROUND13.md §Q2).
+    pub async fn has_owned_address_book(&self, owner_id: Uuid) -> Result<bool, DomainError> {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM carddav.address_books WHERE owner_id = $1)",
+        )
+        .bind(owner_id)
+        .fetch_one(&*self.pool)
+        .await
+        .map_err(|e| {
+            DomainError::database_error(format!("Failed to probe owned address books: {}", e))
+        })?;
+        Ok(exists)
+    }
 }
 
 impl AddressBookRepository for AddressBookPgRepository {

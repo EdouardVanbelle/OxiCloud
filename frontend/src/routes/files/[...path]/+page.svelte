@@ -1455,9 +1455,6 @@
 	// renders; `hiddenCount` above lets the template surface a "you're
 	// hiding N items" hint so users aren't confused.
 	const isEmpty = $derived(visibleFolders.length === 0 && visibleFiles.length === 0);
-	const viewClass = $derived(
-		filesStore.viewMode === 'grid' ? 'files-grid-view' : 'files-list-view'
-	);
 
 	// Client-side sort (flat, Drive-style). The listing endpoint returns the
 	// folder contents unsorted; sorting here avoids a refetch per column click.
@@ -1561,6 +1558,25 @@
 		for (const file of sortedFiles) ensure(fileGroupKey(file)).files.push(file);
 		return [...map.values()];
 	});
+
+	// Each group's folders + files folded into ONE ordered `Entry` stream
+	// (folders first, then files — the exact render order the un-windowed
+	// `{#each folders}{#each files}` produced), so each swimlane can feed a
+	// windowed <VirtualList> instead of mounting every row/card
+	// (benches/ROUND13.md §V1). `buildFileRows` is intentionally identity-
+	// and order-only: it must NOT read favoriteIds/sharedIds/selection, or a
+	// single star/select toggle would rebuild every swimlane (the ROUND11
+	// §S2 fine-grained-star invariant).
+	const groupedEntries = $derived(
+		groups.map((g) => ({
+			key: g.key,
+			label: g.label,
+			entries: [
+				...g.folders.map((folder) => ({ kind: 'folder' as const, folder })),
+				...g.files.map((file) => ({ kind: 'file' as const, file }))
+			] as Entry[]
+		}))
+	);
 
 	// ── Toolbar controls (upload split-button + group-by popup menu) ─────────
 	// The group-by popup + sort-direction + view toggle live in the shared
@@ -1893,17 +1909,34 @@
 		{/if}
 	{:else}
 		<div class="files-container" bind:clientWidth={gridWidth}>
-			{#if groupBy !== ''}
-				<div class={viewClass}>
+			{#if groupBy !== '' && filesStore.viewMode === 'list'}
+				<!-- Grouped list: each swimlane's rows are windowed (was: every row
+				     of every group mounted at once — benches/ROUND13.md §V1). -->
+				<div class="files-list-view">
 					{@render fileListHeader()}
-					{#each groups as group (group.key)}
+					{#each groupedEntries as group (group.key)}
 						<div class="resource-list__swimlane-header">{group.label}</div>
-						{#each group.folders as folder (folder.id)}
-							{@render folderRow(folder)}
-						{/each}
-						{#each group.files as file (file.id)}
-							{@render fileRow(file)}
-						{/each}
+						<VirtualList items={group.entries} rowHeight={56} key={entryKey} row={entryRow} />
+					{/each}
+				</div>
+			{:else if groupBy !== ''}
+				<!-- Grouped grid: a flex stack of (header + its own windowed card grid)
+				     per swimlane. The grid lives on each VirtualList's inner window via
+				     `windowClass`, so the outer stack isn't itself a grid. Was the last
+				     unwindowed path (benches/ROUND13.md §V1). -->
+				<div class="files-grouped-grid">
+					{#each groupedEntries as group (group.key)}
+						<div class="resource-list__swimlane-header resource-list__swimlane-header--grid">
+							{group.label}
+						</div>
+						<VirtualList
+							items={group.entries}
+							columns={gridColumns(gridWidth)}
+							rowHeight={240}
+							windowClass="files-grid-view"
+							key={entryKey}
+							row={entryRow}
+						/>
 					{/each}
 				</div>
 			{:else if filesStore.viewMode === 'list'}

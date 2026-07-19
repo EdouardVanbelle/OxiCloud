@@ -414,6 +414,16 @@ impl UserRepository for UserPgRepository {
     /// recipient expansion). Missing ids are silently skipped — the
     /// caller treats absent rows as "no such recipient", same as
     /// `get_user_by_id` returning `NotFound` for a single lookup.
+    ///
+    /// Notification-recipient projection: the up-to-512 KiB avatar `image`
+    /// and the `ui_preferences` JSONB are NOT hydrated (both come back as
+    /// `None`/`Null`) — the sole caller
+    /// (`RecipientNotificationService`) reads only the email/eligibility
+    /// fields, and a group fan-out of M members otherwise detoasted +
+    /// shipped + parsed M avatars purely to discard them (the ROUND12 §Q1
+    /// avatar-narrowing pattern; benches/ROUND13.md §Q1). If a future
+    /// caller needs the avatar, add a wide sibling rather than widening
+    /// this one back.
     async fn get_users_by_ids(&self, ids: Vec<Uuid>) -> UserRepositoryResult<Vec<User>> {
         if ids.is_empty() {
             return Ok(Vec::new());
@@ -425,9 +435,8 @@ impl UserRepository for UserPgRepository {
                 id, username, email, password_hash, role::text as role_text,
                 storage_quota_bytes, storage_used_bytes,
                 created_at, updated_at, last_login_at, active,
-                oidc_provider, oidc_subject, image, is_external,
-                given_name, family_name, email_verified_at, preferred_locale, notify_on_share,
-                ui_preferences
+                oidc_provider, oidc_subject, is_external,
+                given_name, family_name, email_verified_at, preferred_locale, notify_on_share
             FROM auth.users
             WHERE id = ANY($1)
             "#,
@@ -460,14 +469,14 @@ impl UserRepository for UserPgRepository {
                     row.get("active"),
                     row.get("oidc_provider"),
                     row.get("oidc_subject"),
-                    row.get("image"),
+                    None, // image — not projected (notification-recipient path)
                     row.get("is_external"),
                     row.get("given_name"),
                     row.get("family_name"),
                     row.get("email_verified_at"),
                     row.get("preferred_locale"),
                     row.get("notify_on_share"),
-                    row.get::<serde_json::Value, _>("ui_preferences"),
+                    serde_json::Value::Null, // ui_preferences — not projected
                 )
             })
             .collect())

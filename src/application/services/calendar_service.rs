@@ -474,18 +474,21 @@ impl DefaultCalendarLifecycleHook {
         // Ownership-based idempotency check (see hook docstring for
         // the design rationale). Whether the existing calendar was
         // auto-provisioned by a prior run, manually created by the
-        // user, or migrated in, we respect it and skip.
-        let existing = self
+        // user, or migrated in, we respect it and skip. `EXISTS`
+        // short-circuits at the first owned row instead of hydrating them
+        // all just to test emptiness — this runs on EVERY login
+        // (benches/ROUND13.md §Q2).
+        let has_calendar = self
             .calendar_storage
-            .list_calendars_by_owner(user.id())
+            .has_owned_calendar(user.id())
             .await
             .map_err(|e| {
                 DomainError::internal_error(
                     "DefaultCalendarHook",
-                    format!("list_calendars_by_owner: {e}"),
+                    format!("has_owned_calendar: {e}"),
                 )
             })?;
-        if !existing.is_empty() {
+        if has_calendar {
             return Ok(());
         }
 

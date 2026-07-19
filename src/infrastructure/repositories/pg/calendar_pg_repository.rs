@@ -16,6 +16,24 @@ impl CalendarPgRepository {
     pub fn new(pool: Arc<PgPool>) -> Self {
         Self { pool }
     }
+
+    /// `EXISTS` short-circuit for the login provisioning hook, which only
+    /// needs to know whether the user owns ANY calendar. The old
+    /// `list_calendars_by_owner(..).is_empty()` hydrated every owned
+    /// `Calendar` row (8 cols incl. description/color TEXT) on EVERY login
+    /// just to test emptiness — the ROUND9 §7 `Drive::is_empty` COUNT→EXISTS
+    /// pattern (benches/ROUND13.md §Q2).
+    pub async fn has_owned_calendar(&self, owner_id: Uuid) -> CalendarRepositoryResult<bool> {
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM caldav.calendars WHERE owner_id = $1)")
+                .bind(owner_id)
+                .fetch_one(&*self.pool)
+                .await
+                .map_err(|e| {
+                    DomainError::database_error(format!("Failed to probe owned calendars: {}", e))
+                })?;
+        Ok(exists)
+    }
 }
 
 impl CalendarRepository for CalendarPgRepository {

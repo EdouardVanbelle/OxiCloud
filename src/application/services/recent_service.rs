@@ -98,8 +98,15 @@ impl RecentService {
             ));
         }
 
-        self.repo.upsert_access(user_id, item_id, item_type).await?;
-        self.repo.prune(user_id, self.max_recent_items).await?;
+        // Prune only when the upsert actually inserted a NEW row — a
+        // re-access refreshes an existing row's timestamp and can never
+        // grow the set past the cap, so the prune (a DELETE over an
+        // OFFSET self-subquery) is a wasted round-trip on that common path
+        // (benches/ROUND13.md §Q3).
+        let inserted = self.repo.upsert_access(user_id, item_id, item_type).await?;
+        if inserted {
+            self.repo.prune(user_id, self.max_recent_items).await?;
+        }
         Ok(())
     }
 }

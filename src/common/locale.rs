@@ -115,6 +115,13 @@ pub struct LocaleRegistry {
     /// case-insensitive: input is canonicalised, then probed against
     /// this set.
     canonical: Arc<HashSet<SmolStr>>,
+    /// The same codes as an owned `Vec<String>`, materialized ONCE at
+    /// [`Self::discover`] time. The `Accept-Language` extractor needs a
+    /// `&[&str]` supported-list per anonymous request; without this it
+    /// rebuilt N heap `String`s from the registry on every such request
+    /// (the ROUND10 §15 "process-invariant rebuilt per request" class;
+    /// benches/ROUND13.md §L1). Borrowed via [`Self::supported_codes`].
+    supported_codes: Arc<Vec<String>>,
     /// The configured fallback locale. Resolved from
     /// `OXICLOUD_DEFAULT_LOCALE` at startup; defaults to English when
     /// unset.
@@ -200,8 +207,15 @@ impl LocaleRegistry {
             sorted.join(", ")
         );
 
+        // Materialize the supported-codes list once. Order is irrelevant —
+        // `accept_language::intersection` ranks by the request header's
+        // q-values, not by this list's order.
+        let supported_codes: Vec<String> =
+            canonical.iter().map(|s| s.as_str().to_string()).collect();
+
         Ok(Self {
             canonical: Arc::new(canonical),
+            supported_codes: Arc::new(supported_codes),
             default,
         })
     }
@@ -234,6 +248,13 @@ impl LocaleRegistry {
     /// by the preload step at startup.
     pub fn iter(&self) -> impl Iterator<Item = Locale> + '_ {
         self.canonical.iter().map(|s| Locale(s.clone()))
+    }
+
+    /// The registry's codes as a borrowable `&[String]`, precomputed at
+    /// [`Self::discover`] time. Feeds the per-request `Accept-Language`
+    /// negotiation without re-allocating the list (benches/ROUND13.md §L1).
+    pub fn supported_codes(&self) -> &[String] {
+        &self.supported_codes
     }
 
     /// Number of locales in the registry. Used by tests + startup logs.

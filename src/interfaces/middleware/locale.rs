@@ -64,9 +64,15 @@ impl FromRequestParts<Arc<AppState>> for RequestLocale {
             .get(axum::http::header::ACCEPT_LANGUAGE)
             .and_then(|v| v.to_str().ok())
         {
-            let supported_owned: Vec<String> =
-                registry.iter().map(|l| l.as_str().to_string()).collect();
-            let supported: Vec<&str> = supported_owned.iter().map(String::as_str).collect();
+            // Borrow the precomputed supported-codes list (materialized
+            // once at registry build) instead of rebuilding N heap Strings
+            // per anonymous request (benches/ROUND13.md §L1). Only the
+            // `&[&str]` view the crate needs is built here.
+            let supported: Vec<&str> = registry
+                .supported_codes()
+                .iter()
+                .map(String::as_str)
+                .collect();
             if let Some(matched) = accept_language::intersection(header_value, &supported).first()
                 && let Some(locale) = registry.parse(matched)
             {

@@ -96,19 +96,24 @@ impl RecentItemsRepositoryPort for RecentItemsPgRepository {
         Ok(items)
     }
 
-    async fn upsert_access(&self, user_id: Uuid, item_id: &str, item_type: &str) -> Result<()> {
-        sqlx::query(
+    async fn upsert_access(&self, user_id: Uuid, item_id: &str, item_type: &str) -> Result<bool> {
+        // `xmax = 0` on the affected row is the canonical upsert idiom for
+        // "this was an INSERT, not a DO UPDATE" — lets the caller skip the
+        // prune round-trip on the common re-access (UPDATE) path
+        // (benches/ROUND13.md §Q3).
+        let inserted: bool = sqlx::query_scalar(
             r#"
             INSERT INTO auth.user_recent_files (user_id, item_id, item_type, accessed_at)
             VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
             ON CONFLICT (user_id, item_id, item_type)
             DO UPDATE SET accessed_at = CURRENT_TIMESTAMP
+            RETURNING (xmax = 0)
             "#,
         )
         .bind(user_id)
         .bind(item_id)
         .bind(item_type)
-        .execute(&*self.db_pool)
+        .fetch_one(&*self.db_pool)
         .await
         .map_err(|e| {
             error!("Database error upserting recent item access: {}", e);
@@ -119,7 +124,7 @@ impl RecentItemsRepositoryPort for RecentItemsPgRepository {
             )
         })?;
 
-        Ok(())
+        Ok(inserted)
     }
 
     async fn remove_item(&self, user_id: Uuid, item_id: &str, item_type: &str) -> Result<bool> {

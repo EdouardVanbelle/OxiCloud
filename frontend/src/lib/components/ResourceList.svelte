@@ -329,9 +329,6 @@
 	// filter on shows the empty state (the host page's `emptyHint` can
 	// reference `hiddenCount` to say "3 items hidden by the filter").
 	const isEmpty = $derived(visibleItems.length === 0);
-	const viewClass = $derived(
-		filesStore.viewMode === 'grid' ? 'files-grid-view' : 'files-list-view'
-	);
 	/** Content width, for computing the grid's column count to match auto-fill. */
 	let gridWidth = $state(0);
 	const gridCols = $derived(gridColumns(gridWidth));
@@ -740,8 +737,8 @@
 	/>
 {:else}
 	<div class="files-container" bind:clientWidth={gridWidth}>
-		{#if grouped}
-			<div class={viewClass} style="--files-list-columns: {columns}">
+		{#if grouped && filesStore.viewMode === 'list'}
+			<div class="files-list-view" style="--files-list-columns: {columns}">
 				{#if listHeaderOverride}{@render listHeaderOverride()}{:else}{@render listHeader()}{/if}
 				{#each sections as section (section.key)}
 					<div class="rl-swimlane-header" role="rowheader">
@@ -752,17 +749,37 @@
 							</span>
 						{/if}
 					</div>
-					{#if filesStore.viewMode === 'list'}
-						<!-- Window each section's rows so a large grouped list (e.g. a big
-						     trash, grouped by remaining days) doesn't mount every row. The
-						     grid-grouped branch stays un-windowed: `files-grid-view` is itself
-						     the card grid and can't host the windowing spacer wrapper. -->
-						<VirtualList items={section.rows} rowHeight={56} key={(e) => e.id} {row} />
-					{:else}
-						{#each section.rows as entry (entry.id)}
-							{@render row(entry)}
-						{/each}
-					{/if}
+					<!-- Window each section's rows so a large grouped list (e.g. a big
+					     trash, grouped by remaining days) doesn't mount every row. -->
+					<VirtualList items={section.rows} rowHeight={56} key={(e) => e.id} {row} />
+				{/each}
+			</div>
+		{:else if grouped}
+			<!-- Grouped GRID: a vertical stack of (header + its own windowed card
+			     grid) per section. The outer is a flex column, NOT `.files-grid-view`
+			     (which is itself a grid and would place each header/VirtualList into a
+			     cell) — the grid lives on each VirtualList's inner window via
+			     `windowClass`, exactly like the flat-grid arm. This was the last
+			     unwindowed path: a grouped-by-default grid (trash) mounted every card
+			     (benches/ROUND13.md §V1). -->
+			<div class="rl-grouped-grid">
+				{#each sections as section (section.key)}
+					<div class="rl-swimlane-header rl-swimlane-header--grid" role="rowheader">
+						<span class="rl-swimlane-header__label">{section.label}</span>
+						{#if bucketAction}
+							<span class="rl-swimlane-header__action">
+								{@render bucketAction(section.key)}
+							</span>
+						{/if}
+					</div>
+					<VirtualList
+						items={section.rows}
+						columns={gridCols}
+						rowHeight={240}
+						windowClass="files-grid-view"
+						key={(e) => e.id}
+						{row}
+					/>
 				{/each}
 			</div>
 		{:else if filesStore.viewMode === 'list'}
@@ -985,6 +1002,22 @@
 	.rl-swimlane-header__action {
 		display: inline-flex;
 		align-items: center;
+	}
+
+	/* Grouped-grid container: a vertical stack of (header + its own windowed
+	   card grid) per section. Not `.files-grid-view` — the grid is on each
+	   VirtualList's inner window, so this outer element just stacks. */
+	.rl-grouped-grid {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-2);
+	}
+
+	/* In the flex stack the `grid-column: 1 / -1` span (meant for the grid
+	   context) is inert; the header spans naturally as a block-level flex
+	   child. */
+	.rl-swimlane-header--grid {
+		grid-column: auto;
 	}
 
 	/* Grid view date meta line. */

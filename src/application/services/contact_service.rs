@@ -1219,7 +1219,6 @@ impl ContactUseCase for ContactService {
 
 use crate::application::ports::user_lifecycle::{DeletionMode, LogoutReason, UserLifecycleHook};
 use crate::domain::entities::user::User;
-use crate::domain::repositories::address_book_repository::AddressBookRepository;
 use crate::infrastructure::repositories::pg::AddressBookPgRepository;
 use async_trait::async_trait;
 
@@ -1264,17 +1263,20 @@ impl DefaultAddressBookLifecycleHook {
         // Ownership-based idempotency check — same rationale as the
         // calendar hook. Any existing owned address book (auto-
         // provisioned earlier, user-created, migrated) is respected.
-        let existing = self
+        // `EXISTS` short-circuits instead of hydrating every owned
+        // address book to test emptiness, on EVERY login
+        // (benches/ROUND13.md §Q2).
+        let has_address_book = self
             .address_book_repo
-            .get_address_books_by_owner(user.id())
+            .has_owned_address_book(user.id())
             .await
             .map_err(|e| {
                 DomainError::internal_error(
                     "DefaultAddressBookHook",
-                    format!("get_address_books_by_owner: {e}"),
+                    format!("has_owned_address_book: {e}"),
                 )
             })?;
-        if !existing.is_empty() {
+        if has_address_book {
             return Ok(());
         }
 

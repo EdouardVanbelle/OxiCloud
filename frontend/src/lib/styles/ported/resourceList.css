@@ -1025,6 +1025,25 @@
     margin-top: 0;
 }
 
+/* Grouped-grid container (files route): a vertical stack of
+   (header + its own windowed card grid) per swimlane. Not a grid itself —
+   the card grid rides each VirtualList's inner window — so it just stacks. */
+.files-grouped-grid {
+    display: flex;
+    flex-direction: column;
+}
+
+/* In that flex stack the `grid-column: 1 / -1` span is inert; the header
+   spans naturally as a block-level flex child. First header needs no top
+   margin (there is no list-header sibling before it in the grid path). */
+.files-grouped-grid > .resource-list__swimlane-header--grid {
+    grid-column: auto;
+}
+
+.files-grouped-grid > .resource-list__swimlane-header--grid:first-child {
+    margin-top: 0;
+}
+
 /* When the header contains a rich DOM node (e.g. a user vignette for the
    "owner" group-by), reset the typographic overrides that only make sense
    for plain-text labels, and lay the node out inline. */

@@ -354,6 +354,22 @@ name = "bench_micro_allocs"
 path = "examples/bench_micro_allocs.rs"
 required-features = ["bench"]
 
+# Round-13 battery ────────────────────────────────────────────────────────────
+
+# Round-13 HTTP micro-pack — duplicate /api TraceLayer removal, borrow-only
+# client_ip span render, precomputed locale supported-codes. No Postgres.
+[[example]]
+name = "bench_round13_micro"
+path = "examples/bench_round13_micro.rs"
+required-features = ["bench"]
+
+# Round-13 query-shape pack — notification recipient narrowing, login-hook
+# EXISTS probes, recent prune-on-insert (needs the dev Postgres up).
+[[example]]
+name = "bench_round13_queries"
+path = "examples/bench_round13_queries.rs"
+required-features = ["bench"]
+
 # Round-12 battery ────────────────────────────────────────────────────────────
 
 # Round-12 query-shape pack — sharee narrow read + trgm, login/email stamp
