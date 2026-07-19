@@ -28,6 +28,7 @@
 		type ItemContext
 	} from '$lib/components/ResourceList.svelte';
 	import { confirmDialog, promptDialog } from '$lib/stores/dialogs.svelte';
+	import { folderAccessCached, warmFolderAccess } from '$lib/utils/folderAccess';
 	import { t } from '$lib/i18n/index.svelte';
 
 	let raw = $state<FavoritesResourceItem[]>([]);
@@ -123,6 +124,16 @@
 			]);
 			cursor = page.next_cursor;
 			void owners.resolve(page.items.map((i) => i.resource.created_by));
+			// Pre-warm the folder-access cache for each row's parent
+			// folder — the "Open parent folder" context-menu entry
+			// gates on the cached boolean. Fire-and-forget: probes for
+			// already-cached ids no-op.
+			warmFolderAccess(
+				page.items.map((i) => {
+					const r = i.resource as FileItem | FolderItem;
+					return isFile(r) ? r.folder_id : r.parent_id;
+				})
+			);
 		} catch (e) {
 			console.error('favorites: load error', e);
 			error = t('errors_loadFailed', 'Failed to load items');
@@ -223,7 +234,31 @@
 		a.remove();
 	}
 
+	// See /recent's mirror for the rationale: files carry `folder_id`,
+	// folders carry `parent_id`; nullable when the folder is a drive
+	// root. Null → no meaningful parent to open.
+	function parentFolderId(item: FileItem | FolderItem): string | null {
+		return isFile(item) ? item.folder_id : item.parent_id;
+	}
+
 	const contextActions: ContextAction[] = [
+		{
+			key: 'open_parent',
+			label: t('files.open_parent', 'Open parent folder'),
+			icon: 'folder-open',
+			// Sync gate on the pre-warmed folder-access cache (see
+			// `warmFolderAccess` in `load()` below). `undefined` = not
+			// yet probed → hide; the entry appears once the probe
+			// resolves to `true`.
+			visible: (item) => {
+				const pid = parentFolderId(item);
+				return pid !== null && folderAccessCached(pid) === true;
+			},
+			run: (item) => {
+				const pid = parentFolderId(item);
+				if (pid) goto(resolve(`/files/${pid}`));
+			}
+		},
 		{
 			key: 'download',
 			label: t('common.download', 'Download'),

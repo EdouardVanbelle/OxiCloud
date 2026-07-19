@@ -35,6 +35,7 @@
 	// filter is inside ResourceList (gated on `showDotfileToggle`).
 	import { preferences } from '$lib/stores/preferences.svelte';
 	import { isDotfile } from '$lib/utils/dotfileFilter';
+	import { folderAccessCached, warmFolderAccess } from '$lib/utils/folderAccess';
 	import { t } from '$lib/i18n/index.svelte';
 	import Icon from '$lib/icons/Icon.svelte';
 
@@ -119,6 +120,16 @@
 			]);
 			cursor = page.next_cursor;
 			void owners.resolve(page.items.map((i) => i.resource.updated_by));
+			// Pre-warm the folder-access cache for each row's parent
+			// folder so the "Open parent folder" context-menu entry has
+			// a resolved boolean by the time the user right-clicks. Fire-
+			// and-forget: probes for already-cached ids no-op.
+			warmFolderAccess(
+				page.items.map((i) => {
+					const r = i.resource as FileItem | FolderItem;
+					return isFile(r) ? r.folder_id : r.parent_id;
+				})
+			);
 		} catch (e) {
 			console.error('recent: load error', e);
 			error = t('errors_loadFailed', 'Failed to load items');
@@ -254,7 +265,33 @@
 		a.remove();
 	}
 
+	// Extract the parent-folder id from any item — files carry `folder_id`
+	// (required by the DTO), folders carry `parent_id` (nullable when the
+	// folder is a drive root). `null` means "no meaningful parent to open";
+	// the "Open parent folder" entry stays hidden in that case.
+	function parentFolderId(item: FileItem | FolderItem): string | null {
+		return isFile(item) ? item.folder_id : item.parent_id;
+	}
+
 	const contextActions: ContextAction[] = [
+		{
+			key: 'open_parent',
+			label: t('files.open_parent', 'Open parent folder'),
+			icon: 'folder-open',
+			// Sync gate: relies on the `warmFolderAccess` call in `load()`
+			// having populated the cache with a boolean answer for each
+			// visible row's parent id by the time the user right-clicks.
+			// `undefined` (not yet probed) is treated as "hide" — the
+			// entry appears once the probe resolves to `true`.
+			visible: (item) => {
+				const pid = parentFolderId(item);
+				return pid !== null && folderAccessCached(pid) === true;
+			},
+			run: (item) => {
+				const pid = parentFolderId(item);
+				if (pid) goto(resolve(`/files/${pid}`));
+			}
+		},
 		{
 			key: 'download',
 			label: t('common.download', 'Download'),

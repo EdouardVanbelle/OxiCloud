@@ -50,6 +50,16 @@
 		label: string;
 		icon: string;
 		danger?: boolean;
+		/**
+		 * Optional per-item visibility gate. Called at menu-open time
+		 * with the target item + context; return `false` to hide the
+		 * entry for that row. Synchronous by contract — pages that need
+		 * an async check (e.g. "does the caller have Read on the parent
+		 * folder?") should pre-warm a cache when items load so the
+		 * answer is already resolved by the time this runs. See
+		 * `$lib/utils/folderAccess.ts` for the reference pattern.
+		 */
+		visible?: (item: FileItem | FolderItem, ctx?: ItemContext) => boolean;
 		run: (item: FileItem | FolderItem, ctx?: ItemContext) => void;
 	}
 
@@ -1261,6 +1271,9 @@
 {/snippet}
 
 {#if ctxOpen && ctxItem && contextActions}
+	{@const visibleActions = contextActions.filter(
+		(a) => a.visible?.(ctxItem!, ctxOf(ctxItem!.id)) !== false
+	)}
 	<div
 		class="rl-ctx-scrim"
 		role="presentation"
@@ -1274,7 +1287,7 @@
 		role="menu"
 		data-testid="resource-list-context-menu"
 	>
-		{#each contextActions as action (action.key)}
+		{#each visibleActions as action (action.key)}
 			<button
 				class="rl-ctx-item"
 				class:rl-ctx-item--danger={action.danger}
