@@ -871,7 +871,14 @@
     "create_drive": "Crea unità condivisa",
     "no_drives": "Ancora nessuna unità.",
     "external_user": "esterno",
-    "external_user_hint": "Account solo su invito (magic-link o OCM). Non può essere amministratore e non ha un limite di archiviazione."
+    "external_user_hint": "Account solo su invito (magic-link o OCM). Non può essere amministratore e non ha un limite di archiviazione.",
+    "no_storage_for_external": "Gli account esterni non hanno un’envelope di archiviazione.",
+    "promote_to_internal_title": "Promuovi a utente interno",
+    "confirm_promote_user": "Promuovere {{name}} a utente interno? Verrà provisionata un'unità personale e assegnata un'envelope di archiviazione normale. L'identità dell'account viene mantenuta; il login magic-link resta il modo d'accesso finché non viene impostata una password.",
+    "delete_user_title": "Elimina utente",
+    "delete_user_warning": "Stai per eliminare definitivamente «{{name}}». L'account verrà rimosso, tutte le sessioni revocate e l'unità personale cancellata. Operazione irreversibile.",
+    "delete_user_confirm_hint": "Per confermare, digita qui sotto l'email dell'account: {{email}}",
+    "deleting": "Eliminazione…"
   },
   "profile": {
     "page_title": "Profilo",

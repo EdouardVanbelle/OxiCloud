@@ -871,7 +871,14 @@
     "create_drive": "Criar unidade partilhada",
     "no_drives": "Ainda não existem unidades.",
     "external_user": "externo",
-    "external_user_hint": "Conta apenas por convite (magic-link ou OCM). Não pode ser administrador e não tem quota de armazenamento."
+    "external_user_hint": "Conta apenas por convite (magic-link ou OCM). Não pode ser administrador e não tem quota de armazenamento.",
+    "no_storage_for_external": "As contas externas não têm envelope de armazenamento.",
+    "promote_to_internal_title": "Promover a utilizador interno",
+    "confirm_promote_user": "Promover {{name}} a utilizador interno? Isto aprovisiona uma unidade pessoal e atribui um envelope de armazenamento normal. A identidade da conta é preservada; o login por magic-link continua a ser a via de acesso enquanto não for definida uma palavra-passe.",
+    "delete_user_title": "Eliminar utilizador",
+    "delete_user_warning": "Está prestes a eliminar permanentemente «{{name}}». A conta será removida, todas as sessões revogadas e a unidade pessoal apagada. Esta ação é irreversível.",
+    "delete_user_confirm_hint": "Para confirmar, escreva o e-mail da conta abaixo: {{email}}",
+    "deleting": "A eliminar…"
   },
   "profile": {
     "page_title": "Perfil",

@@ -871,7 +871,14 @@
     "create_drive": "Utwórz dysk współdzielony",
     "no_drives": "Brak dysków.",
     "external_user": "zewnętrzny",
-    "external_user_hint": "Konto tylko z zaproszenia (magic-link lub OCM). Nie może być administratorem i nie ma limitu przestrzeni."
+    "external_user_hint": "Konto tylko z zaproszenia (magic-link lub OCM). Nie może być administratorem i nie ma limitu przestrzeni.",
+    "no_storage_for_external": "Konta zewnętrzne nie mają koperty przestrzeni.",
+    "promote_to_internal_title": "Promuj do użytkownika wewnętrznego",
+    "confirm_promote_user": "Promować {{name}} do użytkownika wewnętrznego? Zostanie utworzony dysk osobisty i przypisana normalna koperta przestrzeni. Tożsamość konta jest zachowana; logowanie magic-link pozostaje sposobem dostępu, dopóki nie ustawiono hasła.",
+    "delete_user_title": "Usuń użytkownika",
+    "delete_user_warning": "Zamierzasz trwale usunąć „{{name}}\". Konto zostanie usunięte, wszystkie sesje unieważnione, a dysk osobisty skasowany. Tej operacji nie można cofnąć.",
+    "delete_user_confirm_hint": "Aby potwierdzić, wpisz poniżej e-mail konta: {{email}}",
+    "deleting": "Usuwanie…"
   },
   "profile": {
     "page_title": "Profil",

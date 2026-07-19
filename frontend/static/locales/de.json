@@ -871,7 +871,14 @@
     "create_drive": "Gemeinsames Laufwerk erstellen",
     "no_drives": "Noch keine Laufwerke.",
     "external_user": "extern",
-    "external_user_hint": "Nur-Einladung-Konto (Magic-Link oder OCM). Kann kein Administrator sein und hat keinen Speicherumfang."
+    "external_user_hint": "Nur-Einladung-Konto (Magic-Link oder OCM). Kann kein Administrator sein und hat keinen Speicherumfang.",
+    "no_storage_for_external": "Externe Konten haben keinen Speicherumfang.",
+    "promote_to_internal_title": "Zu internem Benutzer heraufstufen",
+    "confirm_promote_user": "{{name}} zu einem internen Benutzer heraufstufen? Dies richtet ein persönliches Laufwerk ein und weist einen normalen Speicherumfang zu. Die Kontoidentität bleibt erhalten; der Magic-Link-Login bleibt der Zugang, solange kein Passwort gesetzt wird.",
+    "delete_user_title": "Benutzer löschen",
+    "delete_user_warning": "Du bist dabei „{{name}}\" endgültig zu löschen. Das Konto wird entfernt, alle Sitzungen widerrufen und das persönliche Laufwerk gelöscht. Dies kann nicht rückgängig gemacht werden.",
+    "delete_user_confirm_hint": "Zur Bestätigung tippe die Konto-E-Mail unten ein: {{email}}",
+    "deleting": "Löschen…"
   },
   "profile": {
     "page_title": "Profil",

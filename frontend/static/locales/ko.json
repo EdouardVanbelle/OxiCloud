@@ -1131,7 +1131,14 @@
     "create_drive": "공유 드라이브 만들기",
     "no_drives": "아직 드라이브가 없습니다.",
     "external_user": "외부",
-    "external_user_hint": "초대 전용 계정(매직 링크 또는 OCM). 관리자가 될 수 없으며 저장소 할당량이 없습니다."
+    "external_user_hint": "초대 전용 계정(매직 링크 또는 OCM). 관리자가 될 수 없으며 저장소 할당량이 없습니다.",
+    "no_storage_for_external": "외부 계정에는 저장소 할당량이 없습니다.",
+    "promote_to_internal_title": "내부 사용자로 승격",
+    "confirm_promote_user": "{{name}}을(를) 내부 사용자로 승격하시겠습니까? 홈 드라이브가 프로비저닝되고 일반 저장소 할당량이 부여됩니다. 계정 식별자는 유지됩니다. 비밀번호가 설정되기 전까지는 매직 링크 로그인이 계속 접속 경로가 됩니다.",
+    "delete_user_title": "사용자 삭제",
+    "delete_user_warning": "\"{{name}}\"을(를) 영구적으로 삭제하려고 합니다. 계정이 제거되고 모든 세션이 취소되며 개인 드라이브가 회수됩니다. 이 작업은 되돌릴 수 없습니다.",
+    "delete_user_confirm_hint": "확인을 위해 아래에 계정 이메일을 입력하세요: {{email}}",
+    "deleting": "삭제 중…"
   },
   "profile": {
     "page_title": "프로필",

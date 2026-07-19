@@ -854,7 +854,14 @@
     "create_drive": "建立共用雲端硬碟",
     "no_drives": "尚無雲端硬碟。",
     "external_user": "外部",
-    "external_user_hint": "僅邀請帳戶(magic-link 或 OCM)。無法作為管理員,亦無儲存配額。"
+    "external_user_hint": "僅邀請帳戶(magic-link 或 OCM)。無法作為管理員,亦無儲存配額。",
+    "no_storage_for_external": "外部帳戶沒有儲存配額。",
+    "promote_to_internal_title": "提升為內部使用者",
+    "confirm_promote_user": "將 {{name}} 提升為內部使用者?此操作會配置主雲端硬碟並指派正常的儲存配額。帳戶身分保持不變;在設定密碼前,magic-link 登入仍是進入方式。",
+    "delete_user_title": "刪除使用者",
+    "delete_user_warning": "即將永久刪除「{{name}}」。這將移除帳戶、撤銷所有工作階段並清除個人雲端硬碟。此操作無法復原。",
+    "delete_user_confirm_hint": "要確認,請在下方輸入帳戶電子郵件: {{email}}",
+    "deleting": "刪除中…"
   },
   "profile": {
     "page_title": "個人資料",

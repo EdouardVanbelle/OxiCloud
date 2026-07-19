@@ -21,6 +21,7 @@
 		migrationAction,
 		reextractAudioMetadata,
 		reextractPhotoMetadata,
+		promoteUserToInternal,
 		resetUserPassword,
 		saveOidc,
 		savePluginRetention,
@@ -128,6 +129,41 @@
 	function resolveConfirm(ok: boolean) {
 		confirmState?.resolve(ok);
 		confirmState = null;
+	}
+
+	/* ── User-delete confirm modal ──
+	   Destructive-action guard: the admin must re-type the target
+	   user's email address to enable the Delete button. Prevents
+	   fat-finger deletion — a single accidental click on the wrong
+	   row won't wipe an account. The admin still bears final
+	   responsibility; this is UX friction, not authorization. */
+	let deleteUserModal = $state<{ userId: string; username: string; email: string } | null>(null);
+	let deleteUserEmailInput = $state('');
+	let deleteUserBusy = $state(false);
+	const deleteUserEmailMatches = $derived(
+		deleteUserModal !== null &&
+			deleteUserEmailInput.trim().toLowerCase() === deleteUserModal.email.toLowerCase()
+	);
+	function openDeleteUser(u: User) {
+		deleteUserModal = {
+			userId: u.id,
+			username: u.username || u.email,
+			email: u.email
+		};
+		deleteUserEmailInput = '';
+	}
+	async function confirmDeleteUser() {
+		if (!deleteUserModal || !deleteUserEmailMatches) return;
+		deleteUserBusy = true;
+		try {
+			await deleteUser(deleteUserModal.userId);
+			deleteUserModal = null;
+			await loadUsers();
+		} catch (e) {
+			reportError(e);
+		} finally {
+			deleteUserBusy = false;
+		}
 	}
 
 	type Tab = 'dashboard' | 'users' | 'drives' | 'plugins' | 'oidc' | 'storage' | 'smtp';
@@ -818,16 +854,29 @@
 		}
 	}
 
-	async function removeUser(u: User) {
+	function removeUser(u: User) {
 		if (isSelf(u)) return;
+		openDeleteUser(u);
+	}
+
+	// External → internal promotion. Confirms first because the mutation
+	// provisions a home drive + flips the is_external flag; irreversible
+	// via the admin UI (there's no demote endpoint on purpose). Backend
+	// refuses when magic-link login is disabled — surfaced as a toast.
+	async function promoteExternal(u: User) {
+		if (!u.is_external) return;
 		if (
 			!(await showConfirm(
-				t('admin.confirm_delete_user', { name: u.username || u.email }, 'Delete user {{name}}?')
+				t(
+					'admin.confirm_promote_user',
+					{ name: u.username || u.email },
+					'Promote {{name}} to an internal user? This provisions a home drive and gives the account a normal storage envelope. The account keeps its identity; magic-link login stays the way in unless a password is set later.'
+				)
 			))
 		)
 			return;
 		try {
-			await deleteUser(u.id);
+			await promoteUserToInternal(u.id);
 			await loadUsers();
 		} catch (e) {
 			reportError(e);
@@ -2257,78 +2306,120 @@
 								</span>
 							</td>
 							<td>
-								<div class="quota-cell">
-									<div class="quota-bar">
-										<div
-											class="quota-fill"
-											class:quota-fill--warn={pct > 70}
-											class:quota-fill--danger={pct > 90}
-											style:width="{Math.min(pct, 100)}%"
-										></div>
+								{#if u.is_external}
+									<!-- External accounts have no storage envelope by
+									     design (DB CHECK `users_external_no_storage`
+									     enforces storage_quota_bytes = 0). Rendering the
+									     usage bar with `0 / 0` reads as "over quota"
+									     visually and is misleading; show an em-dash
+									     instead. -->
+									<span class="muted" title={t('admin.no_storage_for_external', 'External accounts have no storage envelope.')}>—</span>
+								{:else}
+									<div class="quota-cell">
+										<div class="quota-bar">
+											<div
+												class="quota-fill"
+												class:quota-fill--warn={pct > 70}
+												class:quota-fill--danger={pct > 90}
+												style:width="{Math.min(pct, 100)}%"
+											></div>
+										</div>
+										<span class="muted">
+											{formatBytes(u.storage_used_bytes)} / {u.storage_quota_bytes > 0
+												? formatBytes(u.storage_quota_bytes)
+												: '∞'}
+										</span>
 									</div>
-									<span class="muted">
-										{formatBytes(u.storage_used_bytes)} / {u.storage_quota_bytes > 0
-											? formatBytes(u.storage_quota_bytes)
-											: '∞'}
-									</span>
-								</div>
+								{/if}
 							</td>
 							<td class="muted">{timeAgo(u.last_login_at)}</td>
-							<td class="actions">
-								<button
-									class="icon-btn"
-									data-testid={`admin-user-quota-${u.id}`}
-									title={t('admin.edit_quota_title', 'Edit quota')}
-									aria-label={t('admin.edit_quota_title', 'Edit quota')}
-									onclick={() => openQuota(u)}
-								>
-									<Icon name="gauge-simple-high" />
-								</button>
-								{#if !isOidcUser(u)}
+							<td>
+								<!-- Fixed 5-column grid keeps icons aligned across
+								     rows even when a row's user kind skips some
+								     actions (external users have no envelope so
+								     no quota edit, and no password so no reset;
+								     internals never get a promote). Inapplicable
+								     actions render as invisible placeholders. -->
+								<div class="actions actions--user">
+									<!-- Slot 1: quota (internal) OR promote (external). -->
+									{#if u.is_external}
+										<button
+											class="icon-btn icon-btn--success"
+											data-testid={`admin-user-promote-${u.id}`}
+											title={t('admin.promote_to_internal_title', 'Promote to internal user')}
+											aria-label={t(
+												'admin.promote_to_internal_title',
+												'Promote to internal user'
+											)}
+											onclick={() => promoteExternal(u)}
+										>
+											<Icon name="user-plus" />
+										</button>
+									{:else}
+										<button
+											class="icon-btn"
+											data-testid={`admin-user-quota-${u.id}`}
+											title={t('admin.edit_quota_title', 'Edit quota')}
+											aria-label={t('admin.edit_quota_title', 'Edit quota')}
+											onclick={() => openQuota(u)}
+										>
+											<Icon name="gauge-simple-high" />
+										</button>
+									{/if}
+									<!-- Slot 2: reset password (local internal only —
+									     OIDC and external accounts have no password
+									     to reset). Placeholder otherwise. -->
+									{#if !isOidcUser(u) && !u.is_external}
+										<button
+											class="icon-btn"
+											data-testid={`admin-user-reset-password-${u.id}`}
+											title={t('admin.reset_password_title', 'Reset password')}
+											aria-label={t('admin.reset_password_title', 'Reset password')}
+											onclick={() => openReset(u)}
+										>
+											<Icon name="key" />
+										</button>
+									{:else}
+										<span class="icon-btn icon-btn--placeholder" aria-hidden="true"></span>
+									{/if}
+									<!-- Slot 3: role toggle. -->
 									<button
 										class="icon-btn"
-										data-testid={`admin-user-reset-password-${u.id}`}
-										title={t('admin.reset_password_title', 'Reset password')}
-										aria-label={t('admin.reset_password_title', 'Reset password')}
-										onclick={() => openReset(u)}
+										data-testid={`admin-user-toggle-role-${u.id}`}
+										title={t('admin.toggle_role_title', 'Toggle admin role')}
+										aria-label={t('admin.toggle_role_title', 'Toggle admin role')}
+										disabled={isSelf(u)}
+										onclick={() => toggleRole(u)}
 									>
-										<Icon name="key" />
+										<Icon name={u.role === 'admin' ? 'user' : 'crown'} />
 									</button>
-								{/if}
-								<button
-									class="icon-btn"
-									data-testid={`admin-user-toggle-role-${u.id}`}
-									title={t('admin.toggle_role_title', 'Toggle admin role')}
-									aria-label={t('admin.toggle_role_title', 'Toggle admin role')}
-									disabled={isSelf(u)}
-									onclick={() => toggleRole(u)}
-								>
-									<Icon name={u.role === 'admin' ? 'user' : 'crown'} />
-								</button>
-								<button
-									class="icon-btn {u.active ? 'icon-btn--danger' : 'icon-btn--success'}"
-									data-testid={`admin-user-toggle-active-${u.id}`}
-									title={u.active
-										? t('admin.deactivate_title', 'Deactivate')
-										: t('admin.activate_title', 'Activate')}
-									aria-label={u.active
-										? t('admin.deactivate_title', 'Deactivate')
-										: t('admin.activate_title', 'Activate')}
-									disabled={isSelf(u) && u.active}
-									onclick={() => toggleActive(u)}
-								>
-									<Icon name={u.active ? 'ban' : 'check'} />
-								</button>
-								<button
-									class="icon-btn icon-btn--danger"
-									data-testid={`admin-user-delete-${u.id}`}
-									title={t('admin.delete_title', 'Delete user')}
-									aria-label={t('admin.delete_title', 'Delete user')}
-									disabled={isSelf(u)}
-									onclick={() => removeUser(u)}
-								>
-									<Icon name="trash-alt" />
-								</button>
+									<!-- Slot 4: activate/deactivate. -->
+									<button
+										class="icon-btn {u.active ? 'icon-btn--danger' : 'icon-btn--success'}"
+										data-testid={`admin-user-toggle-active-${u.id}`}
+										title={u.active
+											? t('admin.deactivate_title', 'Deactivate')
+											: t('admin.activate_title', 'Activate')}
+										aria-label={u.active
+											? t('admin.deactivate_title', 'Deactivate')
+											: t('admin.activate_title', 'Activate')}
+										disabled={isSelf(u) && u.active}
+										onclick={() => toggleActive(u)}
+									>
+										<Icon name={u.active ? 'ban' : 'check'} />
+									</button>
+									<!-- Slot 5: delete. -->
+									<button
+										class="icon-btn icon-btn--danger"
+										data-testid={`admin-user-delete-${u.id}`}
+										title={t('admin.delete_title', 'Delete user')}
+										aria-label={t('admin.delete_title', 'Delete user')}
+										disabled={isSelf(u)}
+										onclick={() => removeUser(u)}
+									>
+										<Icon name="trash-alt" />
+									</button>
+								</div>
 							</td>
 						</tr>
 					{/each}
@@ -3066,6 +3157,75 @@
 			disabled={resetting}
 		>
 			{resetting ? t('admin.resetting', 'Resetting…') : t('admin.reset_btn', 'Reset')}
+		</button>
+	{/snippet}
+</Modal>
+
+<!-- Delete-user confirmation modal — typed-email gate. The Delete
+     button stays disabled until the admin re-types the target's
+     email address, matching case-insensitively. Extra friction on a
+     destructive, irreversible action. -->
+<Modal
+	open={deleteUserModal !== null}
+	title={t('admin.delete_user_title', 'Delete user')}
+	onclose={() => (deleteUserModal = null)}
+>
+	{#if deleteUserModal}
+		<form
+			id="delete-user-form"
+			class="form"
+			data-testid="admin-delete-user-form"
+			onsubmit={(e) => {
+				e.preventDefault();
+				void confirmDeleteUser();
+			}}
+		>
+			<p>
+				{t(
+					'admin.delete_user_warning',
+					{ name: deleteUserModal.username },
+					'You are about to permanently delete "{{name}}". This will remove the account, revoke every session, and reap the personal drive. This cannot be undone.'
+				)}
+			</p>
+			<label>
+				<span>
+					{t(
+						'admin.delete_user_confirm_hint',
+						{ email: deleteUserModal.email },
+						'To confirm, type the account email below: {{email}}'
+					)}
+				</span>
+				<input
+					type="email"
+					data-testid="admin-delete-user-email-input"
+					autocomplete="off"
+					bind:value={deleteUserEmailInput}
+					placeholder={deleteUserModal.email}
+					disabled={deleteUserBusy}
+					required
+				/>
+			</label>
+		</form>
+	{/if}
+	{#snippet footer()}
+		<button
+			class="btn"
+			data-testid="admin-delete-user-cancel-btn"
+			onclick={() => (deleteUserModal = null)}
+			disabled={deleteUserBusy}
+		>
+			{t('common.cancel', 'Cancel')}
+		</button>
+		<button
+			class="btn btn--danger"
+			type="submit"
+			form="delete-user-form"
+			data-testid="admin-delete-user-confirm-btn"
+			disabled={!deleteUserEmailMatches || deleteUserBusy}
+		>
+			{deleteUserBusy
+				? t('admin.deleting', 'Deleting…')
+				: t('admin.delete_title', 'Delete user')}
 		</button>
 	{/snippet}
 </Modal>
@@ -3838,6 +3998,24 @@
 		border-color: transparent;
 	}
 
+	/* Destructive-action button. Kept red once enabled so the visual
+	   weight of the action doesn't dilute when the typed-email gate
+	   unlocks it — dimming to opacity only when disabled, not
+	   swapping the palette. Used by the delete-user modal's Delete
+	   button. */
+	.btn--danger {
+		background: var(--color-error-text);
+		color: var(--color-text-light);
+		border-color: transparent;
+	}
+	.btn--danger:hover:not(:disabled) {
+		filter: brightness(0.92);
+	}
+	.btn--danger:disabled {
+		opacity: 0.55;
+		cursor: not-allowed;
+	}
+
 	.status {
 		color: var(--color-text-muted);
 		padding: 2rem 0;
@@ -3977,6 +4155,19 @@
 	   vertically across rows regardless of which actions a given drive
 	   supports. Inapplicable actions render as invisible placeholders
 	   (see `.icon-btn--placeholder`). */
+	/* Users tab actions cell — five fixed slots so icons stay column-
+	   aligned across rows even when a row skips some actions (external
+	   users skip quota-edit + reset-password; internals never get the
+	   promote button). Prevents the last icon from wrapping to a new
+	   line when a placeholder + all five buttons would together push
+	   past the cell width. */
+	.actions--user {
+		display: grid;
+		grid-template-columns: repeat(5, auto);
+		justify-content: end;
+		align-items: center;
+		gap: var(--space-1, 0.25rem);
+	}
 	.actions--drive {
 		display: grid;
 		/* Four action slots per row: manage-owners, policies, edit-

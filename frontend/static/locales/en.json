@@ -1168,7 +1168,14 @@
     "create_drive": "Create shared drive",
     "no_drives": "No drives yet.",
     "external_user": "external",
-    "external_user_hint": "Grant-only account (magic-link or OCM). Cannot be admin and has no storage envelope."
+    "external_user_hint": "Grant-only account (magic-link or OCM). Cannot be admin and has no storage envelope.",
+    "no_storage_for_external": "External accounts have no storage envelope.",
+    "promote_to_internal_title": "Promote to internal user",
+    "confirm_promote_user": "Promote {{name}} to an internal user? This provisions a home drive and gives the account a normal storage envelope. The account keeps its identity; magic-link login stays the way in unless a password is set later.",
+    "delete_user_title": "Delete user",
+    "delete_user_warning": "You are about to permanently delete \"{{name}}\". This will remove the account, revoke every session, and reap the personal drive. This cannot be undone.",
+    "delete_user_confirm_hint": "To confirm, type the account email below: {{email}}",
+    "deleting": "Deleting…"
   },
   "profile": {
     "page_title": "Profile",

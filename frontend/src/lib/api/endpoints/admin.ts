@@ -318,6 +318,20 @@ export function deleteUser(userId: string): Promise<void> {
 	return mutate(`/api/admin/users/${userId}`, 'DELETE');
 }
 
+/**
+ * Promote a currently-external (grant-only) user to an internal
+ * account. The deployment must have magic-link login enabled — the
+ * admin doesn't set the target's password, so the promoted user
+ * needs some way to log in. Backend refuses with:
+ *   * 400 — magic-link disabled deployment-wide
+ *   * 403 — target is OIDC-linked
+ *   * 404 — user not found
+ *   * 409 — user is already internal
+ */
+export function promoteUserToInternal(userId: string): Promise<void> {
+	return mutate(`/api/admin/users/${userId}/promote-to-internal`, 'POST');
+}
+
 // ── Dashboard ───────────────────────────────────────────────────────────
 
 export interface AdminDashboard {

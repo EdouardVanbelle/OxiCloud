@@ -871,7 +871,14 @@
     "create_drive": "Créer un disque partagé",
     "no_drives": "Aucun disque pour le moment.",
     "external_user": "externe",
-    "external_user_hint": "Compte à accès par invitation (magic-link ou OCM). Ne peut pas être admin et n’a pas de quota de stockage."
+    "external_user_hint": "Compte à accès par invitation (magic-link ou OCM). Ne peut pas être admin et n’a pas de quota de stockage.",
+    "no_storage_for_external": "Les comptes externes n’ont pas d’enveloppe de stockage.",
+    "promote_to_internal_title": "Promouvoir en utilisateur interne",
+    "confirm_promote_user": "Promouvoir {{name}} en utilisateur interne ? Cela provisionne un disque personnel et attribue une enveloppe de stockage normale. L’identité du compte est conservée ; la connexion par magic-link reste la voie d’accès tant qu’aucun mot de passe n’est défini.",
+    "delete_user_title": "Supprimer l’utilisateur",
+    "delete_user_warning": "Vous êtes sur le point de supprimer définitivement « {{name}} ». Cette action supprime le compte, révoque toutes les sessions et efface le disque personnel. Elle est irréversible.",
+    "delete_user_confirm_hint": "Pour confirmer, saisissez l’e-mail du compte ci-dessous : {{email}}",
+    "deleting": "Suppression…"
   },
   "profile": {
     "page_title": "Profil",

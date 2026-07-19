@@ -854,7 +854,14 @@
     "create_drive": "创建共享云盘",
     "no_drives": "暂无云盘。",
     "external_user": "外部",
-    "external_user_hint": "仅邀请账户(magic-link 或 OCM)。不能作为管理员,也没有存储配额。"
+    "external_user_hint": "仅邀请账户(magic-link 或 OCM)。不能作为管理员,也没有存储配额。",
+    "no_storage_for_external": "外部账户没有存储配额。",
+    "promote_to_internal_title": "提升为内部用户",
+    "confirm_promote_user": "将 {{name}} 提升为内部用户?这将预配主云盘并分配正常的存储配额。账户身份保持不变;在设置密码前,magic-link 登录仍然是进入方式。",
+    "delete_user_title": "删除用户",
+    "delete_user_warning": "即将永久删除\"{{name}}\"。这将移除账户、撤销所有会话并清除个人云盘。此操作无法撤销。",
+    "delete_user_confirm_hint": "要确认,请在下方输入账户邮箱: {{email}}",
+    "deleting": "删除中…"
   },
   "profile": {
     "page_title": "个人资料",

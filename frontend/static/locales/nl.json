@@ -871,7 +871,14 @@
     "create_drive": "Gedeelde schijf aanmaken",
     "no_drives": "Nog geen schijven.",
     "external_user": "extern",
-    "external_user_hint": "Alleen-uitnodiging account (magic-link of OCM). Kan geen beheerder zijn en heeft geen opslagenveloppe."
+    "external_user_hint": "Alleen-uitnodiging account (magic-link of OCM). Kan geen beheerder zijn en heeft geen opslagenveloppe.",
+    "no_storage_for_external": "Externe accounts hebben geen opslagenveloppe.",
+    "promote_to_internal_title": "Promoveren tot interne gebruiker",
+    "confirm_promote_user": "{{name}} promoveren tot interne gebruiker? Dit provisioneert een persoonlijke schijf en kent een normale opslagenveloppe toe. De identiteit blijft behouden; magic-link login blijft de toegangsweg zolang er geen wachtwoord is ingesteld.",
+    "delete_user_title": "Gebruiker verwijderen",
+    "delete_user_warning": "Je staat op het punt \"{{name}}\" definitief te verwijderen. Het account wordt verwijderd, alle sessies ingetrokken en de persoonlijke schijf gewist. Dit kan niet ongedaan worden gemaakt.",
+    "delete_user_confirm_hint": "Typ ter bevestiging het e-mailadres van het account hieronder: {{email}}",
+    "deleting": "Verwijderen…"
   },
   "profile": {
     "page_title": "Profiel",

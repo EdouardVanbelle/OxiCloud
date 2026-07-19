@@ -11,6 +11,7 @@ use axum::{
 
 use crate::application::dtos::drive_dto::DriveDto;
 use crate::application::dtos::grant_dto::{GrantDto, RoleDto, SubjectDto, SubjectTypeDto};
+use crate::application::dtos::user_dto::UserDto;
 use crate::application::dtos::plugin_dto::{
     PluginInfoDto, PluginLogEntryDto, PluginLogPageDto, PluginLogQueryDto, PluginRetentionDto,
     SetEnabledDto,
@@ -68,6 +69,10 @@ pub fn admin_routes() -> Router<Arc<AppState>> {
         .route("/users/{id}/active", put(update_user_active))
         .route("/users/{id}/quota", put(update_user_quota))
         .route("/users/{id}/password", put(reset_user_password))
+        .route(
+            "/users/{id}/promote-to-internal",
+            post(admin_promote_external_to_internal),
+        )
         // Registration control
         .route("/settings/registration", put(set_registration_setting))
         // Audio metadata
@@ -1093,6 +1098,48 @@ pub async fn reset_user_password(
             "message": "Password reset successfully"
         })),
     ))
+}
+
+/// POST /api/admin/users/{id}/promote-to-internal — flip an external
+/// (grant-only) account into a normal internal account, provisioning
+/// its personal drive on the way. The deployment MUST have magic-link
+/// login enabled (the admin doesn't set the user's password on their
+/// behalf, so the promoted user needs some way to log in). Refuses
+/// OIDC-linked users and users who are already internal.
+#[utoipa::path(
+    post,
+    path = "/api/admin/users/{id}/promote-to-internal",
+    params(("id" = String, Path, description = "Target user id")),
+    responses(
+        (status = 200, description = "User promoted", body = UserDto),
+        (status = 400, description = "Magic-link login is disabled on this deployment"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin required (or target is OIDC-linked)"),
+        (status = 404, description = "User not found"),
+        (status = 409, description = "User is already internal"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin"
+)]
+pub async fn admin_promote_external_to_internal(
+    State(state): State<Arc<AppState>>,
+    auth_user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let target_id = Uuid::parse_str(&id).map_err(|_| AppError::bad_request("Invalid UUID"))?;
+
+    let auth = state
+        .auth_service
+        .as_ref()
+        .ok_or_else(|| AppError::internal_error("Auth service not configured"))?;
+
+    let dto = auth
+        .auth_application_service
+        .admin_promote_external_to_internal(auth_user.id, target_id)
+        .await
+        .map_err(AppError::from)?;
+
+    Ok((StatusCode::OK, Json(dto)))
 }
 
 // ============================================================================

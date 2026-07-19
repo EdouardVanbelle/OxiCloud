@@ -1389,6 +1389,117 @@ impl AuthApplicationService {
         Ok(UserDto::from(updated))
     }
 
+    /// Admin-driven external → internal promotion.
+    ///
+    /// Same wire outcome as [`Self::upgrade_to_internal`] but the actor
+    /// is an operator, not the target user. The target's password stays
+    /// as it was (usually `None` — magic-link-only accounts) so the
+    /// deployment MUST have magic-link login enabled, otherwise the
+    /// promoted user has no login path at all.
+    ///
+    /// Refuses:
+    /// - Target is already internal → 409 `AlreadyInternal`.
+    /// - Target is OIDC-linked → 403 (IdP owns identity).
+    /// - Magic-link login disabled deployment-wide → 400 with a hint.
+    ///
+    /// On success:
+    /// - `is_external → false`, `storage_quota_bytes → capped default`.
+    /// - Home-drive provisioning fires via
+    ///   `PersonalDriveLifecycleHook::on_upgraded_to_internal` — same
+    ///   hook the self-upgrade path uses.
+    /// - `user_flags_cache` invalidated on the target so per-request
+    ///   guards observe the new flag within one cache round-trip.
+    /// - Audit line `event = "user.promoted_to_internal_by_admin"`
+    ///   with `by = <admin_id>`, `target_id = <user_id>`.
+    pub async fn admin_promote_external_to_internal(
+        &self,
+        admin_id: Uuid,
+        target_id: Uuid,
+    ) -> Result<UserDto, DomainError> {
+        let mut user = self.user_storage.get_user_by_id(target_id).await?;
+
+        if !user.is_external() {
+            tracing::info!(
+                target: "audit",
+                event = "user.promote_rejected",
+                reason = "already_internal",
+                by = %admin_id,
+                target_id = %target_id,
+                "👮🏻‍♂️ admin-promote refused: target user is already internal",
+            );
+            return Err(DomainError::new(
+                ErrorKind::Conflict,
+                "User",
+                "Account is already internal",
+            ));
+        }
+
+        if user.is_oidc_user() {
+            tracing::info!(
+                target: "audit",
+                event = "user.promote_rejected",
+                reason = "oidc_user",
+                by = %admin_id,
+                target_id = %target_id,
+                "👮🏻‍♂️ admin-promote refused: OIDC-linked user is managed by the IdP",
+            );
+            return Err(DomainError::new(
+                ErrorKind::AccessDenied,
+                "User",
+                "SSO/OIDC accounts are managed by your identity provider",
+            ));
+        }
+
+        // Admin can't set a password on the target's behalf, so the
+        // upgraded account MUST have magic-link login available on the
+        // deployment — otherwise no login path exists post-promotion.
+        if !self.is_magic_link_login_allowed() {
+            tracing::info!(
+                target: "audit",
+                event = "user.promote_rejected",
+                reason = "no_login_path",
+                by = %admin_id,
+                target_id = %target_id,
+                "👮🏻‍♂️ admin-promote refused: magic-link login disabled and admin can't set the target's password",
+            );
+            return Err(DomainError::new(
+                ErrorKind::InvalidInput,
+                "User",
+                "Cannot promote: magic-link login is disabled on this deployment, so the user would have no login path.",
+            ));
+        }
+
+        let quota = self.capped_quota(&UserRole::User);
+
+        user.promote_to_internal(None, quota).map_err(|e| {
+            DomainError::new(
+                ErrorKind::Conflict,
+                "User",
+                format!("Promote refused: {}", e),
+            )
+        })?;
+
+        let updated = self.user_storage.update_user(user).await?;
+
+        // Invalidate the target's flags cache — same reason as the
+        // self-upgrade path.
+        self.user_flags_cache.invalidate(&target_id).await;
+
+        if let Some(lc) = &self.user_lifecycle {
+            lc.dispatch_upgraded_to_internal(&updated).await;
+        }
+
+        tracing::info!(
+            target: "audit",
+            event = "user.promoted_to_internal_by_admin",
+            by = %admin_id,
+            target_id = %target_id,
+            "👮🏻‍♂️ external user promoted to internal by admin",
+        );
+
+        Ok(UserDto::from(updated))
+    }
+
     pub async fn change_password(
         &self,
         user_id: Uuid,
