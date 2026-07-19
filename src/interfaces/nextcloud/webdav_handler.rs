@@ -186,19 +186,27 @@ pub fn nc_collection_href(username: &str, subpath: &str) -> String {
 pub fn nc_href(username: &str, subpath: &str) -> String {
     let subpath = subpath.trim_matches('/');
     let encoded_user = urlencoding::encode(username);
-    if subpath.is_empty() {
-        format!("/remote.php/dav/files/{}/", encoded_user)
-    } else {
-        let encoded_segments: Vec<_> = subpath
-            .split('/')
-            .map(|seg| urlencoding::encode(seg))
-            .collect();
-        format!(
-            "/remote.php/dav/files/{}/{}",
-            encoded_user,
-            encoded_segments.join("/")
-        )
+    // Write the prefix, user and each encoded segment straight into one
+    // pre-sized buffer — avoids the per-segment `Vec<Cow>`, the joined String and
+    // the `format!` result the previous `.map(...).collect().join("/")` allocated
+    // on every NC PROPFIND/REPORT href (mirrors the native `encode_uri_path`).
+    // Keeps `urlencoding::encode` so the emitted bytes are unchanged.
+    const PREFIX: &str = "/remote.php/dav/files/";
+    let mut out = String::with_capacity(PREFIX.len() + encoded_user.len() + subpath.len() + 8);
+    out.push_str(PREFIX);
+    out.push_str(&encoded_user);
+    out.push('/');
+    // No empty-segment filter: `split('/')` on an empty (root) subpath yields a
+    // single "" whose encode is "" — leaving the trailing slash above intact —
+    // and any internal "//" is preserved byte-for-byte, exactly as the old
+    // `split → map → join("/")` produced.
+    for (i, seg) in subpath.split('/').enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        out.push_str(&urlencoding::encode(seg));
     }
+    out
 }
 
 /// Dispatch Nextcloud WebDAV request to the appropriate handler.

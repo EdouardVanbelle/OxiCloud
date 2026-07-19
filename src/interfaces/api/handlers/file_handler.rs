@@ -1153,18 +1153,39 @@ pub(super) fn build_content_disposition(name: &str, mime: &str, force_inline: bo
         .remove(b'`')
         .remove(b'|')
         .remove(b'~');
-    let encoded = utf8_percent_encode(name, RFC5987_SET).to_string();
+    // Fast path: a name whose every byte is an RFC 5987 attr-char needs neither
+    // percent-encoding nor ASCII-fallback filtering ('"' and '\\' are not
+    // attr-chars, so none is substituted), so `filename` and `filename*` are the
+    // name verbatim — one allocation (the header) instead of three.
+    let all_attr_char = name.bytes().all(|b| {
+        b.is_ascii_alphanumeric()
+            || matches!(
+                b,
+                b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+            )
+    });
+    if all_attr_char {
+        return format!("{disposition}; filename=\"{name}\"; filename*=UTF-8''{name}");
+    }
 
-    let ascii_safe: String = name
-        .chars()
-        .filter(|c| c.is_ascii_graphic() || *c == ' ')
-        .map(|c| match c {
+    // Slow path: assemble the header in one pre-sized buffer, writing the ASCII
+    // fallback and the percent-encoded form in place — no throwaway `ascii_safe`
+    // / `encoded` Strings. Sized for the worst case (every byte → %XX) so it
+    // never grows.
+    let mut out = String::with_capacity(disposition.len() + name.len() * 4 + 32);
+    out.push_str(disposition);
+    out.push_str("; filename=\"");
+    for c in name.chars().filter(|c| c.is_ascii_graphic() || *c == ' ') {
+        out.push(match c {
             '"' | '\\' => '_',
             _ => c,
-        })
-        .collect();
-
-    format!("{disposition}; filename=\"{ascii_safe}\"; filename*=UTF-8''{encoded}")
+        });
+    }
+    out.push_str("\"; filename*=UTF-8''");
+    for chunk in utf8_percent_encode(name, RFC5987_SET) {
+        out.push_str(chunk);
+    }
+    out
 }
 
 // ── Route handlers (free functions) ──────────────────────────────────────────

@@ -10,7 +10,7 @@ use quick_xml::{
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::application::dtos::display_helpers::format_file_size;
+use crate::application::dtos::display_helpers::{format_file_size, intern_display};
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
 use crate::application::dtos::search_dto::SearchCriteriaDto;
@@ -443,9 +443,9 @@ fn folder_dto_from_search(
         created_at: sr.created_at,
         modified_at: sr.modified_at,
         is_root: sr.is_root,
-        icon_class: Arc::from("fas fa-folder"),
-        icon_special_class: Arc::from("folder-icon"),
-        category: Arc::from("Folder"),
+        icon_class: intern_display("fas fa-folder"),
+        icon_special_class: intern_display("folder-icon"),
+        category: intern_display("Folder"),
         // §14 provenance not selected by search results.
         created_by: None,
         updated_by: None,

@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { errorToast } from '$lib/utils/errors';
+	import { SvelteMap } from 'svelte/reactivity';
+	import { primeContextPage } from '$lib/utils/listContext';
 	import { onMount } from 'svelte';
 	import {
 		deleteTrashItem,
@@ -44,20 +46,10 @@
 	// travel through `contextMap`, which page-provided group-by / render
 	// callbacks read via the `ctx` parameter.
 	const items = $derived(raw.map((it) => it.resource as FileItem | FolderItem));
-	const contextMap = $derived(
-		new Map<string, ItemContext>(
-			raw.map((it) => [
-				it.resource.id,
-				{
-					date: it.deletion_date,
-					extras: {
-						driveId: it.drive_id,
-						trashedAt: it.trashed_at
-					}
-				}
-			])
-		)
-	);
+	// Persistent reactive map, primed per page in `load()` (benches/ROUND16.md §F2)
+	// instead of rebuilding a fresh Map that re-hashes the whole accumulated list
+	// on every infinite-scroll page. Mirrors the shipped `favoriteIds` SvelteSet.
+	const contextMap = new SvelteMap<string, ItemContext>();
 
 	// "Drive" group rank: default-personal first, then secondary personal, then
 	// shared — matches `DrivePicker.svelte::sortedDrives` so the sidebar and
@@ -140,6 +132,10 @@
 				resourceTypes: ['file', 'folder']
 			});
 			raw = reset ? page.items : [...raw, ...page.items];
+			primeContextPage(contextMap, reset, page.items, (it) => [
+				it.resource.id,
+				{ date: it.deletion_date, extras: { driveId: it.drive_id, trashedAt: it.trashed_at } }
+			]);
 			cursor = page.next_cursor;
 		} catch (e) {
 			console.error('trash: load error', e);

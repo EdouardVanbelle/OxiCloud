@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { SvelteSet } from 'svelte/reactivity';
+	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+	import { primeContextPage } from '$lib/utils/listContext';
 	import Button from '$lib/components/Button.svelte';
 	import { useOwnerCache } from '$lib/composables/useOwnerCache.svelte';
 	import { errorToast } from '$lib/utils/errors';
@@ -52,11 +53,10 @@
 	// items on this page are favorites — pass every id in `favoriteIds`
 	// so the star widget lights up universally.
 	const items = $derived(raw.map((it) => it.resource as FileItem | FolderItem));
-	const contextMap = $derived(
-		new Map<string, ItemContext>(
-			raw.map((it) => [it.resource.id, { date: it.favorited_at } satisfies ItemContext])
-		)
-	);
+	// Persistent reactive map, primed per page in `load()` (benches/ROUND16.md §F2)
+	// instead of rebuilding a fresh Map that re-hashes the whole accumulated list
+	// on every infinite-scroll page. Mirrors the sibling `favoriteIds` SvelteSet.
+	const contextMap = new SvelteMap<string, ItemContext>();
 	// Persistent reactive set, updated in place per page (add the fresh page's
 	// ids; clear on reset) instead of rebuilding a brand-new SvelteSet over the
 	// whole accumulated list on every infinite-scroll page — that was O(N²)
@@ -117,6 +117,10 @@
 			// reset, then add only this page's ids (benches/ROUND14.md §F2).
 			if (reset) favoriteIds.clear();
 			for (const it of page.items) favoriteIds.add(it.resource.id);
+			primeContextPage(contextMap, reset, page.items, (it) => [
+				it.resource.id,
+				{ date: it.favorited_at }
+			]);
 			cursor = page.next_cursor;
 			void owners.resolve(page.items.map((i) => i.resource.created_by));
 		} catch (e) {

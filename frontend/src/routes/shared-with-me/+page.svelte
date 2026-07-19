@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { errorMessage } from '$lib/utils/errors';
+	import { SvelteMap } from 'svelte/reactivity';
+	import { primeContextPage } from '$lib/utils/listContext';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { onMount } from 'svelte';
@@ -43,14 +45,11 @@
 	// so the sharer shows up in the vignette (rather than the resource's
 	// intrinsic `created_by`, which is a stranger for grantees).
 	const items = $derived(fileFolderGrants.map((it) => it.resource as FileItem | FolderItem));
-	const contextMap = $derived(
-		new Map<string, ItemContext>(
-			fileFolderGrants.map((it) => [
-				it.resource.id,
-				{ date: it.granted_at, ownerId: it.granted_by ?? null } satisfies ItemContext
-			])
-		)
-	);
+	// Persistent reactive map, primed per page in `load()` (benches/ROUND16.md §F2)
+	// instead of rebuilding a fresh Map that re-hashes the whole accumulated list
+	// on every infinite-scroll page. Drives are skipped (they never reach the
+	// row UI), so the map covers exactly the displayed `fileFolderGrants`.
+	const contextMap = new SvelteMap<string, ItemContext>();
 
 	// Server-supported sort_by values (see grant_handler.rs:615):
 	//   granted_at, granted_by, name, type
@@ -96,6 +95,11 @@
 				reverse: rev
 			});
 			raw = reset ? page.items : [...raw, ...page.items];
+			primeContextPage(contextMap, reset, page.items, (it) =>
+				it.resource_type === 'drive'
+					? null
+					: [it.resource.id, { date: it.granted_at, ownerId: it.granted_by ?? null }]
+			);
 			cursor = page.next_cursor;
 			// Warm the sharer-name cache so the "Shared by" group headers
 			// show real names instead of UUIDs.

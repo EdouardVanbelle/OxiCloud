@@ -354,6 +354,17 @@ name = "bench_micro_allocs"
 path = "examples/bench_micro_allocs.rs"
 required-features = ["bench"]
 
+# Round-16 battery ────────────────────────────────────────────────────────────
+
+# Round-16 CPU/alloc micro-pack — folder display constants `Arc::from` → interned
+# clone (3 sites), `build_content_disposition` 3→1 alloc (every download + Range
+# seek), `nc_href` Vec+join → single pre-sized buffer (every NC PROPFIND/REPORT
+# href), NC preview `fileId` collect-then-parse → borrowed-slice parse. No Postgres.
+[[example]]
+name = "bench_round16_micro"
+path = "examples/bench_round16_micro.rs"
+required-features = ["bench"]
+
 # Round-15 battery ────────────────────────────────────────────────────────────
 
 # Round-15 CPU/alloc micro-pack — exif Make/Model in-place trim (drop the
