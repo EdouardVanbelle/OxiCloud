@@ -540,6 +540,25 @@
 			onselectionchange?.(selected);
 		}
 	}
+
+	// Ctrl+A (Linux / Windows) / ⌘+A (macOS) selects every visible row.
+	// Handled here rather than in each page's own `svelte:window` so all
+	// consumers get the shortcut for free — /files, /trash, /favorites,
+	// /recent, /shared-with-me — with identical semantics. Only fires
+	// when `selectable` is on, and only when the focused element isn't
+	// a text input (typing inside a search box shouldn't hijack it).
+	function onSelectAllShortcut(e: KeyboardEvent) {
+		if (!selectable) return;
+		if (!(e.ctrlKey || e.metaKey)) return;
+		if (e.key.toLowerCase() !== 'a') return;
+		const tag = (e.target as HTMLElement | null)?.tagName;
+		if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+		// Also skip when the focus is inside a contentEditable region
+		// (rich-text popups, name inline-edit if ever added).
+		if ((e.target as HTMLElement | null)?.isContentEditable) return;
+		e.preventDefault();
+		toggleSelectAll();
+	}
 	// `selectedItems` and the reap-stale effect below stay on the RAW
 	// items — selection persists across a display-filter toggle, and
 	// stale-selection cleanup only fires when items truly leave the
@@ -779,9 +798,16 @@
 						}}
 					/>
 				{/if}
+				<!-- Row badge (e.g. /trash's expiration chip) sits absolutely
+				     inside `.file-icon` — one DOM location, one render, works
+				     for both views. Because it's positioned absolutely it
+				     never affects the row/card height; the surrounding
+				     layout can't stretch to accommodate it. -->
+				{#if rowBadge}
+					<span class="file-icon__badge">{@render rowBadge(item, ctx)}</span>
+				{/if}
 			</span>
 			<span class="name-cell__text">{item.name}</span>
-			{#if rowBadge}<span class="name-cell__badge">{@render rowBadge(item, ctx)}</span>{/if}
 		</div>
 		{#if showOwner}
 			<div class="owner-cell">
@@ -803,8 +829,14 @@
 			</div>
 		{/if}
 		<div class="grid-meta">
-			{#if showDate && dateCell}<span class="grid-meta__chip">{@render dateCell(item, ctx)}</span
-				>{/if}
+			<!-- Grid-view meta line — size + modified date at the bottom of
+			     the card. The `dateCell` snippet override (used by /trash
+			     for the expiration chip) intentionally does NOT render
+			     here: /trash surfaces expiration as the `.file-icon__badge`
+			     overlay above the preview, and duplicating it in the top-
+			     right corner would be redundant. Any date the section
+			     wants to display in the card meta line is `formatDate` on
+			     the intrinsic `dateVal` (per the fallback below). -->
 			<span class="grid-meta__line">
 				{#if sizeVal != null}<span class="grid-meta__size">{formatBytes(sizeVal)}</span>{/if}
 				{#if dateVal != null}<span class="grid-meta__date">{formatDate(dateVal)}</span>{/if}
@@ -860,6 +892,11 @@
 		{/if}
 	</div>
 {/snippet}
+
+<!-- Global Ctrl+A / ⌘+A → select every visible row. See
+     `onSelectAllShortcut` in the script for the guards (selectable
+     only, ignores keys inside INPUT/TEXTAREA/SELECT/contentEditable). -->
+<svelte:window onkeydown={onSelectAllShortcut} />
 
 <!--
 	`.rl-root` is the drop-target boundary for OS file drops. Every
@@ -1127,13 +1164,6 @@
 		min-height: 28px;
 	}
 
-	/* ── Row badge (trash expiration, etc.) ── */
-	.name-cell__badge {
-		display: inline-flex;
-		align-items: center;
-		margin-left: var(--space-2);
-	}
-
 	/* ── Owner vignette ── */
 	.owner-cell {
 		display: flex;
@@ -1197,12 +1227,24 @@
 		gap: var(--space-2);
 	}
 
-	/* Grid view: overlay a custom date chip (e.g. trash expiry) on the card corner. */
-	:global(.files-grid-view) .grid-meta__chip {
+	/* ── Row-badge placement ───────────────────────────────────────
+	   Single copy of the `rowBadge` snippet lives inside `.file-icon`
+	   — one DOM location for BOTH list and grid views. `.file-icon`
+	   is `position: relative` in the shared CSS so this absolute
+	   overlay anchors to it. Positioned bottom-center with NO
+	   vertical translate → the badge sits fully inside the preview
+	   area with its bottom edge flush against the icon's bottom, so
+	   it doesn't crop or spill outside. Because it's absolutely
+	   positioned it never contributes to the row/card height. */
+	.file-icon__badge {
+		display: inline-flex;
 		position: absolute;
-		top: var(--space-2);
-		right: var(--space-2);
-		z-index: 1;
+		left: 50%;
+		bottom: 0;
+		transform: translateX(-50%);
+		z-index: 2;
+		white-space: nowrap;
+		pointer-events: none;
 	}
 
 	/* ── Context menu ── */
