@@ -3669,11 +3669,11 @@
 	   splits mid-word either. */
 	.role-badges {
 		display: flex;
-		flex-direction: row;
-		flex-wrap: nowrap;
+		flex-flow: row nowrap;
 		align-items: center;
 		gap: var(--space-1, 0.25rem);
 	}
+
 	.role-badges .badge {
 		white-space: nowrap;
 	}
@@ -3686,6 +3686,7 @@
 	.auth-cell {
 		max-width: 12ch;
 	}
+
 	.auth-cell .badge__label {
 		display: inline-block;
 		max-width: 8ch;
@@ -4061,9 +4062,11 @@
 		color: var(--color-text-light);
 		border-color: transparent;
 	}
+
 	.btn--danger:hover:not(:disabled) {
 		filter: brightness(0.92);
 	}
+
 	.btn--danger:disabled {
 		opacity: 0.55;
 		cursor: not-allowed;
@@ -4221,6 +4224,7 @@
 		align-items: center;
 		gap: var(--space-1, 0.25rem);
 	}
+
 	.actions--drive {
 		display: grid;
 		/* Four action slots per row: manage-owners, policies, edit-
@@ -4232,12 +4236,14 @@
 		justify-content: end;
 		align-items: center;
 	}
+
 	.drive-kind-cell {
 		display: flex;
 		flex-direction: column;
 		align-items: flex-start;
 		gap: 0.15rem;
 	}
+
 	.drive-kind-cell__suffix {
 		font-size: 0.85em;
 	}

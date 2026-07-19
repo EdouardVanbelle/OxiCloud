@@ -157,3 +157,72 @@
 		</button>
 	{/snippet}
 </Modal>
+
+<style>
+	/* Svelte 5 scopes styles per component, and CSS classes used
+	   in this file's markup — including inside `{#snippet footer}`
+	   — carry this component's hash. The local `.btn` / `.form` /
+	   `.quota-input` / `.muted` / `.status--error` / `.btn--primary`
+	   rules on `/admin/+page.svelte` don't reach across; mirror them
+	   here so the QuotaEditor visually matches every other modal in
+	   the admin panel (same paddings, colours, primary button look). */
+	.form {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+	.form label {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		font-size: 0.875rem;
+	}
+
+	.form input,
+	.form select {
+		padding: 0.5rem;
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+		background: var(--color-bg-input);
+		color: var(--color-text);
+	}
+
+	.quota-input {
+		display: flex;
+		gap: var(--space-2);
+	}
+
+	.quota-input input {
+		flex: 1;
+	}
+
+	.muted {
+		color: var(--color-text-muted);
+		font-size: 0.8125rem;
+	}
+
+	.status--error {
+		color: var(--color-error-text);
+	}
+
+	.btn {
+		padding: 0.5rem 0.875rem;
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+		background: var(--color-bg-surface);
+		color: var(--color-text);
+		cursor: pointer;
+	}
+
+	.btn--primary {
+		background: var(--color-primary);
+		color: var(--color-text-light);
+		border-color: transparent;
+	}
+
+	.btn:disabled {
+		opacity: 0.55;
+		cursor: not-allowed;
+	}
+</style>

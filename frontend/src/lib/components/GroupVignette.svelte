@@ -117,6 +117,7 @@
 		align-items: center;
 		gap: var(--space-2);
 	}
+
 	.gv__avatar {
 		flex-shrink: 0;
 		display: inline-flex;
@@ -130,11 +131,13 @@
 		font-size: 0.85rem;
 		user-select: none;
 	}
+
 	.gv__text {
 		display: flex;
 		flex-direction: column;
 		min-width: 0;
 	}
+
 	.gv__name {
 		font-weight: var(--weight-semibold, 600);
 		color: var(--color-text);
@@ -142,6 +145,7 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
+
 	.gv__sub {
 		color: var(--color-text-muted);
 		font-size: 0.8125rem;
