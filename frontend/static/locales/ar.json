@@ -461,7 +461,8 @@
       "trashed_time": "وقت الحذف"
     },
     "delete": "حذف نهائياً",
-    "empty_action": "تفريغ سلة المهملات"
+    "empty_action": "تفريغ سلة المهملات",
+    "expires_at": "ينتهي في"
   },
   "daysRemaining": {
     "expired": "منتهية الصلاحية",
@@ -1265,5 +1266,9 @@
   "group": {
     "members_empty": "لا يوجد أعضاء",
     "member_count": "{{n}} أعضاء"
+  },
+  "resource_list": {
+    "location": "الموقع",
+    "wrong_drop_zone_msg": "الرفع يعمل فقط في قسم الملفات — افتح قسم الملفات وأفلت العناصر هناك."
   }
 }

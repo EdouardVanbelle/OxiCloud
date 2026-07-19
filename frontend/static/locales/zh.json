@@ -461,7 +461,8 @@
       "trashed_time": "删除时间"
     },
     "delete": "永久删除",
-    "empty_action": "Empty trash"
+    "empty_action": "Empty trash",
+    "expires_at": "到期时间"
   },
   "daysRemaining": {
     "expired": "已过期",
@@ -1265,5 +1266,9 @@
   "group": {
     "members_empty": "无成员",
     "member_count": "{{n}} 名成员"
+  },
+  "resource_list": {
+    "location": "位置",
+    "wrong_drop_zone_msg": "上传仅在 “文件” 中生效 — 请打开文件区并在那里拖放。"
   }
 }

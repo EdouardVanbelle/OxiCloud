@@ -461,7 +461,8 @@
       "trashed_time": "हटाने का समय"
     },
     "delete": "स्थायी रूप से हटाएँ",
-    "empty_action": "रद्दी खाली करें"
+    "empty_action": "रद्दी खाली करें",
+    "expires_at": "समाप्ति"
   },
   "daysRemaining": {
     "expired": "समाप्त",
@@ -1265,5 +1266,9 @@
   "group": {
     "members_empty": "कोई सदस्य नहीं",
     "member_count": "{{n}} सदस्य"
+  },
+  "resource_list": {
+    "location": "स्थान",
+    "wrong_drop_zone_msg": "अपलोड केवल फ़ाइलें अनुभाग में काम करता है — फ़ाइलें अनुभाग खोलें और वहीं छोड़ें।"
   }
 }

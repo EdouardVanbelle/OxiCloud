@@ -69,10 +69,12 @@
 	import Icon from '$lib/icons/Icon.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import SkeletonList from '$lib/components/SkeletonList.svelte';
-	import ListToolbar from '$lib/components/ListToolbar.svelte';
+	import ActionBar from '$lib/components/ActionBar.svelte';
+	import DisplayModeControls from '$lib/components/DisplayModeControls.svelte';
 	import UserVignette from '$lib/components/UserVignette.svelte';
 	import VirtualList from '$lib/components/VirtualList.svelte';
 	import { t } from '$lib/i18n/index.svelte';
+	import { ui } from '$lib/stores/ui.svelte';
 	import { files as filesStore } from '$lib/stores/files.svelte';
 	import { preferences } from '$lib/stores/preferences.svelte';
 	import { formatBytes } from '$lib/utils/format';
@@ -176,10 +178,62 @@
 		onfavorite?: (item: FileItem | FolderItem) => void;
 		/** Selection changed (set of selected item ids). */
 		onselectionchange?: (ids: Set<string>) => void;
-		actions?: Snippet<[FileItem | FolderItem]>;
-		toolbar?: Snippet;
-		/** Batch toolbar shown when items are selected; receives selected items. */
-		batchToolbar?: Snippet<[Array<FileItem | FolderItem>]>;
+		/**
+		 * Per-item action cell (renders at the end of a row). Kept as a
+		 * distinct slot from the action-bar snippets below so callers
+		 * that want an item-scoped affordance (a per-row overflow menu)
+		 * don't have to piggyback on the bar.
+		 */
+		itemActions?: Snippet<[FileItem | FolderItem]>;
+		/**
+		 * Action-bar left cluster — always-visible page action buttons
+		 * (Upload / New folder / Empty trash / Clear recent / …). Swaps
+		 * to `batchActions` when the selection is non-empty. Every
+		 * section provides its own buttons; ResourceList doesn't ship
+		 * any defaults.
+		 */
+		actions?: Snippet;
+		/**
+		 * Action-bar left cluster when selection is non-empty —
+		 * replaces `actions`. Receives the selected items so buttons
+		 * can be scoped to the batch. Replaces the phase-1
+		 * `batchToolbar` floating strip pattern.
+		 */
+		batchActions?: Snippet<[Array<FileItem | FolderItem>]>;
+		/**
+		 * Rendered next to the item name in each row. `/trash` uses
+		 * this for its expiration badge; other sections omit it.
+		 * ResourceList stays ignorant of what the badge means — the
+		 * page decides. Empty return = no badge.
+		 */
+		rowBadge?: Snippet<[FileItem | FolderItem, ItemContext | undefined]>;
+		/**
+		 * Rendered above the toolbar in the sticky header. Only
+		 * `/files` wires this today; every other section leaves the
+		 * snippet undefined so no breadcrumb strip appears. Kept as a
+		 * snippet (not a boolean) so the page owns crumb rendering and
+		 * their click / drag-drop behavior.
+		 */
+		breadcrumb?: Snippet;
+		/**
+		 * When true, drops from the OS file system on the ResourceList
+		 * wrapper are forwarded to `onsystemdrop` (upload path). When
+		 * false (default), the wrapper still intercepts the OS drop —
+		 * `preventDefault` so the browser doesn't navigate to the file
+		 * — and fires a "wrong section" `ui.notify()` pointing the user
+		 * at the Files section (the legacy behaviour). Item-drag drops
+		 * (row → folder) are unaffected either way; those go through
+		 * `onitemdrop` per the existing row hooks.
+		 */
+		enableSystemDrop?: boolean;
+		/**
+		 * Called with the OS-dropped files when `enableSystemDrop` is
+		 * true. The page keeps ownership of the upload code (walking
+		 * webkitGetAsEntry trees, chunked uploader, etc.) — this
+		 * component just delivers the payload. Ignored when
+		 * `enableSystemDrop` is false.
+		 */
+		onsystemdrop?: (e: DragEvent) => void;
 		/**
 		 * Render `<img>` thumbnails on file rows and fall back to
 		 * client-side generation when the server doesn't have one
@@ -266,9 +320,13 @@
 		onopen,
 		onfavorite,
 		onselectionchange,
+		itemActions,
 		actions,
-		toolbar,
-		batchToolbar,
+		batchActions,
+		rowBadge,
+		breadcrumb,
+		enableSystemDrop = false,
+		onsystemdrop,
 		enableThumbnails = true,
 		isDraggable,
 		isDropTarget,
@@ -345,7 +403,7 @@
 			showType ? '120px' : '',
 			showSize ? '110px' : '',
 			showDate ? '160px' : '',
-			actions ? '120px' : ''
+			itemActions ? '120px' : ''
 		]
 			.filter(Boolean)
 			.join(' ')
@@ -562,6 +620,63 @@
 			.filter(Boolean)
 			.join('\n');
 	}
+
+	// ── System-drop handling (OS files onto the wrapper) ───────────────────────
+	// Two modes:
+	//
+	//   * `enableSystemDrop = true`: the page has an upload code path
+	//     ready (the `/files` browser). We `preventDefault` the browser's
+	//     default (which would open the dragged file as a top-level
+	//     navigation), highlight the drop zone, and hand the DragEvent
+	//     off to the page via `onsystemdrop`. The page walks the entries
+	//     (webkitGetAsEntry / DataTransferItemList) and drives the upload.
+	//
+	//   * `enableSystemDrop = false` (default): the page has no upload
+	//     path. Still `preventDefault` so the browser doesn't navigate
+	//     away, but instead of forwarding, fire a `ui.notify()` that
+	//     points the user at `/files` — this restores the legacy vanilla
+	//     frontend's "wrong drop zone" behaviour so users don't wonder
+	//     why their drag was silently ignored.
+	//
+	// Row-scoped drops (dragging an in-app row onto a folder row / the
+	// breadcrumb) are handled by the existing `onitemdrop` hooks and use
+	// a private `application/x-oxi-item` MIME so the `Files` type check
+	// below never matches them.
+	let systemDropOver = $state(false);
+	function isSystemDrag(e: DragEvent): boolean {
+		return !!e.dataTransfer?.types?.includes('Files');
+	}
+	function onSystemDragEnter(e: DragEvent) {
+		if (!isSystemDrag(e)) return;
+		e.preventDefault();
+		systemDropOver = true;
+	}
+	function onSystemDragOver(e: DragEvent) {
+		if (!isSystemDrag(e)) return;
+		e.preventDefault();
+		if (e.dataTransfer) e.dataTransfer.dropEffect = enableSystemDrop ? 'copy' : 'none';
+	}
+	function onSystemDragLeave(e: DragEvent) {
+		if (!isSystemDrag(e)) return;
+		systemDropOver = false;
+	}
+	function onSystemDrop(e: DragEvent) {
+		if (!isSystemDrag(e)) return;
+		e.preventDefault();
+		systemDropOver = false;
+		if (enableSystemDrop && onsystemdrop) {
+			onsystemdrop(e);
+		} else if (!enableSystemDrop) {
+			ui.notify(
+				t(
+					'resource_list.wrong_drop_zone_msg',
+					'Uploads only work in Files — open the Files section and drop there.'
+				),
+				'warning',
+				6000
+			);
+		}
+	}
 </script>
 
 {#snippet row(item: FileItem | FolderItem)}
@@ -644,6 +759,7 @@
 				{/if}
 			</span>
 			<span class="name-cell__text">{item.name}</span>
+			{#if rowBadge}<span class="name-cell__badge">{@render rowBadge(item, ctx)}</span>{/if}
 		</div>
 		{#if showOwner}
 			<div class="owner-cell">
@@ -687,50 +803,82 @@
 				}}><Icon name={isFav ? 'star' : 'star-outline'} /></button
 			>
 		{/if}
-		{#if actions}
-			<div class="action-cell">{@render actions(item)}</div>
+		{#if itemActions}
+			<div class="action-cell">{@render itemActions(item)}</div>
 		{/if}
 	</div>
 {/snippet}
 
+<!--
+	`.rl-root` is the drop-target boundary for OS file drops. Every
+	descendant listens through here — dragging in from the desktop over
+	the sticky header or the content area both hit the same handler and
+	either forward to the page's upload code (files browser) or fire the
+	"wrong section" toast (everywhere else).
+
+	svelte-ignore a11y_no_static_element_interactions — the drop handlers
+	are pointer-only fallbacks; keyboard users don't have a "drop a
+	file" action, and the content inside is separately keyboard-nav'd.
+-->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+	class="rl-root"
+	class:rl-root--drop-over={systemDropOver && enableSystemDrop}
+	ondragenter={onSystemDragEnter}
+	ondragover={onSystemDragOver}
+	ondragleave={onSystemDragLeave}
+	ondrop={onSystemDrop}
+>
 <div class="page-sticky-header">
 	<h1 class="page-title">{title}</h1>
-	<ListToolbar
-		groups={groupBys}
-		{groupBy}
-		{reversed}
-		ongroup={selectGroup}
-		ondirection={toggleDirection}
-		{showViewToggle}
-		{showDotfileToggle}
-	>
+	{#if breadcrumb}
+		<div class="rl-breadcrumb">{@render breadcrumb()}</div>
+	{/if}
+	<ActionBar>
 		{#snippet start()}
-			<div class="action-buttons">{@render toolbar?.()}</div>
+			<div class="action-buttons">
+				<!--
+					The action-bar left cluster has two states:
+					  1. `batchActions` — when the user has selected items, the
+					     page's batch buttons (Move / Delete / Restore / …)
+					     replace the default cluster, prefixed with a "clear
+					     selection" close button + count label so the batch is
+					     dismissable without unchecking every row by hand.
+					  2. `actions` — the page's default cluster
+					     (Upload / New folder / Empty trash / Clear recent).
+				-->
+				{#if selectable && selected.size > 0 && batchActions}
+					<button
+						class="rl-batch-close"
+						title={t('common.clear', 'Clear selection')}
+						aria-label={t('common.clear', 'Clear selection')}
+						data-testid="resource-list-batch-close-btn"
+						onclick={clearSelection}
+					>
+						<Icon name="times" />
+					</button>
+					<span class="rl-batch-count"
+						>{t('files.selected_count', { count: selected.size }, '{{count}} selected')}</span
+					>
+					{@render batchActions(selectedItems)}
+				{:else if actions}
+					{@render actions()}
+				{/if}
+			</div>
 		{/snippet}
-	</ListToolbar>
+		{#snippet end()}
+			<DisplayModeControls
+				groups={groupBys}
+				{groupBy}
+				{reversed}
+				ongroup={selectGroup}
+				ondirection={toggleDirection}
+				showViewMode={showViewToggle}
+				{showDotfileToggle}
+			/>
+		{/snippet}
+	</ActionBar>
 </div>
-
-{#if selectable && selected.size > 0 && batchToolbar}
-	<div
-		class="rl-batch"
-		role="region"
-		aria-label={t('files.selection', 'Selection')}
-		data-testid="resource-list-batch-toolbar"
-	>
-		<button
-			class="rl-batch__close"
-			title={t('common.clear', 'Clear')}
-			data-testid="resource-list-batch-close-btn"
-			onclick={clearSelection}
-		>
-			<Icon name="times" />
-		</button>
-		<span class="rl-batch__count"
-			>{t('files.selected_count', { count: selected.size }, '{{count}} selected')}</span
-		>
-		<div class="rl-batch__actions">{@render batchToolbar(selectedItems)}</div>
-	</div>
-{/if}
 
 {#if error}
 	<EmptyState icon="exclamation-circle" title={error} error />
@@ -822,6 +970,7 @@
 		<div bind:this={sentinel} class="rl-sentinel" aria-hidden="true"></div>
 	</div>
 {/if}
+</div><!-- /.rl-root -->
 
 {#snippet listHeader()}
 	<div class="list-header">
@@ -842,7 +991,7 @@
 		{#if showType}<div>{t('files.col_type', 'Type')}</div>{/if}
 		{#if showSize}<div>{t('files.col_size', 'Size')}</div>{/if}
 		{#if showDate}<div>{dateLabel ?? t('files.col_modified', 'Date')}</div>{/if}
-		{#if onfavorite || actions}<div></div>{/if}
+		{#if onfavorite || itemActions}<div></div>{/if}
 	</div>
 {/snippet}
 
@@ -889,19 +1038,47 @@
 		width: 100%;
 	}
 
-	/* ── Batch toolbar ── */
-	.rl-batch {
-		display: flex;
-		align-items: center;
-		gap: var(--space-3);
-		padding: var(--space-2) var(--space-4);
-		margin-bottom: var(--space-3);
-		background: var(--color-accent-bg);
-		border: 1px solid var(--color-border);
-		border-radius: var(--radius-md);
+	/* ── OS-drop wrapper ──
+	   `.rl-root` catches drops that miss a specific in-app drop target
+	   (row → folder). Its highlight fires ONLY when
+	   `enableSystemDrop && dragging` — the "wrong drop zone" toast path
+	   deliberately leaves the surface unhighlighted so users don't get a
+	   false accept cue. */
+	.rl-root {
+		position: relative;
 	}
 
-	.rl-batch__close {
+	.rl-root--drop-over::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		border: 2px dashed var(--color-accent);
+		border-radius: var(--radius-md);
+		pointer-events: none;
+	}
+
+	/* ── Breadcrumb strip inside the sticky header ── */
+	.rl-breadcrumb {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		margin-bottom: var(--space-2);
+		min-height: 28px;
+	}
+
+	/* ── Row badge (trash expiration, etc.) ── */
+	.name-cell__badge {
+		display: inline-flex;
+		align-items: center;
+		margin-left: var(--space-2);
+	}
+
+	/* ── Selection controls inside the action bar ──
+	   Replaces the deprecated `.rl-batch` floating strip. When items
+	   are selected, the close button + count sit before the page's
+	   `batchActions` snippet inside `.action-buttons`, so the whole
+	   cluster reads as one row of the action bar. */
+	.rl-batch-close {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
@@ -914,20 +1091,13 @@
 		cursor: pointer;
 	}
 
-	.rl-batch__close:hover {
+	.rl-batch-close:hover {
 		background: var(--color-bg-hover);
 	}
 
-	.rl-batch__count {
+	.rl-batch-count {
 		font-weight: var(--weight-semibold);
 		color: var(--color-text);
-	}
-
-	.rl-batch__actions {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-		margin-left: auto;
 	}
 
 	/* ── Selection column ── */

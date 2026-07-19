@@ -618,7 +618,8 @@
     "confirm_empty": "Empty the trash? This cannot be undone.",
     "delete": "Delete permanently",
     "empty_action": "Empty trash",
-    "restored": "Restored"
+    "restored": "Restored",
+    "expires_at": "Expires at"
   },
   "daysRemaining": {
     "expired": "Expired",
@@ -1663,5 +1664,9 @@
   "group": {
     "members_empty": "No members",
     "member_count": "{{n}} members"
+  },
+  "resource_list": {
+    "location": "Location",
+    "wrong_drop_zone_msg": "Uploads only work in Files — open the Files section and drop there."
   }
 }

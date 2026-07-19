@@ -583,7 +583,8 @@
     "empty_action": "휴지통 비우기",
     "confirm_delete": "이 항목을 영구적으로 삭제하시겠습니까? 되돌릴 수 없습니다.",
     "confirm_empty": "휴지통을 비우시겠습니까? 되돌릴 수 없습니다.",
-    "restored": "복원됨"
+    "restored": "복원됨",
+    "expires_at": "만료일"
   },
   "daysRemaining": {
     "expired": "만료됨",
@@ -1659,5 +1660,9 @@
   "group": {
     "members_empty": "구성원 없음",
     "member_count": "구성원 {{n}}명"
+  },
+  "resource_list": {
+    "location": "위치",
+    "wrong_drop_zone_msg": "업로드는 파일 섹션에서만 작동합니다. 파일 섹션을 열고 거기에 놓아 주세요."
   }
 }

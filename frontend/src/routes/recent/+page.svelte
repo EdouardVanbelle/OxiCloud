@@ -292,7 +292,7 @@
 	];
 
 	// ── Selection + batch ─────────────────────────────────────────────────────
-	// Selected items arrive via the batchToolbar snippet param —
+	// Selected items arrive via the batchActions snippet param —
 	// ResourceList already derives them (O(selection), not O(N)); a
 	// host-side `items.filter(...)` shadow would re-run a second full scan
 	// per selection toggle, and its id mirror is unnecessary (the component
@@ -356,6 +356,7 @@
 	onopen={open}
 	onfavorite={toggleFavorite}
 	showOwner
+	showPath
 	showDotfileToggle
 	selectable
 	{contextActions}
@@ -367,14 +368,14 @@
 		load(true, orderBy, rev);
 	}}
 >
-	{#snippet toolbar()}
+	{#snippet actions()}
 		{#if items.length > 0}
 			<Button icon="broom" data-testid="recent-clear-btn" onclick={clearAll}
 				>{t('recent.clear', 'Clear recent')}</Button
 			>
 		{/if}
 	{/snippet}
-	{#snippet batchToolbar(sel)}
+	{#snippet batchActions(sel)}
 		<Button
 			icon="download"
 			data-testid="recent-batch-download-btn"

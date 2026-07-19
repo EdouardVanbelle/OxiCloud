@@ -461,7 +461,8 @@
       "trashed_time": "Czas usunięcia"
     },
     "delete": "Usuń trwale",
-    "empty_action": "Opróżnij kosz"
+    "empty_action": "Opróżnij kosz",
+    "expires_at": "Wygasa"
   },
   "daysRemaining": {
     "expired": "Wygasł",
@@ -1265,5 +1266,9 @@
   "group": {
     "members_empty": "Brak członków",
     "member_count": "{{n}} członków"
+  },
+  "resource_list": {
+    "location": "Lokalizacja",
+    "wrong_drop_zone_msg": "Przesyłanie działa tylko w Plikach — otwórz sekcję Pliki i upuść tam pliki."
   }
 }

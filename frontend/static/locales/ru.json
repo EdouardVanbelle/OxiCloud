@@ -461,7 +461,8 @@
       "trashed_time": "Время удаления"
     },
     "delete": "Удалить навсегда",
-    "empty_action": "Очистить корзину"
+    "empty_action": "Очистить корзину",
+    "expires_at": "Истекает"
   },
   "daysRemaining": {
     "expired": "Истёк",
@@ -1265,5 +1266,9 @@
   "group": {
     "members_empty": "Нет участников",
     "member_count": "{{n}} участников"
+  },
+  "resource_list": {
+    "location": "Расположение",
+    "wrong_drop_zone_msg": "Загрузки работают только в разделе Файлы — откройте раздел Файлы и перетащите туда."
   }
 }

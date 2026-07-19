@@ -461,7 +461,8 @@
       "trashed_time": "刪除時間"
     },
     "delete": "永久刪除",
-    "empty_action": "清空回收站"
+    "empty_action": "清空回收站",
+    "expires_at": "到期時間"
   },
   "daysRemaining": {
     "expired": "已過期",
@@ -1265,5 +1266,9 @@
   "group": {
     "members_empty": "無成員",
     "member_count": "{{n}} 位成員"
+  },
+  "resource_list": {
+    "location": "位置",
+    "wrong_drop_zone_msg": "上傳僅在「檔案」中有效 — 請開啟檔案區並在該處拖放。"
   }
 }

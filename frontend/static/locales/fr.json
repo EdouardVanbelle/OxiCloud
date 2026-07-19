@@ -461,7 +461,8 @@
       "trashed_time": "Date de suppression"
     },
     "delete": "Supprimer définitivement",
-    "empty_action": "Vider la corbeille"
+    "empty_action": "Vider la corbeille",
+    "expires_at": "Expiration"
   },
   "daysRemaining": {
     "expired": "Expiré",
@@ -1265,5 +1266,9 @@
   "group": {
     "members_empty": "Aucun membre",
     "member_count": "{{n}} membres"
+  },
+  "resource_list": {
+    "location": "Emplacement",
+    "wrong_drop_zone_msg": "Les envois ne fonctionnent que dans Fichiers — ouvrez la section Fichiers et déposez-y vos éléments."
   }
 }

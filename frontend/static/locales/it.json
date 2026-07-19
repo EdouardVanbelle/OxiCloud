@@ -461,7 +461,8 @@
       "trashed_time": "Data di eliminazione"
     },
     "delete": "Elimina definitivamente",
-    "empty_action": "Svuota il cestino"
+    "empty_action": "Svuota il cestino",
+    "expires_at": "Scadenza"
   },
   "daysRemaining": {
     "expired": "Scaduto",
@@ -1265,5 +1266,9 @@
   "group": {
     "members_empty": "Nessun membro",
     "member_count": "{{n}} membri"
+  },
+  "resource_list": {
+    "location": "Posizione",
+    "wrong_drop_zone_msg": "I caricamenti funzionano solo in File — apri la sezione File e trascina lì gli elementi."
   }
 }

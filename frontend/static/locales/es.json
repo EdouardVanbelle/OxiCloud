@@ -466,7 +466,8 @@
       "trashed_time": "Fecha de eliminación"
     },
     "delete": "Eliminar permanentemente",
-    "empty_action": "Vaciar papelera"
+    "empty_action": "Vaciar papelera",
+    "expires_at": "Expira"
   },
   "daysRemaining": {
     "expired": "Caducado",
@@ -1280,5 +1281,9 @@
   "group": {
     "members_empty": "Sin miembros",
     "member_count": "{{n}} miembros"
+  },
+  "resource_list": {
+    "location": "Ubicación",
+    "wrong_drop_zone_msg": "Las subidas solo funcionan en Archivos — abre la sección Archivos y suelta ahí los elementos."
   }
 }

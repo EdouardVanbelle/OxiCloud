@@ -13,6 +13,7 @@
 		restoreTrashItem
 	} from '$lib/api/endpoints/trash';
 	import { dateBucket, sizeBucket, typeLabel } from '$lib/api/endpoints/favorites';
+	import { formatDate } from '$lib/utils/display';
 	import type { Drive, FileItem, FolderItem, TrashResourceItem } from '$lib/api/types';
 	import Icon from '$lib/icons/Icon.svelte';
 	import ResourceList, {
@@ -268,8 +269,10 @@
 	emptyText={t('trash.empty_state', 'Trash is empty')}
 	hasMore={!!cursor}
 	onloadmore={() => load(false, orderByForGroup())}
+	selectable
+	showPath
 	pathLabel={t('trash.original_location', 'Original location')}
-	dateLabel={t('trash.remaining', 'Remaining')}
+	dateLabel={t('trash.expires_at', 'Expires at')}
 	{groupBys}
 	bind:groupBy
 	bind:reversed
@@ -278,7 +281,7 @@
 		load(true, orderBy, rev);
 	}}
 >
-	{#snippet toolbar()}
+	{#snippet actions()}
 		{#if items.length > 0}
 			<button class="btn btn-danger" data-testid="trash-empty-btn" onclick={purgeAll}>
 				<Icon name="trash" />
@@ -286,12 +289,35 @@
 			</button>
 		{/if}
 	{/snippet}
-	{#snippet dateCell(_item, ctx)}
+	{#snippet batchActions(sel)}
+		<button
+			class="btn-action"
+			data-testid="trash-batch-restore-btn"
+			title={t('trash.restore', 'Restore')}
+			onclick={() => sel.forEach(restore)}
+		>
+			<Icon name="undo" />
+			{t('trash.restore', 'Restore')}
+		</button>
+		<button
+			class="btn-action btn-action--delete"
+			data-testid="trash-batch-delete-btn"
+			title={t('trash.delete', 'Delete permanently')}
+			onclick={() => sel.forEach(purge)}
+		>
+			<Icon name="trash" />
+			{t('trash.delete', 'Delete permanently')}
+		</button>
+	{/snippet}
+	{#snippet rowBadge(_item, ctx)}
 		{@const chip = expiryChip(ctx?.date)}
 		<span class="expiry-chip expiry-chip--{chip.tier}">
 			<Icon name={chip.icon} class="expiry-chip__icon" />
 			{chip.label}
 		</span>
+	{/snippet}
+	{#snippet dateCell(_item, ctx)}
+		{formatDate(ctx?.date)}
 	{/snippet}
 	{#snippet bucketAction(bucketKey: string)}
 		{#if showPerDriveEmpty}
@@ -310,7 +336,7 @@
 			{/if}
 		{/if}
 	{/snippet}
-	{#snippet actions(item)}
+	{#snippet itemActions(item)}
 		<button
 			class="btn-action"
 			data-testid={`trash-restore-btn-${item.id}`}

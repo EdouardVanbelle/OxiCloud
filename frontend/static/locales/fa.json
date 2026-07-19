@@ -461,7 +461,8 @@
       "trashed_time": "زمان حذف"
     },
     "delete": "حذف دائمی",
-    "empty_action": "Empty trash"
+    "empty_action": "Empty trash",
+    "expires_at": "انقضا در"
   },
   "daysRemaining": {
     "expired": "منقضی شده",
@@ -1265,5 +1266,9 @@
   "group": {
     "members_empty": "بدون عضو",
     "member_count": "{{n}} عضو"
+  },
+  "resource_list": {
+    "location": "مکان",
+    "wrong_drop_zone_msg": "بارگذاری فقط در بخش پرونده‌ها کار می‌کند — بخش پرونده‌ها را باز کنید و آنجا رها کنید."
   }
 }

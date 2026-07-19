@@ -461,7 +461,8 @@
       "trashed_time": "削除日時"
     },
     "delete": "完全に削除",
-    "empty_action": "ゴミ箱を空にする"
+    "empty_action": "ゴミ箱を空にする",
+    "expires_at": "期限"
   },
   "daysRemaining": {
     "expired": "期限切れ",
@@ -1265,5 +1266,9 @@
   "group": {
     "members_empty": "メンバーなし",
     "member_count": "{{n}} 人のメンバー"
+  },
+  "resource_list": {
+    "location": "場所",
+    "wrong_drop_zone_msg": "アップロードはファイル セクションでのみ機能します。ファイル セクションを開いてそこにドロップしてください。"
   }
 }

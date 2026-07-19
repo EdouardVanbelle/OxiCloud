@@ -461,7 +461,8 @@
       "trashed_time": "Löschzeit"
     },
     "delete": "Endgültig löschen",
-    "empty_action": "Papierkorb leeren"
+    "empty_action": "Papierkorb leeren",
+    "expires_at": "Läuft ab"
   },
   "daysRemaining": {
     "expired": "Abgelaufen",
@@ -1265,5 +1266,9 @@
   "group": {
     "members_empty": "Keine Mitglieder",
     "member_count": "{{n}} Mitglieder"
+  },
+  "resource_list": {
+    "location": "Speicherort",
+    "wrong_drop_zone_msg": "Uploads funktionieren nur in Dateien — öffne den Bereich Dateien und lege die Elemente dort ab."
   }
 }

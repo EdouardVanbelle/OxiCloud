@@ -461,7 +461,8 @@
       "trashed_time": "Data de exclusão"
     },
     "delete": "Excluir permanentemente",
-    "empty_action": "Esvaziar lixeira"
+    "empty_action": "Esvaziar lixeira",
+    "expires_at": "Expira em"
   },
   "daysRemaining": {
     "expired": "Expirado",
@@ -1265,5 +1266,9 @@
   "group": {
     "members_empty": "Sem membros",
     "member_count": "{{n}} membros"
+  },
+  "resource_list": {
+    "location": "Localização",
+    "wrong_drop_zone_msg": "Os envios só funcionam em Ficheiros — abra a secção Ficheiros e largue-os aí."
   }
 }

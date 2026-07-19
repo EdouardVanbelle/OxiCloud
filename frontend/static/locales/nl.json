@@ -461,7 +461,8 @@
       "trashed_time": "Verwijderd op"
     },
     "delete": "Permanent verwijderen",
-    "empty_action": "Prullenbak legen"
+    "empty_action": "Prullenbak legen",
+    "expires_at": "Verloopt op"
   },
   "daysRemaining": {
     "expired": "Verlopen",
@@ -1265,5 +1266,9 @@
   "group": {
     "members_empty": "Geen leden",
     "member_count": "{{n}} leden"
+  },
+  "resource_list": {
+    "location": "Locatie",
+    "wrong_drop_zone_msg": "Uploaden werkt alleen in Bestanden — open het onderdeel Bestanden en zet ze daar neer."
   }
 }
