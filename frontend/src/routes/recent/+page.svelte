@@ -5,7 +5,8 @@
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { onMount } from 'svelte';
-	import { SvelteSet } from 'svelte/reactivity';
+	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+	import { primeContextPage } from '$lib/utils/listContext';
 	import { clearRecent, fetchRecentPage, type RecentResourceItem } from '$lib/api/endpoints/recent';
 	import {
 		addFavorite,
@@ -59,14 +60,10 @@
 	// shared `isDotfile` predicate purely for the empty-state message
 	// below (distinguishes "genuinely empty" from "everything filtered").
 	const items = $derived(raw.map((it) => it.resource as FileItem | FolderItem));
-	const contextMap = $derived(
-		new Map<string, ItemContext>(
-			raw.map((it) => [
-				it.resource.id,
-				{ date: it.accessed_at, ownerId: it.resource.updated_by ?? null } satisfies ItemContext
-			])
-		)
-	);
+	// Persistent reactive map, primed per page in `load()` (benches/ROUND16.md §F2)
+	// instead of rebuilding a fresh Map that re-hashes the whole accumulated list
+	// on every infinite-scroll page. Mirrors the sibling `favoriteIds` SvelteSet.
+	const contextMap = new SvelteMap<string, ItemContext>();
 	const hiddenCount = $derived(
 		preferences.hideDotfiles ? items.filter((i) => isDotfile(i.name)).length : 0
 	);
@@ -131,6 +128,10 @@
 				resourceTypes: ['file', 'folder']
 			});
 			raw = reset ? page.items : [...raw, ...page.items];
+			primeContextPage(contextMap, reset, page.items, (it) => [
+				it.resource.id,
+				{ date: it.accessed_at, ownerId: it.resource.updated_by ?? null }
+			]);
 			cursor = page.next_cursor;
 			void owners.resolve(page.items.map((i) => i.resource.updated_by));
 		} catch (e) {

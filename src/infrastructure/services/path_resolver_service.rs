@@ -180,9 +180,9 @@ impl PathResolverService {
                     created_at: created_at as u64,
                     modified_at: modified_at as u64,
                     is_root: false,
-                    icon_class: Arc::from("fas fa-folder"),
-                    icon_special_class: Arc::from("folder-icon"),
-                    category: Arc::from("Folder"),
+                    icon_class: intern_display("fas fa-folder"),
+                    icon_special_class: intern_display("folder-icon"),
+                    category: intern_display("Folder"),
                     // §14 provenance not selected by this resolver path —
                     // it's used for existence/type discrimination, not
                     // detailed DTO emission. Callers that need provenance

@@ -27,6 +27,8 @@
  * gate asserts the incremental builder stays deep-equal to it at every page.
  */
 
+import { isAppendExtension } from './appendExtension';
+
 /** One swimlane: a bucket key, its (possibly async-resolved) header label, and its rows. */
 export interface ResourceSection<T> {
 	key: string;
@@ -107,15 +109,6 @@ export class ResourceSectionsBuilder<T, C> {
 	/** False until a grouped sync has populated the accumulation state. */
 	#grouped = false;
 
-	/** Whether `next` extends `prev` (same prefix objects + strictly longer). */
-	#isAppend(prev: T[], next: T[]): boolean {
-		if (next.length <= prev.length) return false;
-		// Prefix identity via the boundary object — O(1); the list is only ever
-		// mutated by appending a page or by replacing it with a filtered copy
-		// (which preserves element identity).
-		return prev.length === 0 || next[prev.length - 1] === prev[prev.length - 1];
-	}
-
 	#rebuild(items: T[], grouping: SectionGrouping<T, C>): void {
 		const bucketOf = grouping.bucketOf!;
 		this.#order = [];
@@ -172,7 +165,7 @@ export class ResourceSectionsBuilder<T, C> {
 		if (
 			this.#grouped &&
 			this.#bucketOf === grouping.bucketOf &&
-			this.#isAppend(this.#items, items)
+			isAppendExtension(this.#items, items)
 		) {
 			this.#extend(items, grouping);
 		} else {

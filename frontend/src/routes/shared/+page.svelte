@@ -28,6 +28,7 @@
 	import { t } from '$lib/i18n/index.svelte';
 	import { ui } from '$lib/stores/ui.svelte';
 	import { formatDate, iconNameFromClass } from '$lib/utils/display';
+	import { SharedLanesBuilder, type LaneGrouping } from '$lib/utils/sharedLanes';
 
 	type GroupBy = 'items' | 'sharedWith';
 
@@ -178,47 +179,58 @@
 		rows: { grant: OutgoingResourceGrant; item: OutgoingGrantItem }[];
 	}
 
-	const lanes = $derived.by((): Lane[] => {
-		const out: Lane[] = [];
-		// Transient scratch map built inside $derived.by and discarded — not reactive state.
-		// eslint-disable-next-line svelte/prefer-svelte-reactivity
-		const byKey = new Map<string, Lane>();
-		const ensure = (key: string, header: Lane['header']): Lane => {
-			let lane = byKey.get(key);
-			if (!lane) {
-				lane = { key, header, rows: [] };
-				byKey.set(key, lane);
-				out.push(lane);
-			}
-			return lane;
-		};
-		for (const item of filteredRaw) {
-			if (groupBy === 'items') {
-				const lane = ensure(`resource:${item.resource.id}`, { kind: 'resource', item });
-				for (const grant of item.grants) lane.rows.push({ grant, item });
-			} else {
-				for (const grant of item.grants) {
-					let key: string;
-					let header: Lane['header'];
-					if (grant.subject_type === 'user') {
-						key = `user:${grant.subject_id}`;
-						header = { kind: 'user', id: grant.subject_id };
-					} else if (grant.subject_type === 'group') {
-						key = `group:${grant.subject_id}`;
-						header = { kind: 'group', id: grant.subject_id };
-					} else if (grant.has_password) {
-						key = 'links:password';
-						header = { kind: 'linkPassword' };
-					} else {
-						key = 'links:public';
-						header = { kind: 'linkPublic' };
+	type LaneRow = Lane['rows'][number];
+
+	// The active grouping as a stable-identity descriptor: `groupKey` changes
+	// only when the user switches group-by, so an infinite-scroll page (or a
+	// grant edit that reassigns `raw`) takes the builder's O(N) incremental path
+	// instead of re-bucketing the whole accumulated list. `emit` reproduces the
+	// old derive exactly — `open` is the old unconditional `ensure` (a by-files
+	// lane exists even with zero grants); `push` is `ensure(...).rows.push`.
+	const laneGrouping = $derived.by(
+		(): LaneGrouping<OutgoingGrantItem, Lane['header'], LaneRow> =>
+			groupBy === 'items'
+				? {
+						groupKey: 'items',
+						emit: (item, sink) => {
+							const key = `resource:${item.resource.id}`;
+							const header: Lane['header'] = { kind: 'resource', item };
+							sink.open(key, header);
+							for (const grant of item.grants) sink.push(key, header, { grant, item });
+						}
 					}
-					ensure(key, header).rows.push({ grant, item });
-				}
-			}
-		}
-		return out;
-	});
+				: {
+						groupKey: 'sharedWith',
+						emit: (item, sink) => {
+							for (const grant of item.grants) {
+								let key: string;
+								let header: Lane['header'];
+								if (grant.subject_type === 'user') {
+									key = `user:${grant.subject_id}`;
+									header = { kind: 'user', id: grant.subject_id };
+								} else if (grant.subject_type === 'group') {
+									key = `group:${grant.subject_id}`;
+									header = { kind: 'group', id: grant.subject_id };
+								} else if (grant.has_password) {
+									key = 'links:password';
+									header = { kind: 'linkPassword' };
+								} else {
+									key = 'links:public';
+									header = { kind: 'linkPublic' };
+								}
+								sink.push(key, header, { grant, item });
+							}
+						}
+					}
+	);
+
+	// Persistent across reactive ticks: re-buckets only the freshly-appended page
+	// and hands back the same rows-array reference for untouched lanes, falling
+	// back to a full rebuild (deep-equal to the pure `buildLanes` reference) on a
+	// group-by switch, grant edit or kind-filter toggle. Mirrors ResourceList's
+	// `sectionsBuilder` (benches/ROUND16.md §F1).
+	const lanesBuilder = new SharedLanesBuilder<OutgoingGrantItem, Lane['header'], LaneRow>();
+	const lanes = $derived.by(() => lanesBuilder.sync(filteredRaw, laneGrouping));
 
 	function laneTitle(header: Lane['header']): string {
 		switch (header.kind) {

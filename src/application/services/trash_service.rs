@@ -882,9 +882,9 @@ fn row_to_item_dto(row: TrashResourceRow) -> TrashResourceItemDto {
             created_at: row.resource_created_at.timestamp() as u64,
             modified_at: row.modified_at.timestamp() as u64,
             is_root: false,
-            icon_class: std::sync::Arc::from("fas fa-folder"),
-            icon_special_class: std::sync::Arc::from("folder-icon"),
-            category: std::sync::Arc::from("Folder"),
+            icon_class: intern_display("fas fa-folder"),
+            icon_special_class: intern_display("folder-icon"),
+            category: intern_display("Folder"),
             // §14 provenance not selected by the trash listing query.
             created_by: None,
             updated_by: None,
