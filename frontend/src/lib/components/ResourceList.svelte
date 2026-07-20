@@ -695,7 +695,12 @@
 		const bandBottom = bandTop + rubberband.h;
 
 		const rows = rlRoot.querySelectorAll<HTMLElement>('.file-item[data-item-id]');
-		const nextSelection = new Set(rubberband.baseline);
+		// Transient scratch set for computing the diff before mutating
+		// `selected`. `SvelteSet` (not plain `Set`) per the codebase's
+		// `svelte/prefer-svelte-reactivity` convention — the lint rule
+		// exists so a future refactor that stashes this in `$state`
+		// can't silently break reactivity.
+		const nextSelection = new SvelteSet(rubberband.baseline);
 		for (const row of rows) {
 			const id = row.dataset.itemId;
 			if (!id) continue;
@@ -1082,14 +1087,14 @@
 	ondragleave={onSystemDragLeave}
 	ondrop={onSystemDrop}
 >
-<div class="page-sticky-header">
-	<h1 class="page-title">{title}</h1>
-	{#if breadcrumb}
-		<div class="rl-breadcrumb">{@render breadcrumb()}</div>
-	{/if}
-	<ActionBar>
-		{#snippet start()}
-			<!--
+	<div class="page-sticky-header">
+		<h1 class="page-title">{title}</h1>
+		{#if breadcrumb}
+			<div class="rl-breadcrumb">{@render breadcrumb()}</div>
+		{/if}
+		<ActionBar>
+			{#snippet start()}
+				<!--
 				The action-bar left cluster has two states:
 				  1. `batchActions` — when the user has selected items, the
 				     page's batch buttons (Move / Delete / Restore / …)
@@ -1103,149 +1108,150 @@
 				  2. `actions` — the page's default cluster
 				     (Upload / New folder / Empty trash / Clear recent).
 			-->
-			<div
-				class="action-buttons"
-				class:batch-selection-bar={selectable && selected.size > 0 && batchActions}
-			>
-				{#if selectable && selected.size > 0 && batchActions}
-					<button
-						class="batch-bar-close"
-						title={t('common.clear', 'Clear selection')}
-						aria-label={t('common.clear', 'Clear selection')}
-						data-testid="resource-list-batch-close-btn"
-						onclick={clearSelection}
-					>
-						<Icon name="times" />
-					</button>
-					<span class="batch-bar-count"
-						>{t('files.selected_count', { count: selected.size }, '{{count}} selected')}</span
-					>
-					<div class="batch-bar-actions">
-						{@render batchActions(selectedItems)}
-					</div>
-				{:else if actions}
-					{@render actions()}
-				{/if}
-			</div>
-		{/snippet}
-		{#snippet end()}
-			<DisplayModeControls
-				groups={groupBys}
-				{groupBy}
-				{reversed}
-				ongroup={selectGroup}
-				ondirection={toggleDirection}
-				showViewMode={showViewToggle}
-				{showDotfileToggle}
-			/>
-		{/snippet}
-	</ActionBar>
-</div>
+				<div
+					class="action-buttons"
+					class:batch-selection-bar={selectable && selected.size > 0 && batchActions}
+				>
+					{#if selectable && selected.size > 0 && batchActions}
+						<button
+							class="batch-bar-close"
+							title={t('common.clear', 'Clear selection')}
+							aria-label={t('common.clear', 'Clear selection')}
+							data-testid="resource-list-batch-close-btn"
+							onclick={clearSelection}
+						>
+							<Icon name="times" />
+						</button>
+						<span class="batch-bar-count"
+							>{t('files.selected_count', { count: selected.size }, '{{count}} selected')}</span
+						>
+						<div class="batch-bar-actions">
+							{@render batchActions(selectedItems)}
+						</div>
+					{:else if actions}
+						{@render actions()}
+					{/if}
+				</div>
+			{/snippet}
+			{#snippet end()}
+				<DisplayModeControls
+					groups={groupBys}
+					{groupBy}
+					{reversed}
+					ongroup={selectGroup}
+					ondirection={toggleDirection}
+					showViewMode={showViewToggle}
+					{showDotfileToggle}
+				/>
+			{/snippet}
+		</ActionBar>
+	</div>
 
-{#if error}
-	<EmptyState icon="exclamation-circle" title={error} error />
-{:else if loading && isEmpty}
-	<SkeletonList count={SKELETON.length} />
-{:else if isEmpty}
-	<EmptyState
-		icon={emptyIcon}
-		title={emptyText ?? t('common.empty', 'Nothing here yet.')}
-		hint={emptyHint}
-	/>
-{:else}
-	<div class="files-container" bind:clientWidth={gridWidth}>
-		{#if grouped && filesStore.viewMode === 'list'}
-			<div class="files-list-view" style="--files-list-columns: {columns}">
-				{#if listHeaderOverride}{@render listHeaderOverride()}{:else}{@render listHeader()}{/if}
-				{#each sections as section (section.key)}
-					<div class="rl-swimlane-header" role="rowheader">
-						<span class="rl-swimlane-header__label">{section.label}</span>
-						{#if bucketAction}
-							<span class="rl-swimlane-header__action">
-								{@render bucketAction(section.key)}
-							</span>
-						{/if}
-					</div>
-					<!-- Window each section's rows so a large grouped list (e.g. a big
+	{#if error}
+		<EmptyState icon="exclamation-circle" title={error} error />
+	{:else if loading && isEmpty}
+		<SkeletonList count={SKELETON.length} />
+	{:else if isEmpty}
+		<EmptyState
+			icon={emptyIcon}
+			title={emptyText ?? t('common.empty', 'Nothing here yet.')}
+			hint={emptyHint}
+		/>
+	{:else}
+		<div class="files-container" bind:clientWidth={gridWidth}>
+			{#if grouped && filesStore.viewMode === 'list'}
+				<div class="files-list-view" style="--files-list-columns: {columns}">
+					{#if listHeaderOverride}{@render listHeaderOverride()}{:else}{@render listHeader()}{/if}
+					{#each sections as section (section.key)}
+						<div class="rl-swimlane-header" role="rowheader">
+							<span class="rl-swimlane-header__label">{section.label}</span>
+							{#if bucketAction}
+								<span class="rl-swimlane-header__action">
+									{@render bucketAction(section.key)}
+								</span>
+							{/if}
+						</div>
+						<!-- Window each section's rows so a large grouped list (e.g. a big
 					     trash, grouped by remaining days) doesn't mount every row. -->
-					<VirtualList items={section.rows} rowHeight={56} key={(e) => e.id} {row} />
-				{/each}
-			</div>
-		{:else if grouped}
-			<!-- Grouped GRID: a vertical stack of (header + its own windowed card
+						<VirtualList items={section.rows} rowHeight={56} key={(e) => e.id} {row} />
+					{/each}
+				</div>
+			{:else if grouped}
+				<!-- Grouped GRID: a vertical stack of (header + its own windowed card
 			     grid) per section. The outer is a flex column, NOT `.files-grid-view`
 			     (which is itself a grid and would place each header/VirtualList into a
 			     cell) — the grid lives on each VirtualList's inner window via
 			     `windowClass`, exactly like the flat-grid arm. This was the last
 			     unwindowed path: a grouped-by-default grid (trash) mounted every card
 			     (benches/ROUND13.md §V1). -->
-			<div class="rl-grouped-grid">
-				{#each sections as section (section.key)}
-					<div class="rl-swimlane-header rl-swimlane-header--grid" role="rowheader">
-						<span class="rl-swimlane-header__label">{section.label}</span>
-						{#if bucketAction}
-							<span class="rl-swimlane-header__action">
-								{@render bucketAction(section.key)}
-							</span>
-						{/if}
-					</div>
-					<VirtualList
-						items={section.rows}
-						columns={gridCols}
-						rowHeight={240}
-						windowClass="files-grid-view"
-						key={(e) => e.id}
-						{row}
-					/>
-				{/each}
-			</div>
-		{:else if filesStore.viewMode === 'list'}
-			<!-- Flat list view: only the visible rows are mounted. The spacer keeps the
+				<div class="rl-grouped-grid">
+					{#each sections as section (section.key)}
+						<div class="rl-swimlane-header rl-swimlane-header--grid" role="rowheader">
+							<span class="rl-swimlane-header__label">{section.label}</span>
+							{#if bucketAction}
+								<span class="rl-swimlane-header__action">
+									{@render bucketAction(section.key)}
+								</span>
+							{/if}
+						</div>
+						<VirtualList
+							items={section.rows}
+							columns={gridCols}
+							rowHeight={240}
+							windowClass="files-grid-view"
+							key={(e) => e.id}
+							{row}
+						/>
+					{/each}
+				</div>
+			{:else if filesStore.viewMode === 'list'}
+				<!-- Flat list view: only the visible rows are mounted. The spacer keeps the
 			     full scroll height so the end-of-list sentinel still fires. -->
-			<div class="files-list-view" style="--files-list-columns: {columns}">
-				{#if listHeaderOverride}{@render listHeaderOverride()}{:else}{@render listHeader()}{/if}
-				<VirtualList items={visibleItems} rowHeight={56} key={(e) => e.id} {row} />
-			</div>
-		{:else}
-			<!-- Grid view: the windowed list's inner element IS the card grid. -->
-			<VirtualList
-				items={visibleItems}
-				columns={gridCols}
-				rowHeight={240}
-				windowClass="files-grid-view"
-				key={(e) => e.id}
-				{row}
-			/>
-		{/if}
+				<div class="files-list-view" style="--files-list-columns: {columns}">
+					{#if listHeaderOverride}{@render listHeaderOverride()}{:else}{@render listHeader()}{/if}
+					<VirtualList items={visibleItems} rowHeight={56} key={(e) => e.id} {row} />
+				</div>
+			{:else}
+				<!-- Grid view: the windowed list's inner element IS the card grid. -->
+				<VirtualList
+					items={visibleItems}
+					columns={gridCols}
+					rowHeight={240}
+					windowClass="files-grid-view"
+					key={(e) => e.id}
+					{row}
+				/>
+			{/if}
 
-		{#if hasMore}
-			<button
-				class="btn btn-secondary rl-more"
-				data-testid="resource-list-load-more-btn"
-				onclick={onloadmore}
-				disabled={loading}
-			>
-				{loading ? t('common.loading', 'Loading…') : t('common.load_more', 'Load more')}
-			</button>
-		{/if}
-		<!-- Infinite-scroll sentinel: auto-loads the next page as it nears the viewport. -->
-		<div bind:this={sentinel} class="rl-sentinel" aria-hidden="true"></div>
-	</div>
-{/if}
-{#if rubberband}
-	<!-- Marquee selection rectangle. Positioned relative to `.rl-root`
+			{#if hasMore}
+				<button
+					class="btn btn-secondary rl-more"
+					data-testid="resource-list-load-more-btn"
+					onclick={onloadmore}
+					disabled={loading}
+				>
+					{loading ? t('common.loading', 'Loading…') : t('common.load_more', 'Load more')}
+				</button>
+			{/if}
+			<!-- Infinite-scroll sentinel: auto-loads the next page as it nears the viewport. -->
+			<div bind:this={sentinel} class="rl-sentinel" aria-hidden="true"></div>
+		</div>
+	{/if}
+	{#if rubberband}
+		<!-- Marquee selection rectangle. Positioned relative to `.rl-root`
 	     (which is `position: relative`); pointer-events off so the
 	     live pointermove handler on window still sees the drag. -->
-	<div
-		class="rl-rubberband"
-		style:left="{rubberband.x}px"
-		style:top="{rubberband.y}px"
-		style:width="{rubberband.w}px"
-		style:height="{rubberband.h}px"
-		aria-hidden="true"
-	></div>
-{/if}
-</div><!-- /.rl-root -->
+		<div
+			class="rl-rubberband"
+			style:left="{rubberband.x}px"
+			style:top="{rubberband.y}px"
+			style:width="{rubberband.w}px"
+			style:height="{rubberband.h}px"
+			aria-hidden="true"
+		></div>
+	{/if}
+</div>
+<!-- /.rl-root -->
 
 {#snippet listHeader()}
 	<div class="list-header">

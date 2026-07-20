@@ -1,6 +1,4 @@
 <script lang="ts">
-	import SkeletonList from '$lib/components/SkeletonList.svelte';
-	import EmptyState from '$lib/components/EmptyState.svelte';
 	import { errorMessage, errorToast } from '$lib/utils/errors';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
@@ -25,10 +23,8 @@
 	import {
 		deleteFile,
 		fileDownloadUrl,
-		fileThumbnailUrl,
 		moveFile,
 		renameFile,
-		thumbSizeForView,
 		uploadFileWithProgress
 	} from '$lib/api/endpoints/files';
 	import { folderZipUrl } from '$lib/api/endpoints/folders';
@@ -850,23 +846,6 @@
 		});
 	});
 
-	/**
-	 * Whether the server can render a thumbnail preview for this file. Only images
-	 * and videos have server-side thumbnails (see `ThumbnailService::is_supported_image`
-	 * plus client-uploaded video frames); the backend does NOT rasterise PDFs or
-	 * documents, so claiming it could left their tiles blank (the doomed <img>
-	 * 404s and `onerror` hides it). Non-thumbnail files fall back to their colour
-	 * type icon, which renders underneath the <img> regardless.
-	 */
-	function canThumbnail(file: FileItem): boolean {
-		const m = file.mime_type ?? '';
-		// PDF joins image/video: the client-side generator ported from
-		// the legacy vanilla frontend renders PDFs via pdf.js on the
-		// `<img onerror>` fallback path. Without this the img never
-		// mounts for PDFs and the fallback never fires.
-		return m.startsWith('image/') || m.startsWith('video/') || m === 'application/pdf';
-	}
-
 	// ── Multi-select + batch ────────────────────────────────────────────────
 	// After the ResourceList migration the row-level selection UX (shift-
 	// range, ctrl-toggle, anchor tracking, header select-all) lives inside
@@ -1390,26 +1369,20 @@
 		input.value = '';
 	}
 
-	// Visual emptiness — reflects the filtered set, not the raw listing.
-	// When the folder contains only dotfiles that the user has chosen to
-	// hide, `visibleFolders + visibleFiles` is empty and the empty state
-	// renders; `hiddenCount` above lets the template surface a "you're
-	// hiding N items" hint so users aren't confused.
-	const isEmpty = $derived(visibleFolders.length === 0 && visibleFiles.length === 0);
-
 	// Client-side sort (flat, Drive-style). The listing endpoint returns the
 	// folder contents unsorted; sorting here avoids a refetch per column click.
+	//
+	// `reversed` is the single source of truth for direction — bound to
+	// ResourceList's `bind:reversed` below and read by the comparators.
+	// The legacy `sortDir: 1 | -1` value used by the comparators is a
+	// read-only `$derived` off `reversed` so we don't need two-way sync
+	// (the previous `$state` + two `$effect` mirror was fragile — a
+	// programmatic write to either side triggered an update on the
+	// other, and eslint's `prefer-writable-derived` rightly flagged it).
 	type SortField = 'name' | 'type' | 'size' | 'modified_at' | 'created_at';
 	let sortField = $state<SortField>('name');
-	let sortDir = $state<1 | -1>(1);
-
-	function toggleSort(field: SortField) {
-		if (sortField === field) sortDir = (sortDir * -1) as 1 | -1;
-		else {
-			sortField = field;
-			sortDir = 1;
-		}
-	}
+	let reversed = $state(false);
+	const sortDir = $derived<1 | -1>(reversed ? -1 : 1);
 
 	function cmpFolders(a: FolderItem, b: FolderItem): number {
 		let v: number;
@@ -1485,18 +1458,6 @@
 		}
 	]);
 
-	// ResourceList's `reversed` is a boolean; the legacy sort uses `1 | -1`.
-	// Two-way binding: setting `rlReversed` writes back into `sortDir`, and
-	// any programmatic sort direction change (e.g. group-by picking) mirrors
-	// out.
-	let rlReversed = $state(false);
-	$effect(() => {
-		rlReversed = sortDir === -1;
-	});
-	$effect(() => {
-		sortDir = rlReversed ? -1 : 1;
-	});
-
 	// Bridge for <ResourceList>'s callbacks — the row's open/favorite/drag
 	// props take one item; the legacy handlers take `(kind, id, name)`.
 	function rlOnOpen(item: FileItem | FolderItem) {
@@ -1546,8 +1507,6 @@
 		window.addEventListener('pointerdown', onDown);
 		return () => window.removeEventListener('pointerdown', onDown);
 	});
-
-	const SKELETON = [0, 1, 2, 3, 4, 5, 6, 7];
 
 	// Reload whenever the route path changes.
 	//
@@ -1640,7 +1599,7 @@
 		onsystemdrop={onDrop}
 		groupBys={rlGroupBys}
 		bind:groupBy
-		bind:reversed={rlReversed}
+		bind:reversed
 		onreload={(orderBy) => {
 			sortField = orderBy as SortField;
 		}}
@@ -1735,17 +1694,13 @@
 					</div>
 				{/if}
 			</div>
-			<button
-				class="btn btn-secondary"
-				data-testid="files-new-folder-btn"
-				onclick={onNewFolder}
-			>
+			<button class="btn btn-secondary" data-testid="files-new-folder-btn" onclick={onNewFolder}>
 				<Icon name="folder-plus" class="icon-mr" />
 				<span>{t('actions.new_folder', 'New folder')}</span>
 			</button>
 		{/snippet}
 
-		{#snippet batchActions(sel)}
+		{#snippet batchActions(_sel)}
 			<button
 				class="batch-btn"
 				title={t('files.add_favorites', 'Add to favorites')}
