@@ -354,6 +354,21 @@ name = "bench_micro_allocs"
 path = "examples/bench_micro_allocs.rs"
 required-features = ["bench"]
 
+# Round-24 battery ────────────────────────────────────────────────────────────
+
+# Round-24 download_zip authz+metadata N+1 → batch, VALIDATED. The per-file
+# get_file_with_perms (require + get, 2 round-trips/file) becomes one
+# check_files_read_batch + one get_files_by_ids. Because the change is
+# authorization-sensitive, the gate is the security property: the batch check
+# must make the identical per-file inclusion decision (same set AND input order)
+# as the shipped-before require loop, over owned + denied + missing ids, and
+# never include a denied/missing file. Drives the real PgAclEngine. Needs the
+# dev Postgres up (reads DATABASE_URL from .env).
+[[example]]
+name = "bench_round24_zip_authz"
+path = "examples/bench_round24_zip_authz.rs"
+required-features = ["bench"]
+
 # Round-23 battery ────────────────────────────────────────────────────────────
 
 # Round-23 CPU/alloc micro-pack (no Postgres) — deterministic alloc gates for

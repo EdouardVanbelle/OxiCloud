@@ -287,6 +287,52 @@ impl FileRetrievalService {
         Ok(files.into_iter().map(FileDto::from).collect())
     }
 
+    /// Batched, authorized multi-get for the ZIP-download multi-select — the
+    /// batch form of [`FileRetrievalUseCase::get_file_with_perms`] over an
+    /// explicit id list.
+    ///
+    /// Authorizes `Read` on every id in ONE `check_files_read_batch`
+    /// round-trip (which resolves all drives in a single query AND primes the
+    /// resource→drive cache, so the per-file re-check the subsequent stream
+    /// open performs becomes a cache hit), then fetches only the authorized ids
+    /// in ONE `get_files_by_ids` query. Replaces `download_zip`'s per-file
+    /// `require_file` + `get_file` loop — 2 round-trips/file → 2 total.
+    ///
+    /// Returns the authorized, existing files; a denied / missing / unparseable
+    /// id is simply **absent** from the result (the caller re-associates by id
+    /// and skips the rest, exactly as the per-file loop skipped a denied /
+    /// missing `get_file_with_perms`). Read-authorization is identical to the
+    /// per-file path (`check_files_read_batch` is documented and gated as
+    /// semantically identical to looping `require`). Recents recording is left
+    /// to the subsequent per-file stream open (`get_file_stream_with_perms`),
+    /// which records it (throttle-coalesced) — same net effect as the old
+    /// loop's `notify_file_accessed` + stream double-notify. Fail-closed if no
+    /// engine was injected, mirroring [`Self::require_file`].
+    pub async fn get_files_by_ids_with_perms(
+        &self,
+        ids: &[String],
+        caller_id: Uuid,
+    ) -> Result<Vec<FileDto>, DomainError> {
+        let authz = self.authz.as_ref().ok_or_else(|| {
+            DomainError::internal_error("FileRetrieval", "Authorization engine unavailable")
+        })?;
+        // Unparseable ids can't be authorized (the per-file path 404s on them),
+        // so drop them here — they stay absent from the authorized set.
+        let uuids: Vec<Uuid> = ids.iter().filter_map(|s| Uuid::parse_str(s).ok()).collect();
+        if uuids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let allowed = authz
+            .check_files_read_batch(Subject::User(caller_id), &uuids)
+            .await?;
+        if allowed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let allowed_ids: Vec<String> = allowed.iter().map(Uuid::to_string).collect();
+        let files = self.file_read.get_files_by_ids(&allowed_ids).await?;
+        Ok(files.into_iter().map(FileDto::from).collect())
+    }
+
     /// Range read for HTTP Range Requests, cache-aware.
     ///
     /// Media players and PDF viewers fetch these files *exclusively* through
