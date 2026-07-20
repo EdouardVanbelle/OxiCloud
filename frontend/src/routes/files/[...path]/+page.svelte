@@ -34,6 +34,7 @@
 	import { addFavorite, removeFavorite } from '$lib/api/endpoints/favorites';
 	import { canEditWithWopi, getEditorUrlWithFallback } from '$lib/api/endpoints/wopi';
 	import { addTracks, createPlaylist, listPlaylists } from '$lib/api/endpoints/music';
+	import { copyFiles, copyFolders } from '$lib/api/endpoints/batch';
 	import { apiFetch } from '$lib/api/client';
 	import { getCsrfHeaders } from '$lib/api/csrf';
 	import { countHidden, filterDotfiles } from '$lib/utils/dotfileFilter';
@@ -1108,6 +1109,33 @@
 	const CRUMB_HOME_ID = '__home__';
 	let dropCrumbId = $state<string | null>(null);
 
+	// Copy-vs-move on drop.
+	//
+	// Cursor visual: `effectAllowed = 'copyMove'` set at dragstart AND
+	// the dragover handlers touching only `preventDefault()` (no
+	// `dropEffect` write) leaves the browser free to negotiate the
+	// cursor glyph from OS-native modifier keys (macOS Option, Win/Linux
+	// Ctrl) — arrow-with-plus for copy, plain arrow for move.
+	//
+	// Routing: at DROP time we read the modifier keys DIRECTLY on the
+	// event (DragEvent extends MouseEvent, so `altKey`/`metaKey`/`ctrlKey`
+	// are all live). This is deliberately independent of
+	// `dataTransfer.dropEffect` — that value isn't reliably updated by
+	// every browser for JS-initiated drags, but the raw modifier bits
+	// on the drop event ARE. One source of truth, one path.
+	//
+	// OS convention:
+	//   * macOS: ⌥ Option (altKey) → copy — Finder convention. ⌘
+	//     (metaKey) accepted too as a forgiving fallback.
+	//   * Windows / Linux: Ctrl (ctrlKey) → copy — Explorer / Nautilus
+	//     convention.
+	const IS_MAC =
+		typeof navigator !== 'undefined' &&
+		/Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || '');
+	function isCopyDrop(e: DragEvent): boolean {
+		return IS_MAC ? e.altKey || e.metaKey : e.ctrlKey;
+	}
+
 	/**
 	 * Begin dragging an item. When the dragged row is part of the current
 	 * selection, the whole selection travels (mirrors ui.js' multi-item drag);
@@ -1118,7 +1146,13 @@
 			selected.has(id) && selected.size > 1 ? selectionTargets() : [{ id, name, kind }];
 		e.dataTransfer?.setData(DRAG_TYPE, JSON.stringify(items));
 		if (e.dataTransfer) {
-			e.dataTransfer.effectAllowed = 'move';
+			// `copyMove` advertises both operations; the drop-target's
+			// `dropEffect` (set on dragover by our handlers based on
+			// modifier key) picks the effective operation and the OS
+			// cursor reflects it (arrow-with-plus for copy, plain for
+			// move). Was `'move'`, which forced the cursor to always
+			// show move even when Ctrl/Cmd was held.
+			e.dataTransfer.effectAllowed = 'copyMove';
 			// Custom drag ghost for both single and multi-item drags —
 			// consistent UX. The `.dragged-items-badge` always shows
 			// the count (reads "1" on a single-item drag) so the user
@@ -1232,18 +1266,46 @@
 		await reload();
 	}
 
+	/**
+	 * Copy variant of `moveInto` used when the drop happens with the copy
+	 * modifier held (Ctrl on Win/Linux, ⌘ on macOS). Files and folders go
+	 * through the batch copy endpoints (`copyFiles` / `copyFolders`) —
+	 * there's no per-item copy in the REST API today, only batch.
+	 */
+	async function copyInto(targetFolderId: string, e: DragEvent) {
+		const items = dragPayload(e).filter((it) => it.id !== targetFolderId);
+		if (items.length === 0) return;
+		const fileIds = items.filter((it) => it.kind === 'file').map((it) => it.id);
+		const folderIds = items.filter((it) => it.kind === 'folder').map((it) => it.id);
+		try {
+			// Two batch calls in parallel — the endpoints are independent
+			// and the aggregate error surface is a single toast anyway.
+			await Promise.all([
+				copyFiles(fileIds, targetFolderId),
+				copyFolders(folderIds, targetFolderId)
+			]);
+		} catch (err) {
+			errorToast(err);
+			return;
+		}
+		clearSelection();
+		await reloadAndTrackNew();
+	}
+
 	function onFolderDrop(e: DragEvent, folder: FolderItem) {
 		if (!e.dataTransfer?.types.includes(DRAG_TYPE)) return; // external file drop → page dropzone
 		e.preventDefault();
 		e.stopPropagation();
 		dropFolderId = null;
-		void moveInto(folder.id, e);
+		if (isCopyDrop(e)) void copyInto(folder.id, e);
+		else void moveInto(folder.id, e);
 	}
 
 	function onCrumbDrop(e: DragEvent, folderId: string) {
 		if (!e.dataTransfer?.types.includes(DRAG_TYPE)) return;
 		e.preventDefault();
-		void moveInto(folderId, e);
+		if (isCopyDrop(e)) void copyInto(folderId, e);
+		else void moveInto(folderId, e);
 	}
 
 	// ── Right-click context menu ─────────────────────────────────────────────
@@ -1605,6 +1667,9 @@
 	function rlOnItemDragOver(e: DragEvent, item: FileItem | FolderItem) {
 		if (isFile(item)) return;
 		if (e.dataTransfer?.types.includes(DRAG_TYPE)) {
+			// preventDefault is what accepts the drop. Leaving
+			// `dropEffect` untouched lets the browser negotiate it
+			// from OS-native modifier keys.
 			e.preventDefault();
 			dropFolderId = item.id;
 		}
