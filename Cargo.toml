@@ -354,6 +354,58 @@ name = "bench_micro_allocs"
 path = "examples/bench_micro_allocs.rs"
 required-features = ["bench"]
 
+# Round-24 battery ────────────────────────────────────────────────────────────
+
+# Round-24 download_zip authz+metadata N+1 → batch, VALIDATED. The per-file
+# get_file_with_perms (require + get, 2 round-trips/file) becomes one
+# check_files_read_batch + one get_files_by_ids. Because the change is
+# authorization-sensitive, the gate is the security property: the batch check
+# must make the identical per-file inclusion decision (same set AND input order)
+# as the shipped-before require loop, over owned + denied + missing ids, and
+# never include a denied/missing file. Drives the real PgAclEngine. Needs the
+# dev Postgres up (reads DATABASE_URL from .env).
+[[example]]
+name = "bench_round24_zip_authz"
+path = "examples/bench_round24_zip_authz.rs"
+required-features = ["bench"]
+
+# Round-23 battery ────────────────────────────────────────────────────────────
+
+# Round-23 CPU/alloc micro-pack (no Postgres) — deterministic alloc gates for
+# the decode/clone candidates: contact JSONB `Value`+`from_value` → typed
+# `sqlx::types::Json<T>` decode (J1); `DrivePolicies::from_value` DOM clone →
+# borrow-deserialize (J2); dedup hash reshape clone-collect → `into_iter().unzip()`
+# (U1). The PG latency/round-trip/equivalence evidence is bench_round23_queries.
+[[example]]
+name = "bench_round23_micro"
+path = "examples/bench_round23_micro.rs"
+required-features = ["bench"]
+
+# Round-23 PG query-shape pack — end-to-end latency + equivalence on the live
+# dev Postgres: contact JSONB typed decode on real rows (Q1); get_user_profile
+# 2 serial reads → tokio::join! (Q4); subject_group remove_member 2 recursive
+# CTEs → 1 reused (Q6). Needs the dev Postgres up (reads DATABASE_URL from .env).
+[[example]]
+name = "bench_round23_queries"
+path = "examples/bench_round23_queries.rs"
+required-features = ["bench"]
+
+# Round-22 battery ────────────────────────────────────────────────────────────
+
+# Round-22 CPU/alloc micro-pack — the deferred hot-GET-handler `HeaderMap`
+# extractor clone (thumbnail/list/download/photos/preview/share read 1–3 headers
+# out of a full `parts.headers.clone()`), routed through `Request` + borrow (H1);
+# native-WebDAV `write_etag_quoted` borrowed pre-escaped quotes, the sweep's last
+# per-row DAV site (W1); CalDAV `getetag` shared `write_quoted_etag` helper across
+# 5 sites + dead etag-buffer removal (C1); `FileDto::from` reuse of the moved
+# `blob_hash` instead of the getter clone the move-not-clone sweep missed (D1);
+# `CalendarEvent` timed DTSTART/DTEND via `fmt::compact_ical_utc` (E1);
+# `ShareItemType::try_from` `eq_ignore_ascii_case` (S1). No Postgres.
+[[example]]
+name = "bench_round22_micro"
+path = "examples/bench_round22_micro.rs"
+required-features = ["bench"]
+
 # Round-21 battery ────────────────────────────────────────────────────────────
 
 # Round-21 CPU/alloc micro-pack — CalDAV/CardDAV row-mapper container pre-size

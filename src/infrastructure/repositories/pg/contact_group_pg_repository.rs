@@ -1,5 +1,4 @@
 use chrono::Utc;
-use serde_json::Value as JsonValue;
 use sqlx::{PgPool, Row, types::Uuid};
 use std::sync::Arc;
 
@@ -220,18 +219,21 @@ impl ContactGroupRepository for ContactGroupPgRepository {
 
         let mut contacts = Vec::with_capacity(rows.len());
         for row in &rows {
-            let email_json: JsonValue = row.get("email");
-            let phone_json: JsonValue = row.get("phone");
-            let address_json: JsonValue = row.get("address");
-
-            let emails = serde_json::from_value::<Vec<EmailPersistenceDto>>(email_json)
-                .map(emails_from_persistence)
+            // Typed `Json<T>` decode (one `from_slice` pass) instead of the
+            // `Value` DOM + `from_value` re-walk — the contact_pg_repository
+            // §J1 fix applied to this inlined sibling. Byte-identical result,
+            // 3 fewer throwaway DOMs per contact. (benches/ROUND23.md §J1)
+            let emails = row
+                .try_get::<sqlx::types::Json<Vec<EmailPersistenceDto>>, _>("email")
+                .map(|j| emails_from_persistence(j.0))
                 .unwrap_or_default();
-            let phones = serde_json::from_value::<Vec<PhonePersistenceDto>>(phone_json)
-                .map(phones_from_persistence)
+            let phones = row
+                .try_get::<sqlx::types::Json<Vec<PhonePersistenceDto>>, _>("phone")
+                .map(|j| phones_from_persistence(j.0))
                 .unwrap_or_default();
-            let addresses = serde_json::from_value::<Vec<AddressPersistenceDto>>(address_json)
-                .map(addresses_from_persistence)
+            let addresses = row
+                .try_get::<sqlx::types::Json<Vec<AddressPersistenceDto>>, _>("address")
+                .map(|j| addresses_from_persistence(j.0))
                 .unwrap_or_default();
 
             contacts.push(Contact::from_raw(

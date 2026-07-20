@@ -23,18 +23,27 @@ impl ContactPgRepository {
 
     /// Maps a database row to a Contact domain entity
     fn row_to_contact(row: &sqlx::postgres::PgRow) -> Result<Contact, DomainError> {
-        let email_json: JsonValue = row.get("email");
-        let phone_json: JsonValue = row.get("phone");
-        let address_json: JsonValue = row.get("address");
-
-        let emails = serde_json::from_value::<Vec<EmailPersistenceDto>>(email_json)
-            .map(emails_from_persistence)
+        // Decode each JSONB column straight into its typed Vec via
+        // `sqlx::types::Json<T>` (a single `serde_json::from_slice` pass over
+        // the raw JSONB bytes) instead of `row.get::<serde_json::Value>` +
+        // `serde_json::from_value`, which built a throwaway `Value` DOM per
+        // column and then walked it a SECOND time to produce the typed Vec —
+        // 3 discarded DOMs per contact row on every list / multiget / CardDAV
+        // sync. `try_get` preserves the exact malformed-shape fallback (the old
+        // `from_value(...).unwrap_or_default()`; a bare `row.get` would panic on
+        // a decode error); the columns are `JSONB NOT NULL DEFAULT '[]'`, so SQL
+        // NULL never occurs. (benches/ROUND23.md §J1)
+        let emails = row
+            .try_get::<sqlx::types::Json<Vec<EmailPersistenceDto>>, _>("email")
+            .map(|j| emails_from_persistence(j.0))
             .unwrap_or_default();
-        let phones = serde_json::from_value::<Vec<PhonePersistenceDto>>(phone_json)
-            .map(phones_from_persistence)
+        let phones = row
+            .try_get::<sqlx::types::Json<Vec<PhonePersistenceDto>>, _>("phone")
+            .map(|j| phones_from_persistence(j.0))
             .unwrap_or_default();
-        let addresses = serde_json::from_value::<Vec<AddressPersistenceDto>>(address_json)
-            .map(addresses_from_persistence)
+        let addresses = row
+            .try_get::<sqlx::types::Json<Vec<AddressPersistenceDto>>, _>("address")
+            .map(|j| addresses_from_persistence(j.0))
             .unwrap_or_default();
 
         Ok(Contact::from_raw(

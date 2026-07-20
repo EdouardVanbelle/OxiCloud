@@ -180,13 +180,18 @@ impl TryFrom<&str> for ShareItemType {
     type Error = ShareError;
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
-        match s.to_lowercase().as_str() {
-            "file" => Ok(ShareItemType::File),
-            "folder" => Ok(ShareItemType::Folder),
-            _ => Err(ShareError::ValidationError(format!(
+        // ASCII case-insensitive compare against the two literals instead of a
+        // throwaway Unicode `to_lowercase()` String — byte-identical acceptance
+        // for the ASCII targets "file"/"folder" (1 → 0 allocs/call).
+        if s.eq_ignore_ascii_case("file") {
+            Ok(ShareItemType::File)
+        } else if s.eq_ignore_ascii_case("folder") {
+            Ok(ShareItemType::Folder)
+        } else {
+            Err(ShareError::ValidationError(format!(
                 "Invalid item type: {}",
                 s
-            ))),
+            )))
         }
     }
 }

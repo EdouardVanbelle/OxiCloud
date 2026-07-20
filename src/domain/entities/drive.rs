@@ -230,7 +230,15 @@ impl DrivePolicies {
     /// rather than refusing the read; enforcement code never panics on
     /// existing data.
     pub fn from_value(value: &serde_json::Value) -> Self {
-        serde_json::from_value(value.clone()).unwrap_or_default()
+        // Deserialize straight from the borrowed `Value` (`T::deserialize(&Value)`,
+        // via serde_json's `Deserializer for &Value`) instead of
+        // `serde_json::from_value(value.clone())` — the old form cloned the ENTIRE
+        // policies DOM before walking it, on every drive-policy read (move/copy,
+        // shared-link creation, grant). Byte-identical (same derived `Deserialize`
+        // impl); the lenient `unwrap_or_default` fallback is unchanged.
+        // (benches/ROUND23.md §J2)
+        use serde::Deserialize as _;
+        Self::deserialize(value).unwrap_or_default()
     }
 
     /// D5 `forbid_public_links` gate, used by every entry point that

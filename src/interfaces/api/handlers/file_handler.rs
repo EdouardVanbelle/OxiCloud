@@ -361,9 +361,9 @@ impl FileHandler {
     pub(super) async fn get_thumbnail_impl(
         State(state): State<GlobalState>,
         auth_user: AuthUser,
-        headers: HeaderMap,
+        headers: &HeaderMap,
         Path((id, size)): Path<(String, String)>,
-    ) -> impl IntoResponse {
+    ) -> impl IntoResponse + use<> {
         use crate::application::ports::thumbnail_ports::{ThumbnailFormat, ThumbnailSize};
 
         // check first that user can access this resource
@@ -665,8 +665,8 @@ impl FileHandler {
         auth_user: AuthUser,
         Path(id): Path<String>,
         Query(params): Query<HashMap<String, String>>,
-        headers: HeaderMap,
-    ) -> impl IntoResponse {
+        headers: &HeaderMap,
+    ) -> impl IntoResponse + use<> {
         let retrieval = &state.applications.file_retrieval_service;
 
         // ── Get file metadata (ownership-scoped) ────────────────────────
@@ -705,7 +705,7 @@ impl FileHandler {
         let etag = format!("\"{}\"", file_dto.etag);
 
         // ── ETag (304 Not Modified) ──────────────────────────────────
-        if let Some(resp) = not_modified_response(&headers, &etag) {
+        if let Some(resp) = not_modified_response(headers, &etag) {
             return resp.into_response();
         }
 
@@ -830,9 +830,9 @@ impl FileHandler {
     pub(super) async fn list_files_query_impl(
         State(state): State<GlobalState>,
         auth_user: AuthUser,
-        headers: HeaderMap,
+        headers: &HeaderMap,
         Query(params): Query<HashMap<String, String>>,
-    ) -> impl IntoResponse {
+    ) -> impl IntoResponse + use<> {
         let folder_id = params.get("folder_id").map(|id| id.as_str());
         tracing::info!("API: Listing files with folder_id: {:?}", folder_id);
 
@@ -1217,10 +1217,14 @@ pub(super) fn build_content_disposition(name: &str, mime: &str, force_inline: bo
 pub async fn list_files_query(
     state: State<GlobalState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
     query: Query<HashMap<String, String>>,
+    req: axum::extract::Request,
 ) -> impl IntoResponse {
-    FileHandler::list_files_query_impl(state, auth_user, headers, query).await
+    // Read headers by borrow (`req.headers()`) instead of the `HeaderMap`
+    // extractor, which clones the whole request header table (~2 allocs) just to
+    // read one If-None-Match — the ROUND14 §A4 middleware pattern applied to the
+    // hot listing handler (benches/ROUND22.md §H1).
+    FileHandler::list_files_query_impl(state, auth_user, req.headers(), query).await
 }
 
 #[utoipa::path(
@@ -1299,9 +1303,12 @@ pub async fn download_file(
     auth_user: AuthUser,
     path: Path<String>,
     query: Query<HashMap<String, String>>,
-    headers: HeaderMap,
+    req: axum::extract::Request,
 ) -> impl IntoResponse {
-    FileHandler::download_file_impl(state, auth_user, path, query, headers).await
+    // Borrow the headers (`req.headers()`) instead of the `HeaderMap` extractor's
+    // full clone — every download AND every media Range seek hit this path
+    // (benches/ROUND22.md §H1).
+    FileHandler::download_file_impl(state, auth_user, path, query, req.headers()).await
 }
 
 #[utoipa::path(
@@ -1323,10 +1330,13 @@ pub async fn download_file(
 pub async fn get_thumbnail(
     state: State<GlobalState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
     path: Path<(String, String)>,
+    req: axum::extract::Request,
 ) -> impl IntoResponse {
-    FileHandler::get_thumbnail_impl(state, auth_user, headers, path).await
+    // Borrow the headers (`req.headers()`) instead of the `HeaderMap` extractor's
+    // full clone — thumbnails are the highest-frequency GET (one per grid tile),
+    // and this handler reads only Accept + If-None-Match (benches/ROUND22.md §H1).
+    FileHandler::get_thumbnail_impl(state, auth_user, req.headers(), path).await
 }
 
 #[utoipa::path(

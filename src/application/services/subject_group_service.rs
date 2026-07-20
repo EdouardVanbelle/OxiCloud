@@ -477,6 +477,23 @@ impl SubjectGroupService {
         // user is still reachable via another path after this remove,
         // they stay in the set on the post-state, so the check would
         // pass on the next remove instead.
+        // For a nested child-group removal the child's transitive user set is
+        // needed twice: by the would-empty pre-check below AND, after the
+        // remove, as the cache-invalidation set. The edge delete is ABOVE the
+        // child, so it cannot change the child's descendants — compute the
+        // recursive CTE ONCE here and reuse it, instead of the identical query
+        // running twice (the second was hidden inside `invalidation_targets`).
+        // (benches/ROUND23.md §G1)
+        let child_users: Option<Vec<uuid::Uuid>> = match member {
+            GroupMember::Group(child_id) => Some(
+                self.repo
+                    .list_transitive_users(child_id)
+                    .await
+                    .map_err(map_repo_err)?,
+            ),
+            GroupMember::User(_) => None,
+        };
+
         let users_before = self
             .repo
             .list_transitive_users(group_id)
@@ -485,17 +502,12 @@ impl SubjectGroupService {
         if !users_before.is_empty() {
             let would_be_empty = match member {
                 GroupMember::User(uid) => users_before.len() == 1 && users_before.contains(&uid),
-                GroupMember::Group(child_id) => {
-                    // For child-group removal: would this drop the
-                    // parent's transitive user set to 0? Look up the
-                    // child's transitive users — if every user in the
-                    // parent's set comes through the child, removing the
-                    // child empties the parent.
-                    let child_users = self
-                        .repo
-                        .list_transitive_users(child_id)
-                        .await
-                        .map_err(map_repo_err)?;
+                GroupMember::Group(_) => {
+                    // Would removing this child drop the parent's transitive
+                    // user set to 0? Reuse the child's transitive users
+                    // computed above — if every user in the parent's set comes
+                    // through the child, removing the child empties the parent.
+                    let child_users = child_users.as_deref().unwrap_or(&[]);
                     // Set probe instead of an O(|before|·|child|) slice scan
                     // (benches/ROUND11.md §13: 5.7x at 500×500).
                     let child_set: std::collections::HashSet<&uuid::Uuid> =
@@ -535,7 +547,15 @@ impl SubjectGroupService {
         // ancestor. Without this, a removed-from-group user keeps
         // appearing as a transitive member in `expand_subject_for_listing`
         // for up to 30 s, surfacing grants they no longer have.
-        for uid in self.invalidation_targets(member).await? {
+        //
+        // Reuse the child's transitive users computed above (unchanged by the
+        // edge delete) as the invalidation set — no second recursive CTE. For a
+        // `User` member it's just that user. (benches/ROUND23.md §G1)
+        let invalidation: Vec<uuid::Uuid> = match member {
+            GroupMember::User(uid) => vec![uid],
+            GroupMember::Group(_) => child_users.unwrap_or_default(),
+        };
+        for uid in invalidation {
             self.engine.invalidate_user_groups_cache(uid).await;
             self.drive_repo.invalidate_readable_for_user(uid).await;
         }

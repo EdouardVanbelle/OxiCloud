@@ -809,12 +809,17 @@ impl WebDavAdapter {
 
     fn write_etag_quoted<W: Write>(xml_writer: &mut Writer<W>, etag: &str) -> Result<()> {
         xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
-        // One exactly-sized allocation instead of format!'s grow-from-empty.
-        let mut quoted = String::with_capacity(etag.len() + 2);
-        quoted.push('"');
-        quoted.push_str(etag);
-        quoted.push('"');
-        xml_writer.write_event(Event::Text(BytesText::new(&quoted)))?;
+        // Borrowed pre-escaped quotes (the ROUND20 §C1 NextCloud / ROUND21 §R4
+        // CardDAV pattern the native WebDAV adapter never got): `BytesText::new`
+        // escapes a literal `"` → `&quot;`, re-allocating an owned `Cow`, so the
+        // old `"{etag}"` String paid TWO allocs/row (the sized buffer + the
+        // escape). Emit the two quotes as borrowed pre-escaped `&quot;` text
+        // events around the escaped body — byte-identical output, 0 allocs/row
+        // on the hottest native-WebDAV PROPFIND path (per file AND per folder,
+        // up to PROPFIND_BATCH_SIZE=500 rows/page).
+        xml_writer.write_event(Event::Text(BytesText::from_escaped("&quot;")))?;
+        xml_writer.write_event(Event::Text(BytesText::new(etag)))?;
+        xml_writer.write_event(Event::Text(BytesText::from_escaped("&quot;")))?;
         xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
         Ok(())
     }

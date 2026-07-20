@@ -93,10 +93,15 @@ impl From<File> for FileDto {
         // already-extracted parts. `content_hash` is just the raw
         // blob hash; `etag` is the cache token derived from it.
         let etag = file.etag();
-        let content_hash = file.content_hash().to_string();
 
         // Consume the entity by moving all fields — zero heap allocations
-        // for id, name, path, folder_id (previously 4× .to_string()).
+        // for id, name, path, folder_id (previously 4× .to_string()), and now
+        // for `content_hash` too: `into_parts()` moves `blob_hash` out, so it is
+        // reused verbatim below instead of cloning it through the
+        // `content_hash()` getter. The moved `parts.blob_hash` was previously
+        // dropped unused while the getter clone paid 1 alloc/row on every file
+        // listing (folder browse, streaming PROPFIND, search/favorites/recent
+        // hydration). `etag` is still computed first from the live entity.
         let parts = file.into_parts();
 
         // Display fields come from closed static tables and MIME values
@@ -123,7 +128,7 @@ impl From<File> for FileDto {
             category,
             size_formatted,
             sort_date: None,
-            content_hash,
+            content_hash: parts.blob_hash,
             etag,
             created_by: parts.created_by,
             updated_by: parts.updated_by,

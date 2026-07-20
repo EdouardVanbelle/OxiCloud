@@ -17,6 +17,23 @@ use crate::application::adapters::webdav_adapter::{
 };
 use crate::application::dtos::calendar_dto::{CalendarDto, CalendarEventDto};
 
+/// Emit a WebDAV `getetag` body as `"…"` with the surrounding quotes written as
+/// borrowed pre-escaped `&quot;` text events around the escaped etag body.
+///
+/// Byte-identical to escaping a `"{etag}"` String — `quick_xml`'s
+/// `BytesText::new` escapes a literal `"` → `&quot;`, re-allocating an owned
+/// `Cow` — but with 0 heap allocs (the NextCloud ROUND20 §C1 / CardDAV
+/// ROUND21 §R4 pattern, applied to the CalDAV emitter it missed). The caller
+/// writes the surrounding `<D:getetag>…</D:getetag>` tags. Every `etag` body
+/// here is a bare `Uuid` (`calendar.id` / `anchor.id`), so the escaped body is
+/// itself a borrow — 0 allocs/row.
+fn write_quoted_etag<W: Write>(xml_writer: &mut Writer<W>, etag: &str) -> Result<()> {
+    xml_writer.write_event(Event::Text(BytesText::from_escaped("&quot;")))?;
+    xml_writer.write_event(Event::Text(BytesText::new(etag)))?;
+    xml_writer.write_event(Event::Text(BytesText::from_escaped("&quot;")))?;
+    Ok(())
+}
+
 /// Parse a CalDAV `time-range` element's `start` / `end` attribute
 /// value into a UTC `DateTime`.
 ///
@@ -794,9 +811,9 @@ impl CalDavAdapter {
         Self::write_lastmodified_text(xml_writer, calendar.updated_at)?;
         xml_writer.write_event(Event::End(BytesEnd::new("D:getlastmodified")))?;
 
-        // ETag
+        // ETag (borrowed pre-escaped quotes, §C1/§R4 — was format! + escape)
         xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
-        xml_writer.write_event(Event::Text(BytesText::new(&format!("\"{}\"", calendar.id))))?;
+        write_quoted_etag(xml_writer, &calendar.id)?;
         xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
 
         // Content type for calendar collection
@@ -924,10 +941,7 @@ impl CalDavAdapter {
                 }
                 ("DAV:", "getetag") => {
                     xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
-                    xml_writer.write_event(Event::Text(BytesText::new(&format!(
-                        "\"{}\"",
-                        calendar.id
-                    ))))?;
+                    write_quoted_etag(xml_writer, &calendar.id)?;
                     xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
                 }
                 ("DAV:", "getcontenttype") => {
@@ -1117,11 +1131,11 @@ impl CalDavAdapter {
         events: &[CalendarEventDto],
         base_href: &str,
     ) -> Result<()> {
-        // Reused per-event buffers (cleared each iteration) so a whole PROPFIND
-        // page allocates the href/etag storage once instead of twice per event
-        // (benches/ROUND14.md §A6).
+        // Reused per-event href buffer (cleared each iteration) so a whole
+        // PROPFIND page allocates the href storage once instead of per event
+        // (benches/ROUND14.md §A6). The etag no longer needs a buffer — it is
+        // emitted via `write_quoted_etag` (borrowed pre-escaped quotes).
         let mut event_href = String::with_capacity(base_href.len() + 48);
-        let mut etag = String::new();
         for bundle in group_events_by_uid(events) {
             // The master (sorted first by group_events_by_uid)
             // supplies the ETag anchor + getlastmodified. If
@@ -1148,11 +1162,9 @@ impl CalDavAdapter {
             // resourcetype (empty for non-collection)
             xml_writer.write_event(Event::Empty(BytesStart::new("D:resourcetype")))?;
 
-            // getetag — anchor row's id (reused buffer, benches/ROUND14.md §A6)
+            // getetag — anchor row's id (borrowed pre-escaped quotes, §C1/§R4)
             xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
-            etag.clear();
-            let _ = std::fmt::Write::write_fmt(&mut etag, format_args!("\"{}\"", anchor.id));
-            xml_writer.write_event(Event::Text(BytesText::new(&etag)))?;
+            write_quoted_etag(xml_writer, &anchor.id)?;
             xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
 
             // getcontenttype
@@ -1215,10 +1227,10 @@ impl CalDavAdapter {
             CalDavReportType::CalendarMultiget { props, .. } => props,
             CalDavReportType::SyncCollection { props, .. } => props,
         };
-        // Reused per-event href + etag buffers for the whole REPORT page
-        // (benches/ROUND14.md §A6).
+        // Reused per-event href buffer for the whole REPORT page
+        // (benches/ROUND14.md §A6). The etag is emitted via `write_quoted_etag`
+        // (borrowed pre-escaped quotes) and no longer needs a buffer.
         let mut href = String::with_capacity(base_href.len() + 48);
-        let mut etag = String::new();
         for bundle in group_events_by_uid(events) {
             let anchor = match bundle.first() {
                 Some(e) => *e,
@@ -1229,7 +1241,7 @@ impl CalDavAdapter {
                 &mut href,
                 format_args!("{}{}.ics", base_href, anchor.ical_uid),
             );
-            Self::write_event_response(xml_writer, &bundle, props, &href, &mut etag)?;
+            Self::write_event_response(xml_writer, &bundle, props, &href)?;
         }
         Ok(())
     }
@@ -1266,7 +1278,6 @@ impl CalDavAdapter {
         bundle: &[&CalendarEventDto],
         props: &[QualifiedName],
         href: &str,
-        etag: &mut String,
     ) -> Result<()> {
         let anchor = bundle
             .first()
@@ -1289,10 +1300,10 @@ impl CalDavAdapter {
 
         // If no specific props requested, return all common ones
         if props.is_empty() {
-            Self::write_event_standard_props(xml_writer, anchor, bundle, etag)?;
+            Self::write_event_standard_props(xml_writer, anchor, bundle)?;
         } else {
             // Write specifically requested properties
-            Self::write_event_requested_props(xml_writer, anchor, bundle, props, etag)?;
+            Self::write_event_requested_props(xml_writer, anchor, bundle, props)?;
         }
 
         // End prop
@@ -1320,22 +1331,17 @@ impl CalDavAdapter {
         xml_writer: &mut Writer<W>,
         anchor: &CalendarEventDto,
         bundle: &[&CalendarEventDto],
-        etag: &mut String,
     ) -> Result<()> {
         // Common WebDAV properties
 
         // Resource type (empty for non-collection)
         xml_writer.write_event(Event::Empty(BytesStart::new("D:resourcetype")))?;
 
-        // ETag anchored on the master (or first exception in
-        // a master-less bundle — pathological state today).
-        // Reused buffer (benches/ROUND14.md §A6).
+        // ETag anchored on the master (or first exception in a master-less
+        // bundle — pathological state today). Borrowed pre-escaped quotes
+        // (§C1/§R4), 0 allocs/event.
         xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
-        etag.clear();
-        etag.push('"');
-        etag.push_str(&anchor.id);
-        etag.push('"');
-        xml_writer.write_event(Event::Text(BytesText::new(etag.as_str())))?;
+        write_quoted_etag(xml_writer, &anchor.id)?;
         xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
 
         // Content type
@@ -1370,7 +1376,6 @@ impl CalDavAdapter {
         anchor: &CalendarEventDto,
         bundle: &[&CalendarEventDto],
         props: &[QualifiedName],
-        etag: &mut String,
     ) -> Result<()> {
         for prop in props {
             match (prop.namespace.as_str(), prop.name.as_str()) {
@@ -1380,12 +1385,7 @@ impl CalDavAdapter {
                 }
                 ("DAV:", "getetag") => {
                     xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
-                    // Reused buffer (benches/ROUND14.md §A6).
-                    etag.clear();
-                    etag.push('"');
-                    etag.push_str(&anchor.id);
-                    etag.push('"');
-                    xml_writer.write_event(Event::Text(BytesText::new(etag.as_str())))?;
+                    write_quoted_etag(xml_writer, &anchor.id)?;
                     xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
                 }
                 ("DAV:", "getcontenttype") => {

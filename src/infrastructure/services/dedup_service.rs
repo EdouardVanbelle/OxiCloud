@@ -209,8 +209,11 @@ impl IngestGuard {
         // sweep can reclaim the bytes — a backend file with no PG row would be
         // invisible to it. ON CONFLICT DO NOTHING keeps a concurrent
         // uploader's row (and its references) intact.
-        let hashes: Vec<String> = written.iter().map(|(h, _)| h.clone()).collect();
-        let sizes: Vec<i64> = written.iter().map(|(_, s)| *s).collect();
+        // `written` is owned and dead after this rollback — unzip it (moving each
+        // 64-byte hash String out) instead of cloning every hash purely to
+        // reshape for `sync_blobs(&[String])` + the UNNEST bind.
+        // (benches/ROUND23.md §U1)
+        let (hashes, sizes): (Vec<String>, Vec<i64>) = written.into_iter().unzip();
         if let Err(e) = backend.sync_blobs(&hashes).await {
             tracing::warn!(
                 "Ingest rollback: sync of {} chunks failed: {e}",
@@ -896,8 +899,10 @@ impl DedupService {
         if !new_rows.is_empty() {
             // Durability before visibility — same invariant as the ingest
             // engine: no PG row may ever point at unsynced bytes.
-            let hashes: Vec<String> = new_rows.iter().map(|(h, _)| h.clone()).collect();
-            let sizes: Vec<i64> = new_rows.iter().map(|(_, s)| *s).collect();
+            // `new_rows` is owned and dead after this block — unzip (move the
+            // hash Strings out) instead of cloning each one for the reshape +
+            // UNNEST bind. (benches/ROUND23.md §U1)
+            let (hashes, sizes): (Vec<String>, Vec<i64>) = new_rows.into_iter().unzip();
             self.backend.sync_blobs(&hashes).await?;
             sqlx::query(
                 "INSERT INTO storage.blobs (hash, size, ref_count, orphaned_at)
