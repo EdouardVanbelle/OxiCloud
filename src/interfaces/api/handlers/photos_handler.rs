@@ -2,7 +2,7 @@ use axum::{
     Json,
     body::Body,
     extract::{Query, State},
-    http::{HeaderMap, Response, StatusCode, header},
+    http::{Response, StatusCode, header},
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
@@ -60,9 +60,12 @@ struct PhotoDto {
 pub async fn list_photos(
     State(state): State<Arc<AppState>>,
     auth_user: AuthUser,
-    headers: HeaderMap,
     Query(params): Query<PhotosQueryParams>,
+    req: axum::extract::Request,
 ) -> impl IntoResponse {
+    // Borrow headers (`req.headers()`) instead of cloning the whole request
+    // header table via the `HeaderMap` extractor to read one If-None-Match — the
+    // gallery open + every pagination page hit this (benches/ROUND22.md §H1).
     let caller_id = auth_user.id;
     let limit = params.limit.unwrap_or(200).clamp(1, 500);
 
@@ -88,7 +91,7 @@ pub async fn list_photos(
             std::hash::Hash::hash(&count, &mut hasher);
             let etag = format!("\"{:x}\"", std::hash::Hasher::finish(&hasher));
 
-            if let Some(inm) = headers.get(header::IF_NONE_MATCH)
+            if let Some(inm) = req.headers().get(header::IF_NONE_MATCH)
                 && let Ok(client_etag) = inm.to_str()
                 && client_etag == etag
             {

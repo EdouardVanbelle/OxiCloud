@@ -5,7 +5,7 @@
 use axum::{
     body::Body,
     extract::{Query, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
@@ -39,7 +39,7 @@ pub async fn handle_preview(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Query(params): Query<PreviewParams>,
-    headers: HeaderMap,
+    req: axum::extract::Request,
 ) -> impl IntoResponse {
     // Parse the Nextcloud file ID — the NC app may append an instance suffix
     // (e.g. "00000326ocnca"), so strip non-digit characters first.
@@ -155,7 +155,7 @@ pub async fn handle_preview(
         e.push('"');
         e
     };
-    if let Some(inm) = headers.get(header::IF_NONE_MATCH)
+    if let Some(inm) = req.headers().get(header::IF_NONE_MATCH)
         && let Ok(client_etag) = inm.to_str()
         && (client_etag == etag || client_etag == "*")
     {

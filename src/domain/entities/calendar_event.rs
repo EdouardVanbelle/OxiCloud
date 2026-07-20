@@ -575,21 +575,38 @@ impl CalendarEvent {
         self.end_time = end_time;
         self.updated_at = Utc::now();
 
-        // Update iCalendar data
-        let start_str = if self.all_day {
-            format!("{}T000000Z", start_time.format("%Y%m%d"))
+        // Update iCalendar data. Timed events stack-render the compact UTC
+        // stamp via `fmt::compact_ical_utc` (the ROUND19 §V2 pattern: drops
+        // chrono's `%Y%m%dT%H%M%SZ` strftime interpreter — ~3 → 0 allocs each),
+        // with chrono kept as the out-of-range fallback. All-day keeps its
+        // `%Y%m%d` + literal-suffix form. Byte-identical output either way.
+        let (mut sbuf, mut ebuf) = ([0u8; 16], [0u8; 16]);
+        let (start_owned, end_owned);
+        let start_str: &str = if self.all_day {
+            start_owned = format!("{}T000000Z", start_time.format("%Y%m%d"));
+            &start_owned
+        } else if let Some(s) =
+            crate::common::fmt::compact_ical_utc(&mut sbuf, start_time.timestamp())
+        {
+            s
         } else {
-            format!("{}", start_time.format("%Y%m%dT%H%M%SZ"))
+            start_owned = format!("{}", start_time.format("%Y%m%dT%H%M%SZ"));
+            &start_owned
+        };
+        let end_str: &str = if self.all_day {
+            end_owned = format!("{}T000000Z", end_time.format("%Y%m%d"));
+            &end_owned
+        } else if let Some(e) =
+            crate::common::fmt::compact_ical_utc(&mut ebuf, end_time.timestamp())
+        {
+            e
+        } else {
+            end_owned = format!("{}", end_time.format("%Y%m%dT%H%M%SZ"));
+            &end_owned
         };
 
-        let end_str = if self.all_day {
-            format!("{}T000000Z", end_time.format("%Y%m%d"))
-        } else {
-            format!("{}", end_time.format("%Y%m%dT%H%M%SZ"))
-        };
-
-        self.update_ical_property("DTSTART", &start_str);
-        self.update_ical_property("DTEND", &end_str);
+        self.update_ical_property("DTSTART", start_str);
+        self.update_ical_property("DTEND", end_str);
 
         Ok(())
     }
@@ -603,21 +620,37 @@ impl CalendarEvent {
         self.all_day = all_day;
         self.updated_at = Utc::now();
 
-        // Update iCalendar data
-        let start_str = if all_day {
-            format!("VALUE=DATE:{}", self.start_time.format("%Y%m%d"))
+        // Update iCalendar data. Timed events stack-render the compact UTC
+        // stamp via `fmt::compact_ical_utc` (drops chrono's `%Y%m%dT%H%M%SZ`
+        // strftime interpreter — ~3 → 0 allocs each), chrono fallback out of
+        // range. All-day keeps its `VALUE=DATE:` + `%Y%m%d` form. Byte-identical.
+        let (mut sbuf, mut ebuf) = ([0u8; 16], [0u8; 16]);
+        let (start_owned, end_owned);
+        let start_str: &str = if all_day {
+            start_owned = format!("VALUE=DATE:{}", self.start_time.format("%Y%m%d"));
+            &start_owned
+        } else if let Some(s) =
+            crate::common::fmt::compact_ical_utc(&mut sbuf, self.start_time.timestamp())
+        {
+            s
         } else {
-            format!("{}", self.start_time.format("%Y%m%dT%H%M%SZ"))
+            start_owned = format!("{}", self.start_time.format("%Y%m%dT%H%M%SZ"));
+            &start_owned
+        };
+        let end_str: &str = if all_day {
+            end_owned = format!("VALUE=DATE:{}", self.end_time.format("%Y%m%d"));
+            &end_owned
+        } else if let Some(e) =
+            crate::common::fmt::compact_ical_utc(&mut ebuf, self.end_time.timestamp())
+        {
+            e
+        } else {
+            end_owned = format!("{}", self.end_time.format("%Y%m%dT%H%M%SZ"));
+            &end_owned
         };
 
-        let end_str = if all_day {
-            format!("VALUE=DATE:{}", self.end_time.format("%Y%m%d"))
-        } else {
-            format!("{}", self.end_time.format("%Y%m%dT%H%M%SZ"))
-        };
-
-        self.update_ical_property("DTSTART", &start_str);
-        self.update_ical_property("DTEND", &end_str);
+        self.update_ical_property("DTSTART", start_str);
+        self.update_ical_property("DTEND", end_str);
     }
 
     /**

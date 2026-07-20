@@ -354,6 +354,22 @@ name = "bench_micro_allocs"
 path = "examples/bench_micro_allocs.rs"
 required-features = ["bench"]
 
+# Round-22 battery ────────────────────────────────────────────────────────────
+
+# Round-22 CPU/alloc micro-pack — the deferred hot-GET-handler `HeaderMap`
+# extractor clone (thumbnail/list/download/photos/preview/share read 1–3 headers
+# out of a full `parts.headers.clone()`), routed through `Request` + borrow (H1);
+# native-WebDAV `write_etag_quoted` borrowed pre-escaped quotes, the sweep's last
+# per-row DAV site (W1); CalDAV `getetag` shared `write_quoted_etag` helper across
+# 5 sites + dead etag-buffer removal (C1); `FileDto::from` reuse of the moved
+# `blob_hash` instead of the getter clone the move-not-clone sweep missed (D1);
+# `CalendarEvent` timed DTSTART/DTEND via `fmt::compact_ical_utc` (E1);
+# `ShareItemType::try_from` `eq_ignore_ascii_case` (S1). No Postgres.
+[[example]]
+name = "bench_round22_micro"
+path = "examples/bench_round22_micro.rs"
+required-features = ["bench"]
+
 # Round-21 battery ────────────────────────────────────────────────────────────
 
 # Round-21 CPU/alloc micro-pack — CalDAV/CardDAV row-mapper container pre-size

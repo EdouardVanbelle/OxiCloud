@@ -230,10 +230,12 @@ pub async fn delete_shared_link(
 pub async fn access_shared_item(
     State(share_use_case): State<Arc<ShareService>>,
     Path(token): Path<String>,
-    headers: HeaderMap,
+    req: axum::extract::Request,
 ) -> impl IntoResponse {
     // Honour an unlock cookie if one was issued by a prior `/verify` call.
-    let unlock_jwt = unlock_jwt_from_headers(&headers, &token);
+    // Borrow the headers (`req.headers()`) instead of the `HeaderMap` extractor's
+    // full clone to read the unlock cookie (benches/ROUND22.md §H1).
+    let unlock_jwt = unlock_jwt_from_headers(req.headers(), &token);
 
     // The access-count increment doesn't gate the fetch — run both
     // round-trips concurrently instead of serially (one RTT saved on
@@ -333,8 +335,11 @@ pub async fn verify_shared_item_password(
 pub async fn download_shared_file(
     State(state): State<Arc<AppState>>,
     Path(token): Path<String>,
-    headers: HeaderMap,
+    req: axum::extract::Request,
 ) -> impl IntoResponse {
+    // Borrow the headers (`req.headers()`) instead of the `HeaderMap` extractor's
+    // full clone — the public-share download + Range path (benches/ROUND22.md §H1).
+    let headers = req.headers();
     // 1. Resolve share service
     let share_service = match &state.share_service {
         Some(s) => s.clone(),
@@ -349,7 +354,7 @@ pub async fn download_shared_file(
     };
 
     // 2. Validate the share token (handles expiry + password checks)
-    let unlock_jwt = unlock_jwt_from_headers(&headers, &token);
+    let unlock_jwt = unlock_jwt_from_headers(headers, &token);
     let share_dto = match share_service
         .get_shared_link_with_unlock(&token, unlock_jwt.as_deref())
         .await
@@ -385,7 +390,7 @@ pub async fn download_shared_file(
         &state,
         &share_dto.item_id,
         share_dto.item_name.as_deref(),
-        &headers,
+        headers,
     )
     .await
 }
