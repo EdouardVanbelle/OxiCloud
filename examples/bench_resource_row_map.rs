@@ -95,6 +95,8 @@ fn rows(n: usize) -> Vec<FolderResourceRow> {
                 } else {
                     Some("a".repeat(64))
                 },
+                created_by: Some(Uuid::new_v4()),
+                updated_by: Some(Uuid::new_v4()),
                 sort_str: format!("row {i}"),
                 type_order: 0,
                 folder_first: if is_folder { 0 } else { 1 },
@@ -262,6 +264,8 @@ fn fav_rows(n: usize) -> Vec<FavoriteResourceRow> {
                 } else {
                     Some("a".repeat(64))
                 },
+                created_by: Some(Uuid::new_v4()),
+                updated_by: Some(Uuid::new_v4()),
                 is_owner: true,
                 favorited_at: ts,
                 path: Some(format!("Documents/Work/item-{i:05}")),

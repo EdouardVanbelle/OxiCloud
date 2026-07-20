@@ -234,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "Per e-mail notificeren",
     "revoke": "Remove",
-    "role_label": "Rol"
+    "role_label": "Rol",
+    "col_shared_by": "Gedeeld door",
+    "col_shared": "Gedeeld"
   },
   "share_dialogTitle": "Deellink",
   "share_linkLabel": "Deellink:",
@@ -337,6 +339,7 @@
     "modified": "Gewijzigd",
     "no_files": "Geen bestanden in deze map",
     "empty_hint": "Upload bestanden of maak mappen aan om te beginnen",
+    "drop_to_upload": "Sleep bestanden hier om te uploaden",
     "loading": "Bestanden laden…",
     "view_grid": "Rasterweergave",
     "view_list": "Lijstweergave",
@@ -375,7 +378,13 @@
     "rename_dotfile_hidden": "Hernoemd naar \"{{name}}\" — nu verborgen door je voorkeur.",
     "new_folder_dotfile_hidden": "Map \"{{name}}\" aangemaakt — verborgen door je voorkeur.",
     "dotfiles_hidden_toast": "Verborgen bestanden verborgen",
-    "dotfiles_shown_toast": "Verborgen bestanden weergegeven"
+    "dotfiles_shown_toast": "Verborgen bestanden weergegeven",
+    "col_modified": "Gewijzigd",
+    "col_added": "Toegevoegd",
+    "col_created_by": "Gemaakt door",
+    "col_opened": "Geopend",
+    "col_path": "Locatie",
+    "new_elements": "Nieuwe items"
   },
   "dialogs": {
     "rename_folder": "Map hernoemen",
@@ -461,7 +470,8 @@
       "trashed_time": "Verwijderd op"
     },
     "delete": "Permanent verwijderen",
-    "empty_action": "Prullenbak legen"
+    "empty_action": "Prullenbak legen",
+    "expires_at": "Verloopt op"
   },
   "daysRemaining": {
     "expired": "Verlopen",
@@ -582,7 +592,8 @@
     "empty_hint": "Bestanden die je opent verschijnen hier",
     "empty_hidden_state": "{{n}} recent(e) item(s) verborgen door je voorkeur",
     "empty_hidden_hint": "Schakel \"Verborgen bestanden verbergen\" uit in je profiel om ze te zien.",
-    "loadMore": "Meer laden"
+    "loadMore": "Meer laden",
+    "remove_item": "Uit recent verwijderen"
   },
   "notifications": {
     "file_renamed": "Bestand hernoemd",
@@ -1265,5 +1276,10 @@
   "group": {
     "members_empty": "Geen leden",
     "member_count": "{{n}} leden"
+  },
+  "resource_list": {
+    "location": "Locatie",
+    "wrong_drop_zone_msg": "Uploaden werkt alleen in Bestanden — open het onderdeel Bestanden en zet ze daar neer.",
+    "wrong_drop_zone_action": "Naar Bestanden"
   }
 }

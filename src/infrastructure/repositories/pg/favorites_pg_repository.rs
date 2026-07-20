@@ -318,6 +318,7 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
         fld.drive_id                     AS drive_id,
         NULL::text                       AS blob_hash,
         fld.created_by                   AS created_by,
+        fld.updated_by                   AS updated_by,
         EXISTS (
             SELECT 1 FROM storage.role_grants g
              WHERE g.resource_type = 'drive'
@@ -350,6 +351,7 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
         f.drive_id                       AS drive_id,
         f.blob_hash,
         f.created_by                     AS created_by,
+        f.updated_by                     AS updated_by,
         EXISTS (
             SELECT 1 FROM storage.role_grants g
              WHERE g.resource_type = 'drive'
@@ -529,7 +531,8 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
 SELECT
     r.resource_type, r.resource_id, r.name, r.parent_id,
     r.mime_type, r.size, r.resource_created_at, r.modified_at,
-    r.drive_id, r.is_owner, r.favorited_at, r.resource_path,
+    r.drive_id, r.blob_hash, r.created_by, r.updated_by,
+    r.is_owner, r.favorited_at, r.resource_path,
     r.sort_str, r.type_order, r.folder_first{username_col}
 FROM resources r
 {user_join}
@@ -602,6 +605,8 @@ LIMIT $6"
                     modified_at: row.get("modified_at"),
                     drive_id: row.get("drive_id"),
                     blob_hash: row.try_get("blob_hash").ok(),
+                    created_by: row.try_get("created_by").ok(),
+                    updated_by: row.try_get("updated_by").ok(),
                     is_owner: row.try_get("is_owner").unwrap_or(false),
                     favorited_at: row.get("favorited_at"),
                     path: row.try_get("resource_path").ok(),

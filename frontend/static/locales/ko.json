@@ -304,7 +304,9 @@
     "public_link": "공개 링크",
     "set_expiry": "만료일 설정",
     "title": "공유됨",
-    "unlock": "잠금 해제"
+    "unlock": "잠금 해제",
+    "col_shared_by": "공유한 사람",
+    "col_shared": "공유일"
   },
   "share_dialogTitle": "공유 링크",
   "share_linkLabel": "공유 링크:",
@@ -407,6 +409,7 @@
     "modified": "수정일",
     "no_files": "이 폴더에 파일이 없습니다",
     "empty_hint": "파일을 업로드하거나 폴더를 만들어 시작하세요",
+    "drop_to_upload": "업로드할 파일을 여기에 놓으세요",
     "loading": "파일 로딩 중…",
     "view_grid": "그리드 보기",
     "view_list": "목록 보기",
@@ -442,7 +445,10 @@
     "batch_delete": "선택 항목 삭제",
     "breadcrumb": "경로",
     "cancel_selection": "선택 취소",
-    "col_modified": "날짜",
+    "col_modified": "수정일",
+    "col_added": "추가일",
+    "col_created_by": "만든 사람",
+    "col_opened": "열어본 날짜",
     "col_path": "위치",
     "confirm_batch_delete": "{{n}}개 항목을 휴지통으로 이동하시겠습니까?",
     "confirm_delete": "\"{{name}}\"을(를) 휴지통으로 이동하시겠습니까?",
@@ -466,6 +472,7 @@
     "move_title": "\"{{name}}\" 이동",
     "moved": "이동됨",
     "new_folder_prompt": "새 폴더 이름",
+    "new_elements": "새 항목",
     "no_home": "홈 폴더를 사용할 수 없습니다.",
     "no_preview": "이 파일 형식은 미리보기를 지원하지 않습니다.",
     "no_subfolders": "하위 폴더가 없습니다.",
@@ -583,7 +590,8 @@
     "empty_action": "휴지통 비우기",
     "confirm_delete": "이 항목을 영구적으로 삭제하시겠습니까? 되돌릴 수 없습니다.",
     "confirm_empty": "휴지통을 비우시겠습니까? 되돌릴 수 없습니다.",
-    "restored": "복원됨"
+    "restored": "복원됨",
+    "expires_at": "만료일"
   },
   "daysRemaining": {
     "expired": "만료됨",
@@ -716,7 +724,8 @@
     "empty_hidden_state": "설정에 따라 숨겨진 최근 항목 {{n}}개",
     "empty_hidden_hint": "프로필에서 \"숨겨진 파일 숨기기\"를 끄면 볼 수 있습니다.",
     "loadMore": "더 불러오기",
-    "confirm_clear": "최근 항목을 지우시겠습니까?"
+    "confirm_clear": "최근 항목을 지우시겠습니까?",
+    "remove_item": "최근에서 제거"
   },
   "notifications": {
     "file_renamed": "파일 이름이 변경되었습니다",
@@ -1659,5 +1668,10 @@
   "group": {
     "members_empty": "구성원 없음",
     "member_count": "구성원 {{n}}명"
+  },
+  "resource_list": {
+    "location": "위치",
+    "wrong_drop_zone_msg": "업로드는 파일 섹션에서만 작동합니다. 파일 섹션을 열고 거기에 놓아 주세요.",
+    "wrong_drop_zone_action": "파일로 이동"
   }
 }

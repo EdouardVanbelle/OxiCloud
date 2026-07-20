@@ -234,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "透過郵件通知",
     "revoke": "移除",
-    "role_label": "角色"
+    "role_label": "角色",
+    "col_shared_by": "分享者",
+    "col_shared": "分享日期"
   },
   "share_dialogTitle": "共享連結",
   "share_linkLabel": "共享連結：",
@@ -337,6 +339,7 @@
     "modified": "修改日期",
     "no_files": "此資料夾中沒有檔案",
     "empty_hint": "上傳檔案或建立資料夾以開始使用",
+    "drop_to_upload": "將檔案拖放到此處上傳",
     "loading": "正在載入檔案…",
     "view_grid": "網格檢視",
     "view_list": "列表檢視",
@@ -375,7 +378,13 @@
     "rename_dotfile_hidden": "已重新命名為「{{name}}」——現已根據您的偏好隱藏。",
     "new_folder_dotfile_hidden": "已建立資料夾「{{name}}」——根據您的偏好隱藏。",
     "dotfiles_hidden_toast": "已隱藏隱藏檔案",
-    "dotfiles_shown_toast": "已顯示隱藏檔案"
+    "dotfiles_shown_toast": "已顯示隱藏檔案",
+    "col_modified": "修改日期",
+    "col_added": "新增日期",
+    "col_created_by": "建立者",
+    "col_opened": "開啟日期",
+    "col_path": "位置",
+    "new_elements": "新項目"
   },
   "dialogs": {
     "rename_folder": "重新命名資料夾",
@@ -461,7 +470,8 @@
       "trashed_time": "刪除時間"
     },
     "delete": "永久刪除",
-    "empty_action": "清空回收站"
+    "empty_action": "清空回收站",
+    "expires_at": "到期時間"
   },
   "daysRemaining": {
     "expired": "已過期",
@@ -582,7 +592,8 @@
     "empty_hint": "您開啟的檔案將顯示在這裡",
     "empty_hidden_state": "根據您的偏好隱藏了 {{n}} 個最近項目",
     "empty_hidden_hint": "在個人資料中關閉「隱藏隱藏檔案」即可查看。",
-    "loadMore": "載入更多"
+    "loadMore": "載入更多",
+    "remove_item": "從最近項目中移除"
   },
   "batch": {
     "one_selected": "已選擇 1 個專案",
@@ -1265,5 +1276,10 @@
   "group": {
     "members_empty": "無成員",
     "member_count": "{{n}} 位成員"
+  },
+  "resource_list": {
+    "location": "位置",
+    "wrong_drop_zone_msg": "上傳僅在「檔案」中有效 — 請開啟檔案區並在該處拖放。",
+    "wrong_drop_zone_action": "前往檔案"
   }
 }

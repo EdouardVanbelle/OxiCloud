@@ -1,17 +1,25 @@
 <script lang="ts">
-	import { errorMessage } from '$lib/utils/errors';
+	import { errorMessage, errorToast } from '$lib/utils/errors';
 	import { SvelteMap } from 'svelte/reactivity';
 	import { primeContextPage } from '$lib/utils/listContext';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { onMount } from 'svelte';
-	import { dateBucket, resolveOwnerName, typeLabel } from '$lib/api/endpoints/favorites';
+	import {
+		addFavorite,
+		dateBucket,
+		resolveOwnerName,
+		typeLabel
+	} from '$lib/api/endpoints/favorites';
+	import { fileDownloadUrl } from '$lib/api/endpoints/files';
+	import { folderZipUrl } from '$lib/api/endpoints/folders';
 	import { fetchSharedWithMe, type IncomingGrantItem } from '$lib/api/endpoints/grants';
 	import type { FileItem, FolderItem } from '$lib/api/types';
 	import { lazyComponent } from '$lib/composables/lazyComponent.svelte';
 	import { useOwnerCache } from '$lib/composables/useOwnerCache.svelte';
 	import ResourceList, {
 		isFile,
+		type ContextAction,
 		type GroupByDef,
 		type ItemContext
 	} from '$lib/components/ResourceList.svelte';
@@ -130,6 +138,59 @@
 		viewerOpen = true;
 	}
 
+	/**
+	 * Kick off a download using an ephemeral `<a download>` so the file
+	 * saves to disk instead of navigating away. Files stream directly
+	 * from `/api/files/{id}/content`; folders come back as a server-
+	 * side zip via `/api/folders/{id}/zip`.
+	 */
+	function downloadItem(item: FileItem | FolderItem) {
+		const a = document.createElement('a');
+		a.href = isFile(item) ? fileDownloadUrl(item.id) : folderZipUrl(item.id);
+		a.download = isFile(item) ? item.name : `${item.name}.zip`;
+		document.body.appendChild(a);
+		a.click();
+		a.remove();
+	}
+
+	// Context menu ordering mirrors `/files` / `/favorites` / `/recent`:
+	//   Download / Download as ZIP  →  (later entries as we grow the menu)
+	//   Favorite  →  (destructive actions if / when introduced)
+	//
+	// Kind-gated download: files show "Download" (direct stream);
+	// folders show "Download as ZIP" (server-side archive). Two entries
+	// with `visible?` predicates rather than one label that changes,
+	// so the `.icon` reads correctly per kind too.
+	//
+	// The favorite entry stays "Add to favorites" only: un-favoriting
+	// from here would need per-row favorite-state tracking which this
+	// view doesn't carry — users toggle off from /favorites' own row
+	// menu. Backend swallows duplicate `addFavorite` calls idempotently.
+	const contextActions: ContextAction[] = [
+		{
+			key: 'download',
+			label: t('common.download', 'Download'),
+			icon: 'download',
+			visible: (item) => isFile(item),
+			run: downloadItem
+		},
+		{
+			key: 'download_zip',
+			label: t('files.download_zip', 'Download as ZIP'),
+			icon: 'download',
+			visible: (item) => !isFile(item),
+			run: downloadItem
+		},
+		{
+			key: 'favorite',
+			label: t('files.favorite', 'Add favorite'),
+			icon: 'star',
+			run: (item) => {
+				void addFavorite(isFile(item) ? 'file' : 'folder', item.id).catch(errorToast);
+			}
+		}
+	];
+
 	onMount(() => load(true));
 </script>
 
@@ -161,11 +222,14 @@
 	{items}
 	{contextMap}
 	resolveOwnerName={(id) => sharers.name(id)}
+	{contextActions}
 	{loading}
 	{error}
 	emptyText={t('shared_with_me.empty', 'Nothing has been shared with you yet.')}
 	hasMore={!!cursor}
 	showOwner={true}
+	ownerLabel={t('share.col_shared_by', 'Shared by')}
+	dateLabel={t('share.col_shared', 'Shared')}
 	{groupBys}
 	bind:groupBy
 	bind:reversed

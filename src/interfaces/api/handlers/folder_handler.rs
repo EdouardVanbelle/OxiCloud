@@ -487,9 +487,8 @@ pub async fn list_folder_resources(
                             icon_class: intern_display("fas fa-folder"),
                             icon_special_class: intern_display("folder-icon"),
                             category: intern_display("Folder"),
-                            // §14 provenance not selected by the resources query.
-                            created_by: None,
-                            updated_by: None,
+                            created_by: row.created_by,
+                            updated_by: row.updated_by,
                         };
                         FolderResourceItemDto {
                             resource_type: ResourceTypeDto::Folder,
@@ -539,9 +538,8 @@ pub async fn list_folder_resources(
                             sort_date: None,
                             content_hash,
                             etag,
-                            // §14 provenance not selected by the resources query.
-                            created_by: None,
-                            updated_by: None,
+                            created_by: row.created_by,
+                            updated_by: row.updated_by,
                         };
                         FolderResourceItemDto {
                             resource_type: ResourceTypeDto::File,

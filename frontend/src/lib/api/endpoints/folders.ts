@@ -110,86 +110,109 @@ export function getFolder(id: string): Promise<FolderItem> {
 	return request;
 }
 
-/**
- * Minimum spacing between intermediate progressive-render emissions of
- * {@link fetchFolderListing}. Each emission hands the consumer the WHOLE
- * accumulated listing, and the files view re-derives its filtered + sorted
- * view from it (O(accumulated · log) with `localeCompare`), so emitting every
- * page made a large-folder load Σ O(N²/page) of main-thread sort work. Page
- * one and the final page always emit; pages in between only emit after this
- * much time has passed since the previous emission.
- */
-export const PAGE_EMIT_MIN_INTERVAL_MS = 150;
+/** One page of `/api/folders/{id}/resources`. */
+export interface FolderPage {
+	/**
+	 * Items in the exact order the server returned them. Under `order_by=name`,
+	 * `type`, `size` the server puts folders first, then files; under
+	 * `modified_at` / `created_at` the two kinds interleave. Consumers that
+	 * need to preserve the server sort MUST iterate this list — the split
+	 * `folders` / `files` arrays lose the interleaving.
+	 */
+	items: (FolderItem | FileItem)[];
+	/** `items` filtered to folder rows (order preserved). */
+	folders: FolderItem[];
+	/** `items` filtered to file rows (order preserved). */
+	files: FileItem[];
+	/** Opaque cursor for the next page; `undefined` on the last page. */
+	nextCursor?: string;
+}
 
 /**
- * Fetch a folder's complete listing (sub-folders + files), rebuilt from the
- * cursor-paginated `/api/folders/{id}/resources` feed — the old combined
- * `/listing` route was removed. We page through to the end (folders sort first
- * under `order_by=name`) and split the mixed resource items back into
- * `folders` / `files`.
+ * Fetch a single page of a folder's listing.
  *
- * That feed carries no whole-listing ETag, so the 304 conditional fast-path is
- * gone: `opts.etag` is accepted for call-site compatibility but ignored, and the
- * in-memory `folderCache` is what the views revalidate against. Favorite/share
- * badge sets aren't part of this feed either, so they come back empty for now.
+ * `/files` uses this directly and drives its own pagination — the initial
+ * `load()` requests page one; the ResourceList's `onloadmore` (fired by an
+ * IntersectionObserver at the bottom sentinel) requests the next page with
+ * the previous `nextCursor` and appends the results. `orderBy` is passed
+ * through so pages come back in the requested server-side sort order; the
+ * caller resets state and refetches page one on sort/group change.
+ *
+ * The legacy `fetchFolderListing` (below) is a thin loop over this — kept
+ * for the move-dialog folder tree, which genuinely needs every child at
+ * once and doesn't have an infinite-scroll surface.
+ */
+export async function fetchFolderPage(
+	folderId: string,
+	opts: {
+		orderBy?: string;
+		reverse?: boolean;
+		cursor?: string;
+		limit?: number;
+		forceRefresh?: boolean;
+	} = {}
+): Promise<FolderPage> {
+	const params = new URLSearchParams({
+		order_by: opts.orderBy ?? 'name',
+		limit: String(opts.limit ?? 200)
+	});
+	if (opts.reverse) params.set('reverse', 'true');
+	if (opts.cursor) params.set('cursor', opts.cursor);
+	if (opts.forceRefresh) params.set('force_refresh', 'true');
+	const res = await apiFetch(`/api/folders/${folderId}/resources?${params.toString()}`, {
+		credentials: 'same-origin',
+		cache: 'no-store'
+	});
+	if (res.status === 403) throw Object.assign(new Error('Forbidden'), { status: 403 });
+	if (!res.ok) throw new Error(`listing failed: ${res.status}`);
+	const page = (await res.json()) as {
+		items?: { resource_type: ItemType; resource: FolderItem | FileItem }[];
+		next_cursor?: string;
+	};
+	const items: (FolderItem | FileItem)[] = [];
+	const folders: FolderItem[] = [];
+	const files: FileItem[] = [];
+	for (const it of page.items ?? []) {
+		if (it.resource_type === 'folder') {
+			const f = it.resource as FolderItem;
+			folders.push(f);
+			items.push(f);
+		} else {
+			const f = it.resource as FileItem;
+			files.push(f);
+			items.push(f);
+		}
+	}
+	// Learn the children's names for breadcrumb resolution.
+	for (const f of folders) rememberFolderName(f.id, f.name);
+	return { items, folders, files, nextCursor: page.next_cursor };
+}
+
+/**
+ * Fetch a folder's complete listing (sub-folders + files) by walking every
+ * cursor page eagerly. Only the move-dialog tree still needs this shape —
+ * `/files` switched to {@link fetchFolderPage} for lazy scroll-driven paging.
+ *
+ * `opts.etag` is accepted for call-site compatibility but ignored (the
+ * `/resources` feed carries no whole-listing ETag). Favorite / share badge
+ * sets are unpopulated by this endpoint and come back empty.
  */
 export async function fetchFolderListing(
 	folderId: string,
-	opts: {
-		etag?: string;
-		forceRefresh?: boolean;
-		/**
-		 * Progressive render hook: invoked with the accumulated listing so
-		 * far (the arrays are fresh copies — safe to hand to reactive
-		 * state). Without it, a 2,000-item folder waited for all ⌈N/200⌉
-		 * sequential round-trips before the first row painted; with it the
-		 * view paints after page one (~200 items) and fills in as the tail
-		 * pages land. Emissions are coalesced to at most one per
-		 * {@link PAGE_EMIT_MIN_INTERVAL_MS} between the first and the final
-		 * page — the hook is always called for page one and always called
-		 * once more with `done === true` and the complete listing.
-		 */
-		onPage?: (partial: FolderListing, done: boolean) => void;
-	} = {}
+	opts: { etag?: string; forceRefresh?: boolean } = {}
 ): Promise<FolderListingResult> {
 	const folders: FolderItem[] = [];
 	const files: FileItem[] = [];
 	let cursor: string | undefined;
-	let firstPage = true;
-	let lastEmit = 0;
 	do {
-		const params = new URLSearchParams({ order_by: 'name', limit: '200' });
-		if (opts.forceRefresh) params.set('force_refresh', 'true');
-		if (cursor) params.set('cursor', cursor);
-		const res = await apiFetch(`/api/folders/${folderId}/resources?${params.toString()}`, {
-			credentials: 'same-origin',
-			cache: 'no-store'
+		const page = await fetchFolderPage(folderId, {
+			cursor,
+			forceRefresh: opts.forceRefresh
 		});
-		if (res.status === 403) throw Object.assign(new Error('Forbidden'), { status: 403 });
-		if (!res.ok) throw new Error(`listing failed: ${res.status}`);
-		const page = (await res.json()) as {
-			items?: { resource_type: ItemType; resource: FolderItem | FileItem }[];
-			next_cursor?: string;
-		};
-		for (const it of page.items ?? []) {
-			if (it.resource_type === 'folder') folders.push(it.resource as FolderItem);
-			else files.push(it.resource as FileItem);
-		}
-		cursor = page.next_cursor;
-		const done = !cursor;
-		if (
-			opts.onPage &&
-			(done || firstPage || performance.now() - lastEmit >= PAGE_EMIT_MIN_INTERVAL_MS)
-		) {
-			lastEmit = performance.now();
-			opts.onPage(
-				{ folders: [...folders], files: [...files], favoriteIds: [], sharedIds: [] },
-				done
-			);
-		}
-		firstPage = false;
+		folders.push(...page.folders);
+		files.push(...page.files);
+		cursor = page.nextCursor;
 	} while (cursor);
-
 	return { status: 200, listing: { folders, files, favoriteIds: [], sharedIds: [] } };
 }
 

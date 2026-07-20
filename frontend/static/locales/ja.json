@@ -234,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "メールで通知",
     "revoke": "Remove",
-    "role_label": "役割"
+    "role_label": "役割",
+    "col_shared_by": "共有者",
+    "col_shared": "共有日時"
   },
   "share_dialogTitle": "共有リンク",
   "share_linkLabel": "共有リンク:",
@@ -337,6 +339,7 @@
     "modified": "更新日",
     "no_files": "このフォルダにファイルはありません",
     "empty_hint": "ファイルをアップロードするかフォルダを作成して始めましょう",
+    "drop_to_upload": "アップロードするファイルをここにドロップ",
     "loading": "ファイルを読み込み中…",
     "view_grid": "グリッド表示",
     "view_list": "リスト表示",
@@ -375,7 +378,13 @@
     "rename_dotfile_hidden": "「{{name}}」に名前を変更しました — 設定により非表示になりました。",
     "new_folder_dotfile_hidden": "フォルダ「{{name}}」を作成しました — 設定により非表示になっています。",
     "dotfiles_hidden_toast": "非表示ファイルを隠しました",
-    "dotfiles_shown_toast": "非表示ファイルを表示しました"
+    "dotfiles_shown_toast": "非表示ファイルを表示しました",
+    "col_modified": "更新日時",
+    "col_added": "追加日",
+    "col_created_by": "作成者",
+    "col_opened": "アクセス日時",
+    "col_path": "場所",
+    "new_elements": "新しいアイテム"
   },
   "dialogs": {
     "rename_folder": "フォルダ名を変更",
@@ -461,7 +470,8 @@
       "trashed_time": "削除日時"
     },
     "delete": "完全に削除",
-    "empty_action": "ゴミ箱を空にする"
+    "empty_action": "ゴミ箱を空にする",
+    "expires_at": "期限"
   },
   "daysRemaining": {
     "expired": "期限切れ",
@@ -582,7 +592,8 @@
     "empty_hint": "開いたファイルがここに表示されます",
     "empty_hidden_state": "設定により非表示になっている最近の項目が {{n}} 件あります",
     "empty_hidden_hint": "プロフィールで「非表示ファイルを隠す」をオフにすると表示されます。",
-    "loadMore": "さらに読み込む"
+    "loadMore": "さらに読み込む",
+    "remove_item": "最近使用したものから削除"
   },
   "notifications": {
     "file_renamed": "ファイル名を変更しました",
@@ -1265,5 +1276,10 @@
   "group": {
     "members_empty": "メンバーなし",
     "member_count": "{{n}} 人のメンバー"
+  },
+  "resource_list": {
+    "location": "場所",
+    "wrong_drop_zone_msg": "アップロードはファイル セクションでのみ機能します。ファイル セクションを開いてそこにドロップしてください。",
+    "wrong_drop_zone_action": "ファイルへ移動"
   }
 }

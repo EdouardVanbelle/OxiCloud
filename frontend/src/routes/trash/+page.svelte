@@ -13,8 +13,10 @@
 		restoreTrashItem
 	} from '$lib/api/endpoints/trash';
 	import { dateBucket, sizeBucket, typeLabel } from '$lib/api/endpoints/favorites';
+	import { formatDate } from '$lib/utils/display';
 	import type { Drive, FileItem, FolderItem, TrashResourceItem } from '$lib/api/types';
 	import Icon from '$lib/icons/Icon.svelte';
+	import Button from '$lib/components/Button.svelte';
 	import ResourceList, {
 		isFile,
 		type GroupByDef,
@@ -268,8 +270,10 @@
 	emptyText={t('trash.empty_state', 'Trash is empty')}
 	hasMore={!!cursor}
 	onloadmore={() => load(false, orderByForGroup())}
+	selectable
+	showPath
 	pathLabel={t('trash.original_location', 'Original location')}
-	dateLabel={t('trash.remaining', 'Remaining')}
+	dateLabel={t('trash.expires_at', 'Expires at')}
 	{groupBys}
 	bind:groupBy
 	bind:reversed
@@ -278,7 +282,7 @@
 		load(true, orderBy, rev);
 	}}
 >
-	{#snippet toolbar()}
+	{#snippet actions()}
 		{#if items.length > 0}
 			<button class="btn btn-danger" data-testid="trash-empty-btn" onclick={purgeAll}>
 				<Icon name="trash" />
@@ -286,12 +290,35 @@
 			</button>
 		{/if}
 	{/snippet}
-	{#snippet dateCell(_item, ctx)}
+	{#snippet batchActions(sel)}
+		<!--
+			Use the shared `<Button>` component here (not the icon-only
+			`.btn-action` chip used for per-row `itemActions` above). The
+			batch bar renders text next to the glyph — `.btn-action` is
+			fixed 28x28 with no room for a label, and shoving text
+			inside was overlapping the icon. `<Button>` picks up the
+			standard action-bar sizing and reads consistently with
+			`/recent` and `/favorites` batch clusters.
+		-->
+		<Button icon="undo" data-testid="trash-batch-restore-btn" onclick={() => sel.forEach(restore)}
+			>{t('trash.restore', 'Restore')}</Button
+		>
+		<Button
+			variant="danger"
+			icon="trash"
+			data-testid="trash-batch-delete-btn"
+			onclick={() => sel.forEach(purge)}>{t('trash.delete', 'Delete permanently')}</Button
+		>
+	{/snippet}
+	{#snippet rowBadge(_item, ctx)}
 		{@const chip = expiryChip(ctx?.date)}
 		<span class="expiry-chip expiry-chip--{chip.tier}">
 			<Icon name={chip.icon} class="expiry-chip__icon" />
 			{chip.label}
 		</span>
+	{/snippet}
+	{#snippet dateCell(_item, ctx)}
+		{formatDate(ctx?.date)}
 	{/snippet}
 	{#snippet bucketAction(bucketKey: string)}
 		{#if showPerDriveEmpty}
@@ -310,7 +337,7 @@
 			{/if}
 		{/if}
 	{/snippet}
-	{#snippet actions(item)}
+	{#snippet itemActions(item)}
 		<button
 			class="btn-action"
 			data-testid={`trash-restore-btn-${item.id}`}
@@ -373,5 +400,28 @@
 		background: var(--color-danger-bg);
 		color: var(--color-danger-text);
 		font-weight: var(--weight-semibold);
+	}
+
+	/* Grid-corner action-cell layout + chip visuals now live in the
+	   shared `ported/resourceList.css`; every section using ResourceList
+	   picks them up. What stays here is only the trash-specific danger
+	   red on the "Delete permanently" button — `--color-error-text` is
+	   the right red-text token (the shared `.file-actions:hover` accent
+	   colour still lands on the plain `.btn-action` restore button). */
+	:global(.files-grid-view .file-item .action-cell .btn-action--delete:hover) {
+		color: var(--color-error-text);
+	}
+
+	/* List view: hide the expiry chip that ResourceList paints inside
+	   `.file-icon__badge`. In list mode the same info is already in
+	   the "Expires at" column (`dateCell` snippet above) — showing
+	   the chip on the tiny row icon crops it and duplicates the
+	   signal. Grid view keeps the chip: no dedicated column exists
+	   there and the badge is the ONLY expiration surface on the
+	   card. Scoped to trash because trash is the only section
+	   emitting a rowBadge today; if another section starts using it,
+	   this rule stays inert for them. */
+	:global(.files-list-view .file-item .file-icon__badge) {
+		display: none;
 	}
 </style>

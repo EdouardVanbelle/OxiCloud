@@ -28,6 +28,7 @@
 		type ItemContext
 	} from '$lib/components/ResourceList.svelte';
 	import { confirmDialog, promptDialog } from '$lib/stores/dialogs.svelte';
+	import { folderAccessCached, probeFolderAccess } from '$lib/utils/folderAccess';
 	import { t } from '$lib/i18n/index.svelte';
 
 	let raw = $state<FavoritesResourceItem[]>([]);
@@ -223,7 +224,38 @@
 		a.remove();
 	}
 
+	// See /recent's mirror for the rationale: files carry `folder_id`,
+	// folders carry `parent_id`; nullable when the folder is a drive
+	// root. Null → no meaningful parent to open.
+	function parentFolderId(item: FileItem | FolderItem): string | null {
+		return isFile(item) ? item.folder_id : item.parent_id;
+	}
+
 	const contextActions: ContextAction[] = [
+		{
+			key: 'open_parent',
+			label: t('files.open_parent', 'Open parent folder'),
+			icon: 'folder-open',
+			// Hidden only when there's literally no parent to open
+			// (drive-root folders where `parent_id === null`); otherwise
+			// the entry is always visible and shows up disabled when the
+			// caller lacks read on the parent — a greyed row reads as
+			// "you can't do this here" instead of "the option is missing."
+			// `folderAccessCached` returns `true`/`false`/`undefined`;
+			// disabled fires when the answer is explicitly `false`. On
+			// first right-click of a fresh row, `menuPrepare` below has
+			// primed the cache so the entry either enables or disables
+			// without a "flash of enabled" beforehand.
+			visible: (item) => parentFolderId(item) !== null,
+			disabled: (item) => {
+				const pid = parentFolderId(item);
+				return pid === null || folderAccessCached(pid) === false;
+			},
+			run: (item) => {
+				const pid = parentFolderId(item);
+				if (pid) goto(resolve(`/files/${pid}`));
+			}
+		},
 		{
 			key: 'download',
 			label: t('common.download', 'Download'),
@@ -249,41 +281,31 @@
 				moveOpen = true;
 			}
 		},
+		{
+			// Every row on /favorites IS a favorite, so the entry is always
+			// "Remove favorite" — no per-item state lookup needed. Mirrors
+			// the star-widget behaviour: click, row un-stars, disappears
+			// from the list on next reload. Placed between Move and Rename
+			// to match the canonical context-menu order on `/files`.
+			key: 'unfavorite',
+			label: t('files.unfavorite', 'Remove favorite'),
+			icon: 'star-outline',
+			run: (item) => void unfavorite(item)
+		},
 		{ key: 'rename', label: t('common.rename', 'Rename'), icon: 'pen', run: rename },
 		{ key: 'delete', label: t('common.delete', 'Delete'), icon: 'trash', danger: true, run: remove }
 	];
 
 	// ── Selection + batch ─────────────────────────────────────────────────────
-	// Selected items arrive via the batchToolbar snippet param —
+	// Selected items arrive via the batchActions snippet param —
 	// ResourceList already derives them (O(selection), not O(N)); a
 	// host-side `items.filter(...)` shadow would re-run a second full scan
 	// per selection toggle, and its id mirror is unnecessary (the component
 	// prunes its own selection when items reload) — benches/ROUND11.md §S1.
 	type Selectable = FileItem | FolderItem;
 
-	function batchTargets(sel: Selectable[]) {
-		return sel.map((i) => ({ id: i.id, name: i.name, kind: kindOf(i) }));
-	}
-
 	function batchDownload(sel: Selectable[]) {
 		for (const i of sel) downloadItem(i);
-	}
-
-	async function batchDelete(sel: Selectable[]) {
-		const ok = await confirmDialog({
-			title: t('common.delete', 'Delete'),
-			message: t('files.confirm_delete_n', { count: sel.length }, 'Delete {{count}} item(s)?'),
-			confirmText: t('common.delete', 'Delete'),
-			danger: true
-		});
-		if (!ok) return;
-		try {
-			await Promise.all(sel.map((i) => (isFile(i) ? deleteFile(i.id) : deleteFolder(i.id))));
-			const removed = new Set(sel.map((i) => i.id));
-			raw = raw.filter((i) => !removed.has(i.resource.id));
-		} catch (e) {
-			errorToast(e);
-		}
 	}
 
 	onMount(() => load(true));
@@ -307,8 +329,18 @@
 	onopen={open}
 	onfavorite={unfavorite}
 	showOwner
+	showPath
+	dateLabel={t('files.col_added', 'Added')}
 	selectable
 	{contextActions}
+	menuPrepare={async (item) => {
+		// Lazy folder-access probe — fires only when the user actually
+		// opens the context menu on a row, not proactively for every
+		// row on load. Cached in the LRU (see `folderAccess.ts`) so
+		// subsequent right-clicks on the same folder are instant.
+		const pid = parentFolderId(item);
+		if (pid) await probeFolderAccess(pid);
+	}}
 	{groupBys}
 	bind:groupBy
 	bind:reversed
@@ -317,26 +349,25 @@
 		load(true, orderBy, rev);
 	}}
 >
-	{#snippet batchToolbar(sel)}
+	{#snippet batchActions(sel)}
+		<!--
+			Favorites-scoped batch cluster: Download stays. Move + Delete
+			were destructive-to-content operations carried over from the
+			pre-refactor menu; on a favorites *bookmarks* view they
+			belong in the row's context menu (rename/move/delete via
+			`contextActions`), not in the batch bar. Batch "remove from
+			favorite" un-stars the selected rows without touching the
+			underlying files — mirrors the per-row favorite star.
+		-->
 		<Button
 			icon="download"
 			data-testid="favorites-batch-download-btn"
 			onclick={() => batchDownload(sel)}>{t('common.download', 'Download')}</Button
 		>
 		<Button
-			icon="arrows-alt"
-			data-testid="favorites-batch-move-btn"
-			onclick={() => {
-				moveTarget = null;
-				moveItems = batchTargets(sel);
-				moveOpen = true;
-			}}>{t('files.move', 'Move')}</Button
-		>
-		<Button
-			variant="danger"
-			icon="trash"
-			data-testid="favorites-batch-delete-btn"
-			onclick={() => batchDelete(sel)}>{t('common.delete', 'Delete')}</Button
+			icon="star-outline"
+			data-testid="favorites-batch-remove-btn"
+			onclick={() => sel.forEach(unfavorite)}>{t('files.unfavorite', 'Remove favorite')}</Button
 		>
 	{/snippet}
 </ResourceList>

@@ -234,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "إشعار عبر البريد الإلكتروني",
     "revoke": "Remove",
-    "role_label": "الدور"
+    "role_label": "الدور",
+    "col_shared_by": "شورك بواسطة",
+    "col_shared": "مشترك"
   },
   "share_dialogTitle": "رابط المشاركة",
   "share_linkLabel": "رابط المشاركة:",
@@ -337,6 +339,7 @@
     "modified": "تاريخ التعديل",
     "no_files": "لا توجد ملفات في هذا المجلد",
     "empty_hint": "ارفع ملفات أو أنشئ مجلدات للبدء",
+    "drop_to_upload": "أفلت الملفات هنا للرفع",
     "loading": "جارٍ تحميل الملفات…",
     "view_grid": "عرض شبكي",
     "view_list": "عرض قائمة",
@@ -375,7 +378,13 @@
     "rename_dotfile_hidden": "تمت إعادة التسمية إلى \"{{name}}\" — أصبحت الآن مخفية وفقاً لتفضيلاتك.",
     "new_folder_dotfile_hidden": "تم إنشاء المجلد \"{{name}}\" — مخفي وفقاً لتفضيلاتك.",
     "dotfiles_hidden_toast": "تم إخفاء الملفات المخفية",
-    "dotfiles_shown_toast": "تم إظهار الملفات المخفية"
+    "dotfiles_shown_toast": "تم إظهار الملفات المخفية",
+    "col_modified": "معدل",
+    "col_added": "أضيف",
+    "col_created_by": "أنشئ بواسطة",
+    "col_opened": "افتُح",
+    "col_path": "الموقع",
+    "new_elements": "عناصر جديدة"
   },
   "dialogs": {
     "rename_folder": "إعادة تسمية المجلد",
@@ -461,7 +470,8 @@
       "trashed_time": "وقت الحذف"
     },
     "delete": "حذف نهائياً",
-    "empty_action": "تفريغ سلة المهملات"
+    "empty_action": "تفريغ سلة المهملات",
+    "expires_at": "ينتهي في"
   },
   "daysRemaining": {
     "expired": "منتهية الصلاحية",
@@ -582,7 +592,8 @@
     "empty_hint": "الملفات التي تفتحها ستظهر هنا",
     "empty_hidden_state": "{{n}} من العناصر الأخيرة مخفية وفقاً لتفضيلاتك",
     "empty_hidden_hint": "قم بإيقاف تشغيل \"إخفاء الملفات المخفية\" في ملفك الشخصي لرؤيتها.",
-    "loadMore": "تحميل المزيد"
+    "loadMore": "تحميل المزيد",
+    "remove_item": "إزالة من الأخيرة"
   },
   "notifications": {
     "file_renamed": "تمت إعادة تسمية الملف",
@@ -1265,5 +1276,10 @@
   "group": {
     "members_empty": "لا يوجد أعضاء",
     "member_count": "{{n}} أعضاء"
+  },
+  "resource_list": {
+    "location": "الموقع",
+    "wrong_drop_zone_msg": "الرفع يعمل فقط في قسم الملفات — افتح قسم الملفات وأفلت العناصر هناك.",
+    "wrong_drop_zone_action": "انتقل إلى الملفات"
   }
 }

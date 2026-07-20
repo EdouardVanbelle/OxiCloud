@@ -367,6 +367,8 @@ impl TrashDbRepository {
         fld.updated_at                                       AS modified_at,
         fld.drive_id                                         AS drive_id,
         NULL::text                                           AS blob_hash,
+        fld.created_by                                       AS created_by,
+        fld.updated_by                                       AS updated_by,
         fld.trashed_at                                       AS trashed_at,
         (fld.trashed_at + ($7::int * INTERVAL '1 day'))      AS deletion_date,
         fld.path::text                                       AS resource_path,
@@ -393,6 +395,8 @@ impl TrashDbRepository {
         f.updated_at                                         AS modified_at,
         f.drive_id                                           AS drive_id,
         f.blob_hash,
+        f.created_by                                         AS created_by,
+        f.updated_by                                         AS updated_by,
         f.trashed_at                                         AS trashed_at,
         (f.trashed_at + ($7::int * INTERVAL '1 day'))        AS deletion_date,
         COALESCE(pfld.path::text || '/' || f.name, f.name)   AS resource_path,
@@ -522,7 +526,8 @@ impl TrashDbRepository {
 SELECT
     r.resource_type, r.resource_id, r.name, r.parent_id,
     r.mime_type, r.size, r.resource_created_at, r.modified_at,
-    r.drive_id, r.trashed_at, r.deletion_date, r.resource_path,
+    r.drive_id, r.blob_hash, r.created_by, r.updated_by,
+    r.trashed_at, r.deletion_date, r.resource_path,
     r.sort_str, r.type_order, r.folder_first
 FROM resources r
 {keyset}
@@ -581,6 +586,8 @@ LIMIT $6"
                     modified_at: row.get("modified_at"),
                     drive_id: row.get("drive_id"),
                     blob_hash: row.try_get("blob_hash").ok(),
+                    created_by: row.try_get("created_by").ok(),
+                    updated_by: row.try_get("updated_by").ok(),
                     trashed_at,
                     deletion_date,
                     path: row.try_get("resource_path").ok(),

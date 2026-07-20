@@ -234,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "通过邮件通知",
     "revoke": "Remove",
-    "role_label": "角色"
+    "role_label": "角色",
+    "col_shared_by": "共享者",
+    "col_shared": "共享日期"
   },
   "share_dialogTitle": "共享链接",
   "share_linkLabel": "共享链接：",
@@ -337,6 +339,7 @@
     "modified": "修改日期",
     "no_files": "此文件夹中没有文件",
     "empty_hint": "上传文件或创建文件夹以开始使用",
+    "drop_to_upload": "将文件拖放到此处上传",
     "loading": "正在加载文件…",
     "view_grid": "网格视图",
     "view_list": "列表视图",
@@ -375,7 +378,13 @@
     "rename_dotfile_hidden": "已重命名为「{{name}}」——现已根据您的偏好隐藏。",
     "new_folder_dotfile_hidden": "已创建文件夹「{{name}}」——根据您的偏好隐藏。",
     "dotfiles_hidden_toast": "已隐藏隐藏文件",
-    "dotfiles_shown_toast": "已显示隐藏文件"
+    "dotfiles_shown_toast": "已显示隐藏文件",
+    "col_modified": "修改日期",
+    "col_added": "添加日期",
+    "col_created_by": "创建者",
+    "col_opened": "打开日期",
+    "col_path": "位置",
+    "new_elements": "新元素"
   },
   "dialogs": {
     "rename_folder": "重命名文件夹",
@@ -461,7 +470,8 @@
       "trashed_time": "删除时间"
     },
     "delete": "永久删除",
-    "empty_action": "Empty trash"
+    "empty_action": "Empty trash",
+    "expires_at": "到期时间"
   },
   "daysRemaining": {
     "expired": "已过期",
@@ -582,7 +592,8 @@
     "empty_hint": "您打开的文件将显示在这里",
     "empty_hidden_state": "根据您的偏好隐藏了 {{n}} 个最近项目",
     "empty_hidden_hint": "在个人资料中关闭「隐藏隐藏文件」即可查看。",
-    "loadMore": "加载更多"
+    "loadMore": "加载更多",
+    "remove_item": "从最近使用中移除"
   },
   "batch": {
     "one_selected": "已选择 1 个项目",
@@ -1265,5 +1276,10 @@
   "group": {
     "members_empty": "无成员",
     "member_count": "{{n}} 名成员"
+  },
+  "resource_list": {
+    "location": "位置",
+    "wrong_drop_zone_msg": "上传仅在 “文件” 中生效 — 请打开文件区并在那里拖放。",
+    "wrong_drop_zone_action": "前往文件"
   }
 }

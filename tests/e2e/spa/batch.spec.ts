@@ -25,14 +25,14 @@ async function openFolderWithChildren(
   await apiCreateFolder(page, c2, parent.id);
   await page.goto(`/files/${parent.id}`);
   await expect(page.getByTestId(c1)).toBeVisible({ timeout: 15_000 });
-  await page.getByTestId('list-toolbar-view-list-btn').click();
+  await page.getByTestId('display-mode-view-list-btn').click();
   return { c1, c2 };
 }
 
 test('select-all then batch favorite', async ({ page }) => {
   const { c1 } = await openFolderWithChildren(page);
-  await page.getByTestId('files-select-all-checkbox').check();
-  await expect(page.getByTestId('files-batch-bar')).toBeVisible();
+  await page.getByTestId('resource-list-select-all-checkbox').check();
+  await expect(page.getByTestId('resource-list-batch-close-btn')).toBeVisible();
   await page.getByTestId('files-batch-favorite-btn').click();
   // Items remain in the folder after favoriting.
   await expect(page.getByTestId(c1)).toBeVisible({ timeout: 15_000 });
@@ -40,8 +40,8 @@ test('select-all then batch favorite', async ({ page }) => {
 
 test('select-all then batch copy and download', async ({ page }) => {
   const { c1 } = await openFolderWithChildren(page);
-  await page.getByTestId('files-select-all-checkbox').check();
-  await expect(page.getByTestId('files-batch-bar')).toBeVisible();
+  await page.getByTestId('resource-list-select-all-checkbox').check();
+  await expect(page.getByTestId('resource-list-batch-close-btn')).toBeVisible();
 
   // Copy → the move dialog (copy mode); cancel.
   await page.getByTestId('files-batch-copy-btn').click();
@@ -49,8 +49,8 @@ test('select-all then batch copy and download', async ({ page }) => {
   await page.getByTestId('move-dialog-cancel-btn').click();
 
   // Re-select and batch-download (a zip).
-  await page.getByTestId('files-select-all-checkbox').check();
-  await expect(page.getByTestId('files-batch-bar')).toBeVisible();
+  await page.getByTestId('resource-list-select-all-checkbox').check();
+  await expect(page.getByTestId('resource-list-batch-close-btn')).toBeVisible();
   const dl = page.waitForEvent('download', { timeout: 10_000 }).catch(() => null);
   await page.getByTestId('files-batch-download-btn').click();
   await dl;
@@ -59,8 +59,8 @@ test('select-all then batch copy and download', async ({ page }) => {
 
 test('select-all then batch delete', async ({ page }) => {
   const { c1, c2 } = await openFolderWithChildren(page);
-  await page.getByTestId('files-select-all-checkbox').check();
-  await expect(page.getByTestId('files-batch-bar')).toBeVisible();
+  await page.getByTestId('resource-list-select-all-checkbox').check();
+  await expect(page.getByTestId('resource-list-batch-close-btn')).toBeVisible();
   await page.getByTestId('files-batch-delete-btn').click();
   await page.getByTestId('dialog-host-confirm-btn').click();
 

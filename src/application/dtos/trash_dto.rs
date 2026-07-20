@@ -71,6 +71,12 @@ pub struct TrashResourceRow {
     /// same file (restorable trash items are conditional-request
     /// targets too).
     pub blob_hash: Option<String>,
+    /// §14 provenance — who created the row. `None` when the creator
+    /// was deleted (FK `ON DELETE SET NULL`).
+    pub created_by: Option<Uuid>,
+    /// §14 provenance — who last touched the row (includes the trash
+    /// action itself, which stamps `updated_by = caller_id`).
+    pub updated_by: Option<Uuid>,
     pub trashed_at: DateTime<Utc>,
     pub deletion_date: DateTime<Utc>,
     /// Original location path (for folders: `path`; for files: `parent.path || '/' || name`).

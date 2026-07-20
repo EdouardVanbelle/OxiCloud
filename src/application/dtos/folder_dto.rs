@@ -219,6 +219,13 @@ pub struct FolderResourceRow {
     /// on the REST `/api/folders/{id}/resources` listing so API
     /// consumers can issue conditional requests against listed files.
     pub blob_hash: Option<String>,
+    /// §14 provenance — who created the row. `None` when the creator was
+    /// deleted (FK `ON DELETE SET NULL`). Populates
+    /// `FileDto::created_by` / `FolderDto::created_by` on the listing so
+    /// the UI can render the owner column without a follow-up query.
+    pub created_by: Option<Uuid>,
+    /// §14 provenance — who last touched the row.
+    pub updated_by: Option<Uuid>,
     // Pre-computed sort fields — returned by the SQL for cursor construction.
     /// `LOWER(name)` used by `name`/`type` sorts.
     pub sort_str: String,

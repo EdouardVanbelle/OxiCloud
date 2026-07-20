@@ -112,6 +112,16 @@ pub struct RecentResourceRow {
     /// folder rows. Feeds `File::compute_etag` so this listing's
     /// `etag` matches GET/HEAD/PROPFIND for the same file.
     pub blob_hash: Option<String>,
+    /// §14 provenance — who created the row. `None` when the creator
+    /// was deleted (FK `ON DELETE SET NULL`). Powers the owner column
+    /// on the `/recent` UI (aligned with `/files` and `/favorites`
+    /// for cross-surface consistency, rather than the finer-grained
+    /// but noisier "who touched this last" signal).
+    pub created_by: Option<Uuid>,
+    /// §14 provenance — who last touched the row. Not currently
+    /// consumed by the UI but surfaced for API parity with the other
+    /// listing endpoints.
+    pub updated_by: Option<Uuid>,
     /// `true` when `owner_id == requesting user_id`.
     pub is_owner: bool,
     pub accessed_at: DateTime<Utc>,

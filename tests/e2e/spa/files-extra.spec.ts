@@ -20,12 +20,12 @@ test('sort columns and toggle list/grid views', async ({ page }) => {
   await page.goto(`/files/${folder.id}`);
   await expect(page.getByTestId(SAMPLE_FILES.text().name)).toBeVisible({ timeout: 15_000 });
 
-  await page.getByTestId('list-toolbar-view-list-btn').click();
+  await page.getByTestId('display-mode-view-list-btn').click();
   // Column sort buttons live in the list-view header.
   await page.getByTestId('files-sort-name-btn').click({ timeout: 5_000 }).catch(() => {});
   await page.getByTestId('files-sort-size-btn').click({ timeout: 5_000 }).catch(() => {});
   await page.getByTestId('files-sort-modified_at-btn').click({ timeout: 5_000 }).catch(() => {});
-  await page.getByTestId('list-toolbar-view-grid-btn').click();
+  await page.getByTestId('display-mode-view-grid-btn').click();
 });
 
 test('sort by every column and group by every dimension', async ({ page }) => {
@@ -37,17 +37,17 @@ test('sort by every column and group by every dimension', async ({ page }) => {
   await expect(page.getByTestId(SAMPLE_FILES.text().name)).toBeVisible({ timeout: 15_000 });
 
   // List view exposes the column-sort buttons.
-  await page.getByTestId('list-toolbar-view-list-btn').click();
+  await page.getByTestId('display-mode-view-list-btn').click();
   for (const col of ['name', 'owner', 'type', 'size', 'modified_at']) {
     await page.getByTestId(`files-sort-${col}-btn`).click({ timeout: 3_000 }).catch(() => {});
   }
   // Flip the sort direction.
-  await page.getByTestId('list-toolbar-sort-direction-btn').click({ timeout: 3_000 }).catch(() => {});
+  await page.getByTestId('display-mode-sort-direction-btn').click({ timeout: 3_000 }).catch(() => {});
 
   // Cycle through every group-by dimension.
   for (const g of ['type', 'size', 'modifiedAt', 'createdAt']) {
-    await page.getByTestId('list-toolbar-groupby-btn').click({ timeout: 3_000 }).catch(() => {});
-    await page.getByTestId(`list-toolbar-groupby-${g}-item`).click({ timeout: 3_000 }).catch(() => {});
+    await page.getByTestId('display-mode-groupby-btn').click({ timeout: 3_000 }).catch(() => {});
+    await page.getByTestId(`display-mode-groupby-${g}-item`).click({ timeout: 3_000 }).catch(() => {});
   }
 });
 
@@ -58,8 +58,8 @@ test('group files by type', async ({ page }) => {
   await page.goto(`/files/${folder.id}`);
   await expect(page.getByTestId(SAMPLE_FILES.text().name)).toBeVisible({ timeout: 15_000 });
 
-  await page.getByTestId('list-toolbar-groupby-btn').click();
-  await page.getByTestId('list-toolbar-groupby-type-item').click();
+  await page.getByTestId('display-mode-groupby-btn').click();
+  await page.getByTestId('display-mode-groupby-type-item').click();
   // The grouped (swimlane) view now renders; items remain visible.
   await expect(page.getByTestId(SAMPLE_FILES.text().name)).toBeVisible();
 });
@@ -109,12 +109,15 @@ test('deep-link ?file= opens the viewer', async ({ page }) => {
 
   await page.goto(`/files/${folder.id}`);
   await expect(page.getByTestId(f.name)).toBeVisible({ timeout: 15_000 });
-  // Extract the file id from a row action button, then deep-link to it.
-  const tid = await page
-    .locator('[data-testid^="files-file-share-"]')
+  // Extract the file id straight off the row — ResourceList tags every
+  // `.file-item` with `data-item-id={item.id}`. The pre-migration
+  // approach read `files-file-share-{id}` off a per-row share button
+  // that no longer exists (Share moved into the context menu).
+  const fileId = await page
+    .locator(`.file-item[data-testid="${f.name}"]`)
     .first()
-    .getAttribute('data-testid');
-  const fileId = (tid ?? '').replace('files-file-share-', '');
+    .getAttribute('data-item-id');
+  if (!fileId) throw new Error(`could not resolve file id for ${f.name}`);
   await page.goto(`/files/${folder.id}?file=${fileId}`);
   await expect(page.getByTestId('file-viewer-dialog')).toBeVisible({ timeout: 15_000 });
   await page.getByTestId('file-viewer-close-btn').click();
@@ -194,7 +197,7 @@ test('keyboard select-all and escape in the files list', async ({ page }) => {
 
   await page.locator('.files-page').click({ position: { x: 5, y: 5 } });
   await page.keyboard.press('Control+a');
-  await expect(page.getByTestId('files-batch-bar')).toBeVisible({ timeout: 5_000 }).catch(() => {});
+  await expect(page.getByTestId('resource-list-batch-close-btn')).toBeVisible({ timeout: 5_000 }).catch(() => {});
   await page.keyboard.press('Escape');
 });
 

@@ -183,7 +183,9 @@
     "link_name": "Nombre del enlace (opcional)",
     "notifyByEmail": "Notificar por correo",
     "revoke": "Eliminar",
-    "role_label": "Rol"
+    "role_label": "Rol",
+    "col_shared_by": "Compartido por",
+    "col_shared": "Compartido"
   },
   "share_dialogTitle": "Compartir Enlace",
   "share_linkLabel": "Enlace compartido:",
@@ -337,6 +339,7 @@
     "modified": "Modificado",
     "no_files": "No hay archivos en esta carpeta",
     "empty_hint": "Sube archivos o crea carpetas para comenzar",
+    "drop_to_upload": "Arrastra archivos aquí para subirlos",
     "loading": "Cargando archivos…",
     "view_grid": "Vista de cuadrícula",
     "view_list": "Vista de lista",
@@ -380,7 +383,13 @@
     "rename_dotfile_hidden": "Renombrado a \"{{name}}\" — ahora oculto por tu preferencia.",
     "new_folder_dotfile_hidden": "Carpeta \"{{name}}\" creada — oculta por tu preferencia.",
     "dotfiles_hidden_toast": "Archivos ocultos ocultados",
-    "dotfiles_shown_toast": "Archivos ocultos mostrados"
+    "dotfiles_shown_toast": "Archivos ocultos mostrados",
+    "col_modified": "Modificado",
+    "col_added": "Añadido",
+    "col_created_by": "Creado por",
+    "col_opened": "Abierto",
+    "col_path": "Ubicación",
+    "new_elements": "Nuevos elementos"
   },
   "dialogs": {
     "rename_folder": "Renombrar carpeta",
@@ -466,7 +475,8 @@
       "trashed_time": "Fecha de eliminación"
     },
     "delete": "Eliminar permanentemente",
-    "empty_action": "Vaciar papelera"
+    "empty_action": "Vaciar papelera",
+    "expires_at": "Expira"
   },
   "daysRemaining": {
     "expired": "Caducado",
@@ -587,7 +597,8 @@
     "empty_hint": "Los archivos que abras aparecerán aquí",
     "empty_hidden_state": "{{n}} elemento(s) reciente(s) oculto(s) por tu preferencia",
     "empty_hidden_hint": "Desactiva \"Ocultar archivos ocultos\" en tu perfil para verlos.",
-    "loadMore": "Cargar más"
+    "loadMore": "Cargar más",
+    "remove_item": "Quitar de recientes"
   },
   "notifications": {
     "file_renamed": "Archivo renombrado",
@@ -1280,5 +1291,10 @@
   "group": {
     "members_empty": "Sin miembros",
     "member_count": "{{n}} miembros"
+  },
+  "resource_list": {
+    "location": "Ubicación",
+    "wrong_drop_zone_msg": "Las subidas solo funcionan en Archivos — abre la sección Archivos y suelta ahí los elementos.",
+    "wrong_drop_zone_action": "Ir a Archivos"
   }
 }

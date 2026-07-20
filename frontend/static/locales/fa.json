@@ -234,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "اطلاع‌رسانی از طریق ایمیل",
     "revoke": "Remove",
-    "role_label": "نقش"
+    "role_label": "نقش",
+    "col_shared_by": "به اشتراک گذاشته شده توسط",
+    "col_shared": "به اشتراک گذاشته شده"
   },
   "share_dialogTitle": "پیوند هم‌رسانی",
   "share_linkLabel": "پیوند هم‌رسانی:",
@@ -337,6 +339,7 @@
     "modified": "تاریخ تغییر",
     "no_files": "هنوز هیچ پرونده‌ای در این پوشه وجود ندارد",
     "empty_hint": "برای شروع، فایل‌ها را آپلود کنید یا پوشه بسازید",
+    "drop_to_upload": "برای بارگذاری، فایل‌ها را اینجا رها کنید",
     "loading": "در حال بارگذاری فایل‌ها…",
     "view_grid": "نمای شبکه‌ای",
     "view_list": "نمای فهرستی",
@@ -375,7 +378,13 @@
     "rename_dotfile_hidden": "نام به \"{{name}}\" تغییر کرد — اکنون طبق تنظیمات شما پنهان است.",
     "new_folder_dotfile_hidden": "پوشه \"{{name}}\" ایجاد شد — طبق تنظیمات شما پنهان است.",
     "dotfiles_hidden_toast": "پرونده‌های پنهان مخفی شد",
-    "dotfiles_shown_toast": "پرونده‌های پنهان نمایش داده شد"
+    "dotfiles_shown_toast": "پرونده‌های پنهان نمایش داده شد",
+    "col_modified": "تغییر یافته",
+    "col_added": "افزوده شده",
+    "col_created_by": "ایجاد شده توسط",
+    "col_opened": "باز شده",
+    "col_path": "مکان",
+    "new_elements": "موارد جدید"
   },
   "dialogs": {
     "rename_folder": "تغییر نام پوشه",
@@ -461,7 +470,8 @@
       "trashed_time": "زمان حذف"
     },
     "delete": "حذف دائمی",
-    "empty_action": "Empty trash"
+    "empty_action": "Empty trash",
+    "expires_at": "انقضا در"
   },
   "daysRemaining": {
     "expired": "منقضی شده",
@@ -582,7 +592,8 @@
     "empty_hint": "پرونده‌هایی که باز می‌کنید اینجا ظاهر می‌شوند",
     "empty_hidden_state": "{{n}} مورد اخیر طبق تنظیمات شما پنهان است",
     "empty_hidden_hint": "برای مشاهده آن‌ها \"پنهان کردن پرونده‌های پنهان\" را در پروفایل خود غیرفعال کنید.",
-    "loadMore": "بارگذاری بیشتر"
+    "loadMore": "بارگذاری بیشتر",
+    "remove_item": "حذف از اخیر"
   },
   "batch": {
     "one_selected": "۱ مورد انتخاب شده",
@@ -1265,5 +1276,10 @@
   "group": {
     "members_empty": "بدون عضو",
     "member_count": "{{n}} عضو"
+  },
+  "resource_list": {
+    "location": "مکان",
+    "wrong_drop_zone_msg": "بارگذاری فقط در بخش پرونده‌ها کار می‌کند — بخش پرونده‌ها را باز کنید و آنجا رها کنید.",
+    "wrong_drop_zone_action": "برو به پرونده‌ها"
   }
 }

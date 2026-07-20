@@ -5,12 +5,13 @@ const { confirmDialog, promptDialog } = vi.hoisted(() => ({
 	confirmDialog: vi.fn(),
 	promptDialog: vi.fn()
 }));
-vi.mock('$lib/api/endpoints/recent', () => ({ clearRecent: vi.fn(), fetchRecentPage: vi.fn() }));
+vi.mock('$lib/api/endpoints/recent', () => ({
+	clearRecent: vi.fn(),
+	fetchRecentPage: vi.fn(),
+	removeFromRecent: vi.fn()
+}));
 vi.mock('$lib/api/endpoints/favorites', () => ({
-	addFavorite: vi.fn(),
 	dateBucket: () => 'Today',
-	fetchFavoritesPage: vi.fn(async () => ({ items: [], next_cursor: null })),
-	removeFavorite: vi.fn(),
 	resolveOwnerName: vi.fn(async () => 'me'),
 	sizeBucket: () => 'Small',
 	typeLabel: () => 'File'
@@ -23,9 +24,7 @@ vi.mock('$lib/api/endpoints/files', () => ({
 vi.mock('$lib/api/endpoints/folders', () => ({ renameFolder: vi.fn(), deleteFolder: vi.fn() }));
 vi.mock('$lib/stores/dialogs.svelte', () => ({ confirmDialog, promptDialog }));
 
-import { fetchRecentPage, clearRecent } from '$lib/api/endpoints/recent';
-import { addFavorite } from '$lib/api/endpoints/favorites';
-import { deleteFile } from '$lib/api/endpoints/files';
+import { fetchRecentPage, clearRecent, removeFromRecent } from '$lib/api/endpoints/recent';
 import RecentPage from './+page.svelte';
 
 const m = (fn: unknown) => fn as ReturnType<typeof vi.fn>;
@@ -79,24 +78,33 @@ it('clears recent activity after confirmation', async () => {
 	await waitFor(() => expect(clearRecent).toHaveBeenCalled());
 });
 
-it('favorites a recent row via the star button', async () => {
+it('removes a recent row via the broom button', async () => {
+	// Recent no longer surfaces a favorite star (users go to the item's
+	// real home for that). The per-row affordance is now a broom that
+	// calls `DELETE /api/recent/{kind}/{id}` — verified end-to-end via
+	// the `removeFromRecent` mock.
 	withOneFile();
-	m(addFavorite).mockResolvedValue(undefined);
+	m(removeFromRecent).mockResolvedValue(undefined);
 	render(RecentPage);
 	await screen.findByText('notes.txt');
-	await fireEvent.click(screen.getByTestId('resource-list-favorite-r1-btn'));
-	await waitFor(() => expect(addFavorite).toHaveBeenCalledWith('file', 'r1'));
+	await fireEvent.click(screen.getByTestId('recent-remove-btn-r1'));
+	await waitFor(() => expect(removeFromRecent).toHaveBeenCalledWith('file', 'r1'));
 });
 
-it('batch-deletes selected recent items after confirmation', async () => {
+it('batch-removes-from-recent the selection', async () => {
+	// /recent's batch bar was intentionally trimmed to Download +
+	// Remove-from-recent. Bulk-deleting the underlying file from
+	// this history view (previous behaviour) confused the "this is
+	// activity log" semantics — destructive actions belong in the
+	// row's context menu, not in the batch bar. This test pins the
+	// new shape: batch button just forgets the selection from history.
 	withOneFile();
-	confirmDialog.mockResolvedValue(true);
-	m(deleteFile).mockResolvedValue(undefined);
+	m(removeFromRecent).mockResolvedValue(undefined);
 	render(RecentPage);
 	await screen.findByText('notes.txt');
 	await fireEvent.click(screen.getByTestId('resource-list-select-r1-checkbox'));
-	await fireEvent.click(await screen.findByTestId('recent-batch-delete-btn'));
-	await waitFor(() => expect(deleteFile).toHaveBeenCalledWith('r1'));
+	await fireEvent.click(await screen.findByTestId('recent-batch-remove-btn'));
+	await waitFor(() => expect(removeFromRecent).toHaveBeenCalledWith('file', 'r1'));
 });
 
 it('renders an empty state when there is no recent activity', async () => {

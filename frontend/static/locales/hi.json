@@ -234,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "ईमेल से सूचित करें",
     "revoke": "Remove",
-    "role_label": "भूमिका"
+    "role_label": "भूमिका",
+    "col_shared_by": "द्वारा साझा किया गया",
+    "col_shared": "साझा किया गया"
   },
   "share_dialogTitle": "शेयर लिंक",
   "share_linkLabel": "शेयर लिंक:",
@@ -337,6 +339,7 @@
     "modified": "संशोधित",
     "no_files": "इस फ़ोल्डर में कोई फ़ाइल नहीं",
     "empty_hint": "शुरू करने के लिए ह़ैलें अपलोड करें या होल्डर बनाएँ",
+    "drop_to_upload": "अपलोड करने के लिए फ़ाइलें यहाँ छोड़ें",
     "loading": "फ़ाइलें लोड हो रही हैं…",
     "view_grid": "ग्रिड दृश्य",
     "view_list": "सूची दृश्य",
@@ -375,7 +378,13 @@
     "rename_dotfile_hidden": "\"{{name}}\" में नाम बदला — अब आपकी वरीयता के अनुसार छिपा हुआ है।",
     "new_folder_dotfile_hidden": "फ़ोल्डर \"{{name}}\" बनाया गया — आपकी वरीयता के अनुसार छिपा हुआ है।",
     "dotfiles_hidden_toast": "छिपी फ़ाइलें छिपाई गईं",
-    "dotfiles_shown_toast": "छिपी फ़ाइलें दिखाई गईं"
+    "dotfiles_shown_toast": "छिपी फ़ाइलें दिखाई गईं",
+    "col_modified": "संशोधित",
+    "col_added": "जोड़ा गया",
+    "col_created_by": "द्वारा बनाया गया",
+    "col_opened": "खोला गया",
+    "col_path": "स्थान",
+    "new_elements": "नए तत्व"
   },
   "dialogs": {
     "rename_folder": "फ़ोल्डर का नाम बदलें",
@@ -461,7 +470,8 @@
       "trashed_time": "हटाने का समय"
     },
     "delete": "स्थायी रूप से हटाएँ",
-    "empty_action": "रद्दी खाली करें"
+    "empty_action": "रद्दी खाली करें",
+    "expires_at": "समाप्ति"
   },
   "daysRemaining": {
     "expired": "समाप्त",
@@ -582,7 +592,8 @@
     "empty_hint": "जो फ़ाइलें आप खोलेंगे वे यहाँ दिखेंगी",
     "empty_hidden_state": "आपकी वरीयता के अनुसार {{n}} हाल की वस्तुएँ छिपी हुई हैं",
     "empty_hidden_hint": "उन्हें देखने के लिए अपनी प्रोफ़ाइल में \"छिपी फ़ाइलें छिपाएँ\" को बंद करें।",
-    "loadMore": "और लोड करें"
+    "loadMore": "और लोड करें",
+    "remove_item": "हाल के से हटाएँ"
   },
   "notifications": {
     "file_renamed": "फ़ाइल का नाम बदला गया",
@@ -1265,5 +1276,10 @@
   "group": {
     "members_empty": "कोई सदस्य नहीं",
     "member_count": "{{n}} सदस्य"
+  },
+  "resource_list": {
+    "location": "स्थान",
+    "wrong_drop_zone_msg": "अपलोड केवल फ़ाइलें अनुभाग में काम करता है — फ़ाइलें अनुभाग खोलें और वहीं छोड़ें।",
+    "wrong_drop_zone_action": "फ़ाइलों पर जाएँ"
   }
 }

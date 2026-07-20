@@ -96,7 +96,7 @@ test('toolbar eye toggle hides and re-shows dotfiles in /files', async ({ page }
   // click routes through `preferences.toggleHideDotfiles()` which
   // does an optimistic local mutation, so the row update should be
   // visible before the debounced PATCH lands.
-  await page.getByTestId('list-toolbar-dotfile-toggle-btn').click();
+  await page.getByTestId('display-mode-dotfile-toggle-btn').click();
 
   // Visible row stays; hidden row vanishes.
   await expect(page.getByTestId(visible)).toBeVisible();
@@ -104,7 +104,7 @@ test('toolbar eye toggle hides and re-shows dotfiles in /files', async ({ page }
 
   // Flip it back off — the hidden row must reappear. Same button;
   // its state flips atomically with `preferences.hideDotfiles`.
-  await page.getByTestId('list-toolbar-dotfile-toggle-btn').click();
+  await page.getByTestId('display-mode-dotfile-toggle-btn').click();
   await expect(page.getByTestId(hidden)).toBeVisible();
 });
 
@@ -130,7 +130,7 @@ test('empty-state hint appears when a folder holds only dotfiles', async ({ page
   // Turn hide on. Folder becomes visually empty — but not the
   // generic empty state; the "N hidden items" affordance appears
   // instead, offering a one-click "Show hidden files" escape.
-  await page.getByTestId('list-toolbar-dotfile-toggle-btn').click();
+  await page.getByTestId('display-mode-dotfile-toggle-btn').click();
 
   const showHiddenBtn = page.getByTestId('files-show-hidden-btn');
   await expect(showHiddenBtn).toBeVisible({ timeout: 15_000 });
@@ -181,6 +181,6 @@ test('trash always shows dotfiles even when hide is on', async ({ page }) => {
   // we just verify the toolbar toggle reflects the current server
   // state via aria-pressed on /files.
   await page.goto('/files');
-  const toggle = page.getByTestId('list-toolbar-dotfile-toggle-btn');
+  const toggle = page.getByTestId('display-mode-dotfile-toggle-btn');
   await expect(toggle).toHaveAttribute('aria-pressed', 'true');
 });

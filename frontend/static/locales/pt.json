@@ -234,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "Notificar por e-mail",
     "revoke": "Remove",
-    "role_label": "Função"
+    "role_label": "Função",
+    "col_shared_by": "Compartilhado por",
+    "col_shared": "Compartilhado"
   },
   "share_dialogTitle": "Link de compartilhamento",
   "share_linkLabel": "Link compartilhado:",
@@ -337,6 +339,7 @@
     "modified": "Modificado",
     "no_files": "Nenhum arquivo nesta pasta",
     "empty_hint": "Envie arquivos ou crie pastas para começar",
+    "drop_to_upload": "Solte arquivos aqui para enviar",
     "loading": "Carregando arquivos…",
     "view_grid": "Visualização em grade",
     "view_list": "Visualização em lista",
@@ -375,7 +378,13 @@
     "rename_dotfile_hidden": "Renomeado para \"{{name}}\" — agora oculto pela sua preferência.",
     "new_folder_dotfile_hidden": "Pasta \"{{name}}\" criada — oculta pela sua preferência.",
     "dotfiles_hidden_toast": "Arquivos ocultos ocultados",
-    "dotfiles_shown_toast": "Arquivos ocultos exibidos"
+    "dotfiles_shown_toast": "Arquivos ocultos exibidos",
+    "col_modified": "Modificado",
+    "col_added": "Adicionado",
+    "col_created_by": "Criado por",
+    "col_opened": "Aberto",
+    "col_path": "Localização",
+    "new_elements": "Novos itens"
   },
   "dialogs": {
     "rename_folder": "Renomear pasta",
@@ -461,7 +470,8 @@
       "trashed_time": "Data de exclusão"
     },
     "delete": "Excluir permanentemente",
-    "empty_action": "Esvaziar lixeira"
+    "empty_action": "Esvaziar lixeira",
+    "expires_at": "Expira em"
   },
   "daysRemaining": {
     "expired": "Expirado",
@@ -582,7 +592,8 @@
     "empty_hint": "Os arquivos que você abrir aparecerão aqui",
     "empty_hidden_state": "{{n}} item(ns) recente(s) oculto(s) pela sua preferência",
     "empty_hidden_hint": "Desative \"Ocultar arquivos ocultos\" no seu perfil para vê-los.",
-    "loadMore": "Carregar mais"
+    "loadMore": "Carregar mais",
+    "remove_item": "Remover dos recentes"
   },
   "notifications": {
     "file_renamed": "Arquivo renomeado",
@@ -1265,5 +1276,10 @@
   "group": {
     "members_empty": "Sem membros",
     "member_count": "{{n}} membros"
+  },
+  "resource_list": {
+    "location": "Localização",
+    "wrong_drop_zone_msg": "Os envios só funcionam em Ficheiros — abra a secção Ficheiros e largue-os aí.",
+    "wrong_drop_zone_action": "Ir para Arquivos"
   }
 }

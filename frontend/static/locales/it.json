@@ -234,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "Notifica via email",
     "revoke": "Remuovi",
-    "role_label": "Ruolo"
+    "role_label": "Ruolo",
+    "col_shared_by": "Condiviso da",
+    "col_shared": "Condiviso"
   },
   "share_dialogTitle": "Link di condivisione",
   "share_linkLabel": "Link di condivisione:",
@@ -337,6 +339,7 @@
     "modified": "Modificato",
     "no_files": "Nessun file in questa cartella",
     "empty_hint": "Carica file o crea cartelle per iniziare",
+    "drop_to_upload": "Trascina i file qui per caricarli",
     "loading": "Caricamento file…",
     "view_grid": "Visualizzazione griglia",
     "view_list": "Visualizzazione elenco",
@@ -375,7 +378,13 @@
     "rename_dotfile_hidden": "Rinominato in \"{{name}}\" — ora nascosto dalla tua preferenza.",
     "new_folder_dotfile_hidden": "Cartella \"{{name}}\" creata — nascosta dalla tua preferenza.",
     "dotfiles_hidden_toast": "File nascosti occultati",
-    "dotfiles_shown_toast": "File nascosti mostrati"
+    "dotfiles_shown_toast": "File nascosti mostrati",
+    "col_modified": "Modificato",
+    "col_added": "Aggiunto",
+    "col_created_by": "Creato da",
+    "col_opened": "Aperto",
+    "col_path": "Posizione",
+    "new_elements": "Nuovi elementi"
   },
   "dialogs": {
     "rename_folder": "Rinomina cartella",
@@ -461,7 +470,8 @@
       "trashed_time": "Data di eliminazione"
     },
     "delete": "Elimina definitivamente",
-    "empty_action": "Svuota il cestino"
+    "empty_action": "Svuota il cestino",
+    "expires_at": "Scadenza"
   },
   "daysRemaining": {
     "expired": "Scaduto",
@@ -582,7 +592,8 @@
     "empty_hint": "I file che apri appariranno qui",
     "empty_hidden_state": "{{n}} elemento/i recente/i nascosto/i dalla tua preferenza",
     "empty_hidden_hint": "Disattiva \"Nascondi i file nascosti\" nel tuo profilo per vederli.",
-    "loadMore": "Carica altri"
+    "loadMore": "Carica altri",
+    "remove_item": "Rimuovi dai recenti"
   },
   "notifications": {
     "file_renamed": "File rinominato",
@@ -1265,5 +1276,10 @@
   "group": {
     "members_empty": "Nessun membro",
     "member_count": "{{n}} membri"
+  },
+  "resource_list": {
+    "location": "Posizione",
+    "wrong_drop_zone_msg": "I caricamenti funzionano solo in File — apri la sezione File e trascina lì gli elementi.",
+    "wrong_drop_zone_action": "Vai a File"
   }
 }

@@ -234,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "Powiadom e-mailem",
     "revoke": "Usuń",
-    "role_label": "Rola"
+    "role_label": "Rola",
+    "col_shared_by": "Udostępnione przez",
+    "col_shared": "Udostępnione"
   },
   "share_dialogTitle": "Link udostępniania",
   "share_linkLabel": "Link udostępniania:",
@@ -337,6 +339,7 @@
     "modified": "Zmodyfikowano",
     "no_files": "Brak plików w tym folderze",
     "empty_hint": "Prześlij pliki lub utwórz foldery, aby rozpocząć",
+    "drop_to_upload": "Upuść pliki tutaj, aby wysłać",
     "loading": "Ładowanie plików…",
     "view_grid": "Widok siatki",
     "view_list": "Widok listy",
@@ -375,7 +378,13 @@
     "rename_dotfile_hidden": "Zmieniono nazwę na \"{{name}}\" — teraz ukryty zgodnie z Twoją preferencją.",
     "new_folder_dotfile_hidden": "Utworzono folder \"{{name}}\" — ukryty zgodnie z Twoją preferencją.",
     "dotfiles_hidden_toast": "Ukryte pliki ukryte",
-    "dotfiles_shown_toast": "Ukryte pliki wyświetlone"
+    "dotfiles_shown_toast": "Ukryte pliki wyświetlone",
+    "col_modified": "Zmodyfikowano",
+    "col_added": "Dodano",
+    "col_created_by": "Utworzone przez",
+    "col_opened": "Otwarte",
+    "col_path": "Lokalizacja",
+    "new_elements": "Nowe elementy"
   },
   "dialogs": {
     "rename_folder": "Zmień nazwę folderu",
@@ -461,7 +470,8 @@
       "trashed_time": "Czas usunięcia"
     },
     "delete": "Usuń trwale",
-    "empty_action": "Opróżnij kosz"
+    "empty_action": "Opróżnij kosz",
+    "expires_at": "Wygasa"
   },
   "daysRemaining": {
     "expired": "Wygasł",
@@ -582,7 +592,8 @@
     "empty_hint": "Otwarte pliki pojawią się tutaj",
     "empty_hidden_state": "{{n}} ostatnich elementów ukrytych zgodnie z Twoją preferencją",
     "empty_hidden_hint": "Wyłącz \"Ukryj ukryte pliki\" w swoim profilu, aby je zobaczyć.",
-    "loadMore": "Załaduj więcej"
+    "loadMore": "Załaduj więcej",
+    "remove_item": "Usuń z ostatnich"
   },
   "notifications": {
     "file_renamed": "Zmieniono nazwę pliku",
@@ -1265,5 +1276,10 @@
   "group": {
     "members_empty": "Brak członków",
     "member_count": "{{n}} członków"
+  },
+  "resource_list": {
+    "location": "Lokalizacja",
+    "wrong_drop_zone_msg": "Przesyłanie działa tylko w Plikach — otwórz sekcję Pliki i upuść tam pliki.",
+    "wrong_drop_zone_action": "Przejdź do Plików"
   }
 }

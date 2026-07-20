@@ -339,7 +339,9 @@
     "set_expiry": "Set expiry",
     "title": "Shared",
     "unlock": "Unlock",
-    "role_label": "Role"
+    "role_label": "Role",
+    "col_shared_by": "Shared by",
+    "col_shared": "Shared"
   },
   "share_dialogTitle": "Share Link",
   "share_linkLabel": "Share Link:",
@@ -442,6 +444,7 @@
     "modified": "Modified",
     "no_files": "No files in this folder",
     "empty_hint": "Upload files or create folders to get started",
+    "drop_to_upload": "Drop files here to upload",
     "loading": "Loading files…",
     "view_grid": "Grid view",
     "view_list": "List view",
@@ -466,7 +469,10 @@
     "batch_delete": "Delete selected",
     "breadcrumb": "Breadcrumb",
     "cancel_selection": "Cancel selection",
-    "col_modified": "Date",
+    "col_modified": "Modified",
+    "col_added": "Added",
+    "col_created_by": "Created by",
+    "col_opened": "Opened",
     "col_name": "Name",
     "col_owner": "Owner",
     "col_path": "Location",
@@ -499,6 +505,7 @@
     "moved": "Moved",
     "new_folder": "New folder",
     "new_folder_prompt": "New folder name",
+    "new_elements": "New elements",
     "no_home": "No home folder available.",
     "no_preview": "No preview available for this file type.",
     "no_subfolders": "No subfolders here.",
@@ -618,7 +625,8 @@
     "confirm_empty": "Empty the trash? This cannot be undone.",
     "delete": "Delete permanently",
     "empty_action": "Empty trash",
-    "restored": "Restored"
+    "restored": "Restored",
+    "expires_at": "Expires at"
   },
   "daysRemaining": {
     "expired": "Expired",
@@ -753,7 +761,8 @@
     "empty_hidden_state": "{{n}} recent item(s) hidden by your dotfile preference",
     "empty_hidden_hint": "Turn off \"Hide dotfiles\" in your profile to see them.",
     "loadMore": "Load more",
-    "confirm_clear": "Clear your recent items?"
+    "confirm_clear": "Clear your recent items?",
+    "remove_item": "Remove from recent"
   },
   "notifications": {
     "file_renamed": "File renamed",
@@ -1663,5 +1672,10 @@
   "group": {
     "members_empty": "No members",
     "member_count": "{{n}} members"
+  },
+  "resource_list": {
+    "location": "Location",
+    "wrong_drop_zone_msg": "Uploads only work in Files — open the Files section and drop there.",
+    "wrong_drop_zone_action": "Go to Files"
   }
 }

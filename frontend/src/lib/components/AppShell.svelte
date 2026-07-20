@@ -872,7 +872,10 @@
 		top: calc(100% + 4px);
 		left: 0;
 		right: 0;
-		z-index: 50;
+		/* Search suggestions render above `.page-sticky-header` — otherwise the
+		   dropdown clips under the action bar on the content pages. Design-token
+		   `--z-dropdown` (1000) sits above `--z-sticky` (100) by construction. */
+		z-index: var(--z-dropdown);
 		list-style: none;
 		margin: 0;
 		padding: 0.25rem;
@@ -1117,7 +1120,8 @@
 		position: absolute;
 		bottom: calc(100% + 4px);
 		right: 0;
-		z-index: 60;
+		/* Sits above `--z-sticky` for the same reason as `.suggest` above. */
+		z-index: var(--z-dropdown);
 		min-width: 12rem;
 		max-height: 18rem;
 		overflow: auto;

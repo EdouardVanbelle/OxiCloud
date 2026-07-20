@@ -707,6 +707,38 @@ HTTP 200
 jsonpath "$.created_by" == "{{alice_user_id}}"
 jsonpath "$.updated_by" == "{{adam_user_id}}"
 
+# ── D0 §14 provenance survives on the LISTING endpoint too ──
+# The rename-response asserts above cover the mutation DTO, but
+# /api/folders/{id}/resources has its own DTO-build path that
+# used to hardcode created_by/updated_by = None (silent bug —
+# owner column rendered "—" on /files for everyone). Hit the
+# listing and re-assert both the untouched folder (both = alice)
+# AND the Adam-renamed file (created_by=alice, updated_by=adam)
+# on the same page — two shapes, one round-trip.
+#
+# Fixed indices are safe because at this point perm_folder_id
+# holds exactly two rows and the default order_by=name puts
+# 'perm-test-child' (folder) at [0] and 'adam-renamed-logo.jpg'
+# (file) at [1]. Anything appended to this folder later in the
+# scenario would break these indices — hence the assertion runs
+# BEFORE the subsequent thumbnail/create/upload steps.
+GET {{base_url}}/api/folders/{{perm_folder_id}}/resources
+Authorization: Bearer {{alice_token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$.items" count == 2
+# [0] — untouched folder inherits Alice on both fields.
+jsonpath "$.items[0].resource.name" == "perm-test-child"
+jsonpath "$.items[0].resource.created_by" == "{{alice_user_id}}"
+jsonpath "$.items[0].resource.updated_by" == "{{alice_user_id}}"
+# [1] — file Adam renamed. created_by stays alice (original
+# uploader), updated_by is adam (last mutator). Canonical
+# listing-side cross-user split.
+jsonpath "$.items[1].resource.name" == "adam-renamed-logo.jpg"
+jsonpath "$.items[1].resource.created_by" == "{{alice_user_id}}"
+jsonpath "$.items[1].resource.updated_by" == "{{adam_user_id}}"
+
 # ── Thumbnail push (Update) succeeds ────────────────────────
 PUT {{base_url}}/api/files/{{perm_file_id}}/thumbnail/preview
 Authorization: Bearer {{adam_token}}

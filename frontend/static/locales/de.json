@@ -234,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "Per E-Mail benachrichtigen",
     "revoke": "Remove",
-    "role_label": "Rolle"
+    "role_label": "Rolle",
+    "col_shared_by": "Geteilt von",
+    "col_shared": "Geteilt"
   },
   "share_dialogTitle": "Link teilen",
   "share_linkLabel": "Geteilter Link:",
@@ -337,6 +339,7 @@
     "modified": "Geändert",
     "no_files": "Keine Dateien in diesem Ordner",
     "empty_hint": "Laden Sie Dateien hoch oder erstellen Sie Ordner, um loszulegen",
+    "drop_to_upload": "Dateien zum Hochladen hier ablegen",
     "loading": "Dateien werden geladen…",
     "view_grid": "Rasteransicht",
     "view_list": "Listenansicht",
@@ -375,7 +378,13 @@
     "rename_dotfile_hidden": "In \"{{name}}\" umbenannt — jetzt durch Ihre Einstellung ausgeblendet.",
     "new_folder_dotfile_hidden": "Ordner \"{{name}}\" erstellt — durch Ihre Einstellung ausgeblendet.",
     "dotfiles_hidden_toast": "Verborgene Dateien ausgeblendet",
-    "dotfiles_shown_toast": "Verborgene Dateien angezeigt"
+    "dotfiles_shown_toast": "Verborgene Dateien angezeigt",
+    "col_modified": "Geändert",
+    "col_added": "Hinzugefügt",
+    "col_created_by": "Erstellt von",
+    "col_opened": "Geöffnet",
+    "col_path": "Speicherort",
+    "new_elements": "Neue Elemente"
   },
   "dialogs": {
     "rename_folder": "Ordner umbenennen",
@@ -461,7 +470,8 @@
       "trashed_time": "Löschzeit"
     },
     "delete": "Endgültig löschen",
-    "empty_action": "Papierkorb leeren"
+    "empty_action": "Papierkorb leeren",
+    "expires_at": "Läuft ab"
   },
   "daysRemaining": {
     "expired": "Abgelaufen",
@@ -582,7 +592,8 @@
     "empty_hint": "Dateien, die Sie öffnen, werden hier angezeigt",
     "empty_hidden_state": "{{n}} zuletzt verwendete(s) Element(e) durch Ihre Einstellung ausgeblendet",
     "empty_hidden_hint": "Deaktivieren Sie \"Verborgene Dateien ausblenden\" in Ihrem Profil, um sie anzuzeigen.",
-    "loadMore": "Mehr laden"
+    "loadMore": "Mehr laden",
+    "remove_item": "Aus zuletzt verwendet entfernen"
   },
   "notifications": {
     "file_renamed": "Datei umbenannt",
@@ -1265,5 +1276,10 @@
   "group": {
     "members_empty": "Keine Mitglieder",
     "member_count": "{{n}} Mitglieder"
+  },
+  "resource_list": {
+    "location": "Speicherort",
+    "wrong_drop_zone_msg": "Uploads funktionieren nur in Dateien — öffne den Bereich Dateien und lege die Elemente dort ab.",
+    "wrong_drop_zone_action": "Zu Dateien wechseln"
   }
 }

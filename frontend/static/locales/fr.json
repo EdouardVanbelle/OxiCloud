@@ -234,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "Notifier par e-mail",
     "revoke": "Remove",
-    "role_label": "Rôle"
+    "role_label": "Rôle",
+    "col_shared_by": "Partagé par",
+    "col_shared": "Partagé"
   },
   "share_dialogTitle": "Lien de partage",
   "share_linkLabel": "Lien partagé :",
@@ -337,6 +339,7 @@
     "modified": "Modifié",
     "no_files": "Aucun fichier dans ce dossier",
     "empty_hint": "Téléversez des fichiers ou créez des dossiers pour commencer",
+    "drop_to_upload": "Déposez les fichiers ici pour les téléverser",
     "loading": "Chargement des fichiers…",
     "view_grid": "Vue en grille",
     "view_list": "Vue en liste",
@@ -375,7 +378,13 @@
     "rename_dotfile_hidden": "Renommé en \"{{name}}\" — désormais masqué par votre préférence.",
     "new_folder_dotfile_hidden": "Dossier \"{{name}}\" créé — masqué par votre préférence.",
     "dotfiles_hidden_toast": "Fichiers masqués",
-    "dotfiles_shown_toast": "Fichiers affichés"
+    "dotfiles_shown_toast": "Fichiers affichés",
+    "col_modified": "Modifié",
+    "col_added": "Ajouté",
+    "col_created_by": "Créé par",
+    "col_opened": "Ouvert",
+    "col_path": "Emplacement",
+    "new_elements": "Nouveaux éléments"
   },
   "dialogs": {
     "rename_folder": "Renommer le dossier",
@@ -461,7 +470,8 @@
       "trashed_time": "Date de suppression"
     },
     "delete": "Supprimer définitivement",
-    "empty_action": "Vider la corbeille"
+    "empty_action": "Vider la corbeille",
+    "expires_at": "Expiration"
   },
   "daysRemaining": {
     "expired": "Expiré",
@@ -582,7 +592,8 @@
     "empty_hint": "Les fichiers que vous ouvrez apparaîtront ici",
     "empty_hidden_state": "{{n}} élément(s) récent(s) masqué(s) par votre préférence",
     "empty_hidden_hint": "Désactivez \"Masquer les fichiers\" dans votre profil pour les voir.",
-    "loadMore": "Charger plus"
+    "loadMore": "Charger plus",
+    "remove_item": "Retirer des récents"
   },
   "notifications": {
     "file_renamed": "Fichier renommé",
@@ -1265,5 +1276,10 @@
   "group": {
     "members_empty": "Aucun membre",
     "member_count": "{{n}} membres"
+  },
+  "resource_list": {
+    "location": "Emplacement",
+    "wrong_drop_zone_msg": "Les envois ne fonctionnent que dans Fichiers — ouvrez la section Fichiers et déposez-y vos éléments.",
+    "wrong_drop_zone_action": "Aller aux Fichiers"
   }
 }
