@@ -75,27 +75,37 @@ pub struct UserDto {
 
 impl From<User> for UserDto {
     fn from(user: User) -> Self {
+        // `user` is owned and dropped here, so every owned field is MOVED out
+        // via `into_parts` rather than cloned through the borrowing accessors —
+        // the accessor form deep-cloned `image` (a data URI up to 512 KiB) and
+        // the whole `ui_preferences` JSON tree on every `/api/auth/me` and admin
+        // user listing (benches/ROUND20.md §A2). The two derived values read the
+        // entity before the move.
+        let role = format!("{}", user.role());
+        let can_edit_image = !user.is_oidc_user();
+        let p = user.into_parts();
         Self {
-            id: user.id().to_string(),
-            username: user.username().map(str::to_string),
-            email: user.email().to_string(),
-            role: format!("{}", user.role()),
-            storage_quota_bytes: user.storage_quota_bytes(),
-            storage_used_bytes: user.storage_used_bytes(),
-            created_at: user.created_at(),
-            updated_at: user.updated_at(),
-            last_login_at: user.last_login_at(),
-            active: user.is_active(),
-            auth_provider: user.oidc_provider().unwrap_or("local").to_string(),
-            image: user.image().map(|s| s.to_string()),
-            can_edit_image: !user.is_oidc_user(),
-            is_external: user.is_external(),
-            given_name: user.given_name().map(str::to_string),
-            family_name: user.family_name().map(str::to_string),
-            email_verified_at: user.email_verified_at(),
-            preferred_locale: user.preferred_locale().map(str::to_string),
-            notify_on_share: user.notify_on_share(),
-            ui_preferences: user.ui_preferences().clone(),
+            id: p.id.to_string(),
+            username: p.username,
+            email: p.email,
+            role,
+            storage_quota_bytes: p.storage_quota_bytes,
+            storage_used_bytes: p.storage_used_bytes,
+            created_at: p.created_at,
+            updated_at: p.updated_at,
+            last_login_at: p.last_login_at,
+            active: p.active,
+            // Some(provider) moves the String; None still allocates "local".
+            auth_provider: p.oidc_provider.unwrap_or_else(|| "local".to_string()),
+            image: p.image,
+            can_edit_image,
+            is_external: p.is_external,
+            given_name: p.given_name,
+            family_name: p.family_name,
+            email_verified_at: p.email_verified_at,
+            preferred_locale: p.preferred_locale,
+            notify_on_share: p.notify_on_share,
+            ui_preferences: p.ui_preferences,
         }
     }
 }

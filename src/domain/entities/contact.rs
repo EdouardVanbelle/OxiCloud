@@ -13,6 +13,48 @@ pub struct AddressBook {
     updated_at: DateTime<Utc>,
 }
 
+/// Owned decomposition of an [`AddressBook`] (mirrors `FileParts`/`UserParts`).
+/// Lets `AddressBookDto::from` MOVE `name`/`description`/`color`/`owner_id`
+/// instead of cloning them on every CardDAV discovery listing
+/// (benches/ROUND20.md §A4).
+pub struct AddressBookParts {
+    pub id: Uuid,
+    pub name: String,
+    pub owner_id: String,
+    pub description: Option<String>,
+    pub color: Option<String>,
+    pub is_public: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl AddressBook {
+    /// Decompose into [`AddressBookParts`], moving every owned field out
+    /// (exhaustive destructure — compiler-checked against added fields).
+    pub fn into_parts(self) -> AddressBookParts {
+        let AddressBook {
+            id,
+            name,
+            owner_id,
+            description,
+            color,
+            is_public,
+            created_at,
+            updated_at,
+        } = self;
+        AddressBookParts {
+            id,
+            name,
+            owner_id,
+            description,
+            color,
+            is_public,
+            created_at,
+            updated_at,
+        }
+    }
+}
+
 impl AddressBook {
     /// Creates a new AddressBook with generated id and timestamps
     pub fn new(

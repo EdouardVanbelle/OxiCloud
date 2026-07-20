@@ -354,6 +354,22 @@ name = "bench_micro_allocs"
 path = "examples/bench_micro_allocs.rs"
 required-features = ["bench"]
 
+# Round-20 battery ────────────────────────────────────────────────────────────
+
+# Round-20 CPU/alloc micro-pack — CalendarEvent `prop_with_params` throwaway
+# HashMap → direct VALUE=DATE scan; `UserDto::from` clone-every-field → move
+# (image ≤512 KiB + ui_preferences JSON); `parse_vcard` per-line to_ascii_uppercase
+# + lines Vec → direct iterate + `common::text::ascii_ci_contains`; Calendar/
+# AddressBook DTO clone → move; listing `collect::<Result<Vec>>()` (size_hint 0)
+# → `Vec::with_capacity` + push; `plaintext_stream` eager Vec collect → lazy iter;
+# NC `write_etag_element` 3→0 allocs/row (borrowed pre-escaped quote events);
+# NC `oc:id` per-row String → reused buffer; favorites REPORT DTO clone → map move.
+# No Postgres.
+[[example]]
+name = "bench_round20_micro"
+path = "examples/bench_round20_micro.rs"
+required-features = ["bench"]
+
 # Round-19 battery ────────────────────────────────────────────────────────────
 
 # Round-19 CPU/alloc micro-pack — Basic-auth cache-key incremental blake3 (drop

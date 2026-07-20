@@ -135,7 +135,88 @@ pub struct User {
     ui_preferences: serde_json::Value,
 }
 
+/// Owned decomposition of a [`User`] (mirrors `FileParts` / `FolderParts` /
+/// `ContactParts`). Lets a consumer MOVE the heap fields out instead of cloning
+/// them through the borrowing accessors — notably `image` (a data URI up to
+/// 512 KiB) and `ui_preferences` (a JSON tree). See `UserDto::from`
+/// (benches/ROUND20.md §A2).
+pub struct UserParts {
+    pub id: Uuid,
+    pub username: Option<String>,
+    pub email: String,
+    pub password_hash: Option<String>,
+    pub role: UserRole,
+    pub storage_quota_bytes: i64,
+    pub storage_used_bytes: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_login_at: Option<DateTime<Utc>>,
+    pub active: bool,
+    pub oidc_provider: Option<String>,
+    pub oidc_subject: Option<String>,
+    pub image: Option<String>,
+    pub is_external: bool,
+    pub given_name: Option<String>,
+    pub family_name: Option<String>,
+    pub email_verified_at: Option<DateTime<Utc>>,
+    pub preferred_locale: Option<String>,
+    pub notify_on_share: bool,
+    pub ui_preferences: serde_json::Value,
+}
+
 impl User {
+    /// Decompose into [`UserParts`], moving every owned field out. The
+    /// exhaustive destructure is compiler-checked, so a future field can't be
+    /// silently dropped.
+    pub fn into_parts(self) -> UserParts {
+        let User {
+            id,
+            username,
+            email,
+            password_hash,
+            role,
+            storage_quota_bytes,
+            storage_used_bytes,
+            created_at,
+            updated_at,
+            last_login_at,
+            active,
+            oidc_provider,
+            oidc_subject,
+            image,
+            is_external,
+            given_name,
+            family_name,
+            email_verified_at,
+            preferred_locale,
+            notify_on_share,
+            ui_preferences,
+        } = self;
+        UserParts {
+            id,
+            username,
+            email,
+            password_hash,
+            role,
+            storage_quota_bytes,
+            storage_used_bytes,
+            created_at,
+            updated_at,
+            last_login_at,
+            active,
+            oidc_provider,
+            oidc_subject,
+            image,
+            is_external,
+            given_name,
+            family_name,
+            email_verified_at,
+            preferred_locale,
+            notify_on_share,
+            ui_preferences,
+        }
+    }
+
     /// Create a new user.
     ///
     /// One unified constructor for every kind of user (internal, OIDC-linked,

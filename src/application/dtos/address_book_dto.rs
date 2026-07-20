@@ -31,15 +31,18 @@ impl Default for AddressBookDto {
 
 impl From<AddressBook> for AddressBookDto {
     fn from(book: AddressBook) -> Self {
+        // Owned entity → move the owned fields instead of cloning through the
+        // borrowing accessors (benches/ROUND20.md §A4).
+        let p = book.into_parts();
         Self {
-            id: book.id().to_string(),
-            name: book.name().to_string(),
-            owner_id: book.owner_id().to_string(),
-            description: book.description().map(|s| s.to_string()),
-            color: book.color().map(|s| s.to_string()),
-            is_public: book.is_public(),
-            created_at: *book.created_at(),
-            updated_at: *book.updated_at(),
+            id: p.id.to_string(),
+            name: p.name,
+            owner_id: p.owner_id,
+            description: p.description,
+            color: p.color,
+            is_public: p.is_public,
+            created_at: p.created_at,
+            updated_at: p.updated_at,
         }
     }
 }

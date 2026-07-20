@@ -297,8 +297,12 @@ impl CalendarEvent {
         // rather than scanning the raw property line. The pre-parser-
         // rewrite substring scan couldn't see param-carrying lines at
         // all — see #528.
-        let (dtstart_value, dtstart_params) = Self::prop_with_params(&event, "DTSTART")
-            .ok_or_else(|| {
+        // DTSTART carries the value AND the all-day flag: a `VALUE=DATE`
+        // parameter (RFC 5545 §3.3.4) means date-only. Strict — only "DATE"
+        // (case-insensitive) counts; "DATE-TIME" and anything else is timed.
+        // The flag drives both the DTSTART and the DTEND datetime parse below.
+        let (dtstart_value, all_day) =
+            Self::prop_value_and_is_date(&event, "DTSTART").ok_or_else(|| {
                 DomainError::new(
                     ErrorKind::InvalidInput,
                     "CalendarEvent",
@@ -306,25 +310,14 @@ impl CalendarEvent {
                 )
             })?;
 
-        let (dtend_value, _dtend_params) =
-            Self::prop_with_params(&event, "DTEND").ok_or_else(|| {
-                DomainError::new(
-                    ErrorKind::InvalidInput,
-                    "CalendarEvent",
-                    "Missing DTEND in iCalendar data",
-                )
-            })?;
-
-        // All-day detection: `VALUE=DATE` parameter on DTSTART.
-        // Falls back to `false` when the parameter is absent, matching
-        // RFC 5545 §3.3.4 ("If the property permits, multiple 'VALUE'
-        // parameters can be specified as a comma-separated list") —
-        // we're strict: only "DATE" (case-insensitive) counts, "DATE-TIME"
-        // and anything else means timed.
-        let all_day = dtstart_params
-            .get("VALUE")
-            .map(|vs| vs.iter().any(|v| v.eq_ignore_ascii_case("DATE")))
-            .unwrap_or(false);
+        // DTEND needs only its value (the all-day flag comes from DTSTART).
+        let dtend_value = Self::prop_value(&event, "DTEND").ok_or_else(|| {
+            DomainError::new(
+                ErrorKind::InvalidInput,
+                "CalendarEvent",
+                "Missing DTEND in iCalendar data",
+            )
+        })?;
 
         let start_time = Self::parse_ical_datetime(&dtstart_value, all_day).map_err(|e| {
             DomainError::new(
@@ -359,14 +352,8 @@ impl CalendarEvent {
         // gets stored, just as a plain event (worst case a client sync
         // treats it as a new master, which the DB uniqueness will
         // refuse; better a persistence error than a silent split).
-        let recurrence_id = match Self::prop_with_params(&event, "RECURRENCE-ID") {
-            Some((value, params)) => {
-                let is_date = params
-                    .get("VALUE")
-                    .map(|vs| vs.iter().any(|v| v.eq_ignore_ascii_case("DATE")))
-                    .unwrap_or(false);
-                Self::parse_ical_datetime(&value, is_date).ok()
-            }
+        let recurrence_id = match Self::prop_value_and_is_date(&event, "RECURRENCE-ID") {
+            Some((value, is_date)) => Self::parse_ical_datetime(&value, is_date).ok(),
             None => None,
         };
 
@@ -701,23 +688,20 @@ impl CalendarEvent {
         // (they need to know whether the value is a date or a datetime).
         let dtstart_pair = event
             .as_ref()
-            .and_then(|e| Self::prop_with_params(e, "DTSTART"));
+            .and_then(|e| Self::prop_value_and_is_date(e, "DTSTART"));
         let all_day = dtstart_pair
             .as_ref()
-            .and_then(|(_v, params)| params.get("VALUE"))
-            .map(|vs| vs.iter().any(|v| v.eq_ignore_ascii_case("DATE")))
+            .map(|(_v, is_date)| *is_date)
             .unwrap_or(false);
         self.all_day = all_day;
 
-        if let Some((value, _params)) = &dtstart_pair
+        if let Some((value, _is_date)) = &dtstart_pair
             && let Ok(start_time) = Self::parse_ical_datetime(value, all_day)
         {
             self.start_time = start_time;
         }
 
-        if let Some((value, _params)) = event
-            .as_ref()
-            .and_then(|e| Self::prop_with_params(e, "DTEND"))
+        if let Some(value) = event.as_ref().and_then(|e| Self::prop_value(e, "DTEND"))
             && let Ok(end_time) = Self::parse_ical_datetime(&value, all_day)
         {
             self.end_time = end_time;
@@ -861,12 +845,52 @@ impl CalendarEvent {
         Some(trimmed.to_string())
     }
 
+    /// Read a property's trimmed value plus whether it carries a
+    /// case-insensitive `VALUE=DATE` parameter (the all-day / date-only
+    /// marker) — the ONLY thing `from_ical` / `update_ical_data` ever asked the
+    /// parameter map for. Scans `prop.params` directly, so DTSTART / DTEND /
+    /// RECURRENCE-ID no longer build a throwaway
+    /// `HashMap<String, Vec<String>>` (uppercased keys + cloned value Vecs) per
+    /// event on every CalDAV PUT / iCal import (benches/ROUND20.md §A1).
+    ///
+    /// `.rev().find(...)` preserves the old map's last-insert-wins semantics for
+    /// the (pathological) duplicate-`VALUE` case, so the flag is byte-identical.
+    fn prop_value_and_is_date(
+        event: &ical::parser::ical::component::IcalEvent,
+        property_name: &str,
+    ) -> Option<(String, bool)> {
+        let prop = event
+            .properties
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(property_name))?;
+        let trimmed = prop.value.as_deref()?.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let is_date = prop
+            .params
+            .as_ref()
+            .and_then(|list| {
+                list.iter()
+                    .rev()
+                    .find(|(n, _)| n.eq_ignore_ascii_case("VALUE"))
+            })
+            .map(|(_, vs)| vs.iter().any(|v| v.eq_ignore_ascii_case("DATE")))
+            .unwrap_or(false);
+        Some((trimmed.to_string(), is_date))
+    }
+
     /// Read a property's trimmed value AND parameter map from an
     /// already-parsed VEVENT. The map is keyed by parameter name
     /// (`"VALUE"`, `"TZID"`, `"CN"`, …) whose value is the list of
     /// parameter values (parameters can be multi-valued —
     /// `MEMBER="mailto:a@x","mailto:b@x"` — hence the `Vec<String>`
     /// per key).
+    ///
+    /// Retained only for the `#[cfg(test)]` `extract_ical_property_with_params`
+    /// wrapper; production parses once and uses [`Self::prop_value_and_is_date`]
+    /// / [`Self::prop_value`].
+    #[cfg(test)]
     fn prop_with_params(
         event: &ical::parser::ical::component::IcalEvent,
         property_name: &str,

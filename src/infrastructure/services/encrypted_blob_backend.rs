@@ -140,13 +140,18 @@ where
 }
 
 /// Turn a decrypted payload into a stream of bounded, zero-copy slices.
+///
+/// The emit-slice iterator is handed to `stream::iter` lazily — the closure
+/// owns `data` (a refcounted `Bytes`), so each `slice` is produced on demand
+/// as the consumer polls, rather than eagerly `collect`ing a `Vec` of
+/// ⌈len/64 KiB⌉ slice handles up front (benches/ROUND20.md §I4).
 fn plaintext_stream(data: Bytes) -> BlobStream {
     let len = data.len();
-    let slices: Vec<Result<Bytes, std::io::Error>> = (0..len)
-        .step_by(PLAINTEXT_EMIT_SIZE)
-        .map(|off| Ok(data.slice(off..len.min(off + PLAINTEXT_EMIT_SIZE))))
-        .collect();
-    Box::pin(futures::stream::iter(slices))
+    Box::pin(futures::stream::iter(
+        (0..len)
+            .step_by(PLAINTEXT_EMIT_SIZE)
+            .map(move |off| Ok(data.slice(off..len.min(off + PLAINTEXT_EMIT_SIZE)))),
+    ))
 }
 
 impl BlobStorageBackend for EncryptedBlobBackend {

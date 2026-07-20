@@ -14,6 +14,7 @@ use crate::application::ports::carddav_ports::{
     AddressBookUseCase, ContactStoragePort, ContactUseCase,
 };
 use crate::common::errors::DomainError;
+use crate::common::text::ascii_ci_contains;
 use crate::domain::entities::contact::{Address, AddressBook, Contact, ContactGroup, Email, Phone};
 use crate::domain::services::authorization::{Permission, Resource, Role, Subject};
 use crate::infrastructure::adapters::contact_storage_adapter::ContactStorageAdapter;
@@ -113,9 +114,11 @@ impl ContactService {
 
         let mut contact = Contact::default();
 
-        let lines: Vec<&str> = vcard_data.lines().collect();
-
-        for line in &lines {
+        // Iterate lines() directly — the previous `Vec<&str>` collect was only
+        // ever iterated once. Per EMAIL/TEL/ADR line the `TYPE=` routing uses
+        // the allocation-free `ascii_ci_contains` instead of a throwaway
+        // `line.to_ascii_uppercase()` copy (benches/ROUND20.md §A3).
+        for line in vcard_data.lines() {
             let line = line.trim();
 
             if let Some(stripped) = line.strip_prefix("FN:") {
@@ -132,10 +135,10 @@ impl ContactService {
                 // from value parsing.
                 let value = line.split_once(':').map(|(_, v)| v.trim()).unwrap_or("");
                 if !value.is_empty() {
-                    let params_upper = line.to_ascii_uppercase();
-                    let email_type = if params_upper.contains("TYPE=HOME") {
+                    let lb = line.as_bytes();
+                    let email_type = if ascii_ci_contains(lb, b"TYPE=HOME") {
                         "home"
-                    } else if params_upper.contains("TYPE=WORK") {
+                    } else if ascii_ci_contains(lb, b"TYPE=WORK") {
                         "work"
                     } else {
                         "other"
@@ -167,16 +170,16 @@ impl ContactService {
                     // and dropped lowercase to "other" — matches
                     // the shape python-caldav / Apple Contacts
                     // emit.
-                    let params_upper = line.to_ascii_uppercase();
-                    let phone_type = if params_upper.contains("TYPE=CELL")
-                        || params_upper.contains("TYPE=MOBILE")
+                    let lb = line.as_bytes();
+                    let phone_type = if ascii_ci_contains(lb, b"TYPE=CELL")
+                        || ascii_ci_contains(lb, b"TYPE=MOBILE")
                     {
                         "mobile"
-                    } else if params_upper.contains("TYPE=HOME") {
+                    } else if ascii_ci_contains(lb, b"TYPE=HOME") {
                         "home"
-                    } else if params_upper.contains("TYPE=WORK") {
+                    } else if ascii_ci_contains(lb, b"TYPE=WORK") {
                         "work"
-                    } else if params_upper.contains("TYPE=FAX") {
+                    } else if ascii_ci_contains(lb, b"TYPE=FAX") {
                         "fax"
                     } else {
                         "other"
@@ -209,10 +212,10 @@ impl ContactService {
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty())
                 };
-                let params_upper = line.to_ascii_uppercase();
-                let addr_type = if params_upper.contains("TYPE=HOME") {
+                let lb = line.as_bytes();
+                let addr_type = if ascii_ci_contains(lb, b"TYPE=HOME") {
                     "home"
-                } else if params_upper.contains("TYPE=WORK") {
+                } else if ascii_ci_contains(lb, b"TYPE=WORK") {
                     "work"
                 } else {
                     "other"

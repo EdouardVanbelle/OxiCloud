@@ -13,6 +13,7 @@ use crate::application::ports::content_index_ports::{ContentHitDto, ContentIndex
 use crate::application::ports::inbound::SearchUseCase;
 use crate::application::ports::storage_ports::FileReadPort;
 use crate::common::errors::Result;
+use crate::common::text::ascii_ci_contains;
 use crate::domain::entities::folder::Folder;
 use crate::domain::repositories::folder_repository::FolderRepository;
 use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
@@ -181,20 +182,6 @@ fn compute_relevance(name: &str, query_lower: &str) -> u32 {
             0
         }
     }
-}
-
-/// ASCII case-insensitive substring test — the allocation-free equivalent of
-/// `haystack_lower.contains(needle_lower)` when both are ASCII.
-fn ascii_ci_contains(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    if needle.len() > haystack.len() {
-        return false;
-    }
-    haystack
-        .windows(needle.len())
-        .any(|w| w.eq_ignore_ascii_case(needle))
 }
 
 /// Max content-index candidates fetched per search. Hydration re-filters

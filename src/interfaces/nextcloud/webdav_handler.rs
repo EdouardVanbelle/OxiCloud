@@ -1990,18 +1990,30 @@ pub fn write_date_element<W: std::io::Write>(
     }
 }
 
-/// `d:getetag` with the HTTP quoting — one exactly-sized allocation
-/// instead of `format!`'s grow-from-empty.
+/// `d:getetag` with the HTTP quoting — zero allocations.
+///
+/// The two `"` quotes are emitted as borrowed pre-escaped text events around
+/// the escaped etag body. `quick_xml` renders a literal `"` as `&quot;`, so
+/// this is byte-identical to escaping `"{etag}"` as one owned string — but with
+/// no `with_capacity` quoted String and no escape re-allocation (the whole-string
+/// escape re-allocated an owned Cow because the string contained `"`). On a
+/// 500-child PROPFIND page this is called per file AND per folder row
+/// (benches/ROUND20.md §C1: 3 → 0 allocs/row).
 pub fn write_etag_element<W: std::io::Write>(
     xml: &mut Writer<W>,
     tag: &str,
     etag: &str,
 ) -> Result<(), String> {
-    let mut quoted = String::with_capacity(etag.len() + 2);
-    quoted.push('"');
-    quoted.push_str(etag);
-    quoted.push('"');
-    write_text_element(xml, tag, &quoted)
+    xml.write_event(Event::Start(BytesStart::new(tag)))
+        .xml_err()?;
+    xml.write_event(Event::Text(BytesText::from_escaped("&quot;")))
+        .xml_err()?;
+    xml.write_event(Event::Text(BytesText::new(etag)))
+        .xml_err()?;
+    xml.write_event(Event::Text(BytesText::from_escaped("&quot;")))
+        .xml_err()?;
+    xml.write_event(Event::End(BytesEnd::new(tag))).xml_err()?;
+    Ok(())
 }
 
 pub fn write_text_element<W: std::io::Write>(

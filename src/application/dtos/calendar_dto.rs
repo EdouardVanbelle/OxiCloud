@@ -36,16 +36,20 @@ impl Default for CalendarDto {
 
 impl From<Calendar> for CalendarDto {
     fn from(calendar: Calendar) -> Self {
+        // `calendar` is owned and dropped here — move the heap fields (notably
+        // the `custom_properties` HashMap) instead of cloning them through the
+        // borrowing accessors (benches/ROUND20.md §A4).
+        let p = calendar.into_parts();
         Self {
-            id: calendar.id().to_string(),
-            name: calendar.name().to_string(),
-            owner_id: calendar.owner_id().to_string(),
-            description: calendar.description().map(|s| s.to_string()),
-            color: calendar.color().map(|s| s.to_string()),
+            id: p.id.to_string(),
+            name: p.name,
+            owner_id: p.owner_id.to_string(),
+            description: p.description,
+            color: p.color,
             is_public: false, // This needs to be set separately as it's not part of the domain entity
-            created_at: *calendar.created_at(),
-            updated_at: *calendar.updated_at(),
-            custom_properties: calendar.custom_properties().clone(),
+            created_at: p.created_at,
+            updated_at: p.updated_at,
+            custom_properties: p.custom_properties,
         }
     }
 }

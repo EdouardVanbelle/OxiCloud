@@ -114,14 +114,14 @@ async fn handle_filter_files(
         }
     }
 
-    let file_map: HashMap<String, FileDto> = file_service
+    let mut file_map: HashMap<String, FileDto> = file_service
         .get_files_by_ids(&file_ids)
         .await
         .map_err(|e| AppError::internal_error(format!("Failed to resolve favorite files: {e}")))?
         .into_iter()
         .map(|f| (f.id.clone(), f))
         .collect();
-    let folder_map: HashMap<String, FolderDto> = folder_service
+    let mut folder_map: HashMap<String, FolderDto> = folder_service
         .get_folders_by_ids(&folder_ids)
         .await
         .map_err(|e| AppError::internal_error(format!("Failed to resolve favorite folders: {e}")))?
@@ -131,16 +131,21 @@ async fn handle_filter_files(
 
     let mut files: Vec<FileDto> = Vec::new();
     let mut folders: Vec<FolderDto> = Vec::new();
+    // Move the DTO out of the map instead of cloning it: the maps are built
+    // just above solely to hydrate `files`/`folders` in favorites order and are
+    // dropped at fn end, so the clone was pure waste. `favorites.item_id` is
+    // unique per user, so `remove` drops nothing needed and the favorites order
+    // is preserved (benches/ROUND20.md §C3).
     for fav in &favorites {
         match fav.item_type.as_str() {
             "file" => {
-                if let Some(f) = file_map.get(&fav.item_id) {
-                    files.push(f.clone());
+                if let Some(f) = file_map.remove(&fav.item_id) {
+                    files.push(f);
                 }
             }
             "folder" => {
-                if let Some(f) = folder_map.get(&fav.item_id) {
-                    folders.push(f.clone());
+                if let Some(f) = folder_map.remove(&fav.item_id) {
+                    folders.push(f);
                 }
             }
             _ => {}

@@ -293,16 +293,20 @@ impl FileBlobReadRepository {
             DomainError::internal_error("FileBlobRead", format!("hydrate by ids: {e}"))
         })?;
 
-        rows.into_iter()
-            .map(
-                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)| {
-                    Self::row_to_file(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)
-                },
-            )
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| {
-                DomainError::internal_error("FileBlobRead", format!("hydrate mapping: {e}"))
-            })
+        // Pre-size the result Vec. `collect::<Result<Vec<_>, _>>()` size-hints
+        // to 0 (the Result shunt may short-circuit on any element), so the Vec
+        // grows from capacity 0 — ~⌈log₂N⌉ reallocations, memcpy-ing the
+        // accumulated File rows each grow (benches/ROUND20.md §I1).
+        let mut files = Vec::with_capacity(rows.len());
+        for (id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub) in rows {
+            files.push(
+                Self::row_to_file(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)
+                    .map_err(|e| {
+                        DomainError::internal_error("FileBlobRead", format!("hydrate mapping: {e}"))
+                    })?,
+            );
+        }
+        Ok(files)
     }
 
     /// Batch-fetch files by id — the by-ids counterpart of [`get_file`],
@@ -337,19 +341,21 @@ impl FileBlobReadRepository {
             DomainError::internal_error("FileBlobRead", format!("get_files_by_ids: {e}"))
         })?;
 
-        rows.into_iter()
-            .map(
-                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)| {
-                    Self::row_to_file(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)
-                },
-            )
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| {
-                DomainError::internal_error(
-                    "FileBlobRead",
-                    format!("get_files_by_ids mapping: {e}"),
-                )
-            })
+        // Pre-size the result Vec (see the size-hint note in `hydrate`,
+        // benches/ROUND20.md §I1).
+        let mut files = Vec::with_capacity(rows.len());
+        for (id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub) in rows {
+            files.push(
+                Self::row_to_file(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)
+                    .map_err(|e| {
+                        DomainError::internal_error(
+                            "FileBlobRead",
+                            format!("get_files_by_ids mapping: {e}"),
+                        )
+                    })?,
+            );
+        }
+        Ok(files)
     }
 
     /// Returns `drive_id` for a given file. Drives the permission-floor
@@ -1254,15 +1260,16 @@ impl FileReadPort for FileBlobReadRepository {
         // total_count is the same in every row; 0 when result set is empty.
         let total_count = rows.first().map_or(0, |r| r.11) as usize;
 
-        let files = rows
-            .into_iter()
-            .map(
-                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub, _total)| {
-                    Self::row_to_file(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)
-                },
-            )
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| DomainError::internal_error("FileBlobRead", format!("mapping: {e}")))?;
+        // Pre-size the result Vec (size-hint note in `hydrate`, ROUND20 §I1).
+        let mut files = Vec::with_capacity(rows.len());
+        for (id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub, _total) in rows {
+            files.push(
+                Self::row_to_file(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)
+                    .map_err(|e| {
+                        DomainError::internal_error("FileBlobRead", format!("mapping: {e}"))
+                    })?,
+            );
+        }
 
         Ok((files, total_count))
     }
@@ -1384,17 +1391,16 @@ impl FileReadPort for FileBlobReadRepository {
 
         let total_count = rows.first().map_or(0, |r| r.11) as usize;
 
-        let files = rows
-            .into_iter()
-            .map(
-                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub, _total)| {
-                    Self::row_to_file(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)
-                },
-            )
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| {
-                DomainError::internal_error("FileBlobRead", format!("subtree mapping: {e}"))
-            })?;
+        // Pre-size the result Vec (size-hint note in `hydrate`, ROUND20 §I1).
+        let mut files = Vec::with_capacity(rows.len());
+        for (id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub, _total) in rows {
+            files.push(
+                Self::row_to_file(id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub)
+                    .map_err(|e| {
+                        DomainError::internal_error("FileBlobRead", format!("subtree mapping: {e}"))
+                    })?,
+            );
+        }
 
         Ok((files, total_count))
     }
