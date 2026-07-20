@@ -28,7 +28,7 @@
 		type ItemContext
 	} from '$lib/components/ResourceList.svelte';
 	import { confirmDialog, promptDialog } from '$lib/stores/dialogs.svelte';
-	import { folderAccessCached, warmFolderAccess } from '$lib/utils/folderAccess';
+	import { folderAccessCached, probeFolderAccess } from '$lib/utils/folderAccess';
 	import { t } from '$lib/i18n/index.svelte';
 
 	let raw = $state<FavoritesResourceItem[]>([]);
@@ -124,16 +124,6 @@
 			]);
 			cursor = page.next_cursor;
 			void owners.resolve(page.items.map((i) => i.resource.created_by));
-			// Pre-warm the folder-access cache for each row's parent
-			// folder — the "Open parent folder" context-menu entry
-			// gates on the cached boolean. Fire-and-forget: probes for
-			// already-cached ids no-op.
-			warmFolderAccess(
-				page.items.map((i) => {
-					const r = i.resource as FileItem | FolderItem;
-					return isFile(r) ? r.folder_id : r.parent_id;
-				})
-			);
 		} catch (e) {
 			console.error('favorites: load error', e);
 			error = t('errors_loadFailed', 'Failed to load items');
@@ -345,6 +335,14 @@
 	showPath
 	selectable
 	{contextActions}
+	menuPrepare={async (item) => {
+		// Lazy folder-access probe — fires only when the user actually
+		// opens the context menu on a row, not proactively for every
+		// row on load. Cached in the LRU (see `folderAccess.ts`) so
+		// subsequent right-clicks on the same folder are instant.
+		const pid = parentFolderId(item);
+		if (pid) await probeFolderAccess(pid);
+	}}
 	{groupBys}
 	bind:groupBy
 	bind:reversed

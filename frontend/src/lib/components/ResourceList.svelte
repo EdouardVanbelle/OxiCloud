@@ -207,6 +207,21 @@
 		 */
 		oncontextmenu?: (e: MouseEvent, item: FileItem | FolderItem) => void;
 		/**
+		 * Optional async pre-open hook. When provided, ResourceList
+		 * awaits it before the built-in context menu appears — so a
+		 * page can lazily prime any per-item cache the menu's
+		 * `visible?` predicates depend on WITHOUT the page having to
+		 * pre-warm every row at load time (which would fire N HTTP
+		 * calls for a feature the user may never invoke).
+		 *
+		 * Reference use: `/recent` / `/favorites` probe folder-access
+		 * for the row's parent inside `menuPrepare` so the "Open parent
+		 * folder" entry shows up on the first right-click of a
+		 * previously-unseen row. Short-typically-cached call; typical
+		 * menu-open latency stays well under a UI frame.
+		 */
+		menuPrepare?: (item: FileItem | FolderItem, ctx?: ItemContext) => Promise<void>;
+		/**
 		 * Per-item action cell (renders at the end of a row). Kept as a
 		 * distinct slot from the action-bar snippets below so callers
 		 * that want an item-scoped affordance (a per-row overflow menu)
@@ -350,6 +365,7 @@
 		onfavorite,
 		onselectionchange,
 		oncontextmenu: onContextMenuOverride,
+		menuPrepare,
 		itemActions,
 		actions,
 		batchActions,
@@ -787,13 +803,30 @@
 	let ctxY = $state(0);
 	let ctxItem = $state<FileItem | FolderItem | null>(null);
 
-	function openContext(e: MouseEvent, item: FileItem | FolderItem) {
+	async function openContext(e: MouseEvent, item: FileItem | FolderItem) {
 		if (!contextActions?.length) return;
 		e.preventDefault();
 		e.stopPropagation();
+		// Snapshot the pointer coords now — after an `await menuPrepare`
+		// tick the event object may be reused / stale, and reading
+		// `e.clientX` post-await could pin the menu to the wrong spot.
+		const x = Math.min(e.clientX, window.innerWidth - 220);
+		const y = Math.min(e.clientY, window.innerHeight - (contextActions.length * 44 + 24));
+		// Give the page a chance to prime any per-item cache the
+		// `visible?` predicates read (e.g. folder-access on /recent +
+		// /favorites for the "Open parent folder" entry). Awaited so the
+		// menu opens with the final visibility state — avoids a
+		// flash-of-hidden-then-shown when the probe resolves.
+		if (menuPrepare) {
+			try {
+				await menuPrepare(item, ctxOf(item.id));
+			} catch {
+				/* prepare failures degrade to the sync-only visibility */
+			}
+		}
 		ctxItem = item;
-		ctxX = Math.min(e.clientX, window.innerWidth - 220);
-		ctxY = Math.min(e.clientY, window.innerHeight - (contextActions.length * 44 + 24));
+		ctxX = x;
+		ctxY = y;
 		ctxOpen = true;
 	}
 	function closeContext() {
@@ -930,7 +963,7 @@
 		oncontextmenu={onContextMenuOverride
 			? (e) => onContextMenuOverride(e, item)
 			: contextActions?.length
-				? (e) => openContext(e, item)
+				? (e) => void openContext(e, item)
 				: undefined}
 	>
 		{#if selectable}
@@ -1057,7 +1090,7 @@
 						onclick={(e) => {
 							e.stopPropagation();
 							if (onContextMenuOverride) onContextMenuOverride(e, item);
-							else openContext(e, item);
+							else void openContext(e, item);
 						}}
 					>
 						<Icon name="ellipsis-v" />
@@ -1096,11 +1129,16 @@
 	ondragleave={onSystemDragLeave}
 	ondrop={onSystemDrop}
 >
+	<!--
+		Title sits OUTSIDE `.page-sticky-header` so it scrolls away on
+		descent — pinning it would waste the always-scarce top-of-viewport
+		strip. What stays sticky (defined by `.page-sticky-header`'s
+		`position: sticky` in shared CSS): the action bar and, when
+		provided, the breadcrumb — the two controls the user reaches for
+		while scrolling.
+	-->
+	<h1 class="page-title">{title}</h1>
 	<div class="page-sticky-header">
-		<h1 class="page-title">{title}</h1>
-		{#if breadcrumb}
-			<div class="rl-breadcrumb">{@render breadcrumb()}</div>
-		{/if}
 		<ActionBar>
 			{#snippet start()}
 				<!--
@@ -1154,6 +1192,15 @@
 				/>
 			{/snippet}
 		</ActionBar>
+		{#if breadcrumb}
+			<!--
+				Breadcrumb sits BELOW the action bar (same sticky block) so
+				the two travel together as the sticky top strip: bar +
+				breadcrumb pin, everything above (title) and below (list)
+				scrolls normally.
+			-->
+			<div class="rl-breadcrumb">{@render breadcrumb()}</div>
+		{/if}
 	</div>
 
 	{#if error}

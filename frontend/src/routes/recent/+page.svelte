@@ -35,7 +35,7 @@
 	// filter is inside ResourceList (gated on `showDotfileToggle`).
 	import { preferences } from '$lib/stores/preferences.svelte';
 	import { isDotfile } from '$lib/utils/dotfileFilter';
-	import { folderAccessCached, warmFolderAccess } from '$lib/utils/folderAccess';
+	import { folderAccessCached, probeFolderAccess } from '$lib/utils/folderAccess';
 	import { t } from '$lib/i18n/index.svelte';
 	import Icon from '$lib/icons/Icon.svelte';
 
@@ -120,16 +120,6 @@
 			]);
 			cursor = page.next_cursor;
 			void owners.resolve(page.items.map((i) => i.resource.updated_by));
-			// Pre-warm the folder-access cache for each row's parent
-			// folder so the "Open parent folder" context-menu entry has
-			// a resolved boolean by the time the user right-clicks. Fire-
-			// and-forget: probes for already-cached ids no-op.
-			warmFolderAccess(
-				page.items.map((i) => {
-					const r = i.resource as FileItem | FolderItem;
-					return isFile(r) ? r.folder_id : r.parent_id;
-				})
-			);
 		} catch (e) {
 			console.error('recent: load error', e);
 			error = t('errors_loadFailed', 'Failed to load items');
@@ -387,6 +377,14 @@
 	showDotfileToggle
 	selectable
 	{contextActions}
+	menuPrepare={async (item) => {
+		// Lazy folder-access probe — fires only when the user actually
+		// opens the context menu on a row, not proactively for every
+		// row on load. Cached in the LRU forever after (per-session);
+		// subsequent right-clicks on the same folder are instant.
+		const pid = parentFolderId(item);
+		if (pid) await probeFolderAccess(pid);
+	}}
 	{groupBys}
 	bind:groupBy
 	bind:reversed

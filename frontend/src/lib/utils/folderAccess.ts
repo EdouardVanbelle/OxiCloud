@@ -75,22 +75,3 @@ export async function probeFolderAccess(id: string): Promise<boolean> {
 	return p;
 }
 
-/**
- * Bulk pre-warm. Deduplicates the input and skips ids already in the
- * cache or in flight, then fires background probes for the rest. Does
- * not await — the promises populate the cache asynchronously.
- *
- * Used by list surfaces (/recent, /favorites, /shared-with-me) that
- * want to gate a per-row "Open parent folder" affordance on whether
- * the caller can actually navigate there. Calling this on every
- * `load()` (initial + infinite-scroll page) is cheap: probes for
- * already-known ids no-op.
- */
-export function warmFolderAccess(ids: Iterable<string | null | undefined>): void {
-	const seen = new Set<string>();
-	for (const id of ids) {
-		if (!id || seen.has(id) || cache.has(id) || inflight.has(id)) continue;
-		seen.add(id);
-		void probeFolderAccess(id);
-	}
-}
