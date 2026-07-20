@@ -1932,17 +1932,28 @@ impl AuthApplicationService {
         expose_system_users: bool,
         pool: &sqlx::PgPool,
     ) -> Result<UserDto, DomainError> {
-        let caller = self.user_storage.get_user_by_id(caller_id).await?;
-
-        // (1) Self.
+        // (1) Self — a single fetch suffices (the check compares the input
+        // UUIDs, so the target read is never needed on this path).
         if caller_id == target_id {
+            let caller = self.user_storage.get_user_by_id(caller_id).await?;
             return Ok(UserDto::from(caller));
         }
+
+        // Caller and target are independent point reads (the self-case already
+        // returned; the branch above compares input UUIDs, not fetched data) —
+        // overlap them with `join!` instead of two serial round-trips.
+        // `caller_res?` first preserves the caller-error precedence of the old
+        // sequential form. (benches/ROUND23.md §P1)
+        let (caller_res, target_res) = tokio::join!(
+            self.user_storage.get_user_by_id(caller_id),
+            self.user_storage.get_user_by_id(target_id)
+        );
+        let caller = caller_res?;
 
         // Anti-enumeration: NotFound for everything that doesn't pass.
         // Convert a real NotFound on `target` to the same anonymous 404,
         // so existence isn't leaked through differential responses.
-        let target = match self.user_storage.get_user_by_id(target_id).await {
+        let target = match target_res {
             Ok(u) => u,
             Err(e) if e.kind == ErrorKind::NotFound => {
                 tracing::info!(

@@ -354,6 +354,27 @@ name = "bench_micro_allocs"
 path = "examples/bench_micro_allocs.rs"
 required-features = ["bench"]
 
+# Round-23 battery ────────────────────────────────────────────────────────────
+
+# Round-23 CPU/alloc micro-pack (no Postgres) — deterministic alloc gates for
+# the decode/clone candidates: contact JSONB `Value`+`from_value` → typed
+# `sqlx::types::Json<T>` decode (J1); `DrivePolicies::from_value` DOM clone →
+# borrow-deserialize (J2); dedup hash reshape clone-collect → `into_iter().unzip()`
+# (U1). The PG latency/round-trip/equivalence evidence is bench_round23_queries.
+[[example]]
+name = "bench_round23_micro"
+path = "examples/bench_round23_micro.rs"
+required-features = ["bench"]
+
+# Round-23 PG query-shape pack — end-to-end latency + equivalence on the live
+# dev Postgres: contact JSONB typed decode on real rows (Q1); get_user_profile
+# 2 serial reads → tokio::join! (Q4); subject_group remove_member 2 recursive
+# CTEs → 1 reused (Q6). Needs the dev Postgres up (reads DATABASE_URL from .env).
+[[example]]
+name = "bench_round23_queries"
+path = "examples/bench_round23_queries.rs"
+required-features = ["bench"]
+
 # Round-22 battery ────────────────────────────────────────────────────────────
 
 # Round-22 CPU/alloc micro-pack — the deferred hot-GET-handler `HeaderMap`
