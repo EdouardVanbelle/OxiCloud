@@ -7,11 +7,9 @@
 	import { SvelteSet } from 'svelte/reactivity';
 	import Icon from '$lib/icons/Icon.svelte';
 	import {
-		cacheFolder,
 		createFolder,
 		deleteFolder,
-		fetchFolderListing,
-		getCachedFolder,
+		fetchFolderPage,
 		getFolder,
 		getFolderName,
 		invalidateFolderCache,
@@ -110,17 +108,26 @@
 	});
 
 	let listing = $state<FolderListing>({ folders: [], files: [], favoriteIds: [], sharedIds: [] });
+	// Server-order accumulator — items in the exact sequence the backend
+	// returned across pages, honouring `sortField`+`reversed` on the wire.
+	// Under order_by=name/type/size the server puts folders first then files;
+	// under modified_at/created_at they interleave. `rlItems` reads this
+	// directly so ResourceList renders in server order without a re-sort.
+	let orderedItems = $state<Array<FileItem | FolderItem>>([]);
+	// Cursor for the NEXT page. `undefined` after the final page has landed
+	// (or before the first fetch). Bound to ResourceList's `hasMore`.
+	let pageCursor = $state<string | undefined>(undefined);
+	// Guard so a fast-firing onloadmore (double intersection tick) can't
+	// enqueue two concurrent next-page fetches on the same cursor.
+	let loadingMore = $state(false);
 
-	// Dotfile hide filter — applied BEFORE sort so `sortedFolders` /
-	// `sortedFiles` reflect exactly what the user sees. Selection,
-	// select-all, batch operations, and the empty-state check all
-	// derive from these visible arrays so a hidden file can't be
-	// silently swept up by "select all" or a "delete visible" batch.
-	// Direct lookups by id (deep-links via `?file=<uuid>`) still go
-	// through `listing.files` so hidden files remain accessible by
-	// their own URL — same UX as macOS Finder.
-	const visibleFolders = $derived(filterDotfiles(listing.folders, preferences.hideDotfiles));
-	const visibleFiles = $derived(filterDotfiles(listing.files, preferences.hideDotfiles));
+	// Dotfile hide filter is now applied inside `rlItems` (below) directly
+	// on the server-ordered accumulator, so a single filter pass feeds
+	// ResourceList. Selection / batch ops iterate ResourceList's own
+	// selection set, which already excludes hidden rows. Direct lookups
+	// by id (deep-links via `?file=<uuid>`) still go through
+	// `listing.files` so hidden files remain reachable via their own URL
+	// — same UX as macOS Finder.
 	// Count of items suppressed by the filter — surfaced in the
 	// empty-state hint when the folder isn't visually empty but
 	// contains only dotfiles the user has hidden, so a "why is this
@@ -211,135 +218,157 @@
 	// writes state, so a fast navigation can't be clobbered by an older fetch.
 	let loadSeq = 0;
 
-	function applyListing(data: FolderListing) {
-		listing = data;
-		replaceSet(favoriteIds, data.favoriteIds);
-		replaceSet(sharedIds, data.sharedIds);
-	}
-
-	async function load() {
+	/**
+	 * Load the current folder's listing.
+	 *
+	 * @param reset  Fresh load (folder nav / sort change / manual reload):
+	 *               clears cursor+accumulator, redoes canonicalization +
+	 *               breadcrumbs, then fetches page 1.
+	 *
+	 *               Append (from `loadMore()` on scroll-bottom): skips
+	 *               preconditions, fetches the NEXT page using the stored
+	 *               cursor and appends to `listing`+`orderedItems`.
+	 *
+	 * Server-side sort: `orderBy=sortField, reverse=reversed` are passed on
+	 * every page request so items arrive already in the requested order —
+	 * client-side sort was removed and `rlItems` reads `orderedItems`
+	 * verbatim. Sort/group changes trigger `load(true)` via `$effect`.
+	 */
+	async function load(reset: boolean = true) {
 		error = null;
 		const seq = ++loadSeq;
 
-		// External users have no home folder; send them to shared-with-me.
-		if (session.isExternalUser && pathSegments.length === 0) {
-			await goto(resolve('/shared-with-me'), { replaceState: true });
-			return;
-		}
-		const home = await session.loadHomeFolder();
-
-		// Canonicalize bare `/files` → `/files/<last-chosen-drive-root>` (or
-		// the default drive's root when there's no memory yet). Keeps the URL
-		// explicit, the breadcrumb populated, and the drive picker correctly
-		// highlighted. The DrivePicker writes `oxi-last-drive-root` on click.
-		if (pathSegments.length === 0) {
-			const last =
-				typeof localStorage !== 'undefined' ? localStorage.getItem('oxi-last-drive-root') : null;
-			const target = last ?? home;
-			if (target) {
-				await goto(resolve(`/files/${target}`), { replaceState: true });
+		let folderId: string;
+		let skeletonTimer: ReturnType<typeof setTimeout> | undefined;
+		if (reset) {
+			// External users have no home folder; send them to shared-with-me.
+			if (session.isExternalUser && pathSegments.length === 0) {
+				await goto(resolve('/shared-with-me'), { replaceState: true });
 				return;
 			}
-		}
+			const home = await session.loadHomeFolder();
 
-		const folderId = pathSegments.at(-1) ?? home;
-		if (!folderId) {
-			error = t('files.no_home', 'No home folder available.');
-			return;
-		}
-		currentId = folderId;
-		filesStore.currentFolder = folderId;
+			// Canonicalize bare `/files` → `/files/<last-chosen-drive-root>` (or
+			// the default drive's root when there's no memory yet). Keeps the URL
+			// explicit, the breadcrumb populated, and the drive picker correctly
+			// highlighted. The DrivePicker writes `oxi-last-drive-root` on click.
+			if (pathSegments.length === 0) {
+				const last =
+					typeof localStorage !== 'undefined' ? localStorage.getItem('oxi-last-drive-root') : null;
+				const target = last ?? home;
+				if (target) {
+					await goto(resolve(`/files/${target}`), { replaceState: true });
+					return;
+				}
+			}
 
-		// Stale-while-revalidate: paint a previously-visited folder instantly,
-		// then revalidate with If-None-Match (304 = keep what's shown).
-		const cached = getCachedFolder(folderId);
-		if (cached) {
-			applyListing(cached.listing);
-			loading = false;
-			showSkeleton = false;
-		} else {
+			const resolvedId = pathSegments.at(-1) ?? home;
+			if (!resolvedId) {
+				error = t('files.no_home', 'No home folder available.');
+				return;
+			}
+			folderId = resolvedId;
+			currentId = folderId;
+			filesStore.currentFolder = folderId;
+
+			// Reset paging state: previous folder's cursor is meaningless here,
+			// and mixing its rows with the new folder's would flash a wrong list.
+			pageCursor = undefined;
+			listing = { folders: [], files: [], favoriteIds: [], sharedIds: [] };
+			orderedItems = [];
 			loading = true;
-		}
-		// Delayed skeleton, only when there's nothing cached to show yet.
-		const skeletonTimer = setTimeout(() => {
-			if (loading) showSkeleton = true;
-		}, 100);
 
-		// Breadcrumbs resolve independently so they never block the grid paint.
-		// Bare `/files` was canonicalized above to `/files/<id>` so pathSegments
-		// is always non-empty here for internal users.
-		void buildCrumbs(pathSegments).then((trail) => {
-			if (seq === loadSeq) crumbs = trail;
-		});
+			// Delayed skeleton so fast loads don't flash it.
+			skeletonTimer = setTimeout(() => {
+				if (loading) showSkeleton = true;
+			}, 100);
 
-		// Resolve the current folder's drive_id so the read-only banner
-		// works even on deep-links into a sub-folder (where
-		// `pathSegments[0]` isn't a drive-root folder id). `getFolder`
-		// hits the same `/api/folders/{id}` endpoint the breadcrumb chain
-		// walks; the folder-name cache warmed by `buildCrumbs` above
-		// makes this a memoised lookup for most navigations. Guarded by
-		// `seq` so a stale in-flight response can't overwrite a newer
-		// navigation's drive.
-		void getFolder(folderId)
-			.then((folder) => {
-				if (seq === loadSeq) currentFolderDriveId = folder.drive_id;
-			})
-			.catch(() => {
-				// Folder metadata fetch failure isn't fatal — the fallback
-				// chain in `currentDrive` (listing[0]?.drive_id, then
-				// pathSegments[0] root-folder lookup) still gives us a
-				// best-effort drive resolution.
+			// Breadcrumbs resolve independently so they never block the grid paint.
+			void buildCrumbs(pathSegments).then((trail) => {
+				if (seq === loadSeq) crumbs = trail;
 			});
+
+			// Resolve the current folder's drive_id so the read-only banner
+			// works even on deep-links into a sub-folder. Guarded by `seq`.
+			void getFolder(folderId)
+				.then((folder) => {
+					if (seq === loadSeq) currentFolderDriveId = folder.drive_id;
+				})
+				.catch(() => {
+					// Fallback chain in `currentDrive` still gives us a
+					// best-effort drive resolution.
+				});
+		} else {
+			// Append path: reuse `currentId`. `pageCursor === undefined` means
+			// we've already reached the last page; treat as no-op.
+			if (!currentId || pageCursor === undefined) return;
+			folderId = currentId;
+		}
 
 		try {
-			const res = await fetchFolderListing(folderId, {
-				etag: cached?.etag,
-				// Paint page one (~200 items) immediately instead of waiting
-				// for every sequential page of a large folder; later pages
-				// extend the view as they land. Skip when a cached copy is
-				// already on screen — replacing it with a partial list would
-				// briefly shrink the view.
-				onPage: cached
-					? undefined
-					: (partial, done) => {
-							if (seq !== loadSeq || done) return; // final state applied below
-							applyListing(partial);
-							loading = false;
-							showSkeleton = false;
-						}
+			const page = await fetchFolderPage(folderId, {
+				orderBy: sortField,
+				reverse: reversed,
+				cursor: reset ? undefined : pageCursor
 			});
 			if (seq !== loadSeq) return; // superseded by a newer navigation
-			if (res.status === 200 && res.listing) {
-				applyListing(res.listing);
-				cacheFolder(folderId, res.listing, res.etag);
+			if (reset) {
+				listing = {
+					folders: page.folders,
+					files: page.files,
+					favoriteIds: [],
+					sharedIds: []
+				};
+				orderedItems = page.items;
+			} else {
+				listing = {
+					folders: [...listing.folders, ...page.folders],
+					files: [...listing.files, ...page.files],
+					favoriteIds: listing.favoriteIds,
+					sharedIds: listing.sharedIds
+				};
+				orderedItems = [...orderedItems, ...page.items];
 			}
-			// 304 → the cached copy already on screen is current.
+			pageCursor = page.nextCursor;
 			error = null;
 		} catch (e) {
 			if (seq !== loadSeq) return;
-			// With a cached view already shown, keep it on a transient failure.
-			if (!cached) {
-				const status = (e as { status?: number })?.status;
-				error =
-					status === 403
-						? t('errors.forbidden', 'Could not load files')
-						: e instanceof Error
-							? e.message
-							: String(e);
-			}
+			const status = (e as { status?: number })?.status;
+			error =
+				status === 403
+					? t('errors.forbidden', 'Could not load files')
+					: e instanceof Error
+						? e.message
+						: String(e);
 		} finally {
-			clearTimeout(skeletonTimer);
-			if (seq === loadSeq) {
+			if (skeletonTimer !== undefined) clearTimeout(skeletonTimer);
+			if (seq === loadSeq && reset) {
 				loading = false;
 				showSkeleton = false;
 			}
 		}
 	}
 
+	/**
+	 * Fetch and append the next page. Invoked by ResourceList's
+	 * IntersectionObserver when the bottom sentinel enters the viewport.
+	 * The `loadingMore` guard collapses a double-fire (the observer can
+	 * tick twice on the same intersection edge).
+	 */
+	async function loadMore() {
+		if (loadingMore || pageCursor === undefined) return;
+		loadingMore = true;
+		try {
+			await load(false);
+		} finally {
+			loadingMore = false;
+		}
+	}
+
 	/** Data changed — drop cached listings and reload the current folder fresh. */
 	async function reload() {
 		invalidateFolderCache();
-		await load();
+		await load(true);
 	}
 
 	function openFolder(folder: FolderItem) {
@@ -1382,35 +1411,14 @@
 	type SortField = 'name' | 'type' | 'size' | 'modified_at' | 'created_at';
 	let sortField = $state<SortField>('name');
 	let reversed = $state(false);
-	const sortDir = $derived<1 | -1>(reversed ? -1 : 1);
 
-	function cmpFolders(a: FolderItem, b: FolderItem): number {
-		let v: number;
-		if (sortField === 'modified_at') v = a.modified_at - b.modified_at;
-		else if (sortField === 'created_at') v = a.created_at - b.created_at;
-		// Folders have no size; fall back to name for size/type so they stay stable.
-		else v = a.name.localeCompare(b.name);
-		return v * sortDir;
-	}
-	function cmpFiles(a: FileItem, b: FileItem): number {
-		let v: number;
-		if (sortField === 'size') v = (a.size ?? 0) - (b.size ?? 0);
-		else if (sortField === 'modified_at') v = a.modified_at - b.modified_at;
-		else if (sortField === 'created_at') v = a.created_at - b.created_at;
-		else if (sortField === 'type') v = (a.category ?? '').localeCompare(b.category ?? '');
-		else v = a.name.localeCompare(b.name);
-		return v * sortDir;
-	}
-
-	// Sorted (folders-then-files) merged into one `Array<FileItem | FolderItem>`
-	// that <ResourceList> renders directly. Order matches the un-migrated
-	// layout: folders precede files, sort key applied within each cohort. The
-	// bespoke `Entry` discriminator + swimlane bucketing that used to live
-	// here is gone — ResourceList does swimlane bucketing itself via
-	// `rlGroupBys` below.
-	const sortedFolders = $derived([...visibleFolders].sort(cmpFolders));
-	const sortedFiles = $derived([...visibleFiles].sort(cmpFiles));
-	const rlItems = $derived<Array<FileItem | FolderItem>>([...sortedFolders, ...sortedFiles]);
+	// Server does the sort (order_by=sortField, reverse=reversed on every
+	// page request), so ResourceList reads `orderedItems` in server order
+	// straight through the dotfile filter. No client-side comparator
+	// necessary. Under order_by=name/type/size the server puts folders
+	// first then files; under modified_at/created_at they interleave —
+	// preserving the accumulator order is what surfaces that correctly.
+	const rlItems = $derived(filterDotfiles(orderedItems, preferences.hideDotfiles));
 
 	// Group-by state (bound to <ResourceList>). Kept as a `string` prop
 	// value; the current `sortField` mirrors from the picked group's
@@ -1508,7 +1516,8 @@
 		return () => window.removeEventListener('pointerdown', onDown);
 	});
 
-	// Reload whenever the route path changes.
+	// Reload whenever the route path OR the server sort dimension/direction
+	// changes.
 	//
 	// `load()` reads several reactive signals in its sync phase
 	// (session.isExternalUser, session.homeFolderId, plus whatever
@@ -1517,12 +1526,14 @@
 	// `session.loadHomeFolder()`'s own writes to `homeFolderId`
 	// during its resolution then re-trigger the effect, firing a
 	// second and third `load()` before the first has settled. Wrap
-	// in `untrack` so the ONLY dependency is `pathSegments` (route
-	// change is the sole legitimate re-trigger).
+	// in `untrack` so the ONLY dependencies are the three we WANT
+	// to reload on: pathSegments, sortField, reversed.
 	$effect(() => {
 		void pathSegments;
+		void sortField;
+		void reversed;
 		untrack(() => {
-			void load();
+			void load(true);
 		});
 	});
 
@@ -1602,6 +1613,8 @@
 		groupBys={rlGroupBys}
 		bind:groupBy
 		bind:reversed
+		hasMore={pageCursor !== undefined}
+		onloadmore={loadMore}
 		onreload={(orderBy) => {
 			sortField = orderBy as SortField;
 		}}
