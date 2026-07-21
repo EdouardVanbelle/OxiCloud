@@ -30,3 +30,20 @@ export async function clearRecent(): Promise<void> {
 	});
 	if (!res.ok) throw new Error(`clear recent failed: ${res.status}`);
 }
+
+/**
+ * Remove a single item from the caller's recent history — the "broom"
+ * per-row affordance in the recent view. Distinct from `clearRecent`
+ * (which wipes every entry). 404 means the item wasn't in recents to
+ * begin with — treated as a no-op success by the caller.
+ */
+export async function removeFromRecent(kind: ItemType, id: string): Promise<void> {
+	const res = await apiFetch(`/api/recent/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`, {
+		method: 'DELETE',
+		credentials: 'same-origin',
+		headers: getCsrfHeaders()
+	});
+	if (!res.ok && res.status !== 404) {
+		throw new Error(`remove from recent failed: ${res.status}`);
+	}
+}

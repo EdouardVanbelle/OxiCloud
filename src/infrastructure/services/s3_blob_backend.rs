@@ -200,6 +200,38 @@ impl BlobStorageBackend for S3BlobBackend {
         })
     }
 
+    /// Dedup settle path: PUT unconditionally. Keys are content-addressed
+    /// (BLAKE3), so a re-PUT writes identical bytes — overwrite-safe
+    /// idempotency without the HEAD probe `put_blob_from_bytes` pays. The
+    /// dedup layer already filtered out chunks the database knows about,
+    /// so the probe was a pure extra round-trip on every NEW chunk of
+    /// every upload (2 RTTs -> 1, benches/S3-PUT.md).
+    fn put_blob_from_bytes_unsynced(
+        &self,
+        hash: &str,
+        data: Bytes,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<u64, DomainError>> + Send + '_>> {
+        let hash = hash.to_owned();
+        Box::pin(async move {
+            let key = Self::object_key(&hash);
+            let size = data.len() as u64;
+            self.client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(&key)
+                .body(ByteStream::from(data))
+                .send()
+                .await
+                .map_err(|e| {
+                    DomainError::internal_error(
+                        "S3",
+                        format!("Failed to upload blob {}: {}", hash, e),
+                    )
+                })?;
+            Ok(size)
+        })
+    }
+
     fn get_blob_stream(
         &self,
         hash: &str,

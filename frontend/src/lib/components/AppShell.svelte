@@ -10,10 +10,11 @@
 	import { lazyComponent } from '$lib/composables/lazyComponent.svelte';
 	import DrivePicker from '$lib/components/DrivePicker.svelte';
 	import Icon from '$lib/icons/Icon.svelte';
-	import { iconNameFromClass } from '$lib/utils/display';
+	import { dateTimeFormatFor, iconNameFromClass } from '$lib/utils/display';
 	import { userInitials, avatarColorIndex } from '$lib/utils/avatar';
 	import { i18n, LANGUAGES, setLocale, t, type Locale } from '$lib/i18n/index.svelte';
 	import { apiFetch } from '$lib/api/client';
+	import { preferences } from '$lib/stores/preferences.svelte';
 	import { session } from '$lib/stores/session.svelte';
 	import { theme, type Theme } from '$lib/stores/theme.svelte';
 	import { ui } from '$lib/stores/ui.svelte';
@@ -129,6 +130,11 @@
 	let suggestOpen = $state(false);
 	let suggestBusy = $state(false);
 	let suggestTimer: ReturnType<typeof setTimeout> | null = null;
+	// Stale-response guard (same family as the search page): the debounce
+	// spaces requests out but doesn't stop a SLOW earlier response from
+	// resolving after a newer one and overwriting its suggestions.
+	let suggestSeq = 0;
+	let suggestInflight: AbortController | null = null;
 
 	function goToResults() {
 		const q = searchQuery.trim();
@@ -148,24 +154,33 @@
 		if (suggestTimer) clearTimeout(suggestTimer);
 		const q = searchQuery.trim();
 		if (q.length < 2) {
+			suggestSeq++;
+			suggestInflight?.abort();
+			suggestInflight = null;
 			suggestions = [];
 			suggestOpen = false;
 			return;
 		}
 		suggestTimer = setTimeout(async () => {
+			const seq = ++suggestSeq;
+			suggestInflight?.abort();
+			const ctl = new AbortController();
+			suggestInflight = ctl;
 			suggestBusy = true;
 			try {
-				const r = await searchFiles(q, { recursive: true, limit: 6 });
+				const r = await searchFiles(q, { recursive: true, limit: 6, signal: ctl.signal });
+				if (seq !== suggestSeq) return; // superseded while awaiting
 				suggestions = [
 					...r.folders.slice(0, 3).map((item) => ({ kind: 'folder' as const, item })),
 					...r.files.slice(0, 6).map((item) => ({ kind: 'file' as const, item }))
 				];
 				suggestOpen = suggestions.length > 0;
 			} catch {
+				if (seq !== suggestSeq || ctl.signal.aborted) return;
 				suggestions = [];
 				suggestOpen = false;
 			} finally {
-				suggestBusy = false;
+				if (seq === suggestSeq) suggestBusy = false;
 			}
 		}, 250);
 	}
@@ -208,6 +223,19 @@
 		langOpen = false;
 	}
 
+	/**
+	 * True when the shortcut target is a text-input surface — <input>,
+	 * <textarea>, or any `contenteditable` element. Used by the
+	 * Cmd/Ctrl+Shift+. shortcut to defer to normal typing when the
+	 * user is composing text (otherwise typing `.` while holding Shift
+	 * in a filename dialog would fight the shortcut).
+	 */
+	function isTextFieldFocused(target: EventTarget | null): boolean {
+		if (!(target instanceof HTMLElement)) return false;
+		const tag = target.tagName;
+		return tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable;
+	}
+
 	async function chooseLocale(loc: Locale) {
 		langOpen = false;
 		await setLocale(loc);
@@ -216,7 +244,7 @@
 	const currentLang = $derived(LANGUAGES.find((l) => l.code === i18n.locale) ?? LANGUAGES[0]);
 
 	function formatTime(ms: number): string {
-		return new Date(ms).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+		return dateTimeFormatFor(undefined, { hour: '2-digit', minute: '2-digit' }).format(ms);
 	}
 
 	function notifIcon(kind: string): string {
@@ -251,6 +279,29 @@
 		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k' && !palette.component) {
 			e.preventDefault();
 			void palette.load();
+			return;
+		}
+		// Cmd/Ctrl+Shift+. toggles dotfile visibility — matches macOS
+		// Finder's convention. `e.code === 'Period'` targets the
+		// physical key regardless of keyboard layout (Cmd+Shift+.
+		// yields `.key === '>'` on some layouts). Skip when focus is
+		// inside a text field so users can still type `.` in inputs.
+		if (
+			(e.metaKey || e.ctrlKey) &&
+			e.shiftKey &&
+			e.code === 'Period' &&
+			!isTextFieldFocused(e.target)
+		) {
+			e.preventDefault();
+			preferences.toggleHideDotfiles();
+			ui.notify(
+				preferences.hideDotfiles
+					? t('files.dotfiles_hidden_toast', 'Dotfiles hidden')
+					: t('files.dotfiles_shown_toast', 'Dotfiles shown'),
+				'info',
+				2000,
+				false
+			);
 			return;
 		}
 		if (e.key !== 'Escape') return;
@@ -821,7 +872,10 @@
 		top: calc(100% + 4px);
 		left: 0;
 		right: 0;
-		z-index: 50;
+		/* Search suggestions render above `.page-sticky-header` — otherwise the
+		   dropdown clips under the action bar on the content pages. Design-token
+		   `--z-dropdown` (1000) sits above `--z-sticky` (100) by construction. */
+		z-index: var(--z-dropdown);
 		list-style: none;
 		margin: 0;
 		padding: 0.25rem;
@@ -1066,7 +1120,8 @@
 		position: absolute;
 		bottom: calc(100% + 4px);
 		right: 0;
-		z-index: 60;
+		/* Sits above `--z-sticky` for the same reason as `.suggest` above. */
+		z-index: var(--z-dropdown);
 		min-width: 12rem;
 		max-height: 18rem;
 		overflow: auto;

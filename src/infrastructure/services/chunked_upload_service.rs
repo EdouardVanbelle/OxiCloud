@@ -514,6 +514,17 @@ impl ChunkedUploadService {
         Ok(())
     }
 
+    /// Alloc-free owner compare for the per-chunk hot path: the caller's
+    /// `Uuid` is stack-encoded (hyphenated, the format sessions store) —
+    /// `prepare_chunk`/`commit_chunk` used to pay a `Uuid::to_string` each
+    /// plus a dedicated `verify_session_owner` map lookup per chunk
+    /// (benches/ROUND12.md §M5, 1.28x / −2 allocs per chunk).
+    #[inline]
+    fn owner_matches(session_user_id: &str, user_id: Uuid) -> bool {
+        let mut buf = [0u8; 36];
+        session_user_id == user_id.hyphenated().encode_lower(&mut buf) as &str
+    }
+
     /// Create a new upload session (persists `session.json` + empty `progress.bin`)
     async fn create_session_inner(
         &self,
@@ -617,9 +628,8 @@ impl ChunkedUploadService {
         user_id: Uuid,
         chunk_index: usize,
     ) -> Result<(PathBuf, usize), DomainError> {
-        self.verify_session_owner(upload_id, &user_id.to_string())
-            .map_err(|e| DomainError::new(ErrorKind::NotFound, "ChunkedUpload", e))?;
-
+        // Single map lookup: the owner gate rides the same guard (same
+        // anti-enum not-found for unknown session and foreign session).
         let session = self.sessions.get(upload_id).ok_or_else(|| {
             DomainError::new(
                 ErrorKind::NotFound,
@@ -627,6 +637,13 @@ impl ChunkedUploadService {
                 format!("Upload session not found: {}", upload_id),
             )
         })?;
+        if !Self::owner_matches(&session.user_id, user_id) {
+            return Err(DomainError::new(
+                ErrorKind::NotFound,
+                "ChunkedUpload",
+                format!("Upload session not found: {}", upload_id),
+            ));
+        }
 
         if chunk_index >= session.chunks.len() {
             return Err(DomainError::new(
@@ -678,20 +695,23 @@ impl ChunkedUploadService {
         computed_checksum: Option<String>,
         expected_checksum: Option<String>,
     ) -> Result<ChunkUploadResponseDto, DomainError> {
-        self.verify_session_owner(upload_id, &user_id.to_string())
-            .map_err(|e| DomainError::new(ErrorKind::NotFound, "ChunkedUpload", e))?;
-
-        // Re-fetch chunk metadata under fresh lock — guards against the
-        // (vanishingly unlikely) case of a session expiry / cancellation
-        // racing with the write.
+        // Owner gate folded into the metadata read below — one lookup
+        // instead of two, same anti-enum not-found semantics.
         let (chunk_path, expected_size, persist_path) = {
             let session = self.sessions.get(upload_id).ok_or_else(|| {
                 DomainError::new(
                     ErrorKind::NotFound,
                     "ChunkedUpload",
-                    "Session disappeared".to_string(),
+                    format!("Upload session not found: {}", upload_id),
                 )
             })?;
+            if !Self::owner_matches(&session.user_id, user_id) {
+                return Err(DomainError::new(
+                    ErrorKind::NotFound,
+                    "ChunkedUpload",
+                    format!("Upload session not found: {}", upload_id),
+                ));
+            }
             if chunk_index >= session.chunks.len() {
                 return Err(DomainError::new(
                     ErrorKind::InvalidInput,
@@ -834,8 +854,7 @@ impl ChunkedUploadService {
             let data_clone = data.clone(); // Bytes::clone is O(1) — just an Arc increment
             let actual_checksum = tokio::task::spawn_blocking(move || {
                 use md5::{Digest, Md5};
-                let hash = Md5::digest(&data_clone);
-                hash.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                crate::common::fmt::hex_lower(&Md5::digest(&data_clone))
             })
             .await
             .map_err(|e| format!("MD5 checksum task failed: {e}"))?;

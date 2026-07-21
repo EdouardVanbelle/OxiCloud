@@ -71,7 +71,7 @@ export const LANGUAGES: readonly LanguageMeta[] = [
 	{ code: 'pl', name: 'Polski', flag: '🇵🇱' }
 ];
 
-const STORAGE_KEY = 'oxicloud-locale';
+const STORAGE_KEY = 'oxi-locale';
 
 /**
  * Reflect the active locale on `<html>`: sets `lang` and flips `dir` to `rtl`
@@ -116,8 +116,33 @@ export function resolveBrowserLocale(
 	return 'en';
 }
 
+// Resolved-value cache, one map per dict object: `t()` runs ~10× per rendered
+// list row over the app's finite static key set, so the nested split + tree
+// walk runs once per (locale, key) instead of on every call. Dicts are
+// assigned once in `loadDict` and never mutated, so entries can't go stale;
+// the cap only guards against a pathological dynamic-key caller.
+const RESOLVED_CACHE_MAX = 4000;
+const resolvedCache = new WeakMap<Dict, Map<string, string | null>>();
+
 /** Resolve a dot-notation key with a prefix_suffix underscore fallback. */
 export function getNestedValue(obj: Dict | undefined, path: string): string | null {
+	if (!obj || typeof obj !== 'object') return resolveNestedValue(obj, path);
+	let cache = resolvedCache.get(obj);
+	if (cache === undefined) {
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity -- deliberately non-reactive: a memo written during render must not create/notify signals
+		cache = new Map();
+		resolvedCache.set(obj, cache);
+	}
+	const hit = cache.get(path);
+	if (hit !== undefined) return hit;
+	const value = resolveNestedValue(obj, path);
+	if (cache.size >= RESOLVED_CACHE_MAX) cache.clear();
+	cache.set(path, value);
+	return value;
+}
+
+/** The uncached lookup: flat-key fast path, dotted walk, underscore fallback. */
+function resolveNestedValue(obj: Dict | undefined, path: string): string | null {
 	if (obj && typeof obj === 'object' && path in obj) {
 		const value = obj[path];
 		return typeof value === 'string' ? value : null;
@@ -146,6 +171,9 @@ export function getNestedValue(obj: Dict | undefined, path: string): string | nu
 
 /** Replace `{{param}}` placeholders; leaves unknown placeholders intact. */
 export function interpolate(text: string, params: Record<string, unknown>): string {
+	// The vast majority of UI strings carry no placeholder — skip the regex
+	// scan (and its per-call machinery) for them.
+	if (!text.includes('{{')) return text;
 	return text.replace(/{{\s*([^}]+)\s*}}/g, (_, key: string) => {
 		const k = key.trim();
 		return params[k] !== undefined ? String(params[k]) : `{{${key}}}`;
@@ -173,6 +201,12 @@ async function loadDict(locale: string): Promise<Dict> {
 	return dicts[locale];
 }
 
+/** Shared frozen empty params for the no-interpolation call forms, so the
+ * ubiquitous `t(key)` / `t(key, 'fallback')` don't each allocate a throwaway
+ * `{}` (t() is the hottest UI function — ~10× per row). Never mutated, so a
+ * single shared instance is safe. See benches/ROUND14.md §F1. */
+const EMPTY_PARAMS: Record<string, unknown> = Object.freeze({});
+
 /**
  * Translate a key.
  *  - `t(key)` / `t(key, params)` — interpolation params object.
@@ -181,11 +215,11 @@ async function loadDict(locale: string): Promise<Dict> {
  */
 export function t(
 	key: string,
-	paramsOrFallback: string | Record<string, unknown> = {},
+	paramsOrFallback: string | Record<string, unknown> = EMPTY_PARAMS,
 	fallbackArg?: string
 ): string {
 	const isStringForm = typeof paramsOrFallback === 'string';
-	const params = isStringForm ? {} : paramsOrFallback;
+	const params = isStringForm ? EMPTY_PARAMS : paramsOrFallback;
 	const fallback = isStringForm ? paramsOrFallback : (fallbackArg ?? null);
 
 	const localeData = dicts[store.locale];

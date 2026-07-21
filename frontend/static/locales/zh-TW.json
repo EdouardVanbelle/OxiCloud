@@ -58,6 +58,8 @@
   "photos": {
     "empty_state": "還沒有照片",
     "empty_hint": "上傳圖片或影片即可在此檢視",
+    "empty_hidden": "根據您的偏好隱藏了 {{n}} 張相片",
+    "empty_hidden_hint": "在個人資料中關閉「隱藏隱藏檔案」即可查看。",
     "items_selected": "已選擇",
     "view_daily": "日",
     "view_monthly": "月",
@@ -232,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "透過郵件通知",
     "revoke": "移除",
-    "role_label": "角色"
+    "role_label": "角色",
+    "col_shared_by": "分享者",
+    "col_shared": "分享日期"
   },
   "share_dialogTitle": "共享連結",
   "share_linkLabel": "共享連結：",
@@ -335,6 +339,7 @@
     "modified": "修改日期",
     "no_files": "此資料夾中沒有檔案",
     "empty_hint": "上傳檔案或建立資料夾以開始使用",
+    "drop_to_upload": "將檔案拖放到此處上傳",
     "loading": "正在載入檔案…",
     "view_grid": "網格檢視",
     "view_list": "列表檢視",
@@ -365,7 +370,21 @@
     "folder": "資料夾",
     "new_folder": "新建資料夾",
     "share": "分享",
-    "view": "檢視"
+    "view": "檢視",
+    "empty_hidden_title": "此資料夾中有 {{n}} 個隱藏項目",
+    "empty_hidden_hint": "以 '.' 開頭的檔案被隱藏。切換設定即可顯示。",
+    "show_hidden": "顯示隱藏檔案",
+    "upload_dotfile_hidden": "已上傳 {{n}} 個檔案,但已根據您的偏好隱藏。",
+    "rename_dotfile_hidden": "已重新命名為「{{name}}」——現已根據您的偏好隱藏。",
+    "new_folder_dotfile_hidden": "已建立資料夾「{{name}}」——根據您的偏好隱藏。",
+    "dotfiles_hidden_toast": "已隱藏隱藏檔案",
+    "dotfiles_shown_toast": "已顯示隱藏檔案",
+    "col_modified": "修改日期",
+    "col_added": "新增日期",
+    "col_created_by": "建立者",
+    "col_opened": "開啟日期",
+    "col_path": "位置",
+    "new_elements": "新項目"
   },
   "dialogs": {
     "rename_folder": "重新命名資料夾",
@@ -451,7 +470,8 @@
       "trashed_time": "刪除時間"
     },
     "delete": "永久刪除",
-    "empty_action": "清空回收站"
+    "empty_action": "清空回收站",
+    "expires_at": "到期時間"
   },
   "daysRemaining": {
     "expired": "已過期",
@@ -570,7 +590,10 @@
     "accessed": "訪問於",
     "empty_state": "沒有最近檔案",
     "empty_hint": "您開啟的檔案將顯示在這裡",
-    "loadMore": "載入更多"
+    "empty_hidden_state": "根據您的偏好隱藏了 {{n}} 個最近項目",
+    "empty_hidden_hint": "在個人資料中關閉「隱藏隱藏檔案」即可查看。",
+    "loadMore": "載入更多",
+    "remove_item": "從最近項目中移除"
   },
   "batch": {
     "one_selected": "已選擇 1 個專案",
@@ -789,7 +812,70 @@
     "title": "管理員",
     "user": "使用者",
     "username": "使用者名稱",
-    "users": "使用者"
+    "users": "使用者",
+    "drive_manage_policies": "管理政策",
+    "drive_manage_policies_for": "政策 — {{name}}",
+    "drive_manage_policies_help": "政策僅限管理員設定 — 雲端硬碟 擁有者無法修改。每個開關控制一項強制規則。",
+    "drive_policy": {
+      "forbid_sharing": "禁止以資源為單位的分享",
+      "forbid_sharing_help": "封鎖以檔案 / 資料夾為單位的授權（同時涵蓋公開連結與外部分享）。雲端硬碟 層級的成員資格仍可使用。",
+      "forbid_public_links": "禁止公開連結",
+      "forbid_public_links_help": "封鎖在此 雲端硬碟 的資源上建立匿名分享連結。",
+      "forbid_external_sharing": "禁止外部分享",
+      "forbid_external_sharing_help": "封鎖授權給外部使用者（電子郵件邀請及既有的外部帳號）。",
+      "forbid_cross_drive_move": "禁止在 雲端硬碟 之間移動",
+      "forbid_cross_drive_move_help": "封鎖將檔案或資料夾移動到另一個 雲端硬碟。並不阻止下載後再上傳。",
+      "forbid_owner_role_change": "鎖定擁有者名單",
+      "forbid_owner_role_change_help": "此項啟用時，僅管理員可新增、移除或降級 雲端硬碟 擁有者。",
+      "include_in_photo_index": "包含於照片中",
+      "include_in_photo_index_help": "在照片時間軸與地點地圖中顯示此 雲端硬碟 的圖像與影片檔案。預設個人 雲端硬碟 會自動包含；針對真正含有照片的共享 雲端硬碟（例如「家庭照片」），請開啟此選項。",
+      "include_in_music_index": "包含於音樂中",
+      "include_in_music_index_help": "將此 雲端硬碟 的音訊檔案包含於音樂媒體庫。預設個人 雲端硬碟 會自動包含；針對真正含有音樂收藏的共享 雲端硬碟（例如「家庭音樂」、「樂團協作」），請開啟此選項。",
+      "implied_by_forbid_sharing": "已由「禁止以資源為單位的分享」強制執行。",
+      "read_only": "唯讀(凍結)",
+      "read_only_help": "完全凍結雲端硬碟 — 任何修改都會被拒絕(上傳、編輯、刪除、重新命名、分享、成員變更)。讀取和下載仍可正常使用。垃圾桶的自動清理也會暫停。適用於封存、法律保留或帳戶關閉。只有管理員可以解凍。"
+    },
+    "drives": "雲端硬碟",
+    "drive_name": "名稱",
+    "drive_kind": "類型",
+    "drive_owners": "擁有者",
+    "drive_usage": "使用量",
+    "drive_created_at": "建立時間",
+    "drive_kind_shared": "共用",
+    "drive_kind_personal": "個人",
+    "drive_kind_default_suffix": "(預設)",
+    "drive_manage_owners": "管理擁有者",
+    "drive_manage_owners_for": "管理擁有者 — {{name}}",
+    "drive_edit_quota": "編輯配額",
+    "drive_delete": "刪除雲端硬碟",
+    "drive_delete_confirm": "刪除雲端硬碟「{{name}}」?此操作無法復原。",
+    "drive_deleted": "雲端硬碟已刪除。",
+    "drive_created": "雲端硬碟已建立。",
+    "drive_add_owner": "新增擁有者",
+    "drive_current_owners": "目前擁有者",
+    "drive_no_owners": "無擁有者",
+    "drive_owner": "擁有者",
+    "drive_owner_hint": "選擇一位使用者(單一擁有者)或一個群組(透過主體展開,每位成員都成為擁有者)。",
+    "drive_owner_picked": "擁有者: {{name}}",
+    "drive_owner_placeholder": "搜尋使用者或群組…",
+    "drive_owner_remove_confirm": "將此擁有者從雲端硬碟中移除?",
+    "drive_name_placeholder": "例如: 工程",
+    "drive_error_name_required": "雲端硬碟名稱為必填。",
+    "drive_error_owner_required": "請選擇一位使用者或群組作為雲端硬碟擁有者。",
+    "create_drive": "建立共用雲端硬碟",
+    "no_drives": "尚無雲端硬碟。",
+    "external_user": "外部",
+    "external_user_hint": "僅邀請帳戶(magic-link 或 OCM)。無法作為管理員,亦無儲存配額。",
+    "no_storage_for_external": "外部帳戶沒有儲存配額。",
+    "promote_to_internal_title": "提升為內部使用者",
+    "confirm_promote_user": "將 {{name}} 提升為內部使用者?此操作會配置主雲端硬碟並指派正常的儲存配額。帳戶身分保持不變;在設定密碼前,magic-link 登入仍是進入方式。",
+    "delete_user_title": "刪除使用者",
+    "delete_user_warning": "即將永久刪除「{{name}}」。這將移除帳戶、撤銷所有工作階段並清除個人雲端硬碟。此操作無法復原。",
+    "delete_user_confirm_hint": "要確認,請在下方輸入帳戶電子郵件: {{email}}",
+    "deleting": "刪除中…",
+    "auth": "驗證",
+    "quota": "儲存用量",
+    "last_login": "上次登入"
   },
   "profile": {
     "page_title": "個人資料",
@@ -842,6 +928,7 @@
     "family_name": "姓",
     "notify_on_share": "當有人與我分享時透過電子郵件通知我",
     "notify_on_share_hint": "取消勾選後，分享項目仍會顯示在您的帳戶中 — 只是不會收到相關郵件通知。",
+    "hide_dotfiles": "隱藏名稱以點開頭的檔案（.env、.git 等）",
     "save_profile": "儲存變更",
     "profile_saved": "個人資料已更新",
     "profile_no_changes": "沒有變更可儲存。",
@@ -979,7 +1066,17 @@
     "notifyRateLimited": "對此收件者的通知過多 — 請稍後重試。",
     "removeAccess": "移除存取權限",
     "resendInvitation": "重新傳送邀請郵件",
-    "publicLinks": "Public links"
+    "publicLinks": "Public links",
+    "filter": {
+      "button": "類型",
+      "title": "依類型篩選",
+      "files": "檔案",
+      "folders": "資料夾",
+      "drives": "磁碟機",
+      "emptyTitle": "沒有分享項目符合目前的篩選",
+      "emptyHint": "調整類型篩選或將其重設為預設 (檔案 + 資料夾)。",
+      "reset": "重設篩選"
+    }
   },
   "sort": {
     "asc": "ascending",
@@ -1078,7 +1175,9 @@
     "rename": "重新命名",
     "save": "儲存",
     "search": "搜尋",
-    "yes": "有"
+    "yes": "有",
+    "saving": "儲存中…",
+    "deleting": "刪除中…"
   },
   "device": {
     "continue": "繼續",
@@ -1108,5 +1207,79 @@
   "view": {
     "grid": "網格檢視",
     "list": "列表檢視"
+  },
+  "preferences": {
+    "save_failed": "無法儲存偏好設定。請再試一次。"
+  },
+  "upgrade": {
+    "title": "升級為完整帳號",
+    "lede": "取得您自己的儲存空間並開始上傳檔案。您現有的共享保持不變。",
+    "busy": "升級中…",
+    "submit": "升級我的帳號",
+    "cancel": "暫不 — 返回共享給我",
+    "success": "您的帳號已升級。正在跳轉到您的檔案…",
+    "error": "升級失敗。",
+    "password_required": "需要密碼 — 此部署未提供電子郵件連結登入。",
+    "password_too_short": "密碼必須至少 8 個字元。",
+    "oidc_user": "SSO/OIDC 帳號由您的身分提供者管理。無法升級。",
+    "domain_not_allowed": "此部署不接受來自您電子郵件網域的新帳號。請聯絡管理員啟用。",
+    "banner_aria": "升級提示",
+    "banner_title": "取得您自己的儲存空間",
+    "banner_body": "您正在使用訪客帳號。升級以取得個人雲端硬碟並開始上傳檔案。",
+    "banner_cta": "升級"
+  },
+  "drive": {
+    "read_only_banner": {
+      "title": "此雲端硬碟為唯讀",
+      "title_named": "雲端硬碟「{{name}}」為唯讀",
+      "body": "上傳、編輯、刪除、重新命名、分享和成員變更均被拒絕。讀取和下載仍可正常使用。請聯絡管理員解凍此雲端硬碟。",
+      "aria": "此雲端硬碟為唯讀"
+    },
+    "back_to_files": "返回檔案",
+    "danger_zone": "危險操作",
+    "delete": "刪除雲端硬碟",
+    "delete_confirm": "刪除雲端硬碟「{{name}}」?此操作無法復原 — 雲端硬碟必須為空,否則伺服器將拒絕。",
+    "delete_hint": "刪除雲端硬碟會永久移除。刪除前雲端硬碟必須為空(沒有作用中的檔案或資料夾)。",
+    "deleted": "雲端硬碟已刪除。",
+    "field": {
+      "created": "建立時間",
+      "default": "預設",
+      "default_yes": "這是您的主要雲端硬碟",
+      "id": "識別碼",
+      "kind": "類型",
+      "updated": "最後更新"
+    },
+    "info": "雲端硬碟資訊",
+    "kind_personal": "個人雲端硬碟",
+    "kind_shared": "共用雲端硬碟",
+    "manage_members": "管理成員",
+    "members": "成員",
+    "members_empty": "尚無成員。",
+    "not_found_body": "此雲端硬碟不存在或您無權存取。",
+    "not_found_title": "找不到雲端硬碟",
+    "policies": "規則",
+    "policies_help": "OxiCloud 管理員為此雲端硬碟設定的規則。只有管理員可以變更;您看到的是目前狀態。",
+    "quota": "配額",
+    "rename": "重新命名雲端硬碟",
+    "role": {
+      "commenter": "評論者",
+      "contributor": "貢獻者",
+      "editor": "編輯者",
+      "owner": "擁有者",
+      "viewer": "檢視者"
+    },
+    "storage": "儲存",
+    "usage": "使用量",
+    "used": "已使用",
+    "members_personal_immutable": "個人雲端硬碟的成員關係固定為單一擁有者。"
+  },
+  "group": {
+    "members_empty": "無成員",
+    "member_count": "{{n}} 位成員"
+  },
+  "resource_list": {
+    "location": "位置",
+    "wrong_drop_zone_msg": "上傳僅在「檔案」中有效 — 請開啟檔案區並在該處拖放。",
+    "wrong_drop_zone_action": "前往檔案"
   }
 }

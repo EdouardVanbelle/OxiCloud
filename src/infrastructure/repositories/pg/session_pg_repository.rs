@@ -327,6 +327,77 @@ impl SessionStoragePort for SessionPgRepository {
             .map_err(DomainError::from)
     }
 
+    /// Revoke + insert + last-login stamp in ONE transaction — the refresh
+    /// rotation used to pay two full BEGIN/COMMIT round-trip pairs
+    /// (`revoke_session` then `create_session`) per token refresh.
+    async fn rotate_session(
+        &self,
+        old_session_id: Uuid,
+        new_session: Session,
+    ) -> Result<Session, DomainError> {
+        let session_clone = new_session.clone();
+        with_transaction(&self.pool, "rotate_session", |tx| {
+            Box::pin(async move {
+                sqlx::query("UPDATE auth.sessions SET revoked = true WHERE id = $1")
+                    .bind(old_session_id)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(Self::map_sqlx_error)?;
+
+                sqlx::query(
+                    r#"
+                        INSERT INTO auth.sessions (
+                            id, user_id, refresh_token, expires_at,
+                            ip_address, user_agent, created_at, revoked, family_id
+                        ) VALUES (
+                            $1, $2, $3, $4, $5, $6, $7, $8, $9
+                        )
+                        "#,
+                )
+                .bind(session_clone.id())
+                .bind(session_clone.user_id())
+                .bind(session_clone.refresh_token())
+                .bind(session_clone.expires_at())
+                .bind(session_clone.ip_address())
+                .bind(session_clone.user_agent())
+                .bind(session_clone.created_at())
+                .bind(session_clone.is_revoked())
+                .bind(session_clone.family_id())
+                .execute(&mut **tx)
+                .await
+                .map_err(Self::map_sqlx_error)?;
+
+                sqlx::query(
+                    r#"
+                        UPDATE auth.users
+                        SET last_login_at = NOW(), updated_at = NOW()
+                        WHERE id = $1
+                        "#,
+                )
+                .bind(session_clone.user_id())
+                .execute(&mut **tx)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(
+                        "Could not update last_login_at for user {}: {}",
+                        session_clone.user_id(),
+                        e
+                    );
+                    SessionRepositoryError::DatabaseError(format!(
+                        "Session rotated but could not update last_login_at: {}",
+                        e
+                    ))
+                })?;
+
+                Ok(session_clone)
+            }) as BoxFuture<'_, SessionRepositoryResult<Session>>
+        })
+        .await
+        .map_err(DomainError::from)?;
+
+        Ok(new_session)
+    }
+
     async fn get_session_by_refresh_token(
         &self,
         refresh_token: &str,

@@ -193,4 +193,32 @@ pub trait UserLifecycleHook: Send + Sync {
         mode: DeletionMode,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ) -> Result<(), DomainError>;
+
+    /// Fires after `AuthApplicationService::upgrade_to_internal`
+    /// successfully persists `is_external = false` on the user row —
+    /// the external → internal conversion path. The `user` argument
+    /// reflects the POST-upgrade state (`is_external() == false`,
+    /// `storage_quota_bytes > 0`, `password_hash` maybe stamped).
+    ///
+    /// Load-bearing implementations:
+    ///   * `PersonalDriveLifecycleHook` → provisions the home drive
+    ///     (would have short-circuited on `on_user_created` because
+    ///     the user was external at creation).
+    ///   * `AuditLifecycleHook` → emits `event="auth.user_upgraded"`.
+    ///
+    /// Default: no-op. Hooks that don't care about upgrade don't need
+    /// to opt in — this keeps the trait extension backwards-compatible
+    /// with existing implementations. Do NOT reuse `on_user_created`
+    /// for this event: hooks that observe `last_login_at().is_none()`
+    /// as "first ever" or that clean up magic-link tokens
+    /// (`ExternalIdentityLifecycleHook`) would mis-fire.
+    ///
+    /// Idempotency: fires exactly once per successful upgrade transition
+    /// (guarded by `is_external` toggling). A retried upgrade after a
+    /// crash would hit the `AlreadyInternal` guard in the service and
+    /// this hook wouldn't fire again — so hooks may assume "first
+    /// upgrade" semantics.
+    async fn on_upgraded_to_internal(&self, _user: &User) -> Result<(), DomainError> {
+        Ok(())
+    }
 }

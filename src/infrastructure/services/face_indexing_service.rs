@@ -28,11 +28,35 @@ fn is_image(content_type: &str) -> bool {
     content_type.starts_with("image/")
 }
 
+/// Concurrent index-task budget. Env override
+/// `OXICLOUD_FACES_INDEX_CONCURRENCY`, else the effective core count —
+/// each task is a full-image read + decode + ONNX inference, so more
+/// permits than cores only adds RAM pressure, not throughput.
+fn max_concurrent_index() -> usize {
+    std::env::var("OXICLOUD_FACES_INDEX_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n: &usize| n > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(2)
+        })
+}
+
 pub struct FaceIndexingService {
     pool: Arc<PgPool>,
     repo: Arc<FacePgRepository>,
     analyzer: Arc<dyn FaceAnalyzerPort>,
     blob_root: PathBuf,
+    /// Bounds concurrent indexing tasks. The lifecycle hooks spawn one
+    /// task per uploaded/copied image with no ceiling, so a bulk upload
+    /// used to fan out N simultaneous full-image reads + decodes +
+    /// inferences — peak RSS N × image size plus CPU thrash. Same
+    /// invariant as `ThumbnailService::decode_semaphore`: the permit is
+    /// acquired BEFORE the blob read, so peak memory is
+    /// `permits × image size` regardless of upload concurrency.
+    index_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl FaceIndexingService {
@@ -43,6 +67,7 @@ impl FaceIndexingService {
             repo,
             analyzer,
             blob_root,
+            index_semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent_index())),
         }
     }
 
@@ -60,7 +85,15 @@ impl FaceIndexingService {
         let repo = self.repo.clone();
         let analyzer = self.analyzer.clone();
         let blob_path = self.blob_path(&blob_hash);
+        let semaphore = self.index_semaphore.clone();
         tokio::spawn(async move {
+            // Queue behind the concurrency budget BEFORE touching the
+            // blob — excess tasks wait holding only this tiny future,
+            // not a decoded image.
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .expect("face index semaphore never closes");
             if delete_first {
                 let _ = repo.delete_faces_for_file(file_id).await;
             }

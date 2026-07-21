@@ -58,7 +58,6 @@ pub fn mount_folder_dto(cfg: &MountConfig, parent_id: &str, stat: &MountStat) ->
         name: node_name(stat.node_id.as_str()).to_owned(),
         path: String::new(),
         parent_id: Some(parent_id.to_owned()),
-        owner_id: Some(cfg.owner_id.to_string()),
         drive_id: cfg.drive_id,
         created_at: stat.created_at,
         modified_at: stat.modified_at,
@@ -66,8 +65,8 @@ pub fn mount_folder_dto(cfg: &MountConfig, parent_id: &str, stat: &MountStat) ->
         icon_class: Arc::from("fas fa-folder"),
         icon_special_class: Arc::from("folder-icon"),
         category: Arc::from("Folder"),
-        created_by: None,
-        updated_by: None,
+        created_by: Some(cfg.owner_id),
+        updated_by: Some(cfg.owner_id),
     }
 }
 
@@ -80,7 +79,6 @@ pub fn mount_entry_folder_dto(cfg: &MountConfig, parent_id: &str, entry: &MountE
         name: entry.name.clone(),
         path: String::new(),
         parent_id: Some(parent_id.to_owned()),
-        owner_id: Some(cfg.owner_id.to_string()),
         drive_id: cfg.drive_id,
         created_at: entry.created_at,
         modified_at: entry.modified_at,
@@ -88,8 +86,8 @@ pub fn mount_entry_folder_dto(cfg: &MountConfig, parent_id: &str, entry: &MountE
         icon_class: Arc::from("fas fa-folder"),
         icon_special_class: Arc::from("folder-icon"),
         category: Arc::from("Folder"),
-        created_by: None,
-        updated_by: None,
+        created_by: Some(cfg.owner_id),
+        updated_by: Some(cfg.owner_id),
     }
 }
 
@@ -112,12 +110,11 @@ pub fn mount_entry_file_dto(cfg: &MountConfig, parent_id: &str, entry: &MountEnt
         icon_special_class: Arc::from(icon_special_class_for(name, &mime)),
         category: Arc::from(category_for(name, &mime)),
         size_formatted: format_file_size(entry.size),
-        owner_id: Some(cfg.owner_id.to_string()),
         sort_date: None,
         content_hash: String::new(),
         etag: virtual_file_etag(entry.size, entry.modified_at),
-        created_by: None,
-        updated_by: None,
+        created_by: Some(cfg.owner_id),
+        updated_by: Some(cfg.owner_id),
     }
 }
 
@@ -139,11 +136,10 @@ pub fn mount_file_dto(cfg: &MountConfig, parent_id: &str, stat: &MountStat) -> F
         icon_special_class: Arc::from(icon_special_class_for(name, mime)),
         category: Arc::from(category_for(name, mime)),
         size_formatted: format_file_size(stat.size),
-        owner_id: Some(cfg.owner_id.to_string()),
         sort_date: None,
         content_hash: String::new(),
         etag: virtual_file_etag(stat.size, stat.modified_at),
-        created_by: None,
-        updated_by: None,
+        created_by: Some(cfg.owner_id),
+        updated_by: Some(cfg.owner_id),
     }
 }

@@ -2,7 +2,7 @@ use axum::{
     Json,
     body::Body,
     extract::{Query, State},
-    http::{HeaderMap, Response, StatusCode, header},
+    http::{Response, StatusCode, header},
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
@@ -60,16 +60,19 @@ struct PhotoDto {
 pub async fn list_photos(
     State(state): State<Arc<AppState>>,
     auth_user: AuthUser,
-    headers: HeaderMap,
     Query(params): Query<PhotosQueryParams>,
+    req: axum::extract::Request,
 ) -> impl IntoResponse {
-    let user_id = auth_user.id;
+    // Borrow headers (`req.headers()`) instead of cloning the whole request
+    // header table via the `HeaderMap` extractor to read one If-None-Match — the
+    // gallery open + every pagination page hit this (benches/ROUND22.md §H1).
+    let caller_id = auth_user.id;
     let limit = params.limit.unwrap_or(200).clamp(1, 500);
 
     let file_read = &state.repositories.file_read_repository;
 
     match file_read
-        .list_media_files(user_id, params.before, limit)
+        .list_media_files(caller_id, params.before, limit)
         .await
     {
         Ok((files, sort_dates, dims)) => {
@@ -88,7 +91,7 @@ pub async fn list_photos(
             std::hash::Hash::hash(&count, &mut hasher);
             let etag = format!("\"{:x}\"", std::hash::Hasher::finish(&hasher));
 
-            if let Some(inm) = headers.get(header::IF_NONE_MATCH)
+            if let Some(inm) = req.headers().get(header::IF_NONE_MATCH)
                 && let Ok(client_etag) = inm.to_str()
                 && client_etag == etag
             {
@@ -119,7 +122,11 @@ pub async fn list_photos(
                 })
                 .collect();
 
-            let mut response = Json(&dtos).into_response();
+            // Pre-sized serialization (benches/ROUND12.md §M1).
+            let mut response = crate::interfaces::api::sized_json::sized_json(
+                64 + dtos.len() * crate::interfaces::api::sized_json::EST_WRAPPED_ROW_BYTES,
+                &dtos,
+            );
             {
                 let h = response.headers_mut();
                 h.insert(header::ETAG, header::HeaderValue::from_str(&etag).unwrap());

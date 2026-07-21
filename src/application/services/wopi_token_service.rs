@@ -31,14 +31,24 @@ pub struct WopiTokenClaims {
 
 /// Service for generating and validating WOPI access tokens.
 pub struct WopiTokenService {
-    secret: String,
+    /// Pre-built signing key — `EncodingKey::from_secret` copies the secret into
+    /// a fresh `Vec` on each call, so build it once (mirrors `JwtTokenService`).
+    encoding_key: EncodingKey,
+    /// Pre-built verification key — same copy-per-call cost as `encoding_key`.
+    decoding_key: DecodingKey,
+    /// Pre-built HS256 validation config — `Validation::new` allocates a
+    /// `required_spec_claims` HashSet + an `algorithms` Vec; Office/Collabora
+    /// hosts poll `validate_token` continuously (benches/ROUND19.md §M2).
+    validation: Validation,
     token_ttl_secs: i64,
 }
 
 impl WopiTokenService {
     pub fn new(secret: String, token_ttl_secs: i64) -> Self {
         Self {
-            secret,
+            encoding_key: EncodingKey::from_secret(secret.as_bytes()),
+            decoding_key: DecodingKey::from_secret(secret.as_bytes()),
+            validation: Validation::new(Algorithm::HS256),
             token_ttl_secs,
         }
     }
@@ -64,12 +74,7 @@ impl WopiTokenService {
             iat: now,
         };
 
-        let token = encode(
-            &Header::default(),
-            &claims,
-            &EncodingKey::from_secret(self.secret.as_bytes()),
-        )
-        .map_err(|e| {
+        let token = encode(&Header::default(), &claims, &self.encoding_key).map_err(|e| {
             DomainError::new(
                 ErrorKind::InternalError,
                 "WopiTokenService",
@@ -83,25 +88,19 @@ impl WopiTokenService {
 
     /// Validate a WOPI access token and extract its claims.
     pub fn validate_token(&self, token: &str) -> Result<WopiTokenClaims, DomainError> {
-        let validation = Validation::new(Algorithm::HS256);
-
-        let token_data = decode::<WopiTokenClaims>(
-            token,
-            &DecodingKey::from_secret(self.secret.as_bytes()),
-            &validation,
-        )
-        .map_err(|e| match e.kind() {
-            jsonwebtoken::errors::ErrorKind::ExpiredSignature => DomainError::new(
-                ErrorKind::AccessDenied,
-                "WopiTokenService",
-                "WOPI token expired",
-            ),
-            _ => DomainError::new(
-                ErrorKind::AccessDenied,
-                "WopiTokenService",
-                format!("Invalid WOPI token: {}", e),
-            ),
-        })?;
+        let token_data = decode::<WopiTokenClaims>(token, &self.decoding_key, &self.validation)
+            .map_err(|e| match e.kind() {
+                jsonwebtoken::errors::ErrorKind::ExpiredSignature => DomainError::new(
+                    ErrorKind::AccessDenied,
+                    "WopiTokenService",
+                    "WOPI token expired",
+                ),
+                _ => DomainError::new(
+                    ErrorKind::AccessDenied,
+                    "WopiTokenService",
+                    format!("Invalid WOPI token: {}", e),
+                ),
+            })?;
 
         let claims = token_data.claims;
 

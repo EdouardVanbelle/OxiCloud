@@ -82,3 +82,26 @@ Content-Type: application/json
 { "username": "ghost@nowhere.invalid", "password": "{{password}}" }
 
 HTTP 403
+
+
+# ─────────────────────────────────────────────────────────────
+# Case 7 — /api/auth/oidc/providers advertises the auth-method
+#           policy the SPA needs to render the correct forms.
+#
+# tests/common/server.env has OXICLOUD_OIDC_ENABLED=false,
+# OXICLOUD_SMTP_MOCK=true (so SMTP is "wired"), and the default
+# OXICLOUD_AUTH_METHODS (both methods allowed). Expected shape:
+#   enabled: false                  — no OIDC IdP configured
+#   password_login_enabled: true    — default allowlist includes it
+#   magic_link_login_enabled: true  — SMTP wired + allowlist + no OIDC
+#   require_verified_email: false   — default
+# ─────────────────────────────────────────────────────────────
+GET {{base_url}}/api/auth/oidc/providers
+
+HTTP 200
+[Asserts]
+jsonpath "$.enabled" == false
+jsonpath "$.password_login_enabled" == true
+jsonpath "$.magic_link_login_enabled" == true
+jsonpath "$.require_verified_email" == false
+

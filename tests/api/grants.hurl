@@ -137,14 +137,15 @@ jsonpath "$.grants[0].role" == "viewer"
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 7 — Viewer cannot rename (no update grant).
+# Step 7 — Viewer cannot rename (no Update grant). Dave has Read
+# (viewer role) → graduated denial returns 403.
 # ─────────────────────────────────────────────────────────────
 PUT {{base_url}}/api/folders/{{shared_folder_id}}/rename
 Authorization: Bearer {{dave_token}}
 Content-Type: application/json
 { "name": "bob-tried-again" }
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
@@ -260,14 +261,15 @@ jsonpath "$[0].role" == "viewer"
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 16 — Demoted Bob can no longer rename.
+# Step 16 — Demoted Bob (now Viewer) can no longer rename. Read
+# is still granted → graduated denial returns 403.
 # ─────────────────────────────────────────────────────────────
 PUT {{base_url}}/api/folders/{{shared_folder_id}}/rename
 Authorization: Bearer {{dave_token}}
 Content-Type: application/json
 { "name": "bob-tried-after-demote" }
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
@@ -301,15 +303,22 @@ Authorization: Bearer {{dave_token}}
 
 HTTP 200
 [Asserts]
-# Post-D0 every user carries an incoming Owner grant on their own
-# personal drive (provisioned by the lifecycle hook). The pre-D0
-# assertion was "no grants at all" (count == 0); the post-D0
-# equivalent is "exactly the self-drive grant remains" (count == 1).
-# Hurl's JSONPath filter returns "no value" — not an empty array —
-# when nothing matches, so a `count == 0` over a negative filter
-# fails to evaluate; the positive-count form sidesteps that quirk.
-jsonpath "$" count == 1
-jsonpath "$[0].resource.type" == "drive"
+# Every user carries three self-owned Owner grants provisioned by
+# the lifecycle hooks:
+#   * personal drive         (PersonalDriveLifecycleHook, D0)
+#   * default calendar       (DefaultCalendarLifecycleHook, #545)
+#   * default address book   (DefaultAddressBookLifecycleHook, #545)
+# The pre-lifecycle-hook assertion here was "no grants at all"
+# (count == 0). D0 shifted it to "exactly the drive Owner grant"
+# (count == 1). Adding the CalDAV/CardDAV defaults shifts it again
+# to count == 3. Body-contains checks for each resource type are
+# ordering-agnostic (the incoming feed doesn't guarantee stable
+# ordering across resource types) and mirror the pattern used by
+# default_caldav_carddav.hurl.
+jsonpath "$" count == 3
+body contains "\"type\":\"drive\""
+body contains "\"type\":\"calendar\""
+body contains "\"type\":\"address_book\""
 
 
 # ─────────────────────────────────────────────────────────────
@@ -320,15 +329,12 @@ Authorization: Bearer {{eve_token}}
 
 HTTP 200
 [Asserts]
-# Post-D0 every user carries an incoming Owner grant on their own
-# personal drive (provisioned by the lifecycle hook). The pre-D0
-# assertion was "no grants at all" (count == 0); the post-D0
-# equivalent is "exactly the self-drive grant remains" (count == 1).
-# Hurl's JSONPath filter returns "no value" — not an empty array —
-# when nothing matches, so a `count == 0` over a negative filter
-# fails to evaluate; the positive-count form sidesteps that quirk.
-jsonpath "$" count == 1
-jsonpath "$[0].resource.type" == "drive"
+# See Step 18 for the invariant rationale (three self-owned Owner
+# grants per user from the lifecycle hooks).
+jsonpath "$" count == 3
+body contains "\"type\":\"drive\""
+body contains "\"type\":\"calendar\""
+body contains "\"type\":\"address_book\""
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -590,34 +596,37 @@ Authorization: Bearer {{adam_token}}
 
 HTTP 200
 
-# ── Mutations still denied (Viewer has no Update/Create/Delete) ─
+# ── Mutations still denied (Viewer has no Update/Create/Delete).
+#    Viewer has Read → graduated denial returns 403 (not 404
+#    anti-enum, which is reserved for Phase 2A above where Adam
+#    had no Read at all).
 POST {{base_url}}/api/folders
 Authorization: Bearer {{adam_token}}
 Content-Type: application/json
 { "name": "adam-attack-2", "parent_id": "{{perm_folder_id}}" }
 
-HTTP 404
+HTTP 403
 
 PUT {{base_url}}/api/folders/{{perm_folder_id}}/rename
 Authorization: Bearer {{adam_token}}
 Content-Type: application/json
 { "name": "adam-rename-as-viewer" }
 
-HTTP 404
+HTTP 403
 
 PUT {{base_url}}/api/files/{{perm_file_id}}/rename
 Authorization: Bearer {{adam_token}}
 Content-Type: application/json
 { "name": "adam-file-rename-as-viewer" }
 
-HTTP 404
+HTTP 403
 
 PUT {{base_url}}/api/files/{{perm_file_id}}/thumbnail/icon
 Authorization: Bearer {{adam_token}}
 Content-Type: image/png
 file,fixtures/blue-image.png;
 
-HTTP 404
+HTTP 403
 
 POST {{base_url}}/api/files/upload
 Authorization: Bearer {{adam_token}}
@@ -625,17 +634,17 @@ Authorization: Bearer {{adam_token}}
 folder_id: {{perm_folder_id}}
 file: file,fixtures/hello.txt; text/plain
 
-HTTP 404
+HTTP 403
 
 DELETE {{base_url}}/api/files/{{perm_file_id}}
 Authorization: Bearer {{adam_token}}
 
-HTTP 404
+HTTP 403
 
 DELETE {{base_url}}/api/folders/{{perm_folder_id}}
 Authorization: Bearer {{adam_token}}
 
-HTTP 404
+HTTP 403
 
 # ── Viewer cannot start a chunked upload (no Create grant) ──
 POST {{base_url}}/api/uploads
@@ -649,7 +658,7 @@ Content-Type: application/json
   "chunk_size": 3000000
 }
 
-HTTP 404
+HTTP 403
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -697,6 +706,38 @@ HTTP 200
 # same; post-D0 they can diverge once a non-owner mutates).
 jsonpath "$.created_by" == "{{alice_user_id}}"
 jsonpath "$.updated_by" == "{{adam_user_id}}"
+
+# ── D0 §14 provenance survives on the LISTING endpoint too ──
+# The rename-response asserts above cover the mutation DTO, but
+# /api/folders/{id}/resources has its own DTO-build path that
+# used to hardcode created_by/updated_by = None (silent bug —
+# owner column rendered "—" on /files for everyone). Hit the
+# listing and re-assert both the untouched folder (both = alice)
+# AND the Adam-renamed file (created_by=alice, updated_by=adam)
+# on the same page — two shapes, one round-trip.
+#
+# Fixed indices are safe because at this point perm_folder_id
+# holds exactly two rows and the default order_by=name puts
+# 'perm-test-child' (folder) at [0] and 'adam-renamed-logo.jpg'
+# (file) at [1]. Anything appended to this folder later in the
+# scenario would break these indices — hence the assertion runs
+# BEFORE the subsequent thumbnail/create/upload steps.
+GET {{base_url}}/api/folders/{{perm_folder_id}}/resources
+Authorization: Bearer {{alice_token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$.items" count == 2
+# [0] — untouched folder inherits Alice on both fields.
+jsonpath "$.items[0].resource.name" == "perm-test-child"
+jsonpath "$.items[0].resource.created_by" == "{{alice_user_id}}"
+jsonpath "$.items[0].resource.updated_by" == "{{alice_user_id}}"
+# [1] — file Adam renamed. created_by stays alice (original
+# uploader), updated_by is adam (last mutator). Canonical
+# listing-side cross-user split.
+jsonpath "$.items[1].resource.name" == "adam-renamed-logo.jpg"
+jsonpath "$.items[1].resource.created_by" == "{{alice_user_id}}"
+jsonpath "$.items[1].resource.updated_by" == "{{adam_user_id}}"
 
 # ── Thumbnail push (Update) succeeds ────────────────────────
 PUT {{base_url}}/api/files/{{perm_file_id}}/thumbnail/preview
@@ -809,16 +850,107 @@ Authorization: Bearer {{adam_token}}
 
 HTTP 204
 
-# ── Delete still denied (Editor excludes Delete) ────────────
+# ── Regression pin for AuthZ audit #17 (2026-07-12). ─────────
+# The chunked-upload `complete` handler used to call plain
+# `upload_file_streaming` at finalize — no `_with_perms` check.
+# A grant revoked between session-open and finalize stayed
+# effective until the last chunk landed (up to 24h JWT TTL,
+# forever with app-passwords). Fix: swap to
+# `upload_file_streaming_with_perms` so `authz.require(Create,
+# Folder)` re-runs at complete time.
+#
+# Sequence:
+#   1. Adam (Editor) opens a session — pre-check passes.
+#   2. Adam PATCHes the single chunk (chunk upload is unauth'd,
+#      always allowed).
+#   3. Alice DEMOTES Adam to Viewer (Viewer bundle has Read but
+#      no Create).
+#   4. Adam POST /complete → 403 (pre-fix: 201 + file created).
+#   5. Cleanup: cancel the orphaned session + re-promote Adam
+#      to Editor so the following steps aren't disturbed.
+
+# 1 — Open session while Editor.
+POST {{base_url}}/api/uploads
+Authorization: Bearer {{adam_token}}
+Content-Type: application/json
+{
+  "filename": "audit17-post-revoke.mp4",
+  "folder_id": "{{perm_folder_id}}",
+  "content_type": "video/mp4",
+  "total_size": 2760653,
+  "chunk_size": 3000000
+}
+
+HTTP 201
+[Captures]
+audit17_upload_id: jsonpath "$.upload_id"
+
+
+# 2 — Send the single chunk (session pre-authorised).
+PATCH {{base_url}}/api/uploads/{{audit17_upload_id}}?chunk_index=0
+Authorization: Bearer {{adam_token}}
+Content-Type: application/octet-stream
+file,fixtures/free_video_over_1MB.mp4;
+
+HTTP 200
+
+
+# 3 — Alice demotes Adam Editor → Viewer (Create removed).
+PUT {{base_url}}/api/grants/role
+Authorization: Bearer {{alice_token}}
+Content-Type: application/json
+{
+  "subject":  { "type": "user",   "id": "{{adam_user_id}}" },
+  "resource": { "type": "folder", "id": "{{perm_folder_id}}" },
+  "role":     "viewer"
+}
+
+HTTP 200
+
+
+# 4 — Finalize now fails: engine re-checks Create at complete
+# time. Adam still has Read (viewer role) → graduated denial
+# returns 403; pre-fix returned 201 with a phantom file.
+POST {{base_url}}/api/uploads/{{audit17_upload_id}}/complete
+Authorization: Bearer {{adam_token}}
+
+HTTP 403
+
+
+# 5a — The session is orphaned (chunks on disk, no completion).
+# Cancel it as Adam (still owns the session, so the `_with_perms`
+# gate on DELETE-session lets him through).
+DELETE {{base_url}}/api/uploads/{{audit17_upload_id}}
+Authorization: Bearer {{adam_token}}
+
+HTTP 204
+
+
+# 5b — Restore Adam to Editor so subsequent steps behave as
+# before this regression pin was inserted.
+PUT {{base_url}}/api/grants/role
+Authorization: Bearer {{alice_token}}
+Content-Type: application/json
+{
+  "subject":  { "type": "user",   "id": "{{adam_user_id}}" },
+  "resource": { "type": "folder", "id": "{{perm_folder_id}}" },
+  "role":     "editor"
+}
+
+HTTP 200
+
+
+# ── Delete still denied (Editor excludes Delete). Editor has
+#    Read → graduated denial returns 403.
 DELETE {{base_url}}/api/files/{{perm_file_id}}
 Authorization: Bearer {{adam_token}}
 
-HTTP 404
+HTTP 403
 
 DELETE {{base_url}}/api/folders/{{perm_folder_id}}
 Authorization: Bearer {{adam_token}}
 
-HTTP 404
+HTTP 403
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -855,21 +987,23 @@ Authorization: Bearer {{alice_token}}
 
 HTTP 200
 
-# Adam's incoming list is empty.
+# Adam's incoming list holds only his three self-owned Owner grants
+# (drive + calendar + address_book — provisioned by the lifecycle
+# hooks). No inbound grants from other users.
 GET {{base_url}}/api/grants/incoming
 Authorization: Bearer {{adam_token}}
 
 HTTP 200
 [Asserts]
-# Post-D0 every user carries an incoming Owner grant on their own
-# personal drive (provisioned by the lifecycle hook). The pre-D0
-# assertion was "no grants at all" (count == 0); the post-D0
-# equivalent is "exactly the self-drive grant remains" (count == 1).
-# Hurl's JSONPath filter returns "no value" — not an empty array —
-# when nothing matches, so a `count == 0` over a negative filter
-# fails to evaluate; the positive-count form sidesteps that quirk.
-jsonpath "$" count == 1
-jsonpath "$[0].resource.type" == "drive"
+# See Step 18 above for the full invariant rationale — three
+# self-owned Owner grants per user (drive + calendar +
+# address_book). Body-contains rather than positional check
+# because the incoming feed doesn't guarantee stable ordering
+# across resource types.
+jsonpath "$" count == 3
+body contains "\"type\":\"drive\""
+body contains "\"type\":\"calendar\""
+body contains "\"type\":\"address_book\""
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1293,12 +1427,12 @@ Authorization: Bearer {{frank_token}}
 
 HTTP 200
 [Asserts]
-# Post-D0 every user carries an incoming Owner grant on their own
-# personal drive (provisioned by the lifecycle hook). The pre-D0
-# assertion was "no grants at all" (count == 0); the post-D0
-# equivalent is "exactly the self-drive grant remains" (count == 1).
-# Hurl's JSONPath filter returns "no value" — not an empty array —
-# when nothing matches, so a `count == 0` over a negative filter
-# fails to evaluate; the positive-count form sidesteps that quirk.
-jsonpath "$" count == 1
-jsonpath "$[0].resource.type" == "drive"
+# See Step 18 above for the full invariant rationale — three
+# self-owned Owner grants per user (drive + calendar +
+# address_book) from the lifecycle hooks. Body-contains rather
+# than positional check because the incoming feed doesn't
+# guarantee stable ordering across resource types.
+jsonpath "$" count == 3
+body contains "\"type\":\"drive\""
+body contains "\"type\":\"calendar\""
+body contains "\"type\":\"address_book\""

@@ -95,7 +95,7 @@ impl PathService {
     /// Validates a path to ensure it doesn't contain dangerous components
     pub fn validate_path(&self, path: &StoragePath) -> Result<(), DomainError> {
         // Check for empty segments
-        if path.segments().iter().any(|s| s.is_empty()) {
+        if path.segments().any(|s| s.is_empty()) {
             return Err(DomainError::new(
                 ErrorKind::InvalidInput,
                 "Path",

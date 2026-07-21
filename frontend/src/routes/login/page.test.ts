@@ -1,11 +1,22 @@
-import { it, expect, vi, beforeEach } from 'vitest';
+import { it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 
-const { goto, pageState, session } = vi.hoisted(() => ({
-	goto: vi.fn(),
-	pageState: { url: new URL('http://localhost/login') } as { url: URL },
-	session: { user: null } as { user: unknown }
-}));
+const { goto, pageState, session } = vi.hoisted(() => {
+	// `setUser` mirrors the real SessionStore method: sets the user and
+	// runs `ensureActiveUser` (localStorage cleanup on account switch).
+	// Tests don't care about the cleanup; the mock just assigns.
+	const store: { user: unknown; setUser: (u: unknown) => void } = {
+		user: null,
+		setUser(u) {
+			store.user = u;
+		}
+	};
+	return {
+		goto: vi.fn(),
+		pageState: { url: new URL('http://localhost/login') } as { url: URL },
+		session: store
+	};
+});
 vi.mock('$app/navigation', () => ({ goto }));
 vi.mock('$app/state', () => ({ page: pageState }));
 vi.mock('$lib/stores/session.svelte', () => ({ session }));
@@ -30,8 +41,34 @@ beforeEach(() => {
 	pageState.url = new URL('http://localhost/login');
 	session.user = null;
 	m(auth.fetchMe).mockResolvedValue(null);
-	m(auth.getOidcProviders).mockResolvedValue({ providers: [] });
+	// Default provider info: both password + magic-link enabled, OIDC off.
+	// The unified login form's magic-link submit path is only reachable
+	// when `magic_link_login_enabled === true` — without this pin the
+	// "sends a magic link" test can't reach `sendMagicLink()`.
+	m(auth.getOidcProviders).mockResolvedValue({
+		enabled: false,
+		password_login_enabled: true,
+		magic_link_login_enabled: true
+	});
 	m(auth.getAuthStatus).mockResolvedValue({ initialized: true });
+});
+
+// jsdom's `Location` can't be spied on in place (its setters trigger
+// "not implemented" navigation errors), so swap the whole object for a
+// stub around each test that needs to observe `window.location.replace`.
+const originalLocation = window.location;
+let replaceSpy: ReturnType<typeof vi.fn>;
+
+beforeEach(() => {
+	replaceSpy = vi.fn();
+	Object.defineProperty(window, 'location', {
+		configurable: true,
+		value: { ...originalLocation, replace: replaceSpy }
+	});
+});
+
+afterEach(() => {
+	Object.defineProperty(window, 'location', { configurable: true, value: originalLocation });
 });
 
 it('logs in and redirects', async () => {
@@ -64,16 +101,21 @@ it('enters setup mode on a fresh install', async () => {
 	await screen.findByTestId('login-setup-form');
 });
 
-it('sends a magic link', async () => {
+it('sends a magic link when the password field is left empty', async () => {
+	// Unified form: the same identifier input drives both flows. Filling
+	// the identifier and leaving password empty makes `submitAsMagicLink`
+	// derived resolve to true — the single submit button then dispatches
+	// to `sendMagicLink` instead of `login`.
 	m(auth.sendMagicLink).mockResolvedValue('sent');
 	render(LoginPage);
 	await screen.findByTestId('login-form');
-	await fireEvent.click(screen.getByTestId('login-magic-toggle-btn'));
-	await fireEvent.input(screen.getByTestId('login-magic-email-input'), {
+	await fireEvent.input(screen.getByTestId('login-username-input'), {
 		target: { value: 'a@b.test' }
 	});
-	await fireEvent.click(screen.getByTestId('login-magic-send-btn'));
+	// Password intentionally NOT filled.
+	await fireEvent.click(screen.getByTestId('login-submit-btn'));
 	await waitFor(() => expect(auth.sendMagicLink).toHaveBeenCalledWith('a@b.test'));
+	expect(auth.login).not.toHaveBeenCalled();
 });
 
 it('registers a new account', async () => {
@@ -154,4 +196,49 @@ it('renders an SSO sign-in link when an OIDC provider is configured', async () =
 	render(LoginPage);
 	const sso = await screen.findByTestId('login-oidc-btn');
 	expect(sso.getAttribute('href')).toBe('https://idp.test/auth');
+});
+
+it('auto-redirects to the IdP when OIDC is the only login method', async () => {
+	m(auth.getOidcProviders).mockResolvedValue({
+		enabled: true,
+		password_login_enabled: false,
+		authorize_endpoint: '/api/auth/oidc/authorize'
+	});
+	render(LoginPage);
+	await waitFor(() => expect(replaceSpy).toHaveBeenCalledWith('/api/auth/oidc/authorize'));
+});
+
+it('does not auto-redirect when password login is also enabled', async () => {
+	m(auth.getOidcProviders).mockResolvedValue({
+		enabled: true,
+		password_login_enabled: true,
+		authorize_endpoint: '/api/auth/oidc/authorize'
+	});
+	render(LoginPage);
+	await screen.findByTestId('login-form');
+	expect(replaceSpy).not.toHaveBeenCalled();
+});
+
+it('does not auto-redirect after the IdP already returned an error (loop guard)', async () => {
+	pageState.url = new URL('http://localhost/login?error=access_denied');
+	m(auth.getOidcProviders).mockResolvedValue({
+		enabled: true,
+		password_login_enabled: false,
+		authorize_endpoint: '/api/auth/oidc/authorize'
+	});
+	render(LoginPage);
+	await screen.findByTestId('login-form');
+	expect(replaceSpy).not.toHaveBeenCalled();
+});
+
+it('does not auto-redirect during first-run setup', async () => {
+	m(auth.getAuthStatus).mockResolvedValue({ initialized: false });
+	m(auth.getOidcProviders).mockResolvedValue({
+		enabled: true,
+		password_login_enabled: false,
+		authorize_endpoint: '/api/auth/oidc/authorize'
+	});
+	render(LoginPage);
+	await screen.findByTestId('login-setup-form');
+	expect(replaceSpy).not.toHaveBeenCalled();
 });

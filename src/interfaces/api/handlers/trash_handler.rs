@@ -97,7 +97,7 @@ pub async fn move_file_to_trash(
     State(state): State<Arc<AppState>>,
     auth_user: AuthUser,
     Path(item_id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> axum::response::Response {
     let user_id = auth_user.id;
     debug!(
         "Request to move file to trash: id={}, user={}",
@@ -112,7 +112,8 @@ pub async fn move_file_to_trash(
                 Json(json!({
                     "error": "Trash feature is not enabled"
                 })),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -129,15 +130,11 @@ pub async fn move_file_to_trash(
                     "message": "File moved to trash successfully"
                 })),
             )
+                .into_response()
         }
         Err(e) => {
-            error!("Error moving file to trash: {:?}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Error moving file to trash"
-                })),
-            )
+            warn!("move_file_to_trash failed: {:?}", e);
+            AppError::from(e).into_response()
         }
     }
 }
@@ -159,7 +156,7 @@ pub async fn move_folder_to_trash(
     State(state): State<Arc<AppState>>,
     auth_user: AuthUser,
     Path(item_id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> axum::response::Response {
     let user_id = auth_user.id;
     debug!(
         "Request to move folder to trash: id={}, user={}",
@@ -174,7 +171,8 @@ pub async fn move_folder_to_trash(
                 Json(json!({
                     "error": "Trash feature is not enabled"
                 })),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -193,15 +191,11 @@ pub async fn move_folder_to_trash(
                     "message": "Folder moved to trash successfully"
                 })),
             )
+                .into_response()
         }
         Err(e) => {
-            error!("Error moving folder to trash: {:?}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Error moving folder to trash"
-                })),
-            )
+            warn!("move_folder_to_trash failed: {:?}", e);
+            AppError::from(e).into_response()
         }
     }
 }
@@ -223,7 +217,7 @@ pub async fn restore_from_trash(
     State(state): State<Arc<AppState>>,
     auth_user: AuthUser,
     Path(trash_id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> axum::response::Response {
     debug!("Request to restore item {} from trash", trash_id);
 
     let trash_service = match state.trash_service.as_ref() {
@@ -234,7 +228,8 @@ pub async fn restore_from_trash(
                 Json(json!({
                     "error": "Trash feature is not enabled"
                 })),
-            );
+            )
+                .into_response();
         }
     };
     let result = trash_service.restore_item(&trash_id, auth_user.id).await;
@@ -249,31 +244,11 @@ pub async fn restore_from_trash(
                     "message": "Item restored successfully"
                 })),
             )
+                .into_response()
         }
         Err(e) => {
-            let err_str = format!("{}", e);
-            // If item not found, report success (it was already restored or removed)
-            if err_str.contains("not found") || err_str.contains("NotFound") {
-                warn!(
-                    "Item not found in trash, but reporting success: {}",
-                    trash_id
-                );
-                return (
-                    StatusCode::OK,
-                    Json(json!({
-                        "success": true,
-                        "message": "Item restored (or was already removed from trash)"
-                    })),
-                );
-            }
-
-            error!("Error restoring item from trash: {:?}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Error restoring item from trash"
-                })),
-            )
+            warn!("restore_from_trash failed: {:?}", e);
+            AppError::from(e).into_response()
         }
     }
 }
@@ -295,7 +270,7 @@ pub async fn delete_permanently(
     State(state): State<Arc<AppState>>,
     auth_user: AuthUser,
     Path(trash_id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> axum::response::Response {
     debug!("Request to permanently delete item {}", trash_id);
 
     let trash_service = match state.trash_service.as_ref() {
@@ -306,7 +281,8 @@ pub async fn delete_permanently(
                 Json(json!({
                     "error": "Trash feature is not enabled"
                 })),
-            );
+            )
+                .into_response();
         }
     };
     let result = trash_service
@@ -323,31 +299,11 @@ pub async fn delete_permanently(
                     "message": "Item deleted permanently"
                 })),
             )
+                .into_response()
         }
         Err(e) => {
-            let err_str = format!("{}", e);
-            // If item not found, report success (it was already deleted)
-            if err_str.contains("not found") || err_str.contains("NotFound") {
-                warn!(
-                    "Item not found in trash, but reporting success: {}",
-                    trash_id
-                );
-                return (
-                    StatusCode::OK,
-                    Json(json!({
-                        "success": true,
-                        "message": "Item deleted (or was already removed from trash)"
-                    })),
-                );
-            }
-
-            error!("Error permanently deleting item: {:?}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Error deleting item permanently"
-                })),
-            )
+            warn!("delete_permanently failed: {:?}", e);
+            AppError::from(e).into_response()
         }
     }
 }
@@ -403,5 +359,63 @@ pub async fn empty_trash(
                 })),
             )
         }
+    }
+}
+
+/// `DELETE /api/trash/drive/{drive_id}` — per-drive empty trash.
+///
+/// Same destructive shape as the all-drives `DELETE /api/trash`, but
+/// scoped to a single drive the caller can Delete in. Used by the
+/// `/trash` page's Drive group-by, which exposes a per-row "Empty"
+/// affordance so multi-drive owners don't have to wipe everything at
+/// once.
+///
+/// Refused with `404` (anti-enum) when the caller has no Delete-bearing
+/// role on the named drive — the user-facing drive listing would emit
+/// the same shape for an unknown id.
+#[utoipa::path(
+    delete,
+    path = "/api/trash/drive/{drive_id}",
+    params(("drive_id" = Uuid, Path, description = "Drive UUID")),
+    responses(
+        (status = 200, description = "Drive trash emptied successfully"),
+        (status = 404, description = "Caller lacks Delete on this drive"),
+        (status = 501, description = "Trash feature not enabled"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "trash"
+)]
+#[instrument(skip_all)]
+pub async fn empty_trash_for_drive(
+    State(state): State<Arc<AppState>>,
+    auth_user: AuthUser,
+    Path(drive_id): Path<uuid::Uuid>,
+) -> impl IntoResponse {
+    debug!(
+        "Request to empty trash for drive {} by user {}",
+        drive_id, auth_user.id
+    );
+
+    let trash_service = match state.trash_service.as_ref() {
+        Some(service) => service,
+        None => {
+            return (
+                StatusCode::NOT_IMPLEMENTED,
+                Json(json!({ "error": "Trash feature is not enabled" })),
+            )
+                .into_response();
+        }
+    };
+
+    match trash_service
+        .empty_trash_for_drive(auth_user.id, drive_id)
+        .await
+    {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(json!({ "success": true, "drive_id": drive_id })),
+        )
+            .into_response(),
+        Err(e) => AppError::from(e).into_response(),
     }
 }

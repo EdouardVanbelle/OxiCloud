@@ -61,23 +61,13 @@ impl ExifService {
 
         // ── Camera info ──
         if let Some(field) = exif.get_field(Tag::Make, In::PRIMARY) {
-            let val = field
-                .display_value()
-                .to_string()
-                .trim_matches('"')
-                .trim()
-                .to_string();
+            let val = display_value_trimmed(field);
             if !val.is_empty() {
                 meta.camera_make = Some(val);
             }
         }
         if let Some(field) = exif.get_field(Tag::Model, In::PRIMARY) {
-            let val = field
-                .display_value()
-                .to_string()
-                .trim_matches('"')
-                .trim()
-                .to_string();
+            let val = display_value_trimmed(field);
             if !val.is_empty() {
                 meta.camera_model = Some(val);
             }
@@ -113,6 +103,29 @@ impl ExifService {
 
         Some(meta)
     }
+}
+
+/// Render an EXIF field's display value, then strip surrounding quotes and
+/// whitespace (the shape `Make`/`Model` want) in a SINGLE allocation.
+///
+/// `display_value().to_string()` is the one unavoidable allocation — the field
+/// value is materialized to text. The old `…to_string().trim_matches('"')
+/// .trim().to_string()` chain then threw that `String` away and allocated a
+/// second time for the trimmed copy. Here the same two-stage trim is applied
+/// in place on the already-owned buffer (`drain` drops the prefix, `truncate`
+/// the suffix — both reuse the allocation), so a quoted `"Canon"` costs one
+/// allocation instead of two.
+fn display_value_trimmed(field: &exif::Field) -> String {
+    let mut s = field.display_value().to_string();
+    // Same order the old chain used: strip `"` first, then whitespace. The
+    // result is a contiguous subslice of `s`; capture its byte range before
+    // mutating the owned buffer (the borrow ends at these two reads).
+    let trimmed = s.trim_matches('"').trim();
+    let start = trimmed.as_ptr().addr() - s.as_ptr().addr();
+    let len = trimmed.len();
+    s.drain(..start);
+    s.truncate(len);
+    s
 }
 
 /// Parse EXIF datetime string "YYYY:MM:DD HH:MM:SS" into DateTime<Utc>.

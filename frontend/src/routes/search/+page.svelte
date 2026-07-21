@@ -124,11 +124,25 @@
 		{ v: 'size', l: t('search.sort.smallest', 'Smallest') }
 	];
 
+	// Stale-response guard: rapid-fire query/filter/sort changes each start a
+	// full recursive backend search; without the token a SLOW earlier response
+	// could resolve after (and clobber) a newer one, and the superseded server
+	// work ran to completion. The seq token keeps only the latest result; the
+	// AbortController cancels the superseded request outright.
+	let runSeq = 0;
+	let inflight: AbortController | null = null;
+
 	async function run(q: string) {
+		const seq = ++runSeq;
+		inflight?.abort();
+		inflight = null;
 		if (!q) {
 			results = null;
+			loading = false;
 			return;
 		}
+		const ctl = new AbortController();
+		inflight = ctl;
 		loading = true;
 		error = null;
 		try {
@@ -137,18 +151,23 @@
 				scope === 'folder' && filesStore.section !== 'trash'
 					? (filesStore.currentFolder ?? undefined)
 					: undefined;
-			results = await searchFiles(q, {
+			const fresh = await searchFiles(q, {
 				recursive: true,
 				sortBy,
 				folderId,
 				fileTypes: typeFilter === 'all' ? undefined : TYPE_EXT[typeFilter],
 				...sizeBounds(sizeFilter),
-				modifiedAfter: dateBound(dateFilter)
+				modifiedAfter: dateBound(dateFilter),
+				signal: ctl.signal
 			});
+			if (seq !== runSeq) return; // superseded while awaiting
+			results = fresh;
 		} catch (e) {
+			// An aborted request is not an error — a newer run owns the UI.
+			if (seq !== runSeq || ctl.signal.aborted) return;
 			error = errorMessage(e);
 		} finally {
-			loading = false;
+			if (seq === runSeq) loading = false;
 		}
 	}
 

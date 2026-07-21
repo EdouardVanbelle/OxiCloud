@@ -5,6 +5,7 @@ use crate::application::dtos::file_dto::FileDto;
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::file_lifecycle::FileLifecycleHook;
 use crate::application::ports::file_ports::{FileUploadUseCase, StoredBlob};
+use crate::application::ports::resource_access_hook::ResourceAccessHook;
 use crate::application::ports::storage_ports::{FileReadPort, FileWritePort, StorageUsagePort};
 use crate::application::services::storage_usage_service::StorageUsageService;
 use crate::common::errors::DomainError;
@@ -14,7 +15,7 @@ use crate::infrastructure::repositories::pg::FileBlobWriteRepository;
 use crate::infrastructure::services::dedup_service::DedupService;
 use crate::infrastructure::services::file_content_cache::FileContentCache;
 use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
-use tracing::{info, warn};
+use tracing::{Instrument, info, warn};
 
 /// Service for file upload operations.
 ///
@@ -35,6 +36,22 @@ pub struct FileUploadService {
     content_cache: Option<Arc<FileContentCache>>,
     /// Single lifecycle dispatcher — fires on_file_created / on_file_updated.
     file_lifecycle_hook: Option<Arc<dyn FileLifecycleHook>>,
+    /// Read-event hook — fires "caller just touched this file" so Recent
+    /// records uploads / overwrites alongside reads. Distinct from
+    /// `file_lifecycle_hook` because the lifecycle dispatcher only knows
+    /// `(file_id, blob_hash, content_type)`; the recording side needs the
+    /// `caller_id` the service already has in hand.
+    resource_access_hook: Option<Arc<dyn ResourceAccessHook>>,
+    /// ReBAC engine — enforces `Permission::Update` on
+    /// overwrite-existing and `Permission::Create` on new-file paths
+    /// inside `update_file_streaming_with_perms`. Optional at the
+    /// struct level for the minimal test constructors (`new`,
+    /// `new_with_read`) but the WebDAV/NC/WOPI put paths refuse
+    /// (fail-closed internal error) if this isn't wired. Set by
+    /// either `with_instant_upload` or `with_authorization` — both
+    /// stash the same Arc so DI callers wiring instant upload get
+    /// the streaming gate for free.
+    authorization: Option<Arc<PgAclEngine>>,
     /// Dependencies of the instant-upload path
     /// (`create_file_from_owned_blob_with_perms`); `None` in minimal test
     /// wiring.
@@ -58,6 +75,8 @@ impl FileUploadService {
             storage_usage_service: None,
             content_cache: None,
             file_lifecycle_hook: None,
+            resource_access_hook: None,
+            authorization: None,
             instant_upload: None,
         }
     }
@@ -73,18 +92,35 @@ impl FileUploadService {
             storage_usage_service: None,
             content_cache: None,
             file_lifecycle_hook: None,
+            resource_access_hook: None,
+            authorization: None,
             instant_upload: None,
         }
     }
 
+    /// Wires the authorization engine used by
+    /// `update_file_streaming_with_perms` on the WebDAV / NC / WOPI
+    /// PUT path. Independent of `with_instant_upload` so callers can
+    /// enable the streaming gate without also opting into the
+    /// dedup-instant-upload check (test wiring, minimal deployments).
+    pub fn with_authorization(mut self, authz: Arc<PgAclEngine>) -> Self {
+        self.authorization = Some(authz);
+        self
+    }
+
     /// Wires the authorization engine, dedup index and quota service that
     /// power the instant-upload path.
+    ///
+    /// Also stashes the `authz` handle in `self.authorization` so
+    /// DI callers wiring instant upload get the streaming-put gate
+    /// for free — a single `Arc` clone, no behavioural coupling.
     pub fn with_instant_upload(
         mut self,
         authz: Arc<PgAclEngine>,
         dedup: Arc<DedupService>,
         quota: Arc<StorageUsageService>,
     ) -> Self {
+        self.authorization = Some(authz.clone());
         self.instant_upload = Some(InstantUploadDeps {
             authz,
             dedup,
@@ -103,6 +139,19 @@ impl FileUploadService {
     pub fn with_file_lifecycle_hook(mut self, hook: Arc<dyn FileLifecycleHook>) -> Self {
         self.file_lifecycle_hook = Some(hook);
         self
+    }
+
+    /// Registers the read/write access hook (Recent list recorder).
+    pub fn with_resource_access_hook(mut self, hook: Arc<dyn ResourceAccessHook>) -> Self {
+        self.resource_access_hook = Some(hook);
+        self
+    }
+
+    /// Internal helper: fire the access hook if registered.
+    fn notify_file_accessed(&self, caller_id: Uuid, file_id: &str) {
+        if let Some(hook) = &self.resource_access_hook {
+            hook.on_file_accessed(caller_id, file_id);
+        }
     }
 
     /// Configures the storage usage service
@@ -256,7 +305,7 @@ impl FileUploadService {
         let file = file_read.get_file(file_id).await?;
         let (new_hash, updated_at) = self
             .file_write
-            .update_file_content_with_blob(file_id, &blob.hash, blob.size, None, caller_id)
+            .update_file_content_with_blob(file_id, &blob.hash, blob.size, None, caller_id, None)
             .await?;
         // The file maps to a different blob now — stale cached content must
         // never be served for the rest of its TTI window.
@@ -274,7 +323,6 @@ impl FileUploadService {
             parts.folder_id,
             parts.created_at,
             updated_at as u64,
-            parts.owner_id,
             new_hash,
         )
         .map_err(|e| DomainError::internal_error("FileUpload", format!("rebuild entity: {e}")))?;
@@ -282,6 +330,9 @@ impl FileUploadService {
         if let Some(hook) = &self.file_lifecycle_hook {
             hook.on_file_updated(file_id, &dto.content_hash, &dto.mime_type);
         }
+        // Delta-upload commit path — record the swap so Recent reflects
+        // "this is the file I just delta-updated".
+        self.notify_file_accessed(caller_id, file_id);
         Ok(dto)
     }
 
@@ -292,30 +343,81 @@ impl FileUploadService {
     /// Incremental (`+size`, O(1)) and fire-and-forget on a background task, so
     /// it adds neither latency nor a `SUM(size)` over the user's whole library
     /// to the upload path (the previous full recompute was O(N) per upload,
-    /// O(N²) for a bulk upload). Keyed by the file's `owner_id`; drift — e.g.
-    /// deletes, which don't decrement — is reconciled by the periodic sweep. A
-    /// DTO without a resolvable owner is simply left to that sweep.
-    fn maybe_update_storage_usage(&self, file: &FileDto) {
+    /// O(N²) for a bulk upload). Drift — e.g. deletes, which don't decrement —
+    /// is reconciled by the periodic sweep.
+    ///
+    /// Post-D7: `file.owner_id` is now nullable and unpopulated on new
+    /// rows, so the envelope owner comes from `caller_id` (the user who
+    /// just did the upload). The user-side delta is guarded by
+    /// `add_user_storage_usage_delta_if_personal` — it only fires when
+    /// the target drive is `kind='personal'`, so a shared-drive upload
+    /// still doesn't touch any user envelope.
+    fn maybe_update_storage_usage(&self, file: &FileDto, caller_id: Uuid) {
+        self.apply_storage_usage_delta(file.size as i64, &file.folder_id, caller_id);
+    }
+
+    /// Same as [`Self::maybe_update_storage_usage`] but takes an explicit
+    /// `delta` instead of assuming "whole file size" — the overwrite path
+    /// (`update_file_streaming_with_perms`) needs `new_size - old_size`,
+    /// not the new size added a second time on top of what the old
+    /// content already contributed.
+    fn apply_storage_usage_delta(&self, delta: i64, folder_id: &Option<String>, caller_id: Uuid) {
         let Some(storage_service) = &self.storage_usage_service else {
             return;
         };
-        let Some(owner) = file
-            .owner_id
-            .as_deref()
-            .and_then(|s| Uuid::parse_str(s).ok())
-        else {
+        if delta == 0 {
             return;
-        };
-        let delta = file.size as i64;
-        let service_clone = Arc::clone(storage_service);
-        tokio::spawn(async move {
-            if let Err(e) = service_clone
-                .add_user_storage_usage_delta(owner, delta)
-                .await
-            {
-                warn!("Failed to bump storage usage for {owner}: {e}");
-            }
-        });
+        }
+
+        let owner = Some(caller_id);
+        let folder = folder_id.as_deref().and_then(|s| Uuid::parse_str(s).ok());
+
+        // Per-user delta — only when the target drive is `kind='personal'`.
+        // The user envelope (`auth.users.storage_quota_bytes`) caps the SUM
+        // of `used_bytes` across the user's personal drives; shared-drive
+        // uploads do NOT count against any user. See
+        // `docs/plan/drive.md` §7.
+        //
+        // The discrimination happens in one SQL statement via an EXISTS
+        // subquery on the folder's drive kind — no extra round-trip vs
+        // the unconditional delta. Without a folder id (root-level
+        // upload — folder service refuses these) the user-side delta is
+        // simply skipped; the sweep reconciles regardless.
+        if let (Some(owner), Some(folder)) = (owner, folder) {
+            let service_clone = Arc::clone(storage_service);
+            tokio::spawn(
+                async move {
+                    if let Err(e) = service_clone
+                        .add_user_storage_usage_delta_if_personal(owner, folder, delta)
+                        .await
+                    {
+                        warn!("Failed to bump user storage for {owner} (folder {folder}): {e}");
+                    }
+                }
+                .in_current_span(),
+            );
+        }
+
+        // Per-drive delta (D4) — same fire-and-forget shape, resolves
+        // the drive id from the file's parent folder in one SQL
+        // statement. `storage.drives.used_bytes` is what the per-drive
+        // quota check and the picker quota bar read; drift from
+        // deletes / trash is reconciled by the same sweep that handles
+        // user-side drift.
+        if let Some(folder) = folder {
+            let service_clone = Arc::clone(storage_service);
+            tokio::spawn(
+                async move {
+                    if let Err(e) = service_clone
+                        .add_drive_storage_usage_delta_by_folder(folder, delta)
+                        .await
+                    {
+                        warn!("Failed to bump drive usage for folder {folder}: {e}");
+                    }
+                }
+                .in_current_span(),
+            );
+        }
     }
 }
 
@@ -345,16 +447,67 @@ impl FileUploadUseCase for FileUploadService {
             "📡 STREAMING UPLOAD: {} ({} bytes, ID: {})",
             name, blob.size, dto.id
         );
-        self.maybe_update_storage_usage(&dto);
+        self.maybe_update_storage_usage(&dto, caller_id);
         if let Some(hook) = &self.file_lifecycle_hook {
             hook.on_file_created(&dto.id, &dto.content_hash, &dto.mime_type, blob.is_new_blob);
         }
+        // The caller just created this file — surface it in Recent so the
+        // "I just uploaded X" UX matches the pre-SvelteKit behaviour.
+        self.notify_file_accessed(caller_id, &dto.id);
         Ok(dto)
+    }
+
+    /// AuthZ audit #17 — `Create` on target folder is re-verified here
+    /// so mid-session grant revocations take effect at finalize. When
+    /// `folder_id` is `None` the write lands at drive-root; the drive
+    /// resolution for that case isn't plumbed through the chunked-
+    /// upload session (`UploadSession.folder_id` alone), so we fall
+    /// back to the pre-audit behaviour there. That drive-root path is
+    /// tracked separately as part of the D0 folder-id-walking work;
+    /// closing it here would require session-scoped drive_id.
+    async fn upload_file_streaming_with_perms(
+        &self,
+        name: String,
+        folder_id: Option<String>,
+        content_type: String,
+        blob: StoredBlob,
+        caller_id: Uuid,
+    ) -> Result<FileDto, DomainError> {
+        if let Some(fid) = folder_id.as_deref() {
+            let Some(authz) = &self.authorization else {
+                return Err(DomainError::internal_error(
+                    "FileUpload",
+                    "upload_file_streaming_with_perms called without authorization engine wired",
+                ));
+            };
+            let folder_uuid = Uuid::parse_str(fid)
+                .map_err(|_| DomainError::not_found("Folder", fid.to_string()))?;
+            authz
+                .require(
+                    Subject::User(caller_id),
+                    Permission::Create,
+                    Resource::Folder(folder_uuid),
+                )
+                .await?;
+        }
+
+        self.upload_file_streaming(name, folder_id, content_type, blob, caller_id)
+            .await
     }
 
     /// Swap the content of the file at `path` to an already-ingested blob,
     /// creating the file when it doesn't exist (WebDAV/NextCloud/WOPI PUT).
-    async fn update_file_streaming(
+    ///
+    /// AuthZ (post-Drive audit Round 2 fix): overwrite path requires
+    /// `Update` on the target file; new-file path requires `Create`
+    /// on the parent folder (or on the drive when writing at drive
+    /// root). Fail-closed if the engine wasn't wired — this method
+    /// is the last line of defence between a Viewer/Commenter drive
+    /// member and cross-tenant PUT. See
+    /// `docs/plan/authz_audit/nextcloud.md` and the sibling native
+    /// `/webdav/*` handler.
+    #[allow(clippy::too_many_arguments)]
+    async fn update_file_streaming_with_perms(
         &self,
         path: &str,
         drive_id: Uuid,
@@ -362,11 +515,36 @@ impl FileUploadUseCase for FileUploadService {
         content_type: &str,
         modified_at: Option<i64>,
         caller_id: Uuid,
+        expected_hash: Option<&str>,
     ) -> Result<FileDto, DomainError> {
+        let Some(authz) = &self.authorization else {
+            return Err(DomainError::internal_error(
+                "FileUpload",
+                "update_file_streaming_with_perms called without authorization engine wired",
+            ));
+        };
+
         // Try to find the existing file first
         if let Some(file_read) = &self.file_read
             && let Some(file) = file_read.find_file_by_path(path, drive_id).await?
         {
+            // Overwrite branch — caller must have `Update` on the
+            // target file. Denial routes through `require` → 404
+            // (anti-enum, matches read-side shape). Before the D7
+            // audit this whole branch ran unchecked; Viewer members
+            // of shared drives could PUT freely.
+            let file_uuid = Uuid::parse_str(file.id()).map_err(|_| {
+                DomainError::internal_error("FileUpload", "invalid file id from repository")
+            })?;
+            authz
+                .require(
+                    Subject::User(caller_id),
+                    Permission::Update,
+                    Resource::File(file_uuid),
+                )
+                .await?;
+
+            let old_size = file.size();
             let file_id = file.id().to_string();
             let (new_hash, updated_at) = self
                 .file_write
@@ -376,6 +554,7 @@ impl FileUploadUseCase for FileUploadService {
                     blob.size,
                     modified_at,
                     caller_id,
+                    expected_hash,
                 )
                 .await?;
             // Invalidate content cache — file content has changed.
@@ -396,16 +575,21 @@ impl FileUploadUseCase for FileUploadService {
                 parts.folder_id,
                 parts.created_at,
                 updated_at as u64,
-                parts.owner_id,
                 new_hash,
             )
             .map_err(|e| {
                 DomainError::internal_error("FileUpload", format!("rebuild entity: {e}"))
             })?;
             let dto = FileDto::from(updated);
+            self.apply_storage_usage_delta(
+                blob.size as i64 - old_size as i64,
+                &dto.folder_id,
+                caller_id,
+            );
             if let Some(hook) = &self.file_lifecycle_hook {
                 hook.on_file_updated(&file_id, &dto.content_hash, content_type);
             }
+            self.notify_file_accessed(caller_id, &file_id);
             return Ok(dto);
         }
 
@@ -435,6 +619,32 @@ impl FileUploadUseCase for FileUploadService {
             None
         };
 
+        // Create branch — caller must have `Create` on the parent
+        // scope. Two cases:
+        //   * `parent_id.is_some()` → caller needs Create on the
+        //     parent Folder resource.
+        //   * `parent_id.is_none()` → the write lands at the drive
+        //     root (either the path was single-segment, or the
+        //     parent-folder lookup failed). We require Create on
+        //     the Drive itself — bundled with owner/editor/contributor
+        //     role_grants, refused for viewer/commenter.
+        let create_resource = match &parent_id {
+            Some(pid) => {
+                let uuid = Uuid::parse_str(pid).map_err(|_| {
+                    DomainError::internal_error("FileUpload", "invalid parent folder id")
+                })?;
+                Resource::Folder(uuid)
+            }
+            None => Resource::Drive(drive_id),
+        };
+        authz
+            .require(
+                Subject::User(caller_id),
+                Permission::Create,
+                create_resource,
+            )
+            .await?;
+
         let is_new_blob = blob.is_new_blob;
         let created = self
             .file_write
@@ -448,9 +658,11 @@ impl FileUploadUseCase for FileUploadService {
             )
             .await?;
         let dto = FileDto::from(created);
+        self.maybe_update_storage_usage(&dto, caller_id);
         if let Some(hook) = &self.file_lifecycle_hook {
             hook.on_file_created(&dto.id, &dto.content_hash, content_type, is_new_blob);
         }
+        self.notify_file_accessed(caller_id, &dto.id);
         Ok(dto)
     }
 }

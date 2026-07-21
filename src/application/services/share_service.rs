@@ -4,8 +4,10 @@ use thiserror::Error;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
+use crate::domain::repositories::drive_repository::DriveRepository;
 use crate::domain::repositories::folder_repository::FolderRepository;
-use crate::domain::services::authorization::{Resource, Role, Subject};
+use crate::domain::services::authorization::{Permission, Resource, Role, Subject};
+use crate::infrastructure::repositories::pg::DrivePgRepository;
 use crate::infrastructure::repositories::pg::SharePgRepository;
 use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
 use crate::infrastructure::repositories::pg::folder_db_repository::FolderDbRepository;
@@ -77,9 +79,18 @@ const MAX_CONCURRENT_HASHES: usize = 2;
 
 pub struct ShareService {
     config: Arc<AppConfig>,
+    /// `AppConfig::base_url()` snapshot, taken once at construction —
+    /// the method re-reads `OXICLOUD_BASE_URL` from the environment (a
+    /// global env-lock + String build) and was being called per DTO row
+    /// in the share listings. Process-invariant, so snapshot it.
+    base_url: String,
     share_repository: Arc<SharePgRepository>,
     file_repository: Arc<FileBlobReadRepository>,
     folder_repository: Arc<FolderDbRepository>,
+    /// Drive repository — D5 enforcement reads the drive's `policies`
+    /// JSONB before any per-resource action that a policy can gate
+    /// (e.g. `forbid_public_links` for token-share creation).
+    drive_repository: Arc<DrivePgRepository>,
     password_hasher: Arc<Argon2PasswordHasher>,
     /// ReBAC engine — used to create/revoke token grants that mirror public
     /// share links so that `GET /api/grants/outgoing` reflects them.
@@ -90,19 +101,23 @@ pub struct ShareService {
 }
 
 impl ShareService {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Arc<AppConfig>,
         share_repository: Arc<SharePgRepository>,
         file_repository: Arc<FileBlobReadRepository>,
         folder_repository: Arc<FolderDbRepository>,
+        drive_repository: Arc<DrivePgRepository>,
         password_hasher: Arc<Argon2PasswordHasher>,
         authorization: Arc<PgAclEngine>,
     ) -> Self {
         Self {
+            base_url: config.base_url(),
             config,
             share_repository,
             file_repository,
             folder_repository,
+            drive_repository,
             password_hasher,
             authorization,
             hash_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_HASHES)),
@@ -195,7 +210,7 @@ impl ShareService {
             ));
         }
 
-        Ok(ShareDto::from_entity(&share, &self.config.base_url()))
+        Ok(ShareDto::from_entity(&share, &self.base_url))
     }
 
     pub fn issue_unlock_jwt(&self, share_token: &str) -> Result<String, DomainError> {
@@ -233,6 +248,56 @@ impl ShareUseCase for ShareService {
             .map_err(|e| ShareServiceError::InvalidItemType(e.to_string()))?;
 
         self.verify_item_exists(&dto.item_id, &item_type).await?;
+
+        // AuthZ: only callers with `Share` on the resource may mint a
+        // public link. Without this gate, an ex-Viewer who kept a
+        // guessed UUID could launder a temporary read into a
+        // permanent anonymous URL that survives their own grant
+        // revocation. `Permission::Share` is bundled with the
+        // `owner` and `editor` role_grants only. `require` returns
+        // `not_found` on denial (anti-enum, matches the shape used
+        // by every other share route). See `docs/plan/authz_audit/`.
+        let item_uuid_for_authz = Uuid::parse_str(&dto.item_id)
+            .map_err(|_| ShareServiceError::Validation("Invalid item UUID".to_string()))?;
+        let resource_for_authz = match item_type {
+            ShareItemType::File => Resource::File(item_uuid_for_authz),
+            ShareItemType::Folder => Resource::Folder(item_uuid_for_authz),
+        };
+        self.authorization
+            .require(
+                Subject::User(user_id),
+                Permission::Share,
+                resource_for_authz,
+            )
+            .await?;
+
+        // D5: `forbid_public_links` policy gate. The drive owner can
+        // disable anonymous-link creation on every resource in their
+        // drive without per-resource intervention. Lookup is one JOIN
+        // (`get_policies_for_file` / `_for_folder` — single round-trip);
+        // the decision + audit + canonical error live on
+        // `DrivePolicies::refuse_public_links` so every public-link entry
+        // point (future NC OCS share, etc.) refuses with the same shape.
+        let item_uuid = Uuid::parse_str(&dto.item_id)
+            .map_err(|_| ShareServiceError::Validation("Invalid item UUID".to_string()))?;
+        let policies = match item_type {
+            ShareItemType::File => self.drive_repository.get_policies_for_file(item_uuid).await,
+            ShareItemType::Folder => {
+                self.drive_repository
+                    .get_policies_for_folder(item_uuid)
+                    .await
+            }
+        }
+        .map_err(|e| ShareServiceError::Repository(e.to_string()))?;
+        let item_type_str: &'static str = match item_type {
+            ShareItemType::File => "file",
+            ShareItemType::Folder => "folder",
+        };
+        policies.refuse_public_links(crate::domain::entities::drive::PublicLinkGateContext {
+            caller_id: user_id,
+            item_type: item_type_str,
+            item_id: item_uuid,
+        })?;
 
         let password_hash = match dto.password {
             Some(p) => Some(self.hash_password_async(&p).await?),
@@ -279,7 +344,7 @@ impl ShareUseCase for ShareService {
 
         // Return DTO with the requested expires_at (grant subquery on the share
         // row would return NULL at this point since INSERT ran before the grant).
-        let mut response = ShareDto::from_entity(&saved_share, &self.config.base_url());
+        let mut response = ShareDto::from_entity(&saved_share, &self.base_url);
         response.expires_at = dto.expires_at;
         Ok(response)
     }
@@ -295,7 +360,7 @@ impl ShareUseCase for ShareService {
         }
 
         // Convert the entity to DTO for the response
-        Ok(ShareDto::from_entity(&share, &self.config.base_url()))
+        Ok(ShareDto::from_entity(&share, &self.base_url))
     }
 
     async fn get_shared_link_by_token(&self, token: &str) -> Result<ShareDto, DomainError> {
@@ -321,7 +386,7 @@ impl ShareUseCase for ShareService {
         // Convert the entities to DTOs for the response
         let share_dtos = active_shares
             .iter()
-            .map(|s| ShareDto::from_entity(s, &self.config.base_url()))
+            .map(|s| ShareDto::from_entity(s, &self.base_url))
             .collect();
 
         Ok(share_dtos)
@@ -368,7 +433,7 @@ impl ShareUseCase for ShareService {
 
         // Use the requested expires_at for the response (subquery in update_share
         // runs before set_expiry_for_subject committed, so entity may lag).
-        let mut response = ShareDto::from_entity(&updated_share, &self.config.base_url());
+        let mut response = ShareDto::from_entity(&updated_share, &self.base_url);
         if dto.expires_at.is_some() {
             response.expires_at = dto.expires_at;
         }
@@ -403,7 +468,7 @@ impl ShareUseCase for ShareService {
         // Convert the entities to DTOs
         let share_dtos: Vec<ShareDto> = shares
             .iter()
-            .map(|s| ShareDto::from_entity(s, &self.config.base_url()))
+            .map(|s| ShareDto::from_entity(s, &self.base_url))
             .collect();
 
         // Create the paginated result
@@ -447,33 +512,22 @@ impl ShareUseCase for ShareService {
         }
 
         // Password verified (or not required) — return full share metadata
-        Ok(ShareDto::from_entity(&share, &self.config.base_url()))
+        Ok(ShareDto::from_entity(&share, &self.base_url))
     }
 
     async fn register_shared_link_access(&self, token: &str) -> Result<(), DomainError> {
-        // Find the shared link by its token
-        let share = self
-            .share_repository
-            .find_share_by_token(token)
-            .await
-            .map_err(|e| {
-                ShareServiceError::NotFound(format!("Share with token {} not found: {}", token, e))
-            })?;
-
-        // Check if it has expired
-        if share.is_expired() {
-            return Err(ShareServiceError::Expired.into());
+        // One atomic UPDATE (see `ShareStoragePort::increment_access_count`).
+        // 0 rows = missing or expired — collapsed into NotFound, same
+        // response shape either way (anti-enumeration; the landing handler
+        // discards this result regardless).
+        let updated = self.share_repository.increment_access_count(token).await?;
+        if updated == 0 {
+            return Err(ShareServiceError::NotFound(format!(
+                "Share with token {} not found or expired",
+                token
+            ))
+            .into());
         }
-
-        // Increment the access counter
-        let updated_share = share.increment_access_count();
-
-        // Save the changes
-        self.share_repository
-            .update_share(&updated_share)
-            .await
-            .map_err(|e| ShareServiceError::Repository(e.to_string()))?;
-
         Ok(())
     }
 }
@@ -492,7 +546,9 @@ mod tests {
 
     /// Test-only service that mirrors `ShareService` logic but accepts generic repos.
     struct ShareServiceForTest<SR, FR, FoR, PH> {
+        #[allow(dead_code)]
         config: Arc<AppConfig>,
+        base_url: String,
         share_repository: Arc<SR>,
         file_repository: Arc<FR>,
         folder_repository: Arc<FoR>,
@@ -515,6 +571,7 @@ mod tests {
             password_hasher: Arc<PH>,
         ) -> Self {
             Self {
+                base_url: config.base_url(),
                 config,
                 share_repository,
                 file_repository,
@@ -593,7 +650,7 @@ mod tests {
                 .save_share(&share)
                 .await
                 .map_err(|e| ShareServiceError::Repository(e.to_string()))?;
-            Ok(ShareDto::from_entity(&saved_share, &self.config.base_url()))
+            Ok(ShareDto::from_entity(&saved_share, &self.base_url))
         }
 
         async fn get_shared_link(
@@ -611,7 +668,7 @@ mod tests {
             if share.is_expired() {
                 return Err(ShareServiceError::Expired.into());
             }
-            Ok(ShareDto::from_entity(&share, &self.config.base_url()))
+            Ok(ShareDto::from_entity(&share, &self.base_url))
         }
 
         async fn get_shared_link_by_token(&self, token: &str) -> Result<ShareDto, DomainError> {
@@ -625,7 +682,7 @@ mod tests {
             if share.is_expired() {
                 return Err(ShareServiceError::Expired.into());
             }
-            Ok(ShareDto::from_entity(&share, &self.config.base_url()))
+            Ok(ShareDto::from_entity(&share, &self.base_url))
         }
 
         async fn get_shared_links_for_item(
@@ -642,7 +699,7 @@ mod tests {
             Ok(shares
                 .into_iter()
                 .filter(|s| !s.is_expired())
-                .map(|s| ShareDto::from_entity(&s, &self.config.base_url()))
+                .map(|s| ShareDto::from_entity(&s, &self.base_url))
                 .collect())
         }
 
@@ -672,7 +729,7 @@ mod tests {
                 .update_share(&share)
                 .await
                 .map_err(|e| ShareServiceError::Repository(e.to_string()))?;
-            Ok(ShareDto::from_entity(&updated, &self.config.base_url()))
+            Ok(ShareDto::from_entity(&updated, &self.base_url))
         }
 
         async fn delete_shared_link(
@@ -701,7 +758,7 @@ mod tests {
                 .map_err(|e| ShareServiceError::Repository(e.to_string()))?;
             let dtos = shares
                 .iter()
-                .map(|s| ShareDto::from_entity(s, &self.config.base_url()))
+                .map(|s| ShareDto::from_entity(s, &self.base_url))
                 .collect();
             Ok(PaginatedResponseDto::new(dtos, page, per_page, total))
         }
@@ -731,9 +788,9 @@ mod tests {
                             "Invalid share password",
                         ));
                     }
-                    Ok(ShareDto::from_entity(&share, &self.config.base_url()))
+                    Ok(ShareDto::from_entity(&share, &self.base_url))
                 }
-                None => Ok(ShareDto::from_entity(&share, &self.config.base_url())),
+                None => Ok(ShareDto::from_entity(&share, &self.base_url)),
             }
         }
 
@@ -867,15 +924,6 @@ mod tests {
             Ok((Vec::new(), 0))
         }
 
-        async fn count_files(
-            &self,
-            _folder_id: Option<&str>,
-            _criteria: &crate::application::dtos::search_dto::SearchCriteriaDto,
-            _user_id: Uuid,
-        ) -> Result<usize, DomainError> {
-            Ok(0)
-        }
-
         async fn stream_files_in_subtree(
             &self,
             _folder_id: &str,
@@ -890,14 +938,6 @@ mod tests {
             DomainError,
         > {
             Ok(Box::pin(futures::stream::empty()))
-        }
-
-        async fn get_file_for_owner(
-            &self,
-            id: &str,
-            _owner_id: Uuid,
-        ) -> Result<crate::domain::entities::file::File, DomainError> {
-            self.get_file(id).await
         }
     }
 
@@ -946,10 +986,9 @@ mod tests {
             unimplemented!()
         }
 
-        async fn list_folders_by_owner(
+        async fn list_root_folders_for_caller(
             &self,
-            _parent_id: Option<&str>,
-            _owner_id: Uuid,
+            _caller_id: Uuid,
         ) -> Result<Vec<crate::domain::entities::folder::Folder>, DomainError> {
             unimplemented!()
         }
@@ -965,10 +1004,9 @@ mod tests {
             unimplemented!()
         }
 
-        async fn list_folders_by_owner_paginated(
+        async fn list_root_folders_for_caller_paginated(
             &self,
-            _parent_id: Option<&str>,
-            _owner_id: Uuid,
+            _caller_id: Uuid,
             _offset: usize,
             _limit: usize,
             _include_total: bool,

@@ -27,11 +27,15 @@ pub trait SearchUseCase: Send + Sync + 'static {
     ) -> Result<Arc<SearchResultsDto>, DomainError>;
 
     /// Returns quick suggestions for autocomplete (lightweight, fast).
+    /// `caller_id` scopes results to drives the caller can Read — without
+    /// it the endpoint leaks names + paths across every tenant on the
+    /// instance (AuthZ audit finding #1, 2026-07-12).
     async fn suggest(
         &self,
         query: &str,
         folder_id: Option<&str>,
         limit: usize,
+        caller_id: Uuid,
     ) -> Result<SearchSuggestionsDto, DomainError>;
 
     /// Clears the search results cache.

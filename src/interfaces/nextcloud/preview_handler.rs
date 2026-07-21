@@ -11,11 +11,14 @@ use axum::{
 use serde::Deserialize;
 use std::sync::Arc;
 
+use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::file_ports::FileRetrievalUseCase;
 use crate::application::ports::storage_ports::FileReadPort;
 use crate::application::ports::thumbnail_ports::{ThumbnailFormat, ThumbnailPort, ThumbnailSize};
 use crate::common::di::AppState;
+use crate::domain::services::authorization::{Permission, Resource, Subject};
 use crate::interfaces::middleware::auth::AuthUser;
+use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
 pub struct PreviewParams {
@@ -36,15 +39,17 @@ pub async fn handle_preview(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Query(params): Query<PreviewParams>,
+    req: axum::extract::Request,
 ) -> impl IntoResponse {
     // Parse the Nextcloud file ID — the NC app may append an instance suffix
     // (e.g. "00000326ocnca"), so strip non-digit characters first.
-    let numeric_part: String = params
+    let digit_end = params
         .file_id
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    let nc_file_id: i64 = match numeric_part.parse() {
+        .as_bytes()
+        .iter()
+        .position(|b| !b.is_ascii_digit())
+        .unwrap_or(params.file_id.len());
+    let nc_file_id: i64 = match params.file_id[..digit_end].parse() {
         Ok(id) => id,
         Err(_) => {
             return Response::builder()
@@ -89,9 +94,28 @@ pub async fn handle_preview(
         }
     };
 
-    // Verify the authenticated user owns this file
-    let user_id_str = user.id.to_string();
-    if file.owner_id.as_deref() != Some(user_id_str.as_str()) {
+    // Verify the authenticated user can Read this file. Anti-enum: any
+    // AuthZ denial surfaces as 404 (same shape as "unknown file" above),
+    // and the engine emits an `authz.denied` audit line internally.
+    let file_uuid = match Uuid::parse_str(&file.id) {
+        Ok(u) => u,
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from("File not found"))
+                .unwrap();
+        }
+    };
+    if state
+        .authorization
+        .require(
+            Subject::User(user.id),
+            Permission::Read,
+            Resource::File(file_uuid),
+        )
+        .await
+        .is_err()
+    {
         return Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(Body::from("File not found"))
@@ -112,6 +136,36 @@ pub async fn handle_preview(
             ThumbnailSize::Large
         }
     };
+
+    // Conditional revalidation — the ETag is derived from (object id, size)
+    // only, so it is computable right here, BEFORE the blob-hash query and
+    // the thumbnail cache/disk read. NC clients revalidate gallery previews
+    // constantly; the REST thumbnail endpoint has honoured `If-None-Match`
+    // since PHOTOS-ETAG — this endpoint set an immutable ETag but never
+    // compared it, so every revalidation re-ran the whole pipeline and
+    // re-shipped the body (ROUND10). Authz already passed above; a 304
+    // must never skip the Read check.
+    let etag = {
+        let s = thumb_size.as_str();
+        let mut e = String::with_capacity(9 + object_id.len() + s.len());
+        e.push_str("\"thumb-");
+        e.push_str(&object_id);
+        e.push('-');
+        e.push_str(s);
+        e.push('"');
+        e
+    };
+    if let Some(inm) = req.headers().get(header::IF_NONE_MATCH)
+        && let Ok(client_etag) = inm.to_str()
+        && (client_etag == etag || client_etag == "*")
+    {
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+            .header(header::ETAG, etag)
+            .body(Body::empty())
+            .unwrap();
+    }
 
     // Check if file is an image
     if !state
@@ -153,7 +207,6 @@ pub async fn handle_preview(
         )
         .await
     {
-        let etag = format!("\"thumb-{}-{:?}\"", object_id, thumb_size);
         return Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "image/jpeg")
@@ -179,17 +232,14 @@ pub async fn handle_preview(
         )
         .await
     {
-        Ok(data) => {
-            let etag = format!("\"thumb-{}-{:?}\"", object_id, thumb_size);
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "image/jpeg")
-                .header(header::CONTENT_LENGTH, data.len())
-                .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
-                .header(header::ETAG, etag)
-                .body(Body::from(data))
-                .unwrap()
-        }
+        Ok(data) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "image/jpeg")
+            .header(header::CONTENT_LENGTH, data.len())
+            .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+            .header(header::ETAG, etag)
+            .body(Body::from(data))
+            .unwrap(),
         Err(err) => {
             tracing::error!("Thumbnail generation failed for {}: {}", object_id, err);
             Response::builder()

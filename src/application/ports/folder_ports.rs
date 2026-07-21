@@ -77,6 +77,31 @@ pub trait FolderUseCase: Send + Sync + 'static {
         pagination: &crate::application::dtos::pagination::PaginationRequestDto,
     ) -> Result<crate::application::dtos::pagination::PaginatedResponseDto<FolderDto>, DomainError>;
 
+    /// Keyset-paged sub-folder listing in name order, scoped to a caller —
+    /// `name > after_name LIMIT limit`, `has_next = len() == limit`.
+    ///
+    /// Used by streaming WebDAV/NC PROPFIND: O(page) per page off the
+    /// `idx_folders_unique_name` index instead of the quadratic
+    /// `COUNT(*) OVER() … LIMIT/OFFSET` walk (benches/FOLDER-KEYSET.md).
+    ///
+    /// The default implementation falls back to `list_folders_with_perms`
+    /// + in-memory slice so stubs and mocks compile without changes.
+    async fn list_folders_batch_with_perms(
+        &self,
+        parent_id: Option<&str>,
+        caller_id: Uuid,
+        after_name: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<FolderDto>, DomainError> {
+        let mut all = self.list_folders_with_perms(parent_id, caller_id).await?;
+        all.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(all
+            .into_iter()
+            .filter(|f| after_name.is_none_or(|a| f.name.as_str() > a))
+            .take(limit)
+            .collect())
+    }
+
     /// Renames a folder (ownership verified against caller_id)
     async fn rename_folder_with_perms(
         &self,

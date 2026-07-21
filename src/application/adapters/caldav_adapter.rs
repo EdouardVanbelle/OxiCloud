@@ -17,6 +17,177 @@ use crate::application::adapters::webdav_adapter::{
 };
 use crate::application::dtos::calendar_dto::{CalendarDto, CalendarEventDto};
 
+/// Emit a WebDAV `getetag` body as `"…"` with the surrounding quotes written as
+/// borrowed pre-escaped `&quot;` text events around the escaped etag body.
+///
+/// Byte-identical to escaping a `"{etag}"` String — `quick_xml`'s
+/// `BytesText::new` escapes a literal `"` → `&quot;`, re-allocating an owned
+/// `Cow` — but with 0 heap allocs (the NextCloud ROUND20 §C1 / CardDAV
+/// ROUND21 §R4 pattern, applied to the CalDAV emitter it missed). The caller
+/// writes the surrounding `<D:getetag>…</D:getetag>` tags. Every `etag` body
+/// here is a bare `Uuid` (`calendar.id` / `anchor.id`), so the escaped body is
+/// itself a borrow — 0 allocs/row.
+fn write_quoted_etag<W: Write>(xml_writer: &mut Writer<W>, etag: &str) -> Result<()> {
+    xml_writer.write_event(Event::Text(BytesText::from_escaped("&quot;")))?;
+    xml_writer.write_event(Event::Text(BytesText::new(etag)))?;
+    xml_writer.write_event(Event::Text(BytesText::from_escaped("&quot;")))?;
+    Ok(())
+}
+
+/// Parse a CalDAV `time-range` element's `start` / `end` attribute
+/// value into a UTC `DateTime`.
+///
+/// RFC 4791 §9.9 requires iCalendar DATE-TIME format
+/// (`YYYYMMDDTHHMMSSZ` — no dashes, no colons). Every real client
+/// (Thunderbird, Apple Calendar, DAVx⁵, Gnome Calendar) sends this
+/// shape, as does the `python-caldav` library.
+///
+/// A prior pass parsed the value with `DateTime::parse_from_rfc3339`
+/// exclusively, which expects `YYYY-MM-DDTHH:MM:SSZ` and fails on
+/// the standard shape — silently returning `None`. The caller then
+/// dropped the whole time-range filter and fell through to
+/// `list_events`, returning the entire calendar regardless of the
+/// window. RFC 3339 is retained as a defensive fallback for the rare
+/// client that emits it.
+///
+/// Returns `None` on any parse failure — callers propagate that as
+/// "no time-range filter provided", matching the pre-fix behaviour
+/// for missing attributes.
+fn parse_caldav_datetime(value: &str) -> Option<DateTime<Utc>> {
+    chrono::NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%SZ")
+        .map(|nd| nd.and_utc())
+        .ok()
+        .or_else(|| {
+            DateTime::parse_from_rfc3339(value)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
+        })
+}
+
+/// Extract the `BEGIN:VEVENT` ... `END:VEVENT` slice from a
+/// stored `ical_data` body (as returned by the storage layer —
+/// one full VCALENDAR per row).
+///
+/// Case-insensitive on the tag names per RFC 5545 §3.1. Includes
+/// the `BEGIN:VEVENT` and `END:VEVENT` lines themselves. Returns
+/// `None` if either tag is missing (malformed body) so callers
+/// can fall back safely.
+pub(crate) fn extract_vevent_chunk(ical_data: &str) -> Option<&str> {
+    // Byte index of the first ASCII-case-insensitive occurrence of
+    // `needle` in `hay` at or after `from`. Every stored body OxiCloud
+    // itself writes carries uppercase tags, so try the memchr-backed
+    // exact `find` first; only genuinely mixed-case foreign bodies pay
+    // the manual scan. Either way this replaces the old
+    // `to_ascii_uppercase()` of the ENTIRE body — one full-copy String
+    // allocation per event per REPORT/GET, done purely to locate two
+    // tags.
+    fn find_ci(hay: &str, needle: &str, from: usize) -> Option<usize> {
+        if let Some(i) = hay[from..].find(needle) {
+            return Some(from + i);
+        }
+        let h = hay.as_bytes();
+        let n = needle.as_bytes();
+        if h.len() < n.len() {
+            return None;
+        }
+        (from..=h.len() - n.len()).find(|&i| h[i..i + n.len()].eq_ignore_ascii_case(n))
+    }
+
+    let begin = find_ci(ical_data, "BEGIN:VEVENT", 0)?;
+    // End marker: the first END:VEVENT after `begin`, plus the length
+    // of "END:VEVENT" itself, then any immediate CRLF/LF to include
+    // the terminator line.
+    let rel_end = find_ci(ical_data, "END:VEVENT", begin)?;
+    let end_tag_end = rel_end + "END:VEVENT".len();
+    // Include any immediate line terminator so the chunk stays a
+    // well-formed line even when the caller concatenates.
+    let mut end = end_tag_end;
+    if ical_data[end..].starts_with('\r') {
+        end += 1;
+    }
+    if ical_data[end..].starts_with('\n') {
+        end += 1;
+    }
+    Some(&ical_data[begin..end])
+}
+
+/// Group a slice of events by `ical_uid`, preserving the order of
+/// first appearance for the groups themselves, and placing the
+/// master (`recurrence_id.is_none()`) first within each group per
+/// RFC 5545 §3.6.1 convention. Ties among exceptions preserve the
+/// original slice order.
+///
+/// Used by the read-side emitters to fold master + per-instance
+/// override rows into a single calendar-object-resource, matching
+/// the "one URL per UID" contract of RFC 4791 §4.1.
+pub(crate) fn group_events_by_uid<'a>(
+    events: &'a [CalendarEventDto],
+) -> Vec<Vec<&'a CalendarEventDto>> {
+    // Keys borrow from the DTO slice (which outlives every local) — the
+    // old String-keyed map cloned every event's UID (twice for first
+    // appearances) on every REPORT / collection PROPFIND / GET.
+    let mut order: Vec<&'a str> = Vec::new();
+    let mut buckets: std::collections::HashMap<&'a str, Vec<&'a CalendarEventDto>> =
+        std::collections::HashMap::new();
+
+    for event in events {
+        let key = event.ical_uid.as_str();
+        match buckets.entry(key) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                order.push(key);
+                slot.insert(vec![event]);
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => slot.get_mut().push(event),
+        }
+    }
+
+    let mut out = Vec::with_capacity(order.len());
+    for uid in order {
+        let mut bucket = buckets.remove(uid).unwrap_or_default();
+        // Master first (recurrence_id None), exceptions in insertion order.
+        bucket.sort_by_key(|e| e.recurrence_id.is_some());
+        out.push(bucket);
+    }
+    out
+}
+
+/// Build the calendar-object-resource body for a bundle (master +
+/// N exception overrides sharing the same UID). Serves each row's
+/// stored `ical_data` verbatim, extracting the VEVENT chunk and
+/// wrapping the concatenation in a single VCALENDAR shell.
+///
+/// This is the fix for the phase-4 read-side gap: the pre-fix
+/// emitter regenerated the body from DTO fields, which (a) lost
+/// every property outside UID / SUMMARY / DTSTART / DTEND /
+/// DESCRIPTION / LOCATION / RRULE (so ATTENDEE, VALARM, CATEGORIES,
+/// STATUS, X-* all silently dropped) and (b) never emitted
+/// RECURRENCE-ID so exception rows were invisible in the bundled
+/// GET body. Serving stored bytes verbatim closes both.
+///
+/// If any row's `ical_data` is malformed (no VEVENT tag pair),
+/// that row is skipped — the bundle survives the rest. An empty
+/// input bundle yields a minimal VCALENDAR with no VEVENTs (the
+/// caller decides whether to treat that as 404 upstream).
+pub(crate) fn bundle_to_calendar_body(bundle: &[&CalendarEventDto]) -> String {
+    let mut buf = String::with_capacity(256 + bundle.len() * 320);
+    buf.push_str("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//OxiCloud//NONSGML Calendar//EN\r\n");
+    for event in bundle {
+        if let Some(chunk) = extract_vevent_chunk(&event.ical_data) {
+            // The chunk already carries its own trailing line
+            // terminator (see extract_vevent_chunk). Append as-is.
+            buf.push_str(chunk);
+            // Defensive: guarantee a line separator between VEVENTs
+            // even if the extracted chunk didn't include a trailing
+            // newline (some stored bodies lack the terminator).
+            if !buf.ends_with('\n') {
+                buf.push_str("\r\n");
+            }
+        }
+    }
+    buf.push_str("END:VCALENDAR\r\n");
+    buf
+}
+
 /// Returns whether `caller_id` owns `calendar`.
 ///
 /// CalDAV clients (DAVx5, Apple Calendar, Thunderbird) only mount a collection
@@ -92,21 +263,17 @@ impl CalDavAdapter {
                         s if s == "prop" || s.ends_with(":prop") => in_prop = true,
                         s if s == "filter" || s.ends_with(":filter") => in_filter = true,
                         s if s == "time-range" || s.ends_with(":time-range") => {
-                            // Parse time-range attributes
                             for attr in e.attributes().flatten() {
                                 let attr_name =
                                     std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
-                                let attr_value = attr.unescape_value().unwrap_or_default();
+                                let attr_value = attr
+                                    .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                    .unwrap_or_default();
 
                                 if attr_name == "start" {
-                                    // Parse ISO date format with Z for UTC
-                                    start_time = DateTime::parse_from_rfc3339(&attr_value)
-                                        .ok()
-                                        .map(|dt| dt.with_timezone(&Utc));
+                                    start_time = parse_caldav_datetime(&attr_value);
                                 } else if attr_name == "end" {
-                                    end_time = DateTime::parse_from_rfc3339(&attr_value)
-                                        .ok()
-                                        .map(|dt| dt.with_timezone(&Utc));
+                                    end_time = parse_caldav_datetime(&attr_value);
                                 }
                             }
                         }
@@ -158,20 +325,17 @@ impl CalDavAdapter {
                         let qname = WebDavAdapter::resolve_name(name_str, &ns_map);
                         props.push(qname);
                     } else if name_str == "time-range" || name_str.ends_with(":time-range") {
-                        // Parse time-range attributes
+                        // Empty-element form: <C:time-range start="..." end="..."/>
                         for attr in e.attributes().flatten() {
                             let attr_name = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
-                            let attr_value = attr.unescape_value().unwrap_or_default();
+                            let attr_value = attr
+                                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                .unwrap_or_default();
 
                             if attr_name == "start" {
-                                // Parse ISO date format with Z for UTC
-                                start_time = DateTime::parse_from_rfc3339(&attr_value)
-                                    .ok()
-                                    .map(|dt| dt.with_timezone(&Utc));
+                                start_time = parse_caldav_datetime(&attr_value);
                             } else if attr_name == "end" {
-                                end_time = DateTime::parse_from_rfc3339(&attr_value)
-                                    .ok()
-                                    .map(|dt| dt.with_timezone(&Utc));
+                                end_time = parse_caldav_datetime(&attr_value);
                             }
                         }
                     }
@@ -642,16 +806,14 @@ impl CalDavAdapter {
         xml_writer.write_event(Event::Text(BytesText::new(&calendar.name)))?;
         xml_writer.write_event(Event::End(BytesEnd::new("D:displayname")))?;
 
-        // Last modified
+        // Last modified (stack render, benches/ROUND14.md §A5)
         xml_writer.write_event(Event::Start(BytesStart::new("D:getlastmodified")))?;
-        xml_writer.write_event(Event::Text(BytesText::new(
-            &calendar.updated_at.to_rfc2822(),
-        )))?;
+        Self::write_lastmodified_text(xml_writer, calendar.updated_at)?;
         xml_writer.write_event(Event::End(BytesEnd::new("D:getlastmodified")))?;
 
-        // ETag
+        // ETag (borrowed pre-escaped quotes, §C1/§R4 — was format! + escape)
         xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
-        xml_writer.write_event(Event::Text(BytesText::new(&format!("\"{}\"", calendar.id))))?;
+        write_quoted_etag(xml_writer, &calendar.id)?;
         xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
 
         // Content type for calendar collection
@@ -773,17 +935,13 @@ impl CalDavAdapter {
                 }
                 ("DAV:", "getlastmodified") => {
                     xml_writer.write_event(Event::Start(BytesStart::new("D:getlastmodified")))?;
-                    xml_writer.write_event(Event::Text(BytesText::new(
-                        &calendar.updated_at.to_rfc2822(),
-                    )))?;
+                    // Stack render (benches/ROUND14.md §A5).
+                    Self::write_lastmodified_text(xml_writer, calendar.updated_at)?;
                     xml_writer.write_event(Event::End(BytesEnd::new("D:getlastmodified")))?;
                 }
                 ("DAV:", "getetag") => {
                     xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
-                    xml_writer.write_event(Event::Text(BytesText::new(&format!(
-                        "\"{}\"",
-                        calendar.id
-                    ))))?;
+                    write_quoted_etag(xml_writer, &calendar.id)?;
                     xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
                 }
                 ("DAV:", "getcontenttype") => {
@@ -917,54 +1075,174 @@ impl CalDavAdapter {
         // Write the calendar collection itself
         Self::write_calendar_response(&mut xml_writer, calendar, request, base_href, caller_id)?;
 
-        // If depth > 0, include event resources
+        // If depth > 0, include event resources — see
+        // `write_collection_event_page`, which the streaming emitter
+        // reuses page by page.
         if depth != "0" {
-            for event in events {
-                // Write a basic DAV response for each event
-                xml_writer.write_event(Event::Start(BytesStart::new("D:response")))?;
-
-                let event_href = format!("{}{}.ics", base_href, event.ical_uid);
-                xml_writer.write_event(Event::Start(BytesStart::new("D:href")))?;
-                xml_writer.write_event(Event::Text(BytesText::new(&event_href)))?;
-                xml_writer.write_event(Event::End(BytesEnd::new("D:href")))?;
-
-                xml_writer.write_event(Event::Start(BytesStart::new("D:propstat")))?;
-                xml_writer.write_event(Event::Start(BytesStart::new("D:prop")))?;
-
-                // resourcetype (empty for non-collection)
-                xml_writer.write_event(Event::Empty(BytesStart::new("D:resourcetype")))?;
-
-                // getetag
-                xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
-                xml_writer
-                    .write_event(Event::Text(BytesText::new(&format!("\"{}\"", event.id))))?;
-                xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
-
-                // getcontenttype
-                xml_writer.write_event(Event::Start(BytesStart::new("D:getcontenttype")))?;
-                xml_writer.write_event(Event::Text(BytesText::new(
-                    "text/calendar; component=vevent",
-                )))?;
-                xml_writer.write_event(Event::End(BytesEnd::new("D:getcontenttype")))?;
-
-                // getlastmodified
-                xml_writer.write_event(Event::Start(BytesStart::new("D:getlastmodified")))?;
-                xml_writer
-                    .write_event(Event::Text(BytesText::new(&event.updated_at.to_rfc2822())))?;
-                xml_writer.write_event(Event::End(BytesEnd::new("D:getlastmodified")))?;
-
-                xml_writer.write_event(Event::End(BytesEnd::new("D:prop")))?;
-
-                xml_writer.write_event(Event::Start(BytesStart::new("D:status")))?;
-                xml_writer.write_event(Event::Text(BytesText::new("HTTP/1.1 200 OK")))?;
-                xml_writer.write_event(Event::End(BytesEnd::new("D:status")))?;
-
-                xml_writer.write_event(Event::End(BytesEnd::new("D:propstat")))?;
-                xml_writer.write_event(Event::End(BytesEnd::new("D:response")))?;
-            }
+            Self::write_collection_event_page(&mut xml_writer, events, base_href)?;
         }
 
+        Self::write_caldav_multistatus_end(&mut xml_writer)?;
+        Ok(())
+    }
+
+    /// Multistatus opening + the calendar collection's own
+    /// `D:response` — the head of a depth-1 collection PROPFIND. The
+    /// streaming emitter calls this once, then
+    /// [`Self::write_collection_event_page`] per hydrated UID page,
+    /// then [`Self::write_caldav_multistatus_end`].
+    pub fn write_collection_head<W: Write>(
+        xml_writer: &mut Writer<W>,
+        calendar: &CalendarDto,
+        request: &PropFindRequest,
+        base_href: &str,
+        caller_id: &str,
+    ) -> Result<()> {
+        Self::write_caldav_multistatus_start(xml_writer)?;
+        Self::write_calendar_response(xml_writer, calendar, request, base_href, caller_id)
+    }
+
+    /// One depth-1 collection page: event resources folded per UID so a
+    /// recurring master + per-instance exception overrides share ONE
+    /// `D:response` (RFC 4791 §4.1 + RFC 5545 §3.6.1) — emitting one
+    /// response per DB row made clients dedupe the shared href and the
+    /// exception appeared to vanish. Callers guarantee same-UID rows
+    /// arrive within a single page.
+    /// Emit an RFC 2822 `getlastmodified` text node with the allocation-free
+    /// stack renderer (byte-identical to `chrono::to_rfc2822` — the parity
+    /// gate lives in `common::fmt`), falling back to chrono only for
+    /// out-of-4-digit-year timestamps. Mirrors the CardDAV emitter; replaces
+    /// the per-event `updated_at.to_rfc2822()` heap `String`
+    /// (benches/ROUND14.md §A5).
+    fn write_lastmodified_text<W: Write>(
+        xml_writer: &mut Writer<W>,
+        ts: DateTime<Utc>,
+    ) -> Result<()> {
+        let mut buf = [0u8; 31];
+        match crate::common::fmt::rfc2822_utc(&mut buf, ts.timestamp()) {
+            Some(s) => xml_writer.write_event(Event::Text(BytesText::new(s)))?,
+            None => xml_writer.write_event(Event::Text(BytesText::new(&ts.to_rfc2822())))?,
+        }
+        Ok(())
+    }
+
+    pub fn write_collection_event_page<W: Write>(
+        xml_writer: &mut Writer<W>,
+        events: &[CalendarEventDto],
+        base_href: &str,
+    ) -> Result<()> {
+        // Reused per-event href buffer (cleared each iteration) so a whole
+        // PROPFIND page allocates the href storage once instead of per event
+        // (benches/ROUND14.md §A6). The etag no longer needs a buffer — it is
+        // emitted via `write_quoted_etag` (borrowed pre-escaped quotes).
+        let mut event_href = String::with_capacity(base_href.len() + 48);
+        for bundle in group_events_by_uid(events) {
+            // The master (sorted first by group_events_by_uid)
+            // supplies the ETag anchor + getlastmodified. If
+            // the bundle is all exceptions (no master row),
+            // fall back to the first exception.
+            let anchor = match bundle.first() {
+                Some(e) => *e,
+                None => continue,
+            };
+            event_href.clear();
+            let _ = std::fmt::Write::write_fmt(
+                &mut event_href,
+                format_args!("{}{}.ics", base_href, anchor.ical_uid),
+            );
+
+            xml_writer.write_event(Event::Start(BytesStart::new("D:response")))?;
+            xml_writer.write_event(Event::Start(BytesStart::new("D:href")))?;
+            xml_writer.write_event(Event::Text(BytesText::new(&event_href)))?;
+            xml_writer.write_event(Event::End(BytesEnd::new("D:href")))?;
+
+            xml_writer.write_event(Event::Start(BytesStart::new("D:propstat")))?;
+            xml_writer.write_event(Event::Start(BytesStart::new("D:prop")))?;
+
+            // resourcetype (empty for non-collection)
+            xml_writer.write_event(Event::Empty(BytesStart::new("D:resourcetype")))?;
+
+            // getetag — anchor row's id (borrowed pre-escaped quotes, §C1/§R4)
+            xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
+            write_quoted_etag(xml_writer, &anchor.id)?;
+            xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
+
+            // getcontenttype
+            xml_writer.write_event(Event::Start(BytesStart::new("D:getcontenttype")))?;
+            xml_writer.write_event(Event::Text(BytesText::new(
+                "text/calendar; component=vevent",
+            )))?;
+            xml_writer.write_event(Event::End(BytesEnd::new("D:getcontenttype")))?;
+
+            // getlastmodified — anchor row's updated_at (stack render, §A5)
+            xml_writer.write_event(Event::Start(BytesStart::new("D:getlastmodified")))?;
+            Self::write_lastmodified_text(xml_writer, anchor.updated_at)?;
+            xml_writer.write_event(Event::End(BytesEnd::new("D:getlastmodified")))?;
+
+            xml_writer.write_event(Event::End(BytesEnd::new("D:prop")))?;
+
+            xml_writer.write_event(Event::Start(BytesStart::new("D:status")))?;
+            xml_writer.write_event(Event::Text(BytesText::new("HTTP/1.1 200 OK")))?;
+            xml_writer.write_event(Event::End(BytesEnd::new("D:status")))?;
+
+            xml_writer.write_event(Event::End(BytesEnd::new("D:propstat")))?;
+            xml_writer.write_event(Event::End(BytesEnd::new("D:response")))?;
+        }
+        Ok(())
+    }
+
+    /// Write the CalDAV `<D:multistatus>` opening tag (DAV + CalDAV +
+    /// CalendarServer namespaces). Streaming emitters call this once,
+    /// then [`Self::write_report_page`] per hydrated UID page, then
+    /// [`Self::write_caldav_multistatus_end`].
+    pub fn write_caldav_multistatus_start<W: Write>(xml_writer: &mut Writer<W>) -> Result<()> {
+        xml_writer.write_event(Event::Start(
+            BytesStart::new("D:multistatus").with_attributes([
+                ("xmlns:D", "DAV:"),
+                ("xmlns:C", "urn:ietf:params:xml:ns:caldav"),
+                ("xmlns:CS", "http://calendarserver.org/ns/"),
+            ]),
+        ))?;
+        Ok(())
+    }
+
+    /// Close the multistatus opened by
+    /// [`Self::write_caldav_multistatus_start`].
+    pub fn write_caldav_multistatus_end<W: Write>(xml_writer: &mut Writer<W>) -> Result<()> {
         xml_writer.write_event(Event::End(BytesEnd::new("D:multistatus")))?;
+        Ok(())
+    }
+
+    /// One REPORT page: group `events` per UID and emit one
+    /// `D:response` per bundle. Callers guarantee same-UID rows arrive
+    /// within a single page (the uid-keyset pager does).
+    pub fn write_report_page<W: Write>(
+        xml_writer: &mut Writer<W>,
+        events: &[CalendarEventDto],
+        request: &CalDavReportType,
+        base_href: &str,
+    ) -> Result<()> {
+        let props = match request {
+            CalDavReportType::CalendarQuery { props, .. } => props,
+            CalDavReportType::CalendarMultiget { props, .. } => props,
+            CalDavReportType::SyncCollection { props, .. } => props,
+        };
+        // Reused per-event href buffer for the whole REPORT page
+        // (benches/ROUND14.md §A6). The etag is emitted via `write_quoted_etag`
+        // (borrowed pre-escaped quotes) and no longer needs a buffer.
+        let mut href = String::with_capacity(base_href.len() + 48);
+        for bundle in group_events_by_uid(events) {
+            let anchor = match bundle.first() {
+                Some(e) => *e,
+                None => continue,
+            };
+            href.clear();
+            let _ = std::fmt::Write::write_fmt(
+                &mut href,
+                format_args!("{}{}.ics", base_href, anchor.ical_uid),
+            );
+            Self::write_event_response(xml_writer, &bundle, props, &href)?;
+        }
         Ok(())
     }
 
@@ -977,44 +1255,35 @@ impl CalDavAdapter {
     ) -> Result<()> {
         let mut xml_writer = Writer::new(writer);
 
-        // Start multistatus response
-        xml_writer.write_event(Event::Start(
-            BytesStart::new("D:multistatus").with_attributes([
-                ("xmlns:D", "DAV:"),
-                ("xmlns:C", "urn:ietf:params:xml:ns:caldav"),
-                ("xmlns:CS", "http://calendarserver.org/ns/"),
-            ]),
-        ))?;
+        Self::write_caldav_multistatus_start(&mut xml_writer)?;
 
-        // Determine which properties to include based on request type
-        let props = match request {
-            CalDavReportType::CalendarQuery { props, .. } => props.clone(),
-            CalDavReportType::CalendarMultiget { props, .. } => props.clone(),
-            CalDavReportType::SyncCollection { props, .. } => props.clone(),
-        };
+        // Responses folded per UID so a recurring master + exception
+        // overrides share ONE D:response (RFC 4791 §4.1) — see
+        // `write_report_page`, which the streaming emitters reuse
+        // page by page.
+        Self::write_report_page(&mut xml_writer, events, request, base_href)?;
 
-        // Add responses for events
-        for event in events {
-            // Create the event href based on its UID
-            let href = format!("{}{}.ics", base_href, event.ical_uid);
-
-            // Write event response
-            Self::write_event_response(&mut xml_writer, event, &props, &href)?;
-        }
-
-        // End multistatus
-        xml_writer.write_event(Event::End(BytesEnd::new("D:multistatus")))?;
+        Self::write_caldav_multistatus_end(&mut xml_writer)?;
 
         Ok(())
     }
 
-    /// Write event properties as a response
+    /// Write a bundle (master + exception overrides sharing a
+    /// UID) as one D:response. The bundle is emitted at one
+    /// href (base + uid.ics); ETag + getlastmodified anchor on
+    /// the first bundle entry (which `group_events_by_uid` puts
+    /// the master at); calendar-data contains every VEVENT.
     fn write_event_response<W: Write>(
         xml_writer: &mut Writer<W>,
-        event: &CalendarEventDto,
+        bundle: &[&CalendarEventDto],
         props: &[QualifiedName],
         href: &str,
     ) -> Result<()> {
+        let anchor = bundle
+            .first()
+            .copied()
+            .expect("write_event_response: bundle must be non-empty (caller guards)");
+
         // Start response element
         xml_writer.write_event(Event::Start(BytesStart::new("D:response")))?;
 
@@ -1031,10 +1300,10 @@ impl CalDavAdapter {
 
         // If no specific props requested, return all common ones
         if props.is_empty() {
-            Self::write_event_standard_props(xml_writer, event)?;
+            Self::write_event_standard_props(xml_writer, anchor, bundle)?;
         } else {
             // Write specifically requested properties
-            Self::write_event_requested_props(xml_writer, event, props)?;
+            Self::write_event_requested_props(xml_writer, anchor, bundle, props)?;
         }
 
         // End prop
@@ -1054,19 +1323,25 @@ impl CalDavAdapter {
         Ok(())
     }
 
-    /// Write standard event properties
+    /// Write standard event properties for a UID bundle.
+    /// `anchor` supplies metadata (ETag, updated_at); `bundle`
+    /// supplies the full calendar-data payload (master + all
+    /// exceptions concatenated into one VCALENDAR).
     fn write_event_standard_props<W: Write>(
         xml_writer: &mut Writer<W>,
-        event: &CalendarEventDto,
+        anchor: &CalendarEventDto,
+        bundle: &[&CalendarEventDto],
     ) -> Result<()> {
         // Common WebDAV properties
 
         // Resource type (empty for non-collection)
         xml_writer.write_event(Event::Empty(BytesStart::new("D:resourcetype")))?;
 
-        // ETag based on updated_at timestamp
+        // ETag anchored on the master (or first exception in a master-less
+        // bundle — pathological state today). Borrowed pre-escaped quotes
+        // (§C1/§R4), 0 allocs/event.
         xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
-        xml_writer.write_event(Event::Text(BytesText::new(&format!("\"{}\"", event.id))))?;
+        write_quoted_etag(xml_writer, &anchor.id)?;
         xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
 
         // Content type
@@ -1076,40 +1351,19 @@ impl CalDavAdapter {
         )))?;
         xml_writer.write_event(Event::End(BytesEnd::new("D:getcontenttype")))?;
 
-        // Last modified
+        // Last modified (stack render, benches/ROUND14.md §A5)
         xml_writer.write_event(Event::Start(BytesStart::new("D:getlastmodified")))?;
-        xml_writer.write_event(Event::Text(BytesText::new(&event.updated_at.to_rfc2822())))?;
+        Self::write_lastmodified_text(xml_writer, anchor.updated_at)?;
         xml_writer.write_event(Event::End(BytesEnd::new("D:getlastmodified")))?;
 
-        // CalDAV specific properties
-
-        // Calendar data (iCalendar format)
+        // CalDAV calendar-data — the whole bundle emitted as one
+        // VCALENDAR by extracting each row's stored VEVENT chunk
+        // verbatim. Every property (ATTENDEE / VALARM / CATEGORIES
+        // / STATUS / X-* / RECURRENCE-ID on exception rows)
+        // survives because we no longer regenerate from DTO
+        // fields.
         xml_writer.write_event(Event::Start(BytesStart::new("C:calendar-data")))?;
-        // In a full implementation, we would generate a complete iCalendar component here
-        // For now, we'll just provide a basic example
-        let ical_data = format!(
-            "BEGIN:VCALENDAR\r\n\
-            VERSION:2.0\r\n\
-            PRODID:-//OxiCloud//NONSGML Calendar//EN\r\n\
-            BEGIN:VEVENT\r\n\
-            UID:{}\r\n\
-            SUMMARY:{}\r\n\
-            DTSTART:{}\r\n\
-            DTEND:{}\r\n\
-            {}\
-            DTSTAMP:{}\r\n\
-            END:VEVENT\r\n\
-            END:VCALENDAR\r\n",
-            event.ical_uid,
-            event.summary.replace("\n", "\\n"),
-            event.start_time.format("%Y%m%dT%H%M%SZ"),
-            event.end_time.format("%Y%m%dT%H%M%SZ"),
-            event
-                .rrule
-                .as_ref()
-                .map_or("".to_string(), |r| format!("RRULE:{}\r\n", r)),
-            event.updated_at.format("%Y%m%dT%H%M%SZ"),
-        );
+        let ical_data = bundle_to_calendar_body(bundle);
         xml_writer.write_event(Event::Text(BytesText::new(&ical_data)))?;
         xml_writer.write_event(Event::End(BytesEnd::new("C:calendar-data")))?;
 
@@ -1119,7 +1373,8 @@ impl CalDavAdapter {
     /// Write requested event properties
     fn write_event_requested_props<W: Write>(
         xml_writer: &mut Writer<W>,
-        event: &CalendarEventDto,
+        anchor: &CalendarEventDto,
+        bundle: &[&CalendarEventDto],
         props: &[QualifiedName],
     ) -> Result<()> {
         for prop in props {
@@ -1130,8 +1385,7 @@ impl CalDavAdapter {
                 }
                 ("DAV:", "getetag") => {
                     xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
-                    xml_writer
-                        .write_event(Event::Text(BytesText::new(&format!("\"{}\"", event.id))))?;
+                    write_quoted_etag(xml_writer, &anchor.id)?;
                     xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
                 }
                 ("DAV:", "getcontenttype") => {
@@ -1143,39 +1397,17 @@ impl CalDavAdapter {
                 }
                 ("DAV:", "getlastmodified") => {
                     xml_writer.write_event(Event::Start(BytesStart::new("D:getlastmodified")))?;
-                    xml_writer
-                        .write_event(Event::Text(BytesText::new(&event.updated_at.to_rfc2822())))?;
+                    // Stack render (benches/ROUND14.md §A5).
+                    Self::write_lastmodified_text(xml_writer, anchor.updated_at)?;
                     xml_writer.write_event(Event::End(BytesEnd::new("D:getlastmodified")))?;
                 }
 
-                // CalDAV namespace properties
+                // CalDAV namespace properties — calendar-data is
+                // the whole bundle, master + exceptions in one
+                // VCALENDAR served from stored ical_data.
                 ("urn:ietf:params:xml:ns:caldav", "calendar-data") => {
                     xml_writer.write_event(Event::Start(BytesStart::new("C:calendar-data")))?;
-                    // In a full implementation, we would generate a complete iCalendar component here
-                    // For now, we'll just provide a basic example
-                    let ical_data = format!(
-                        "BEGIN:VCALENDAR\r\n\
-                        VERSION:2.0\r\n\
-                        PRODID:-//OxiCloud//NONSGML Calendar//EN\r\n\
-                        BEGIN:VEVENT\r\n\
-                        UID:{}\r\n\
-                        SUMMARY:{}\r\n\
-                        DTSTART:{}\r\n\
-                        DTEND:{}\r\n\
-                        {}\
-                        DTSTAMP:{}\r\n\
-                        END:VEVENT\r\n\
-                        END:VCALENDAR\r\n",
-                        event.ical_uid,
-                        event.summary.replace("\n", "\\n"),
-                        event.start_time.format("%Y%m%dT%H%M%SZ"),
-                        event.end_time.format("%Y%m%dT%H%M%SZ"),
-                        event
-                            .rrule
-                            .as_ref()
-                            .map_or("".to_string(), |r| format!("RRULE:{}\r\n", r)),
-                        event.updated_at.format("%Y%m%dT%H%M%SZ"),
-                    );
+                    let ical_data = bundle_to_calendar_body(bundle);
                     xml_writer.write_event(Event::Text(BytesText::new(&ical_data)))?;
                     xml_writer.write_event(Event::End(BytesEnd::new("C:calendar-data")))?;
                 }
@@ -1298,5 +1530,329 @@ impl CalDavAdapter {
         }
 
         Ok((displayname, description, color))
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Bench support
+// ─────────────────────────────────────────────────────────────
+
+/// Thin public wrappers over the `pub(crate)` read-side helpers so
+/// `examples/bench_caldav_parse.rs` can measure them. Gated behind the
+/// `bench` feature — adds nothing to prod builds.
+#[cfg(feature = "bench")]
+pub mod bench {
+    use super::*;
+
+    pub fn extract_vevent_chunk(ical_data: &str) -> Option<&str> {
+        super::extract_vevent_chunk(ical_data)
+    }
+
+    pub fn group_events_by_uid(events: &[CalendarEventDto]) -> Vec<Vec<&CalendarEventDto>> {
+        super::group_events_by_uid(events)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod bundle_helper_tests {
+    use super::*;
+
+    /// One DTO builder for all tests in this module — carries
+    /// enough state (uid, recurrence_id, ical_data) for both the
+    /// grouping tests and the bundle-body tests.
+    fn dto(uid: &str, is_exception: bool, ical: &str) -> CalendarEventDto {
+        use chrono::Utc;
+        CalendarEventDto {
+            id: "row-".to_string() + uid,
+            calendar_id: "cal".to_string(),
+            summary: "s".to_string(),
+            description: None,
+            location: None,
+            start_time: Utc::now(),
+            end_time: Utc::now(),
+            all_day: false,
+            rrule: None,
+            ical_uid: uid.to_string(),
+            recurrence_id: if is_exception { Some(Utc::now()) } else { None },
+            ical_data: ical.to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    // ── extract_vevent_chunk ──────────────────────────────────
+
+    #[test]
+    fn extract_vevent_finds_the_block_inside_vcalendar() {
+        let body = "\
+BEGIN:VCALENDAR\r
+VERSION:2.0\r
+BEGIN:VEVENT\r
+UID:x\r
+DTSTART:20260101T090000Z\r
+END:VEVENT\r
+END:VCALENDAR\r
+";
+        let chunk = extract_vevent_chunk(body).expect("VEVENT present");
+        assert!(chunk.starts_with("BEGIN:VEVENT"));
+        assert!(chunk.contains("UID:x"));
+        assert!(chunk.trim_end().ends_with("END:VEVENT"));
+    }
+
+    #[test]
+    fn extract_vevent_case_insensitive_tags() {
+        // RFC 5545 §3.1: component names are case-insensitive on
+        // read. Real client output is nearly always uppercase but
+        // a lowercase or mixed-case tag mustn't confuse the
+        // splitter.
+        let body = "begin:vcalendar\nbegin:vevent\nuid:x\nend:vevent\nend:vcalendar\n";
+        let chunk = extract_vevent_chunk(body).expect("case-insensitive lookup");
+        assert!(chunk.to_ascii_lowercase().contains("uid:x"));
+    }
+
+    #[test]
+    fn extract_vevent_missing_returns_none() {
+        // A body with only VTIMEZONE (no VEVENT) → None. Caller
+        // uses this to skip malformed rows without crashing the
+        // bundle emitter.
+        let body = "BEGIN:VCALENDAR\r\nBEGIN:VTIMEZONE\r\nEND:VTIMEZONE\r\nEND:VCALENDAR\r\n";
+        assert!(extract_vevent_chunk(body).is_none());
+    }
+
+    #[test]
+    fn extract_vevent_includes_trailing_line_terminator() {
+        // The chunk should end with CRLF so bundle concatenation
+        // produces valid line-separated iCalendar body.
+        let body = "BEGIN:VEVENT\r\nUID:x\r\nEND:VEVENT\r\n";
+        let chunk = extract_vevent_chunk(body).unwrap();
+        assert!(
+            chunk.ends_with("\r\n"),
+            "chunk must retain trailing CRLF for safe concatenation, got {:?}",
+            chunk
+        );
+    }
+
+    // ── group_events_by_uid ───────────────────────────────────
+
+    #[test]
+    fn group_places_master_first_within_each_uid() {
+        // Mixed order: exception first, then master, then a
+        // second exception. Result: [master, exception1, exception2].
+        let ex1 = dto("u1", true, "");
+        let master = dto("u1", false, "");
+        let ex2 = dto("u1", true, "");
+        let events = vec![ex1, master, ex2];
+
+        let grouped = group_events_by_uid(&events);
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].len(), 3);
+        assert!(
+            grouped[0][0].recurrence_id.is_none(),
+            "master (recurrence_id None) must be first per RFC 5545 §3.6.1 convention"
+        );
+        assert!(grouped[0][1].recurrence_id.is_some());
+        assert!(grouped[0][2].recurrence_id.is_some());
+    }
+
+    #[test]
+    fn group_preserves_uid_order_of_first_appearance() {
+        // If the input has UIDs in order [A, B, A], the output's
+        // group order is [A, B] — first-appearance wins.
+        let a1 = dto("A", false, "");
+        let b = dto("B", false, "");
+        let a2 = dto("A", true, "");
+        let events = vec![a1, b, a2];
+
+        let grouped = group_events_by_uid(&events);
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[0][0].ical_uid, "A");
+        assert_eq!(grouped[0].len(), 2);
+        assert_eq!(grouped[1][0].ical_uid, "B");
+        assert_eq!(grouped[1].len(), 1);
+    }
+
+    #[test]
+    fn group_empty_input_yields_empty_output() {
+        let events: Vec<CalendarEventDto> = vec![];
+        assert!(group_events_by_uid(&events).is_empty());
+    }
+
+    // ── bundle_to_calendar_body ───────────────────────────────
+
+    #[test]
+    fn bundle_body_wraps_all_vevents_in_one_vcalendar() {
+        let master = dto(
+            "u",
+            false,
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:u\r\nSUMMARY:Master\r\nRRULE:FREQ=DAILY;COUNT=3\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        );
+        let exception = dto(
+            "u",
+            true,
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:u\r\nSUMMARY:Override\r\nRECURRENCE-ID:20260103T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        );
+        let bundle: Vec<&CalendarEventDto> = vec![&master, &exception];
+
+        let body = bundle_to_calendar_body(&bundle);
+        assert!(body.starts_with("BEGIN:VCALENDAR"));
+        assert!(body.trim_end().ends_with("END:VCALENDAR"));
+        assert_eq!(
+            body.matches("BEGIN:VEVENT").count(),
+            2,
+            "bundle must produce one VEVENT per bundle member"
+        );
+        assert!(body.contains("SUMMARY:Master"));
+        assert!(body.contains("SUMMARY:Override"));
+        assert!(
+            body.contains("RECURRENCE-ID:20260103T090000Z"),
+            "exception RECURRENCE-ID must survive verbatim from stored ical_data"
+        );
+        assert!(
+            body.contains("RRULE:FREQ=DAILY;COUNT=3"),
+            "master RRULE must survive verbatim from stored ical_data"
+        );
+    }
+
+    #[test]
+    fn bundle_body_skips_rows_with_malformed_ical_data() {
+        // Real world defense: a row whose stored ical_data is
+        // corrupt (no VEVENT tag) shouldn't kill the bundle.
+        // Emit the good rows; skip the bad one.
+        let good = dto(
+            "u",
+            false,
+            "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:u\r\nSUMMARY:OK\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        );
+        let bad = dto("u", true, "not-an-ical-body");
+        let bundle: Vec<&CalendarEventDto> = vec![&good, &bad];
+
+        let body = bundle_to_calendar_body(&bundle);
+        assert_eq!(body.matches("BEGIN:VEVENT").count(), 1);
+        assert!(body.contains("SUMMARY:OK"));
+    }
+
+    #[test]
+    fn bundle_body_of_single_row_still_wraps_in_vcalendar() {
+        // A non-recurring event is a bundle of one — output shape
+        // must remain a valid VCALENDAR body.
+        let single = dto(
+            "u",
+            false,
+            "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:u\r\nSUMMARY:Lone\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        );
+        let bundle: Vec<&CalendarEventDto> = vec![&single];
+        let body = bundle_to_calendar_body(&bundle);
+        assert!(body.starts_with("BEGIN:VCALENDAR"));
+        assert!(body.contains("SUMMARY:Lone"));
+        assert_eq!(body.matches("BEGIN:VEVENT").count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod time_range_parser_tests {
+    use super::*;
+
+    // ── parse_caldav_datetime ─────────────────────────────────
+
+    #[test]
+    fn ical_date_time_utc_form_parses() {
+        // Standard shape per RFC 4791 §9.9 / RFC 5545 §3.3.5 —
+        // what every real CalDAV client sends.
+        let parsed = parse_caldav_datetime("20260103T090000Z").expect("iCal DATE-TIME must parse");
+        assert_eq!(parsed.to_rfc3339(), "2026-01-03T09:00:00+00:00");
+    }
+
+    #[test]
+    fn rfc3339_form_parses_as_fallback() {
+        // Defensive fallback for the rare client that emits
+        // dashes+colons. Retained so behaviour is a superset of
+        // the pre-fix parser (which accepted only this shape).
+        let parsed = parse_caldav_datetime("2026-01-03T09:00:00Z").expect("RFC 3339 fallback");
+        assert_eq!(parsed.to_rfc3339(), "2026-01-03T09:00:00+00:00");
+    }
+
+    #[test]
+    fn ical_and_rfc3339_agree_on_same_instant() {
+        // Sanity: the two accepted forms represent the same
+        // instant when they describe the same wall time.
+        let a = parse_caldav_datetime("20260103T090000Z").unwrap();
+        let b = parse_caldav_datetime("2026-01-03T09:00:00Z").unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn empty_string_returns_none() {
+        assert!(parse_caldav_datetime("").is_none());
+    }
+
+    #[test]
+    fn malformed_returns_none() {
+        // Neither iCal nor RFC 3339 shape — parser must reject
+        // without panicking. The caller treats None as "no
+        // time-range attribute provided", falling through to the
+        // unfiltered event listing (same as the pre-fix
+        // behaviour on unparseable input — but at least now we
+        // reach that branch by intent, not by silent parse loss).
+        assert!(parse_caldav_datetime("not-a-datetime").is_none());
+        assert!(parse_caldav_datetime("20260103").is_none()); // date only, no time
+        assert!(parse_caldav_datetime("20260103T090000").is_none()); // missing Z
+    }
+
+    // ── parse_report — end-to-end integration ─────────────────
+
+    #[test]
+    fn calendar_query_with_ical_time_range_captures_both_bounds() {
+        // The end-to-end regression: a calendar-query REPORT
+        // with iCal DATE-TIME `time-range` attributes MUST
+        // surface both bounds as Some in `CalDavReportType::
+        // CalendarQuery { time_range, .. }`. Pre-fix this test
+        // would have seen `time_range = None` because
+        // parse_from_rfc3339 rejected `20260101T093000Z`.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop><D:getetag/><C:calendar-data/></D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR">
+      <C:comp-filter name="VEVENT">
+        <C:time-range start="20260101T093000Z" end="20260101T120000Z"/>
+      </C:comp-filter>
+    </C:comp-filter>
+  </C:filter>
+</C:calendar-query>"#;
+
+        let report = CalDavAdapter::parse_report(xml.as_bytes()).expect("REPORT parses");
+
+        match report {
+            CalDavReportType::CalendarQuery { time_range, .. } => {
+                let (start, end) = time_range
+                    .expect("iCal DATE-TIME time-range must parse as Some; got None (regression)");
+                assert_eq!(start.to_rfc3339(), "2026-01-01T09:30:00+00:00");
+                assert_eq!(end.to_rfc3339(), "2026-01-01T12:00:00+00:00");
+            }
+            other => panic!("Expected CalendarQuery, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn calendar_query_without_time_range_has_none() {
+        // Baseline: a filter-less calendar-query still produces
+        // CalendarQuery with time_range=None. Guards against a
+        // fix that overreaches and starts inventing time bounds.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop><D:getetag/><C:calendar-data/></D:prop>
+</C:calendar-query>"#;
+
+        let report = CalDavAdapter::parse_report(xml.as_bytes()).expect("REPORT parses");
+        match report {
+            CalDavReportType::CalendarQuery { time_range, .. } => {
+                assert!(time_range.is_none());
+            }
+            other => panic!("Expected CalendarQuery, got {:?}", other),
+        }
     }
 }

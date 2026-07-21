@@ -9,6 +9,7 @@
 import { fetchMe, tryRefresh } from '$lib/api/endpoints/auth';
 import { drives } from '$lib/stores/drives.svelte';
 import type { User } from '$lib/api/types';
+import { ensureActiveUser } from '$lib/utils/localStoragePrefs';
 
 class SessionStore {
 	user = $state<User | null>(null);
@@ -32,12 +33,26 @@ class SessionStore {
 			if (!me && (await tryRefresh())) {
 				me = await fetchMe();
 			}
-			this.user = me;
+			if (me) this.setUser(me);
+			else this.user = null;
 		} catch {
 			this.user = null;
 		}
 		this.loaded = true;
 		return this.user;
+	}
+
+	/**
+	 * Set the authenticated user AND run per-user localStorage cleanup
+	 * (see `$lib/utils/localStoragePrefs::ensureActiveUser`). Direct
+	 * `session.user = …` assignments skip the cleanup — always call
+	 * `setUser` on login-flow entry points (form login, OIDC exchange,
+	 * existing-session probe) so a switch-account flow inside the same
+	 * tab observes the wipe.
+	 */
+	setUser(user: User): void {
+		this.user = user;
+		ensureActiveUser(user.id);
 	}
 
 	/**

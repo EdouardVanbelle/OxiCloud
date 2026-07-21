@@ -3,12 +3,27 @@
 	import { listFolder, moveFolder } from '$lib/api/endpoints/folders';
 	import { moveFile } from '$lib/api/endpoints/files';
 	import { copyFiles, copyFolders } from '$lib/api/endpoints/batch';
-	import type { FolderItem } from '$lib/api/types';
+	import type { Drive, DriveRole, FolderItem } from '$lib/api/types';
 	import Icon from '$lib/icons/Icon.svelte';
 	import Modal from '$lib/components/Modal.svelte';
 	import { t } from '$lib/i18n/index.svelte';
-	import { session } from '$lib/stores/session.svelte';
+	import { drives as drivesStore, driveIcon } from '$lib/stores/drives.svelte';
 	import { ui } from '$lib/stores/ui.svelte';
+
+	// A drive accepts new items only if the caller can Create on its root.
+	// Owner / Editor / Contributor cover that; Commenter + Viewer cannot.
+	const WRITABLE_ROLES: readonly DriveRole[] = ['owner', 'editor', 'contributor'] as const;
+	function isWritable(d: Drive): boolean {
+		return d.caller_role != null && WRITABLE_ROLES.includes(d.caller_role);
+	}
+
+	// Default-personal first, then secondary personals, then shared; within
+	// a group, alphabetical. Mirrors DrivePicker so the sidebar and this
+	// dialog rank drives identically.
+	function driveRank(d: Drive): number {
+		if (d.default_for_user) return 0;
+		return d.kind === 'personal' ? 1 : 2;
+	}
 
 	interface Target {
 		id: string;
@@ -34,8 +49,20 @@
 	let crumbs = $state<Array<{ id: string; name: string }>>([]);
 	let folders = $state<FolderItem[]>([]);
 	let currentId = $state<string | null>(null);
+	let selectedDriveId = $state<string | null>(null);
 	let loading = $state(false);
 	let working = $state(false);
+
+	const writableDrives = $derived(
+		[...drivesStore.drives].filter(isWritable).sort((a, b) => {
+			const r = driveRank(a) - driveRank(b);
+			return r !== 0 ? r : a.name.localeCompare(b.name);
+		})
+	);
+
+	// The chip strip only earns its vertical space when there's a real
+	// choice. One writable drive → identical to the single-drive UI.
+	const showDriveSwitcher = $derived(writableDrives.length > 1);
 
 	async function loadInto(id: string) {
 		loading = true;
@@ -50,10 +77,23 @@
 	}
 
 	async function init() {
-		const home = await session.loadHomeFolder();
-		if (!home) return;
-		crumbs = [{ id: home, name: session.homeFolderName ?? t('nav.files', 'Files') }];
-		await loadInto(home);
+		await drivesStore.load();
+		const home = drivesStore.findDefault();
+		// Prefer the user's home drive when it's writable (covers the
+		// common case: moving stuff around inside Personal). Otherwise
+		// fall back to the first writable drive, sorted as above.
+		const start = home && isWritable(home) ? home : writableDrives[0];
+		if (!start) return;
+		selectedDriveId = start.id;
+		crumbs = [{ id: start.root_folder_id, name: start.name }];
+		await loadInto(start.root_folder_id);
+	}
+
+	async function switchDrive(d: Drive) {
+		if (d.id === selectedDriveId) return;
+		selectedDriveId = d.id;
+		crumbs = [{ id: d.root_folder_id, name: d.name }];
+		await loadInto(d.root_folder_id);
 	}
 
 	function enter(f: FolderItem) {
@@ -124,6 +164,30 @@
 
 <Modal bind:open title={moveTitle}>
 	<div data-testid="move-dialog">
+		{#if showDriveSwitcher}
+			<div
+				class="mv-drives"
+				role="tablist"
+				aria-label={t('drive.picker', 'Drives')}
+				data-testid="move-dialog-drives"
+			>
+				{#each writableDrives as d (d.id)}
+					<button
+						type="button"
+						role="tab"
+						aria-selected={d.id === selectedDriveId}
+						class="mv-drive"
+						class:mv-drive--active={d.id === selectedDriveId}
+						data-testid={`move-dialog-drive-${d.id}`}
+						onclick={() => switchDrive(d)}
+					>
+						<Icon name={driveIcon(d)} />
+						<span>{d.name}</span>
+					</button>
+				{/each}
+			</div>
+		{/if}
+
 		<div class="mv-nav">
 			<button
 				class="mv-nav-btn"
@@ -196,6 +260,49 @@
 </Modal>
 
 <style>
+	/* Drive switcher: a chip strip across the top of the dialog. Hidden
+	   when only one writable drive is in scope (single-drive UX). */
+	.mv-drives {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.375rem;
+		margin-bottom: var(--space-3);
+		padding-bottom: var(--space-3);
+		border-bottom: 1px solid var(--color-border);
+	}
+
+	.mv-drive {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+		padding: 0.3rem 0.625rem;
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+		background: var(--color-bg-input);
+		color: var(--color-text);
+		font: inherit;
+		font-size: 0.85rem;
+		cursor: pointer;
+		max-width: 14rem;
+	}
+
+	.mv-drive:hover:not(.mv-drive--active) {
+		background: var(--color-bg-hover);
+	}
+
+	.mv-drive--active {
+		background: var(--color-accent);
+		color: var(--color-on-accent);
+		border-color: var(--color-accent);
+		cursor: default;
+	}
+
+	.mv-drive span {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
 	.mv-nav {
 		display: flex;
 		align-items: center;

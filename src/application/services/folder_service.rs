@@ -5,8 +5,10 @@ use crate::application::dtos::folder_dto::{
 };
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::external_mount_ports::MountEntry;
+use crate::application::ports::file_lifecycle::FileLifecycleHook;
 use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::services::external_mount_router::{MountRouter, ResolvedId};
+use crate::application::services::file_lifecycle_service::FileLifecycleService;
 use crate::application::services::mount_dto::{
     audit_mount_write, mount_entry_folder_dto, mount_folder_dto, mount_parent_id,
 };
@@ -28,6 +30,22 @@ pub struct FolderService {
     /// External-mount classifier. Lets folder operations branch a mount-root or
     /// `ext:` id onto the provider instead of the PostgreSQL repositories.
     mount_router: Arc<MountRouter>,
+    /// File lifecycle dispatcher. Carried so `delete_folder_with_perms`
+    /// can fire `on_file_deleted` for every file the PG cascade is about
+    /// to reap. Always present — the dispatcher itself is a no-op when
+    /// no hooks are registered, so callers don't need an Option branch.
+    file_lifecycle: Arc<FileLifecycleService>,
+    /// Drive repository — used by D5's `forbid_cross_drive_move` gate
+    /// on `move_folder_with_perms`. Optional so stubs / test factories
+    /// can build the service without wiring the full drive repo; in
+    /// that case the cross-drive move check is skipped (the policy is
+    /// silently off). Production DI wires it via `with_drive_repo`.
+    drive_repo: Option<Arc<dyn crate::domain::repositories::drive_repository::DriveRepository>>,
+    /// Storage-usage service — used to pre-check the destination
+    /// drive's `used_bytes + subtree_bytes ≤ quota_bytes` invariant
+    /// on cross-drive MOVE. Silently skipped when unwired (stubs).
+    storage_usage:
+        Option<Arc<crate::application::services::storage_usage_service::StorageUsageService>>,
 }
 
 impl FolderService {
@@ -35,12 +53,16 @@ impl FolderService {
     pub fn new(
         folder_storage: Arc<FolderDbRepository>,
         authz: Arc<PgAclEngine>,
+        file_lifecycle: Arc<FileLifecycleService>,
         mount_router: Arc<MountRouter>,
     ) -> Self {
         Self {
             folder_storage,
             authz,
             mount_router,
+            file_lifecycle,
+            drive_repo: None,
+            storage_usage: None,
         }
     }
 
@@ -97,6 +119,31 @@ impl FolderService {
             }
             _ => Err(cross_boundary_move_err()),
         }
+    }
+
+    /// Wires the drive repository, enabling D5
+    /// `forbid_cross_drive_move` enforcement on
+    /// `move_folder_with_perms`. Without it, the gate is silently
+    /// skipped.
+    pub fn with_drive_repo(
+        mut self,
+        drive_repo: Arc<dyn crate::domain::repositories::drive_repository::DriveRepository>,
+    ) -> Self {
+        self.drive_repo = Some(drive_repo);
+        self
+    }
+
+    /// Wires the storage-usage service so `move_folder_with_perms`
+    /// can pre-check the destination drive's quota on cross-drive
+    /// folder moves.
+    pub fn with_storage_usage(
+        mut self,
+        storage_usage: Arc<
+            crate::application::services::storage_usage_service::StorageUsageService,
+        >,
+    ) -> Self {
+        self.storage_usage = Some(storage_usage);
+        self
     }
 
     /// Batch counterpart of `get_folder`: resolve many folder ids in ONE
@@ -435,18 +482,18 @@ impl FolderUseCase for FolderService {
                 .await?;
             return self.list_folders(parent_id).await;
         }
-        // No parent → list the user's root folders.
+        // No parent → list the caller's readable root folders. The
+        // predicate scopes by drive-membership grants (post-PR-B),
+        // closing the pre-D7 gap where the legacy `user_id` filter
+        // surfaced admin-created folders that admin had no role on.
         let folders = self
             .folder_storage
-            .list_folders_by_owner(parent_id, caller_id)
+            .list_root_folders_for_caller(caller_id)
             .await
             .map_err(|e| {
                 DomainError::internal_error(
                     "FolderStorage",
-                    format!(
-                        "Failed to list folders for owner '{}' in parent {:?}: {}",
-                        caller_id, parent_id, e
-                    ),
+                    format!("Failed to list root folders for caller '{caller_id}': {e}"),
                 )
             })?;
         Ok(folders.into_iter().map(FolderDto::from).collect())
@@ -485,6 +532,62 @@ impl FolderUseCase for FolderService {
         );
 
         Ok(response)
+    }
+
+    /// Keyset-paged sub-folder listing (name order), caller-scoped.
+    ///
+    /// AuthZ mirrors `list_folders_paginated_with_perms`: one
+    /// `authz.require(Read)` on the parent per batch; root scope goes
+    /// through the caller's drive-membership listing.
+    async fn list_folders_batch_with_perms(
+        &self,
+        parent_id: Option<&str>,
+        caller_id: Uuid,
+        after_name: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<FolderDto>, DomainError> {
+        match parent_id {
+            Some(pid) => {
+                self.authz
+                    .require(
+                        Subject::User(caller_id),
+                        Permission::Read,
+                        Self::folder_resource(pid)?,
+                    )
+                    .await?;
+                let folders = self
+                    .folder_storage
+                    .list_folders_batch(parent_id, after_name, limit)
+                    .await
+                    .map_err(|e| {
+                        DomainError::internal_error(
+                            "FolderStorage",
+                            format!("Failed to batch-list folders in parent {pid}: {e}"),
+                        )
+                    })?;
+                Ok(folders.into_iter().map(FolderDto::from).collect())
+            }
+            None => {
+                // Root scope: one row per readable drive — a handful.
+                let mut all = self
+                    .folder_storage
+                    .list_root_folders_for_caller(caller_id)
+                    .await
+                    .map_err(|e| {
+                        DomainError::internal_error(
+                            "FolderStorage",
+                            format!("Failed to batch-list root folders for '{caller_id}': {e}"),
+                        )
+                    })?;
+                all.sort_by(|a, b| a.name().cmp(b.name()));
+                Ok(all
+                    .into_iter()
+                    .filter(|f| after_name.is_none_or(|a| f.name() > a))
+                    .take(limit)
+                    .map(FolderDto::from)
+                    .collect())
+            }
+        }
     }
 
     /// Lists folders with pagination, scoped to a specific owner.
@@ -534,24 +637,23 @@ impl FolderUseCase for FolderService {
             return self.list_folders_paginated(parent_id, &pagination).await;
         } else {
             let (folders, total_items) = self
-            .folder_storage
-            .list_folders_by_owner_paginated(
-                parent_id,
-                owner_id,
-                pagination.offset(),
-                pagination.limit(),
-                true,
-            )
-            .await
-            .map_err(|e| {
-                DomainError::internal_error(
-                    "FolderStorage",
-                    format!(
-                        "Failed to list folders for owner '{}' with pagination in parent {:?}: {}",
-                        owner_id, parent_id, e
-                    ),
+                .folder_storage
+                .list_root_folders_for_caller_paginated(
+                    owner_id,
+                    pagination.offset(),
+                    pagination.limit(),
+                    true,
                 )
-            })?;
+                .await
+                .map_err(|e| {
+                    DomainError::internal_error(
+                        "FolderStorage",
+                        format!(
+                            "Failed to list root folders for caller '{}' with pagination: {}",
+                            owner_id, e
+                        ),
+                    )
+                })?;
 
             let total = total_items.unwrap_or(folders.len());
 
@@ -630,7 +732,7 @@ impl FolderUseCase for FolderService {
             )
             .await?;
 
-        let folder = self
+        let renamed = self
             .folder_storage
             .rename_folder(id, dto.name, caller_id)
             .await
@@ -641,7 +743,26 @@ impl FolderUseCase for FolderService {
                 )
             })?;
 
-        Ok(FolderDto::from(folder))
+        // Root folders double as the drive's display name (see the
+        // `required_perm` branch above and `drive_pg_repository.rs`
+        // `readable_cache` + `default_drive_cache` docs).
+        // `drives.name` is sourced from `folders.name` of the root
+        // folder, so a rename affects BOTH caches — every user's
+        // readable-drive list AND the per-user default-drive lookup.
+        // Both are 30 s TTL; without the invalidation, `GET /api/drives`
+        // returns the stale name for up to that window after a root
+        // rename. Surfaced by `tests/api/drives_membership.hurl`
+        // Step 23. Regression from commit `12dc648c` ("perf: round 4 —
+        // drive-selector cache") which added the caches without
+        // wiring the root-rename invalidation.
+        if folder.parent_id().is_none()
+            && let Some(drive_repo) = &self.drive_repo
+        {
+            drive_repo.invalidate_readable_all();
+            drive_repo.invalidate_default_drive_all();
+        }
+
+        Ok(FolderDto::from(renamed))
     }
 
     /// Moves a folder to a new parent. Requires `Update` on the source and
@@ -712,6 +833,60 @@ impl FolderUseCase for FolderService {
             // TODO: full descendant-cycle check (moving a folder into one of its own descendants)
         }
 
+        // D5 `forbid_cross_drive_move` + D6 `resource.moved_between_drives`
+        // audit share the same src/dst lookup. Gate before the move,
+        // audit after a successful move when the two drives differ.
+        // Skipped for parent_id=None (root namespace, same-drive
+        // semantics) and when drive_repo isn't wired (stubs/tests) —
+        // same shape as `move_file_with_perms`.
+        let mut cross_drive: Option<(Uuid, Uuid)> = None;
+        if let Some(drive_repo) = &self.drive_repo
+            && let Some(parent_id) = &dto.parent_id
+        {
+            let src_folder_uuid =
+                Uuid::parse_str(id).map_err(|_| DomainError::not_found("Folder", id))?;
+            let dst_folder_uuid = Uuid::parse_str(parent_id)
+                .map_err(|_| DomainError::not_found("Folder", parent_id.as_str()))?;
+            // Independent point reads — overlapped so the pre-move drive
+            // resolution pays one round-trip, not two (ROUND10, same shape
+            // as `move_file_with_perms`).
+            let (src_res, dst_res) = tokio::join!(
+                drive_repo.get_drive_id_and_policies_for_folder(src_folder_uuid),
+                drive_repo.drive_id_for_folder(dst_folder_uuid),
+            );
+            let (src_drive_id, src_policies) = src_res.map_err(|e| {
+                DomainError::internal_error("Drive", format!("source drive lookup: {e:?}"))
+            })?;
+            let dst_drive_id = dst_res.map_err(|e| {
+                DomainError::internal_error("Drive", format!("destination drive lookup: {e:?}"))
+            })?;
+            if src_drive_id != dst_drive_id {
+                src_policies.refuse_cross_drive_move(
+                    crate::domain::entities::drive::CrossDriveMoveGateContext {
+                        caller_id,
+                        resource_type: "folder",
+                        resource_id: src_folder_uuid,
+                        src_drive_id,
+                        dst_drive_id,
+                    },
+                )?;
+                // Destination drive quota: sum the moved subtree's
+                // non-trashed files and refuse if the destination
+                // couldn't hold them. Same 507 shape as the file
+                // path + upload path — DomainError::QuotaExceeded
+                // maps at the AppError boundary.
+                if let Some(storage_usage) = &self.storage_usage {
+                    let subtree_bytes = storage_usage.folder_subtree_bytes(src_folder_uuid).await?;
+                    if let Ok(subtree_u64) = u64::try_from(subtree_bytes) {
+                        storage_usage
+                            .check_drive_quota(dst_drive_id, subtree_u64)
+                            .await?;
+                    }
+                }
+                cross_drive = Some((src_drive_id, dst_drive_id));
+            }
+        }
+
         let parent_ref = dto.parent_id.as_deref();
         let folder = self
             .folder_storage
@@ -724,12 +899,46 @@ impl FolderUseCase for FolderService {
                 )
             })?;
 
+        // Cross-drive move flushes the authz engine's `owner_cache`
+        // — every descendant's cached `Resource → drive_id` mapping
+        // just got stale via the cascade trigger, and we don't (yet)
+        // walk the subtree to invalidate individually. Small perf
+        // cost (single JOIN per resource touched over the next
+        // minute) versus a stale-authz bug where destination-drive
+        // Owner cascades don't apply to moved content.
+        if cross_drive.is_some() {
+            self.authz.invalidate_owner_cache_all().await;
+        }
+
+        // D6 audit: only emit when the move crossed a drive boundary.
+        // The cascade trigger has already propagated drive_id to the
+        // subtree at this point (see migration
+        // `20260807000000_cascade_drive_id_on_folder_move.sql`).
+        if let Some((src_drive_id, dst_drive_id)) = cross_drive {
+            tracing::info!(
+                target: "audit",
+                event = "resource.moved_between_drives",
+                resource_type = "folder",
+                resource_id = %folder.id(),
+                src_drive_id = %src_drive_id,
+                dst_drive_id = %dst_drive_id,
+                by = %caller_id,
+                "📦 folder moved between drives",
+            );
+        }
+
         Ok(FolderDto::from(folder))
     }
 
     /// Deletes a folder after verifying the caller has `Delete` permission.
     /// The DB trigger `trg_cleanup_grants_folder` cleans up `access_grants`
     /// rows targeting the deleted folder automatically.
+    ///
+    /// Enumerates the subtree's file ids BEFORE the bulk DELETE so
+    /// `on_file_deleted` fires per file the PG cascade is about to reap —
+    /// without this, file-id-keyed lifecycle data (e.g. `ext-{file_id}.jpg`
+    /// video thumbnails, moka cache entries) leaks past the cascade.
+    /// Same shape `clear_trash_in` uses (`trash_service.rs:804-846`).
     async fn delete_folder_with_perms(&self, id: &str, caller_id: Uuid) -> Result<(), DomainError> {
         // External mount: delete on the provider (permanent — mounts have no
         // trash). The mount root is a real folder row and is not deletable here.
@@ -758,12 +967,28 @@ impl FolderUseCase for FolderService {
             )
             .await?;
 
+        // Snapshot the file ids BEFORE the bulk DELETE — the rows are gone
+        // afterward. Failure to enumerate is non-fatal (logged in the repo
+        // method); the delete proceeds and only file-id-keyed cleanup is
+        // skipped (blob-keyed thumbnails still get reaped by GC).
+        let cascaded_file_ids = self
+            .folder_storage
+            .list_file_ids_in_subtree(id)
+            .await
+            .unwrap_or_default();
+
         self.folder_storage.delete_folder(id).await.map_err(|e| {
             DomainError::internal_error(
                 "FolderStorage",
                 format!("Failed to delete folder with ID: {}: {}", id, e),
             )
-        })
+        })?;
+
+        for file_id in &cascaded_file_ids {
+            self.file_lifecycle.on_file_deleted(file_id);
+        }
+
+        Ok(())
     }
 }
 
@@ -1102,9 +1327,22 @@ impl PersonalDriveLifecycleHook {
         // parent_id=NULL, drive_id pinned) + drives.root_folder_id
         // wire-up + Owner role_grant. Single SQL statement, atomic
         // against server crash mid-sequence (docs/plan/drive.md §3).
+        //
+        // `quota_bytes = None` (NULL in the DB) is the invariant for
+        // every personal drive per plan §7: the cap for a user's
+        // personal storage lives on `auth.users.storage_quota_bytes`
+        // (the user envelope), not on the drive row. Passing
+        // `Some(user.storage_quota_bytes())` here previously baked
+        // the user quota into `drives.quota_bytes` and — combined
+        // with the "0 = unlimited" convention on the user check but
+        // "0 = literal zero" convention on the drive check — turned
+        // "unlimited user" into "0-byte drive" (see #595). The
+        // migration `20260916000000_null_personal_drive_quota.sql`
+        // heals existing rows and adds a CHECK constraint pinning
+        // this invariant at the schema layer.
         let drive_with_name = self
             .drive_repo
-            .create_personal_drive_atomic(user.id(), Some(user.storage_quota_bytes()))
+            .create_personal_drive_atomic(user.id(), None)
             .await
             .map_err(|e| {
                 DomainError::internal_error(
@@ -1139,6 +1377,17 @@ impl UserLifecycleHook for PersonalDriveLifecycleHook {
     /// earlier point (or the user was created in a flow that pre-dated
     /// this hook), provisioning happens here on next login.
     async fn on_user_login(&self, user: &User) -> Result<(), DomainError> {
+        self.provision_if_needed(user).await
+    }
+
+    /// External → internal upgrade. `on_user_created` fired at signup
+    /// with `is_external=true` and short-circuited in
+    /// `provision_if_needed`. The user is now internal — same helper
+    /// runs, but this time the `is_external` guard passes through and
+    /// the atomic CTE creates their default drive + root folder +
+    /// owner grant. Idempotent by construction: a rerun after a partial
+    /// failure hits the `find_default_for_user` short-circuit.
+    async fn on_upgraded_to_internal(&self, user: &User) -> Result<(), DomainError> {
         self.provision_if_needed(user).await
     }
 
@@ -1415,6 +1664,7 @@ mod mount_authz_integration {
         let fs = FolderService::new(
             Arc::new(FolderDbRepository::new(pool.clone())),
             acl(pool),
+            Arc::new(crate::application::services::file_lifecycle_service::FileLifecycleService::new()),
             router,
         );
         (fs, p.mount_folder_id.to_string(), p.owner_id)
@@ -1610,6 +1860,7 @@ mod mount_authz_integration {
         let folder_service = FolderService::new(
             Arc::new(FolderDbRepository::new(pool.clone())),
             acl(&pool),
+            Arc::new(crate::application::services::file_lifecycle_service::FileLifecycleService::new()),
             router.clone(),
         );
         let retrieval = FileRetrievalService::new_with_authz_for_test(
@@ -1659,7 +1910,7 @@ mod mount_authz_integration {
 
         // PROPFIND Depth:1 file loop: list files of the mount root.
         let files = retrieval
-            .list_files_batch_with_perms(Some(&p.mount_folder_id.to_string()), p.owner_id, 0, 100)
+            .list_files_batch_with_perms(Some(&p.mount_folder_id.to_string()), p.owner_id, None, 100)
             .await
             .expect("list mount files");
         assert_eq!(
@@ -1673,7 +1924,6 @@ mod mount_authz_integration {
             .get_file_by_path(&format!("{}/sub/b.txt", root.path), p.drive_id)
             .await
             .expect("nested file");
-        use futures::TryStreamExt as _;
         let content: Vec<u8> = Box::into_pin(retrieval.get_file_stream(&nested.id).await.unwrap())
             .map_ok(|b| b.to_vec())
             .try_concat()
@@ -1745,6 +1995,7 @@ mod mount_authz_integration {
         let folder_service = FolderService::new(
             Arc::new(FolderDbRepository::new(pool.clone())),
             acl(&pool),
+            Arc::new(crate::application::services::file_lifecycle_service::FileLifecycleService::new()),
             router.clone(),
         );
 
@@ -1832,5 +2083,229 @@ mod mount_authz_integration {
             .await
             .expect_err("stranger denied");
         assert_eq!(err.kind, crate::domain::errors::ErrorKind::NotFound);
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Integration test — verifies the folder-cascade hook fix lands `on_file_deleted`
+// for every file the PG cascade reaps when a folder is permanently deleted.
+//
+// Background: `delete_folder_with_perms` issues a bulk SQL DELETE that the PG
+// `ON DELETE CASCADE` fans out to descendant folders + files. Without
+// service-layer enumeration, file-id-keyed lifecycle data (thumbnails keyed
+// on `ext-{file_id}.jpg`, moka cache entries, future per-file metadata)
+// silently leaks. See [[bug-folder-cascade-hooks-missing]] in agent memory.
+//
+// How to run:
+//   bash tests/common/spawn-db.sh
+//   RUSTFLAGS='--cfg integration_tests' cargo test \
+//       -p oxicloud --lib folder_service::cascade_hook_integration_tests
+// ────────────────────────────────────────────────────────────────────────────
+#[cfg(integration_tests)]
+#[allow(dead_code)]
+mod cascade_hook_integration_tests {
+    use super::*;
+    use crate::application::ports::blob_storage_ports::BlobStorageBackend;
+    use crate::application::ports::file_lifecycle::FileLifecycleHook;
+    use crate::infrastructure::repositories::pg::SubjectGroupPgRepository;
+    use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
+    use crate::infrastructure::services::dedup_service::DedupService;
+    use crate::infrastructure::services::local_blob_backend::LocalBlobBackend;
+    use crate::integration_test_support::{ensure_clean_test_db, test_db_url};
+    use sqlx::Row;
+    use sqlx::postgres::PgPoolOptions;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    /// Records every `on_file_deleted` call so the test can assert the
+    /// exact set of file ids the cascade fired hooks for. Other lifecycle
+    /// methods are no-ops — this fix only touches the deletion path.
+    #[derive(Default)]
+    struct RecordingHook {
+        deleted: Mutex<Vec<String>>,
+    }
+
+    impl FileLifecycleHook for RecordingHook {
+        fn on_file_created(
+            &self,
+            _file_id: &str,
+            _blob_hash: &str,
+            _content_type: &str,
+            _is_new_blob: bool,
+        ) {
+        }
+        fn on_file_copied(
+            &self,
+            _file_id: &str,
+            _blob_hash: &str,
+            _content_type: &str,
+            _source_file_id: &str,
+        ) {
+        }
+        fn on_file_updated(&self, _file_id: &str, _blob_hash: &str, _content_type: &str) {}
+        fn on_file_deleted(&self, file_id: &str) {
+            self.deleted.lock().unwrap().push(file_id.to_string());
+        }
+    }
+
+    async fn test_pool() -> Arc<sqlx::PgPool> {
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&test_db_url())
+            .await
+            .expect("connect to test DB — run tests/common/spawn-db.sh first");
+        ensure_clean_test_db(&pool).await;
+        Arc::new(pool)
+    }
+
+    /// Returns `(user_id, drive_id, drive_root_folder_id)` — same default
+    /// Personal drive every internal user gets post-D0 (provisioned by
+    /// `PersonalDriveLifecycleHook`).
+    async fn seed_user(pool: &sqlx::PgPool) -> (Uuid, Uuid, Uuid) {
+        sqlx::query(
+            "SELECT u.id AS user_id, d.id AS drive_id, d.root_folder_id
+               FROM auth.users u
+               JOIN storage.drives d ON d.default_for_user = u.id
+              LIMIT 1",
+        )
+        .fetch_one(pool)
+        .await
+        .map(|r| {
+            (
+                r.get::<Uuid, _>("user_id"),
+                r.get::<Uuid, _>("drive_id"),
+                r.get::<Uuid, _>("root_folder_id"),
+            )
+        })
+        .expect("auth.users + storage.drives must be seeded (init-test-schema.sh)")
+    }
+
+    /// Build a real `PgAclEngine` against the test pool so
+    /// `delete_folder_with_perms` can actually evaluate Owner — the user
+    /// from `seed_user` owns the default drive, so `Permission::Delete`
+    /// on its descendants resolves through the Owner short-circuit.
+    async fn build_authz(
+        pool: Arc<sqlx::PgPool>,
+        dir: &TempDir,
+        folder_repo: Arc<FolderDbRepository>,
+    ) -> Arc<PgAclEngine> {
+        let backend = Arc::new(LocalBlobBackend::new(&dir.path().join("blobs")));
+        backend.initialize().await.expect("init backend");
+        let dedup = Arc::new(DedupService::new(backend, pool.clone(), pool.clone()));
+        let file_repo = Arc::new(FileBlobReadRepository::new(
+            pool.clone(),
+            dedup,
+            folder_repo.clone(),
+        ));
+        let group_repo = Arc::new(SubjectGroupPgRepository::new(pool.clone()));
+        Arc::new(PgAclEngine::new(pool, folder_repo, file_repo, group_repo))
+    }
+
+    /// Seed a file row under `folder_id`. `blob_hash` is just a string —
+    /// `storage.files.blob_hash` is VARCHAR(64) without a FK, so no blob
+    /// row is required. The cascade decrement trigger no-ops when the
+    /// hash is unknown.
+    async fn seed_file_under(
+        pool: &sqlx::PgPool,
+        user_id: Uuid,
+        drive_id: Uuid,
+        folder_id: Uuid,
+        label: &str,
+    ) -> Uuid {
+        let blob_hash = blake3::hash(format!("cascade-{label}-{}", Uuid::new_v4()).as_bytes())
+            .to_hex()
+            .to_string();
+        // Post-D7: `user_id` omitted — the column is nullable and
+        // provenance flows through `created_by` / `updated_by`.
+        sqlx::query_scalar(
+            "INSERT INTO storage.files
+                 (name, drive_id, folder_id, blob_hash, size, created_by, updated_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $6)
+             RETURNING id",
+        )
+        .bind(format!(
+            "rust-test-cascade-{label}-{}",
+            &Uuid::new_v4().to_string()[..8]
+        ))
+        .bind(drive_id)
+        .bind(folder_id)
+        .bind(&blob_hash)
+        .bind(42i64)
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .expect("seed file row")
+    }
+
+    #[tokio::test]
+    async fn delete_folder_with_perms_fires_hook_for_cascaded_files() {
+        let pool = test_pool().await;
+        let dir = TempDir::new().unwrap();
+        let (user_id, drive_id, drive_root) = seed_user(&pool).await;
+
+        let folder_repo = Arc::new(FolderDbRepository::new(pool.clone()));
+        let authz = build_authz(pool.clone(), &dir, folder_repo.clone()).await;
+        let recorder: Arc<RecordingHook> = Arc::new(RecordingHook::default());
+        let fls = Arc::new(
+            crate::application::services::file_lifecycle_service::FileLifecycleService::new()
+                .with_hook(recorder.clone() as Arc<dyn FileLifecycleHook>),
+        );
+        let service = FolderService::new(
+            folder_repo.clone(),
+            authz,
+            fls,
+            Arc::new(MountRouter::new(Arc::new(
+                crate::application::services::mount_registry::MountRegistry::empty(),
+            ))),
+        );
+
+        // Build parent/child via the production create path — it stamps
+        // provenance and computes paths the same way as live uploads.
+        let parent = folder_repo
+            .create_folder(
+                format!(
+                    "rust-test-cascade-parent-{}",
+                    &Uuid::new_v4().to_string()[..8]
+                ),
+                Some(drive_root.to_string()),
+                user_id,
+            )
+            .await
+            .expect("create parent");
+        let child = folder_repo
+            .create_folder(
+                format!(
+                    "rust-test-cascade-child-{}",
+                    &Uuid::new_v4().to_string()[..8]
+                ),
+                Some(parent.id().to_string()),
+                user_id,
+            )
+            .await
+            .expect("create child");
+        let child_uuid = Uuid::parse_str(child.id()).expect("child uuid");
+
+        // Two files: one directly under the parent, one nested under
+        // child. The cascade should reap both; the hook must fire for both.
+        let parent_uuid = Uuid::parse_str(parent.id()).expect("parent uuid");
+        let direct_file = seed_file_under(&pool, user_id, drive_id, parent_uuid, "direct").await;
+        let nested_file = seed_file_under(&pool, user_id, drive_id, child_uuid, "nested").await;
+
+        // Act — the production code path under test.
+        service
+            .delete_folder_with_perms(parent.id(), user_id)
+            .await
+            .expect("delete_folder_with_perms");
+
+        // Assert — every cascaded file id appears in the hook record.
+        let captured = recorder.deleted.lock().unwrap().clone();
+        assert!(
+            captured.contains(&direct_file.to_string()),
+            "expected on_file_deleted for direct-child file {direct_file}, got {captured:?}"
+        );
+        assert!(
+            captured.contains(&nested_file.to_string()),
+            "expected on_file_deleted for nested file {nested_file}, got {captured:?}"
+        );
     }
 }

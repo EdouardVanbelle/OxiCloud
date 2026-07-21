@@ -1,11 +1,38 @@
 import { it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 
-const { session, ui } = vi.hoisted(() => ({
-	session: { loadHomeFolder: vi.fn(async () => 'home'), homeFolderName: 'Files' },
-	ui: { notify: vi.fn() }
-}));
-vi.mock('$lib/stores/session.svelte', () => ({ session }));
+// The dialog now sources its starting folder from the drives store
+// (D6 drive switcher), not from `session.loadHomeFolder`. We mock a
+// single default-personal drive whose `root_folder_id` is 'home' so
+// the existing assertions (listFolder('home'), moveFile('f1', 'home'))
+// stay valid without test churn.
+const { ui, drives, driveIcon } = vi.hoisted(() => {
+	const homeDrive = {
+		id: 'drive-home',
+		root_folder_id: 'home',
+		name: 'Personal',
+		kind: 'personal' as const,
+		default_for_user: 'user-1',
+		caller_role: 'owner' as const,
+		used_bytes: 0,
+		quota_bytes: null
+	};
+	return {
+		ui: { notify: vi.fn() },
+		drives: {
+			drives: [homeDrive],
+			loaded: true,
+			load: vi.fn(async () => [homeDrive]),
+			findDefault: vi.fn(() => homeDrive),
+			findById: vi.fn((id: string) => (id === homeDrive.id ? homeDrive : null)),
+			findByRootFolderId: vi.fn((id: string) =>
+				id === homeDrive.root_folder_id ? homeDrive : null
+			)
+		},
+		driveIcon: vi.fn(() => 'home')
+	};
+});
+vi.mock('$lib/stores/drives.svelte', () => ({ drives, driveIcon }));
 vi.mock('$lib/stores/ui.svelte', () => ({ ui }));
 vi.mock('$lib/utils/errors', () => ({ errorToast: vi.fn() }));
 vi.mock('$lib/api/endpoints/folders', () => ({ listFolder: vi.fn(), moveFolder: vi.fn() }));
@@ -30,7 +57,8 @@ function folder(id: string, name: string) {
 		is_root: false,
 		modified_at: 0,
 		name,
-		owner_id: 'me',
+		created_by: 'me',
+		updated_by: 'me',
 		parent_id: 'home',
 		path: '/' + name,
 		etag: 'e'

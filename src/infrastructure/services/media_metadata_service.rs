@@ -96,22 +96,33 @@ impl MediaMetadataService {
         }
 
         if Self::is_image_file(mime_type) {
+            // ONE disk read: kamadak needs the full buffer anyway, and
+            // nom-exif 3.6+ parses from in-RAM bytes zero-copy
+            // (`MediaSource::from_memory` over the same allocation). This
+            // path used to re-open the file 1-2 more times — nom-exif's
+            // `read_exif(path)` plus a `read_track(path)` fallback for
+            // date-less images (2-3 opens per image, benches/ROUND12.md §M4:
+            // 1.44x warm geomean, 2-3x cold-cache).
+            let buf = std::fs::read(path).ok()?;
             // Rich EXIF (GPS / camera / orientation / dimensions + naive date)
             // from the proven kamadak extractor.
-            let kamadak = std::fs::read(path)
-                .ok()
-                .and_then(|b| ExifService::extract(&b));
+            let kamadak = ExifService::extract(&buf);
             // nom-exif complements kamadak: a timezone-correct capture date and,
             // crucially, the date + GPS for files kamadak rejects outright
             // ("Unexpected next IFD"), where `kamadak` is None and the GPS would
             // otherwise be lost. See `merge_image_metadata`.
-            merge_image_metadata(kamadak, read_nom_exif(path))
+            let bytes = bytes::Bytes::from(buf);
+            merge_image_metadata(kamadak, read_nom_exif_from_bytes(&bytes))
         } else if Self::is_video_file(mime_type) {
             // Videos carry no EXIF — pull the container creation time only.
-            read_nom_exif(path).captured_at.map(|dt| ExifMetadata {
-                captured_at: Some(dt),
-                ..Default::default()
-            })
+            // Single open + header sniff; the old shape opened twice (a
+            // doomed `read_exif` sniff, then `read_track`).
+            read_nom_exif_video(path)
+                .captured_at
+                .map(|dt| ExifMetadata {
+                    captured_at: Some(dt),
+                    ..Default::default()
+                })
         } else {
             None
         }
@@ -375,38 +386,89 @@ struct NomExif {
 /// carries `OffsetTimeOriginal` (or a tz-aware container time); otherwise the
 /// naive wall-clock is interpreted as UTC. Either way it is converted to a true
 /// UTC instant. GPS is returned as signed decimal degrees.
-fn read_nom_exif(path: &Path) -> NomExif {
-    use nom_exif::{EntryValue, ExifTag, TrackInfoTag, read_exif, read_track};
+fn nom_to_utc(ev: &nom_exif::EntryValue) -> Option<DateTime<Utc>> {
+    let edt = ev.as_datetime()?;
+    let utc0 = FixedOffset::east_opt(0)?;
+    Some(edt.or_offset(utc0).with_timezone(&Utc))
+}
 
-    // Captures nothing → `Copy`, so it can be reused across the calls below.
-    let to_utc = |ev: &EntryValue| -> Option<DateTime<Utc>> {
-        let edt = ev.as_datetime()?;
-        let utc0 = FixedOffset::east_opt(0)?;
-        Some(edt.or_offset(utc0).with_timezone(&Utc))
-    };
+fn nom_fill_from_exif(exif: &nom_exif::Exif, out: &mut NomExif) {
+    use nom_exif::ExifTag;
+    out.captured_at = exif
+        .get(ExifTag::DateTimeOriginal)
+        .and_then(nom_to_utc)
+        .or_else(|| exif.get(ExifTag::CreateDate).and_then(nom_to_utc));
+    if let Some(gps) = exif.gps_info() {
+        out.latitude = gps.latitude_decimal();
+        out.longitude = gps.longitude_decimal();
+    }
+}
+
+/// Image arm: nom-exif fed from the buffer the kamadak pass already read —
+/// `MediaSource::from_memory` shares the `Bytes` refcount, so this re-parses
+/// without touching the disk again (the old shape re-opened the file once,
+/// plus a second time for date-less images). The track fallback stays (fed
+/// from the same bytes): it covers MIME-mislabeled rows whose actual
+/// container is a video — the only case where it ever produced a date.
+fn read_nom_exif_from_bytes(bytes: &bytes::Bytes) -> NomExif {
+    use nom_exif::{MediaParser, MediaSource, TrackInfoTag};
 
     let mut out = NomExif::default();
+    let mut parser = MediaParser::new();
 
     // Images: EXIF DateTimeOriginal → DateTimeDigitized (CreateDate), plus GPS.
-    if let Ok(exif) = read_exif(path) {
-        out.captured_at = exif
-            .get(ExifTag::DateTimeOriginal)
-            .and_then(to_utc)
-            .or_else(|| exif.get(ExifTag::CreateDate).and_then(to_utc));
-        if let Some(gps) = exif.gps_info() {
-            out.latitude = gps.latitude_decimal();
-            out.longitude = gps.longitude_decimal();
-        }
+    if let Ok(ms) = MediaSource::from_memory(bytes.clone())
+        && let Ok(iter) = parser.parse_exif(ms)
+    {
+        let exif: nom_exif::Exif = iter.into();
+        nom_fill_from_exif(&exif, &mut out);
     }
 
     // Videos / audio containers (mov/mp4/mkv): track creation time.
     if out.captured_at.is_none()
-        && let Ok(track) = read_track(path)
-        && let Some(dt) = track.get(TrackInfoTag::CreateDate).and_then(to_utc)
+        && let Ok(ms) = MediaSource::from_memory(bytes.clone())
+        && let Ok(track) = parser.parse_track(ms)
+        && let Some(dt) = track.get(TrackInfoTag::CreateDate).and_then(nom_to_utc)
     {
         out.captured_at = Some(dt);
     }
 
+    out
+}
+
+/// Video arm: ONE open, dispatched on the sniffed container kind. Matches
+/// the old `read_exif(path)`-then-`read_track(path)` observable behaviour
+/// exactly — a Track container never parsed as EXIF (the old first open was
+/// pure waste) and an Image container never parsed as a track, so the
+/// two-open sequence always reduced to a single effective parse.
+fn read_nom_exif_video(path: &Path) -> NomExif {
+    use nom_exif::{MediaKind, MediaParser, MediaSource, TrackInfoTag};
+
+    let mut out = NomExif::default();
+    let Ok(file) = std::fs::File::open(path) else {
+        return out;
+    };
+    let Ok(ms) = MediaSource::seekable(file) else {
+        return out;
+    };
+    let mut parser = MediaParser::new();
+    match ms.kind() {
+        MediaKind::Image => {
+            // MIME said video, bytes say image (mislabeled row): same EXIF
+            // extraction the old `read_exif(path)` performed.
+            if let Ok(iter) = parser.parse_exif(ms) {
+                let exif: nom_exif::Exif = iter.into();
+                nom_fill_from_exif(&exif, &mut out);
+            }
+        }
+        MediaKind::Track => {
+            if let Ok(track) = parser.parse_track(ms)
+                && let Some(dt) = track.get(TrackInfoTag::CreateDate).and_then(nom_to_utc)
+            {
+                out.captured_at = Some(dt);
+            }
+        }
+    }
     out
 }
 

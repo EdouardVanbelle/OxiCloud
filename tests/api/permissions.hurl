@@ -299,14 +299,25 @@ jsonpath "$.items[*].resource.name" not contains "bob-attack-2"
 
 # ─────────────────────────────────────────────────────────────
 # Step 16 – Bob crafts a path that looks like it targets admin's
-#            home. The WebDAV handler rewrites the path to live
-#            under bob's home, so the request succeeds (201) but
-#            the new folders land in BOB's tree — never admin's.
+#            home. Pre-43cf4a2b the WebDAV handler silently
+#            rewrote `My Folder - admin/...` into the caller's own
+#            home folder, so this MKCOL succeeded with 201 but the
+#            new folders landed in BOB's tree (defense via
+#            redirect). 43cf4a2b made MKCOL strictly RFC 4918
+#            §9.3.1 compliant: 409 when the parent collection is
+#            missing, no auto-creation of ancestors. Bob's MKCOL
+#            now fails because `My Folder - admin` is not a folder
+#            bob can reach — defense via rejection rather than
+#            silent rewrite. The 4xx range allows for 403/404/409
+#            depending on which gate fires first.
 # ─────────────────────────────────────────────────────────────
 MKCOL {{base_url}}/webdav/My%20Folder%20-%20admin/bob-webdav-attack
 Authorization: Bearer {{bob_token}}
 
-HTTP 201
+HTTP *
+[Asserts]
+status >= 400
+status <  500
 
 
 # ─────────────────────────────────────────────────────────────
@@ -324,13 +335,16 @@ HTTP 201
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 18 – Bob's home now contains:
-#            - "bob-webdav-own"    (from Step 17, normal MKCOL)
-#            - "My Folder - admin" (from Step 16 — the prefix
-#              rewrite turned admin's home name into a literal
-#              sub-folder name inside bob's tree).
-#            This proves the path prefix re-rooted the attack
-#            into bob's own namespace.
+# Step 18 – Bob's home contains "bob-webdav-own" (from Step 17's
+#            legitimate MKCOL) and does NOT contain "My Folder -
+#            admin". Pre-43cf4a2b the path-prefix rewrite would
+#            have created that name literally as a sub-folder in
+#            bob's tree (defense via redirect); post-43cf4a2b the
+#            MKCOL is rejected outright (defense via rejection),
+#            so no such folder exists in bob's namespace either.
+#            Both are correct security outcomes — the wire signal
+#            just changed from "succeeded but didn't reach admin"
+#            to "didn't succeed at all."
 # ─────────────────────────────────────────────────────────────
 GET {{base_url}}/api/folders/{{bob_home_id}}/resources?resource_types=folder
 Authorization: Bearer {{bob_token}}
@@ -338,7 +352,7 @@ Authorization: Bearer {{bob_token}}
 HTTP 200
 [Asserts]
 jsonpath "$.items[*].resource.name" contains "bob-webdav-own"
-jsonpath "$.items[*].resource.name" contains "My Folder - admin"
+jsonpath "$.items[*].resource.name" not contains "My Folder - admin"
 
 
 # ─────────────────────────────────────────────────────────────

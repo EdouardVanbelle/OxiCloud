@@ -41,7 +41,11 @@ pub trait RecentItemsRepositoryPort: Send + Sync + 'static {
     async fn get_recent_items(&self, user_id: Uuid, limit: i32) -> Result<Vec<RecentItemDto>>;
 
     /// Records/updates access to an item (upsert by user+item+type).
-    async fn upsert_access(&self, user_id: Uuid, item_id: &str, item_type: &str) -> Result<()>;
+    /// Returns `true` when a NEW row was inserted (the recent set grew) and
+    /// `false` when an existing row's timestamp was merely refreshed — the
+    /// caller prunes only in the former case, since a re-access can never
+    /// push the user over the cap (benches/ROUND13.md §Q3).
+    async fn upsert_access(&self, user_id: Uuid, item_id: &str, item_type: &str) -> Result<bool>;
 
     /// Removes an item from recents. Returns `true` if it existed.
     async fn remove_item(&self, user_id: Uuid, item_id: &str, item_type: &str) -> Result<bool>;

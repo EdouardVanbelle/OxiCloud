@@ -4,7 +4,14 @@ use uuid::Uuid;
 
 pub type CalendarRepositoryResult<T> = Result<T, DomainError>;
 
-/// Repository interface for Calendar entity operations
+/// Repository interface for Calendar entity operations.
+///
+/// Post-Round-3, access-control state lives in `storage.role_grants` —
+/// the pre-Round-3 methods that read/wrote `caldav.calendar_shares`
+/// (`list_calendars_shared_with_user`, `user_has_calendar_access`,
+/// `share_calendar`, `remove_calendar_sharing`, `get_calendar_shares`)
+/// have been removed from this trait, and the backing table was dropped
+/// in `20260906000002_drop_legacy_share_tables.sql`.
 pub trait CalendarRepository: Send + Sync + 'static {
     /// Creates a new calendar
     async fn create_calendar(&self, calendar: Calendar) -> CalendarRepositoryResult<Calendar>;
@@ -18,7 +25,17 @@ pub trait CalendarRepository: Send + Sync + 'static {
     /// Finds a calendar by its ID
     async fn find_calendar_by_id(&self, id: &Uuid) -> CalendarRepositoryResult<Calendar>;
 
-    /// Lists all calendars for a specific user
+    /// Batch sibling of [`Self::find_calendar_by_id`]: one `= ANY($1)`
+    /// round-trip for a page of grant-derived ids. Missing ids drop out
+    /// (no per-id NotFound), matching the listing carve-out for
+    /// deleted/trashed races. Ordering is not guaranteed.
+    async fn find_calendars_by_ids(&self, ids: &[Uuid]) -> CalendarRepositoryResult<Vec<Calendar>>;
+
+    /// Lists all calendars owned by a specific user. Post-Round-3 the
+    /// service layer prefers `authz.list_incoming_grants` (surfaces
+    /// owned + shared in one union), but this direct lookup remains
+    /// available for internal maintenance / migration paths that need
+    /// owner-only enumeration without going through the engine.
     async fn list_calendars_by_owner(
         &self,
         owner_id: Uuid,
@@ -31,25 +48,12 @@ pub trait CalendarRepository: Send + Sync + 'static {
         owner_id: Uuid,
     ) -> CalendarRepositoryResult<Calendar>;
 
-    /// Lists calendars shared with a specific user
-    async fn list_calendars_shared_with_user(
-        &self,
-        user_id: Uuid,
-    ) -> CalendarRepositoryResult<Vec<Calendar>>;
-
     /// List public calendars
     async fn list_public_calendars(
         &self,
         limit: i64,
         offset: i64,
     ) -> CalendarRepositoryResult<Vec<Calendar>>;
-
-    /// Checks if a user has access to a calendar
-    async fn user_has_calendar_access(
-        &self,
-        calendar_id: &Uuid,
-        user_id: Uuid,
-    ) -> CalendarRepositoryResult<bool>;
 
     /// Gets a custom property for a calendar
     async fn get_calendar_property(
@@ -78,25 +82,4 @@ pub trait CalendarRepository: Send + Sync + 'static {
         &self,
         calendar_id: &Uuid,
     ) -> CalendarRepositoryResult<std::collections::HashMap<String, String>>;
-
-    /// Share calendar with another user
-    async fn share_calendar(
-        &self,
-        calendar_id: &Uuid,
-        user_id: Uuid,
-        access_level: &str,
-    ) -> CalendarRepositoryResult<()>;
-
-    /// Remove calendar sharing for a user
-    async fn remove_calendar_sharing(
-        &self,
-        calendar_id: &Uuid,
-        user_id: Uuid,
-    ) -> CalendarRepositoryResult<()>;
-
-    /// Get calendar sharing information (who has access to this calendar)
-    async fn get_calendar_shares(
-        &self,
-        calendar_id: &Uuid,
-    ) -> CalendarRepositoryResult<Vec<(String, String)>>;
 }

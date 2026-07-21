@@ -218,18 +218,16 @@ impl DedupHandler {
     /// - Deduplication ratio
     pub(super) async fn get_stats_impl(
         State(state): State<GlobalState>,
-        auth_user: AuthUser,
+        _auth_user: AuthUser,
     ) -> impl IntoResponse {
-        // Admin-only — global dedup statistics are sensitive infrastructure data
-        if auth_user.role != "admin" {
-            return Response::builder()
-                .status(StatusCode::FORBIDDEN)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"error": "Admin role required"}"#))
-                .unwrap()
-                .into_response();
-        }
-
+        // AuthZ audit #24 (2026-07-17): admin check moved to the
+        // `/api/admin/*` middleware layer. Reaching this handler means
+        // the caller is admin by construction — the bespoke role
+        // string comparison here (`auth_user.role != "admin"` → 403
+        // with a hand-rolled JSON body, no audit line) is gone. The
+        // route is registered at `admin_handler::admin_routes()`;
+        // moving the URL to `/api/admin/dedup/stats` also declares
+        // the admin intent up front.
         let dedup = &state.core.dedup_service;
         let stats = dedup.get_stats().await;
 
@@ -343,16 +341,10 @@ impl DedupHandler {
         State(state): State<GlobalState>,
         auth_user: AuthUser,
     ) -> impl IntoResponse {
-        // Admin-only — integrity verification is a privileged operation
-        if auth_user.role != "admin" {
-            return Response::builder()
-                .status(StatusCode::FORBIDDEN)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"error": "Admin role required"}"#))
-                .unwrap()
-                .into_response();
-        }
-
+        // AuthZ audit #25 (2026-07-17): admin check moved to the
+        // `/api/admin/*` middleware layer — see the sibling
+        // `get_stats_impl` comment. `auth_user` is kept so the
+        // success-side audit line carries the caller id.
         let dedup = &state.core.dedup_service;
 
         // Verify integrity first
@@ -391,6 +383,21 @@ impl DedupHandler {
             dedup_ratio: stats.dedup_ratio,
             savings_percentage: savings_pct,
         };
+
+        // AuthZ audit #25 (2026-07-17): integrity recalculation is a
+        // low-frequency privileged operation — landing an audit event
+        // so security reviews can see who ran verify + integrity
+        // sweeps and when. The pre-fix path emitted no audit line at
+        // all (the accepted 200 was silent from the security POV).
+        tracing::info!(
+            target: "audit",
+            event = "dedup.integrity_recalculated",
+            caller_id = %auth_user.id,
+            unique_blobs = response.unique_blobs,
+            total_references = response.total_references,
+            bytes_saved = response.bytes_saved,
+            "🧮 dedup integrity verified and stats recomputed by admin",
+        );
 
         Response::builder()
             .status(StatusCode::OK)
@@ -453,12 +460,13 @@ pub async fn check_hashes_batch(
 
 #[utoipa::path(
     get,
-    path = "/api/dedup/stats",
+    path = "/api/admin/dedup/stats",
     responses(
         (status = 200, description = "Deduplication statistics", body = StatsResponse),
-        (status = 403, description = "Admin role required"),
+        (status = 401, description = "Missing or invalid token"),
+        (status = 403, description = "Caller is not an admin"),
     ),
-    tag = "dedup",
+    tag = "admin",
     security(("bearerAuth" = []))
 )]
 pub async fn get_stats(state: State<GlobalState>, auth_user: AuthUser) -> impl IntoResponse {
@@ -489,13 +497,14 @@ pub async fn get_blob(
 
 #[utoipa::path(
     post,
-    path = "/api/dedup/recalculate",
+    path = "/api/admin/dedup/recalculate",
     responses(
         (status = 200, description = "Statistics after integrity verification", body = StatsResponse),
-        (status = 403, description = "Admin role required"),
+        (status = 401, description = "Missing or invalid token"),
+        (status = 403, description = "Caller is not an admin"),
         (status = 500, description = "Integrity verification failed"),
     ),
-    tag = "dedup",
+    tag = "admin",
     security(("bearerAuth" = []))
 )]
 pub async fn recalculate_stats(

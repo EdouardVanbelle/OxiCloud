@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+	import { primeContextPage } from '$lib/utils/listContext';
 	import Button from '$lib/components/Button.svelte';
 	import { useOwnerCache } from '$lib/composables/useOwnerCache.svelte';
 	import { errorToast } from '$lib/utils/errors';
@@ -17,14 +19,16 @@
 	import { fileDownloadUrl } from '$lib/api/endpoints/files';
 	import { renameFile, deleteFile } from '$lib/api/endpoints/files';
 	import { renameFolder, deleteFolder } from '$lib/api/endpoints/folders';
-	import type { FileItem } from '$lib/api/types';
+	import type { FileItem, FolderItem } from '$lib/api/types';
 	import { lazyComponent } from '$lib/composables/lazyComponent.svelte';
 	import ResourceList, {
+		isFile,
 		type ContextAction,
 		type GroupByDef,
-		type ResourceEntry
+		type ItemContext
 	} from '$lib/components/ResourceList.svelte';
 	import { confirmDialog, promptDialog } from '$lib/stores/dialogs.svelte';
+	import { folderAccessCached, probeFolderAccess } from '$lib/utils/folderAccess';
 	import { t } from '$lib/i18n/index.svelte';
 
 	let raw = $state<FavoritesResourceItem[]>([]);
@@ -35,28 +39,33 @@
 	let reversed = $state(false);
 	const owners = useOwnerCache(resolveOwnerName);
 
-	const byId = $derived(new Map(raw.map((it) => [it.resource.id, it])));
-
-	const entries = $derived(
-		raw.map((it): ResourceEntry => {
-			const isFile = it.resource_type === 'file';
-			const ownerId = it.resource.owner_id ?? null;
-			return {
-				id: it.resource.id,
-				name: it.resource.name,
-				kind: it.resource_type,
-				iconClass: it.resource.icon_class,
-				path: it.resource.path,
-				size: isFile ? (it.resource as FileItem).size : null,
-				date: it.favorited_at,
-				ownerId,
-				ownerName: owners.name(ownerId),
-				isFavorite: true,
-				category: isFile ? it.resource.category : 'Folder',
-				modifiedAt: it.resource.modified_at
-			};
-		})
-	);
+	// Favorites view DELIBERATELY doesn't set `showDotfileToggle` on
+	// the ResourceList below — favoriting is an explicit "I want to
+	// keep an eye on this" action by the user, and hiding a starred
+	// dotfile here would contradict that intent. The
+	// `preferences.hideDotfiles` toggle is for reducing incidental
+	// clutter in algorithmic listings (files / recent / photos), not
+	// for overriding user-intentional pins. Trash follows the same
+	// principle for a safety-net reason; the general rule: explicit-
+	// action surfaces don't filter, algorithmic surfaces do.
+	//
+	// ResourceList consumes raw `FileItem | FolderItem`; the favorites
+	// envelope contributes `favorited_at` via `date` in contextMap. All
+	// items on this page are favorites — pass every id in `favoriteIds`
+	// so the star widget lights up universally.
+	const items = $derived(raw.map((it) => it.resource as FileItem | FolderItem));
+	// Persistent reactive map, primed per page in `load()` (benches/ROUND16.md §F2)
+	// instead of rebuilding a fresh Map that re-hashes the whole accumulated list
+	// on every infinite-scroll page. Mirrors the sibling `favoriteIds` SvelteSet.
+	const contextMap = new SvelteMap<string, ItemContext>();
+	// Persistent reactive set, updated in place per page (add the fresh page's
+	// ids; clear on reset) instead of rebuilding a brand-new SvelteSet over the
+	// whole accumulated list on every infinite-scroll page — that was O(N²)
+	// across a drain and, being a new instance each page, invalidated every
+	// mounted star reader. Every item on this page is a favorite, and removed
+	// items are no longer rendered, so the set only needs to be a superset of
+	// the displayed ids (benches/ROUND14.md §F2, mirrors recent's shipped shape).
+	const favoriteIds = new SvelteSet<string>();
 
 	const groupBys: GroupByDef[] = [
 		{ key: '', label: t('files.name', 'Name'), orderBy: 'name', icon: 'arrow-up-a-z' },
@@ -64,33 +73,33 @@
 			key: 'owner',
 			label: t('groupby.owner', 'Owner'),
 			orderBy: 'owner',
-			bucketOf: (e) => e.ownerId ?? null,
+			bucketOf: (item) => item.created_by ?? null,
 			labelOf: (id) => owners.label(id)
 		},
 		{
 			key: 'type',
 			label: t('groupby.type', 'Type'),
 			orderBy: 'type',
-			bucketOf: (e) => e.category ?? 'other',
+			bucketOf: (item) => item.category ?? 'other',
 			labelOf: (k) => typeLabel(k)
 		},
 		{
 			key: 'size',
 			label: t('groupby.size', 'Size'),
 			orderBy: 'size',
-			bucketOf: (e) => sizeBucket(e.kind === 'folder' ? null : e.size)
+			bucketOf: (item) => sizeBucket(isFile(item) ? item.size : null)
 		},
 		{
 			key: 'favoriteDate',
 			label: t('groupby.favoriteDate', 'Favorite date'),
 			orderBy: 'favorited_at',
-			bucketOf: (e) => dateBucket(e.date)
+			bucketOf: (_item, ctx) => dateBucket(ctx?.date)
 		},
 		{
 			key: 'modifiedAt',
 			label: t('groupby.modifiedAt', 'Modified date'),
 			orderBy: 'modified_at',
-			bucketOf: (e) => dateBucket(e.modifiedAt)
+			bucketOf: (item) => dateBucket(item.modified_at)
 		}
 	];
 
@@ -105,8 +114,16 @@
 				resourceTypes: ['file', 'folder']
 			});
 			raw = reset ? page.items : [...raw, ...page.items];
+			// Keep the persistent favoriteIds set in sync incrementally: clear on
+			// reset, then add only this page's ids (benches/ROUND14.md §F2).
+			if (reset) favoriteIds.clear();
+			for (const it of page.items) favoriteIds.add(it.resource.id);
+			primeContextPage(contextMap, reset, page.items, (it) => [
+				it.resource.id,
+				{ date: it.favorited_at }
+			]);
 			cursor = page.next_cursor;
-			void owners.resolve(page.items.map((i) => i.resource.owner_id));
+			void owners.resolve(page.items.map((i) => i.resource.created_by));
 		} catch (e) {
 			console.error('favorites: load error', e);
 			error = t('errors_loadFailed', 'Failed to load items');
@@ -133,22 +150,21 @@
 		if (shareOpen) void shareDialog.load();
 	});
 
-	function open(entry: ResourceEntry) {
-		if (entry.kind === 'folder') {
-			goto(resolve(`/files/${entry.id}`));
+	function open(item: FileItem | FolderItem) {
+		if (!isFile(item)) {
+			goto(resolve(`/files/${item.id}`));
 			return;
 		}
-		const item = byId.get(entry.id);
-		if (item) {
-			viewerFile = item.resource as FileItem;
-			viewerOpen = true;
-		}
+		viewerFile = item;
+		viewerOpen = true;
 	}
 
-	async function unfavorite(entry: ResourceEntry) {
+	async function unfavorite(item: FileItem | FolderItem) {
+		const kind = isFile(item) ? 'file' : 'folder';
 		try {
-			await removeFavorite(entry.kind, entry.id);
-			raw = raw.filter((i) => i.resource.id !== entry.id);
+			await removeFavorite(kind, item.id);
+			raw = raw.filter((i) => i.resource.id !== item.id);
+			favoriteIds.delete(item.id);
 		} catch (e) {
 			errorToast(e);
 		}
@@ -161,62 +177,97 @@
 	let shareOpen = $state(false);
 	let shareTarget = $state<{ id: string; name: string; kind: 'file' | 'folder' } | null>(null);
 
-	async function rename(entry: ResourceEntry) {
+	function kindOf(item: FileItem | FolderItem): 'file' | 'folder' {
+		return isFile(item) ? 'file' : 'folder';
+	}
+
+	async function rename(item: FileItem | FolderItem) {
 		const name = await promptDialog({
 			title: t('common.rename', 'Rename'),
-			defaultValue: entry.name,
+			defaultValue: item.name,
 			confirmText: t('common.rename', 'Rename')
 		});
-		if (!name || name === entry.name) return;
+		if (!name || name === item.name) return;
 		try {
-			if (entry.kind === 'file') await renameFile(entry.id, name);
-			else await renameFolder(entry.id, name);
+			if (isFile(item)) await renameFile(item.id, name);
+			else await renameFolder(item.id, name);
 			await load(true, orderByForGroup());
 		} catch (e) {
 			errorToast(e);
 		}
 	}
 
-	async function remove(entry: ResourceEntry) {
+	async function remove(item: FileItem | FolderItem) {
 		const ok = await confirmDialog({
 			title: t('common.delete', 'Delete'),
-			message: t('files.confirm_delete', { name: entry.name }, 'Delete "{{name}}"?'),
+			message: t('files.confirm_delete', { name: item.name }, 'Delete "{{name}}"?'),
 			confirmText: t('common.delete', 'Delete'),
 			danger: true
 		});
 		if (!ok) return;
 		try {
-			if (entry.kind === 'file') await deleteFile(entry.id);
-			else await deleteFolder(entry.id);
-			raw = raw.filter((i) => i.resource.id !== entry.id);
+			if (isFile(item)) await deleteFile(item.id);
+			else await deleteFolder(item.id);
+			raw = raw.filter((i) => i.resource.id !== item.id);
 		} catch (e) {
 			errorToast(e);
 		}
 	}
 
-	function downloadEntry(entry: ResourceEntry) {
-		if (entry.kind !== 'file') return;
+	function downloadItem(item: FileItem | FolderItem) {
+		if (!isFile(item)) return;
 		const a = document.createElement('a');
-		a.href = fileDownloadUrl(entry.id);
-		a.download = entry.name;
+		a.href = fileDownloadUrl(item.id);
+		a.download = item.name;
 		document.body.appendChild(a);
 		a.click();
 		a.remove();
 	}
 
+	// See /recent's mirror for the rationale: files carry `folder_id`,
+	// folders carry `parent_id`; nullable when the folder is a drive
+	// root. Null → no meaningful parent to open.
+	function parentFolderId(item: FileItem | FolderItem): string | null {
+		return isFile(item) ? item.folder_id : item.parent_id;
+	}
+
 	const contextActions: ContextAction[] = [
+		{
+			key: 'open_parent',
+			label: t('files.open_parent', 'Open parent folder'),
+			icon: 'folder-open',
+			// Hidden only when there's literally no parent to open
+			// (drive-root folders where `parent_id === null`); otherwise
+			// the entry is always visible and shows up disabled when the
+			// caller lacks read on the parent — a greyed row reads as
+			// "you can't do this here" instead of "the option is missing."
+			// `folderAccessCached` returns `true`/`false`/`undefined`;
+			// disabled fires when the answer is explicitly `false`. On
+			// first right-click of a fresh row, `menuPrepare` below has
+			// primed the cache so the entry either enables or disables
+			// without a "flash of enabled" beforehand.
+			visible: (item) => parentFolderId(item) !== null,
+			disabled: (item) => {
+				const pid = parentFolderId(item);
+				return pid === null || folderAccessCached(pid) === false;
+			},
+			run: (item) => {
+				const pid = parentFolderId(item);
+				if (pid) goto(resolve(`/files/${pid}`));
+			}
+		},
 		{
 			key: 'download',
 			label: t('common.download', 'Download'),
 			icon: 'download',
-			run: downloadEntry
+			run: downloadItem
 		},
 		{
 			key: 'share',
 			label: t('files.share', 'Share'),
 			icon: 'share-alt',
-			run: (e) => {
-				shareTarget = { id: e.id, name: e.name, kind: e.kind };
+			run: (item) => {
+				shareTarget = { id: item.id, name: item.name, kind: kindOf(item) };
 				shareOpen = true;
 			}
 		},
@@ -224,50 +275,37 @@
 			key: 'move',
 			label: t('files.move', 'Move'),
 			icon: 'arrows-alt',
-			run: (e) => {
+			run: (item) => {
 				moveItems = null;
-				moveTarget = { id: e.id, name: e.name, kind: e.kind };
+				moveTarget = { id: item.id, name: item.name, kind: kindOf(item) };
 				moveOpen = true;
 			}
+		},
+		{
+			// Every row on /favorites IS a favorite, so the entry is always
+			// "Remove favorite" — no per-item state lookup needed. Mirrors
+			// the star-widget behaviour: click, row un-stars, disappears
+			// from the list on next reload. Placed between Move and Rename
+			// to match the canonical context-menu order on `/files`.
+			key: 'unfavorite',
+			label: t('files.unfavorite', 'Remove favorite'),
+			icon: 'star-outline',
+			run: (item) => void unfavorite(item)
 		},
 		{ key: 'rename', label: t('common.rename', 'Rename'), icon: 'pen', run: rename },
 		{ key: 'delete', label: t('common.delete', 'Delete'), icon: 'trash', danger: true, run: remove }
 	];
 
 	// ── Selection + batch ─────────────────────────────────────────────────────
-	let selectedIds = $state<Set<string>>(new Set());
-	const selectedEntries = $derived(entries.filter((e) => selectedIds.has(e.id)));
+	// Selected items arrive via the batchActions snippet param —
+	// ResourceList already derives them (O(selection), not O(N)); a
+	// host-side `items.filter(...)` shadow would re-run a second full scan
+	// per selection toggle, and its id mirror is unnecessary (the component
+	// prunes its own selection when items reload) — benches/ROUND11.md §S1.
+	type Selectable = FileItem | FolderItem;
 
-	function batchTargets() {
-		return selectedEntries.map((e) => ({ id: e.id, name: e.name, kind: e.kind }));
-	}
-
-	function batchDownload() {
-		for (const e of selectedEntries) downloadEntry(e);
-	}
-
-	async function batchDelete() {
-		const ok = await confirmDialog({
-			title: t('common.delete', 'Delete'),
-			message: t(
-				'files.confirm_delete_n',
-				{ count: selectedEntries.length },
-				'Delete {{count}} item(s)?'
-			),
-			confirmText: t('common.delete', 'Delete'),
-			danger: true
-		});
-		if (!ok) return;
-		try {
-			await Promise.all(
-				selectedEntries.map((e) => (e.kind === 'file' ? deleteFile(e.id) : deleteFolder(e.id)))
-			);
-			const removed = new Set(selectedEntries.map((e) => e.id));
-			raw = raw.filter((i) => !removed.has(i.resource.id));
-			selectedIds = new Set();
-		} catch (e) {
-			errorToast(e);
-		}
+	function batchDownload(sel: Selectable[]) {
+		for (const i of sel) downloadItem(i);
 	}
 
 	onMount(() => load(true));
@@ -277,7 +315,10 @@
 
 <ResourceList
 	title={t('nav.favorites', 'Favorites')}
-	items={entries}
+	{items}
+	{contextMap}
+	{favoriteIds}
+	resolveOwnerName={(id) => owners.name(id)}
 	{loading}
 	{error}
 	emptyIcon="star"
@@ -288,8 +329,18 @@
 	onopen={open}
 	onfavorite={unfavorite}
 	showOwner
+	showPath
+	dateLabel={t('files.col_added', 'Added')}
 	selectable
 	{contextActions}
+	menuPrepare={async (item) => {
+		// Lazy folder-access probe — fires only when the user actually
+		// opens the context menu on a row, not proactively for every
+		// row on load. Cached in the LRU (see `folderAccess.ts`) so
+		// subsequent right-clicks on the same folder are instant.
+		const pid = parentFolderId(item);
+		if (pid) await probeFolderAccess(pid);
+	}}
 	{groupBys}
 	bind:groupBy
 	bind:reversed
@@ -297,26 +348,26 @@
 		cursor = undefined;
 		load(true, orderBy, rev);
 	}}
-	onselectionchange={(ids) => (selectedIds = ids)}
 >
-	{#snippet batchToolbar()}
-		<Button icon="download" data-testid="favorites-batch-download-btn" onclick={batchDownload}
-			>{t('common.download', 'Download')}</Button
+	{#snippet batchActions(sel)}
+		<!--
+			Favorites-scoped batch cluster: Download stays. Move + Delete
+			were destructive-to-content operations carried over from the
+			pre-refactor menu; on a favorites *bookmarks* view they
+			belong in the row's context menu (rename/move/delete via
+			`contextActions`), not in the batch bar. Batch "remove from
+			favorite" un-stars the selected rows without touching the
+			underlying files — mirrors the per-row favorite star.
+		-->
+		<Button
+			icon="download"
+			data-testid="favorites-batch-download-btn"
+			onclick={() => batchDownload(sel)}>{t('common.download', 'Download')}</Button
 		>
 		<Button
-			icon="arrows-alt"
-			data-testid="favorites-batch-move-btn"
-			onclick={() => {
-				moveTarget = null;
-				moveItems = batchTargets();
-				moveOpen = true;
-			}}>{t('files.move', 'Move')}</Button
-		>
-		<Button
-			variant="danger"
-			icon="trash"
-			data-testid="favorites-batch-delete-btn"
-			onclick={batchDelete}>{t('common.delete', 'Delete')}</Button
+			icon="star-outline"
+			data-testid="favorites-batch-remove-btn"
+			onclick={() => sel.forEach(unfavorite)}>{t('files.unfavorite', 'Remove favorite')}</Button
 		>
 	{/snippet}
 </ResourceList>
@@ -331,10 +382,7 @@
 		bind:open={moveOpen}
 		item={moveTarget}
 		items={moveItems}
-		onmoved={() => {
-			selectedIds = new Set();
-			load(true, orderByForGroup());
-		}}
+		onmoved={() => load(true, orderByForGroup())}
 	/>
 {/if}
 {#if shareDialog.component}

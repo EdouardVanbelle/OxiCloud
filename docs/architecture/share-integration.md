@@ -2,9 +2,9 @@
 
 OxiCloud supports public file and folder sharing through signed share links. A share can be public, password-protected, or time-limited.
 
-> **Where permission and expiration live now.** Both the granted permissions and the expiration timestamp are stored on the `storage.access_grants` row that represents the share, not on the share row itself. They are evaluated by the same `AuthorizationEngine` that handles user and group grants — see [ReBAC Authorization](/architecture/rebac-authorization). The `storage.shares` row keeps only the token-side metadata (public token, password hash, item name, access count).
+> **Where the role and expiration live now.** Both the granted role and the expiration timestamp are stored on the `storage.role_grants` row that represents the share, not on the share row itself. They are evaluated by the same `AuthorizationEngine` that handles user and group grants — see [ReBAC Authorization](/architecture/rebac-authorization). The `storage.shares` row keeps only the token-side metadata (public token, password hash, item name, access count).
 
-> **Sharing with people who do not yet have an account.** Token-based shares are anonymous; anyone with the URL can use them. To share with a specific person who isn't on the instance yet, the share modal accepts a raw email address and provisions the recipient as an *external user* on the fly. That flow is described in [Magic-link external authentication](/architecture/magic-link-auth), and the resulting grant is a regular per-user `access_grants` row — identical in evaluation to a grant on an internal recipient.
+> **Sharing with people who do not yet have an account.** Token-based shares are anonymous; anyone with the URL can use them. To share with a specific person who isn't on the instance yet, the share modal accepts a raw email address and provisions the recipient as an *external user* on the fly. That flow is described in [Magic-link external authentication](/architecture/magic-link-auth), and the resulting grant is a regular per-user `role_grants` row — identical in evaluation to a grant on an internal recipient.
 
 ## What a Share Contains
 
@@ -17,8 +17,8 @@ A share record (`storage.shares`) tracks:
 
 What used to live on the share row but is now resolved through ReBAC:
 
-- **Expiration** → `access_grants.expires_at`. The cascade query filters expired grants inline (`expires_at IS NULL OR expires_at > NOW()`), so an expired share fails the same path a revoked user grant fails. No separate "is this share expired" check.
-- **Permission scope** → `access_grants.permission` rows. **For security, public share-link grants are restricted to `read` only** (the equivalent of the `viewer` role). Anyone holding the token can view but not modify, comment, share, or delete. To grant write or share access to a specific recipient, create a per-user or per-group grant instead of a share link.
+- **Expiration** → `role_grants.expires_at`. The cascade query filters expired grants inline (`expires_at IS NULL OR expires_at > NOW()`), so an expired share fails the same path a revoked user grant fails. No separate "is this share expired" check.
+- **Role scope** → `role_grants.role` (Postgres ENUM `storage.grant_role`). **For security, public share-link grants are always `viewer`** and cannot be raised. Anyone holding the token can view but not modify, comment, share, or delete. To grant write or share access to a specific recipient, create a per-user or per-group grant with a higher role (`editor`, `contributor`, `owner`) instead of a share link.
 
 ## Public and Private Routes
 
@@ -70,44 +70,57 @@ Share metadata is persisted separately from the file content itself. The shared 
 
 ## Lifecycle & cleanup
 
-Because permissions and expiry now live on `access_grants`, every share is represented by two correlated rows: one in `storage.shares` (token metadata) and one or more in `storage.access_grants` (`subject_type='token'`, `subject_id=share.id`). Two triggers keep them in sync — one per direction — so neither side can outlive the other.
+Because the role and expiry live on `role_grants`, every share is represented by two correlated rows: one in `storage.shares` (token metadata) and one in `storage.role_grants` with `subject_type='token'` and `subject_id=share.id` carrying the `viewer` role. Two triggers keep them in sync — one per direction — so neither side can outlive the other.
 
 ### Share deletion → grant cleanup
 
-Deleting a share row (`DELETE FROM storage.shares` via `DELETE /api/shares/{id}`) fires the `trg_cleanup_grants_token` trigger declared in `migrations/20260520000000_rebac_access_grants.sql`. That trigger removes every `access_grants` row whose `subject_type='token'` and `subject_id=share.id`, in the same transaction. The token becomes unreachable immediately — no stale grants left behind.
+Deleting a share row (`DELETE FROM storage.shares` via `DELETE /api/shares/{id}`) fires the token-side cleanup trigger. It removes the matching `role_grants` row whose `subject_type='token'` and `subject_id=share.id`, in the same transaction. The token becomes unreachable immediately — no stale grant left behind.
 
-The same pattern runs when the underlying resource is deleted: `trg_cleanup_grants_folder` / `trg_cleanup_grants_file` clean up the grants, and any share row referencing a deleted resource is then garbage-collected by the reverse trigger described below.
+The same pattern runs when the underlying resource is deleted: the per-resource-type triggers on `role_grants` (`trg_cleanup_role_grants_folder`, `trg_cleanup_role_grants_file`, `trg_cleanup_role_grants_drive`, `_calendar`, `_address_book`, `_playlist`) clean up the grants, and any share row referencing a deleted resource is then garbage-collected by the reverse trigger described below.
 
 ### Grant revocation → share row cleanup
 
-`DELETE /api/grants/{grant_id}` on the **last** grant of a token row removes the matching `storage.shares` row, atomically and in the same transaction. The `trg_cleanup_share_on_grant_delete` trigger declared in `migrations/20260612000001_share_grant_reverse_cascade.sql` watches `access_grants` for `DELETE` events with `subject_type='token'` and deletes the paired share row **iff no other grants for the same `subject_id` still exist**:
+`DELETE /api/grants/{grant_id}` on a token row removes the matching `storage.shares` row, atomically and in the same transaction. The `trg_cleanup_share_on_grant_delete` trigger (originally introduced in `migrations/20260612000001_share_grant_reverse_cascade.sql`, carried forward through the `role_grants` migration by `migrations/20260801000001_role_grants_cascade_triggers.sql`) watches `role_grants` for `DELETE` events with `subject_type='token'` and deletes the paired share row **iff no other grants for the same `subject_id` still exist**:
 
 ```sql
-AFTER DELETE ON storage.access_grants:
+AFTER DELETE ON storage.role_grants:
     IF OLD.subject_type = 'token' THEN
         DELETE FROM storage.shares
          WHERE id = OLD.subject_id
-           AND NOT EXISTS (SELECT 1 FROM storage.access_grants
+           AND NOT EXISTS (SELECT 1 FROM storage.role_grants
                             WHERE subject_type = 'token'
                               AND subject_id   = OLD.subject_id);
 ```
 
 The `NOT EXISTS` guard makes it safe in two important cases:
 
-- **Multi-grant tokens** — if a token had several permission rows (e.g. read+share, were that ever to be allowed), revoking one leaves the share row intact. Only the final revocation triggers cleanup.
-- **Forward-cascade re-entry** — when the original DELETE comes from `storage.shares`, the forward trigger is already deleting these grant rows. The reverse trigger then tries to delete a share row that's already gone, finds no row, and the statement is a no-op. No recursion.
+- **Multi-role tokens** — the schema doesn't currently allow more than one role on a token (public share-links are always `viewer`), but the guard is still correct for the general case. Reserved for a future extension where a token might carry multiple assignments.
+- **Forward-cascade re-entry** — when the original DELETE comes from `storage.shares`, the forward trigger is already deleting the corresponding `role_grants` row. The reverse trigger then tries to delete a share row that's already gone, finds no row, and the statement is a no-op. No recursion.
 
-Net effect: revoking the last grant on a token via the grants API and deleting the share via `DELETE /api/shares/{id}` are now equivalent — both end in a clean state with zero rows on either side.
+Net effect: revoking the grant on a token via the grants API and deleting the share via `DELETE /api/shares/{id}` are equivalent — both end in a clean state with zero rows on either side.
 
 ### Resource deletion
 
 Both triggers compose cleanly with resource lifecycle:
 
-- A folder/file delete → `trg_cleanup_grants_*` removes the grants → `trg_cleanup_share_on_grant_delete` removes the share rows that just lost their last grant. One delete on the resource cleans up everything downstream in a single transaction.
+- A folder/file/drive delete → per-resource-type `trg_cleanup_role_grants_*` removes the grants → `trg_cleanup_share_on_grant_delete` removes the share rows that just lost their last grant. One delete on the resource cleans up everything downstream in a single transaction.
+
+### Expired shares — background purge
+
+Public shares with an expiration date follow the general expired-grant
+lifecycle: the AuthZ engine treats them as unusable the moment `expires_at`
+passes (inline filter, no separate expiry check), and the `GrantCleanupService`
+daemon physically deletes the underlying `role_grants` row after a grace
+window (default 15 days, `OXICLOUD_GRANT_CLEANUP_GRACE_DAYS`). When it does,
+the reverse trigger described above fires and reaps the paired `storage.shares`
+row in the same transaction. Expired public shares vanish end-to-end without
+operator intervention. See
+[ReBAC Authorization → Post-expiry cleanup](/architecture/rebac-authorization#post-expiry-cleanup)
+for the daemon and its env vars.
 
 ### Pre-existing orphans
 
-The `20260612000001` migration also runs a one-shot `DELETE FROM storage.shares WHERE NOT EXISTS (… token grants)` to garbage-collect any orphans that accumulated before the reverse trigger existed.
+The `20260612000001` migration ran a one-shot `DELETE FROM storage.shares WHERE NOT EXISTS (… token grants)` to garbage-collect any orphans that accumulated before the reverse trigger existed. The `role_grants` migration path preserved that cleanup — no fresh orphan class was introduced.
 
 ## Security Notes
 

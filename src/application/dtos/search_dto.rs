@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use utoipa::ToSchema;
 
 /**
@@ -109,8 +110,10 @@ pub struct SearchFileResultDto {
     pub path: String,
     /// Size in bytes
     pub size: u64,
-    /// MIME type
-    pub mime_type: String,
+    /// MIME type — `Arc<str>` so enrichment reuses `FileDto`'s interned
+    /// value (an atomic increment) instead of allocating per result row.
+    #[schema(value_type = String)]
+    pub mime_type: Arc<str>,
     /// Parent folder ID
     pub folder_id: Option<String>,
     /// Creation timestamp
@@ -122,11 +125,14 @@ pub struct SearchFileResultDto {
     /// Human-readable file size (e.g., "2.5 MB")
     pub size_formatted: String,
     /// CSS icon class for the file type (e.g., "fas fa-file-pdf")
-    pub icon_class: String,
+    #[schema(value_type = String)]
+    pub icon_class: Arc<str>,
     /// Extra CSS class for icon styling (e.g., "pdf-icon", "code-icon js-icon")
-    pub icon_special_class: String,
+    #[schema(value_type = String)]
+    pub icon_special_class: Arc<str>,
     /// Content category: "document", "image", "video", "audio", "archive", "code", "other"
-    pub category: String,
+    #[schema(value_type = String)]
+    pub category: Arc<str>,
     /// Raw BLAKE3 content hash. Feeds `FileDto::content_hash` and
     /// `File::compute_etag` when search results are converted to
     /// `FileDto` (NC REPORT/SEARCH response). Defaults to `String::new()`
@@ -155,6 +161,10 @@ pub struct SearchFolderResultDto {
     pub path: String,
     /// Parent folder ID
     pub parent_id: Option<String>,
+    /// Drive that owns this folder. Same column as `storage.folders.drive_id`,
+    /// carried through so downstream callers (e.g. the NC search REPORT
+    /// handler) can populate `FolderDto::drive_id` without a fallback sentinel.
+    pub drive_id: uuid::Uuid,
     /// Creation timestamp
     pub created_at: u64,
     /// Last modification timestamp
@@ -263,9 +273,11 @@ pub struct SearchSuggestionItem {
     /// Path for context
     pub path: String,
     /// CSS icon class
-    pub icon_class: String,
+    #[schema(value_type = String)]
+    pub icon_class: Arc<str>,
     /// Extra CSS class for icon styling
-    pub icon_special_class: String,
+    #[schema(value_type = String)]
+    pub icon_special_class: Arc<str>,
     /// Relevance score
     pub relevance_score: u32,
 }

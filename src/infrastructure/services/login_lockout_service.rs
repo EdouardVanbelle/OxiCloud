@@ -68,7 +68,24 @@ impl LoginLockoutService {
     fn key(username: &str, client_ip: &str) -> String {
         // `|` is not valid in either a username or an IP literal so it makes
         // the username/ip boundary unambiguous.
-        format!("{}|{}", username.to_lowercase(), client_ip)
+        //
+        // The lowercased composite is written into ONE pre-sized buffer instead
+        // of the `to_lowercase()` (alloc) + `format!` (alloc) two-step. App
+        // passwords authenticate with an already-lowercase ASCII username in
+        // ~all traffic, so the fast branch covers it; the rare non-ASCII branch
+        // keeps `str::to_lowercase` for exact Unicode (e.g. final-sigma)
+        // semantics. Byte-identical key either way (benches/ROUND29.md §D).
+        if username.is_ascii() {
+            let mut k = String::with_capacity(username.len() + 1 + client_ip.len());
+            for &b in username.as_bytes() {
+                k.push(b.to_ascii_lowercase() as char);
+            }
+            k.push('|');
+            k.push_str(client_ip);
+            k
+        } else {
+            format!("{}|{}", username.to_lowercase(), client_ip)
+        }
     }
 
     /// Check whether the (account, IP) pair is currently locked.

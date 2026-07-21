@@ -22,7 +22,8 @@ use axum::{
     http::{HeaderName, Request, StatusCode, header},
     response::Response,
 };
-use bytes::Buf;
+use bytes::{Buf, Bytes};
+use quick_xml::Writer;
 use std::sync::Arc;
 
 use crate::application::adapters::carddav_adapter::{
@@ -31,10 +32,10 @@ use crate::application::adapters::carddav_adapter::{
 use crate::application::adapters::uid_from_multiget_href;
 use crate::application::adapters::webdav_adapter::{PropFindRequest, PropFindType};
 use crate::application::dtos::address_book_dto::{CreateAddressBookDto, UpdateAddressBookDto};
-use crate::application::dtos::contact_dto::CreateContactVCardDto;
+use crate::application::dtos::contact_dto::{ContactDto, CreateContactVCardDto};
 use crate::application::ports::carddav_ports::{AddressBookUseCase, ContactUseCase};
+use crate::application::services::contact_service::ContactService;
 use crate::common::di::AppState;
-use crate::infrastructure::adapters::contact_storage_adapter::ContactStorageAdapter;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::{AuthUser, CurrentUser};
 
@@ -177,7 +178,7 @@ fn extract_user(req: &Request<Body>) -> Result<AuthUser, AppError> {
         .ok_or_else(|| AppError::unauthorized("Authentication required"))
 }
 
-fn get_addressbook_service(state: &AppState) -> Result<&Arc<ContactStorageAdapter>, AppError> {
+fn get_addressbook_service(state: &AppState) -> Result<&Arc<ContactService>, AppError> {
     state.addressbook_use_case.as_ref().ok_or_else(|| {
         AppError::new(
             StatusCode::NOT_IMPLEMENTED,
@@ -187,7 +188,165 @@ fn get_addressbook_service(state: &AppState) -> Result<&Arc<ContactStorageAdapte
     })
 }
 
-fn get_contact_service(state: &AppState) -> Result<&Arc<ContactStorageAdapter>, AppError> {
+/// Rows per emitted page for the streaming CardDAV emitters — contacts
+/// carry no master/exception bundling, so pages cut anywhere.
+const CARDDAV_STREAM_PAGE_CONTACTS: usize = 500;
+
+/// Streamed multistatus REPORT: header, one chunk per cursor page,
+/// footer. Byte-compatible with the buffered
+/// `generate_contacts_response` output; TTFB becomes the first page and
+/// the whole-book DTO Vec is never materialised.
+fn build_streaming_contacts_report(
+    contact_svc: Arc<ContactService>,
+    address_book_id: String,
+    report: CardDavReportType,
+    base_href: String,
+    user_id: uuid::Uuid,
+) -> Response<Body> {
+    let stream = async_stream::try_stream! {
+        let mut buf = Vec::with_capacity(160);
+        {
+            let mut w = Writer::new(&mut buf);
+            CardDavAdapter::write_report_multistatus_start(&mut w)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        yield Bytes::from(buf);
+
+        {
+            use futures::TryStreamExt;
+            let mut rows = contact_svc
+                .stream_contacts_by_book(&address_book_id, user_id)
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let mut page: Vec<ContactDto> =
+                Vec::with_capacity(CARDDAV_STREAM_PAGE_CONTACTS);
+            loop {
+                let next = rows
+                    .try_next()
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                let flush = match &next {
+                    Some(_) => page.len() >= CARDDAV_STREAM_PAGE_CONTACTS,
+                    None => !page.is_empty(),
+                };
+                if flush {
+                    let mut chunk = Vec::with_capacity(page.len() * 256 + 64);
+                    {
+                        let mut w = Writer::new(&mut chunk);
+                        CardDavAdapter::write_contacts_report_page(
+                            &mut w, &page, &report, &base_href,
+                        )
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    }
+                    page.clear();
+                    yield Bytes::from(chunk);
+                }
+                match next {
+                    Some(c) => page.push(c),
+                    None => break,
+                }
+            }
+        }
+
+        let mut buf = Vec::with_capacity(32);
+        {
+            let mut w = Writer::new(&mut buf);
+            CardDavAdapter::write_carddav_multistatus_end(&mut w)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        yield Bytes::from(buf);
+    };
+
+    use futures::TryStreamExt;
+    let stream = stream
+        .map_err(|e: std::io::Error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) });
+
+    Response::builder()
+        .status(StatusCode::MULTI_STATUS)
+        .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
+        .body(Body::from_stream(stream))
+        .unwrap()
+}
+
+/// Streamed depth-1 address-book PROPFIND: head (multistatus + the
+/// book's own response), one chunk per cursor page, footer.
+fn build_streaming_book_propfind(
+    contact_svc: Arc<ContactService>,
+    address_book: crate::application::dtos::address_book_dto::AddressBookDto,
+    propfind_request: PropFindRequest,
+    address_book_id: String,
+    base_href: String,
+    user_id: uuid::Uuid,
+) -> Response<Body> {
+    let stream = async_stream::try_stream! {
+        let mut buf = Vec::with_capacity(2048);
+        {
+            let mut w = Writer::new(&mut buf);
+            CardDavAdapter::write_collection_head(
+                &mut w,
+                &address_book,
+                &propfind_request,
+                &base_href,
+            )
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        yield Bytes::from(buf);
+
+        {
+            use futures::TryStreamExt;
+            let mut rows = contact_svc
+                .stream_contacts_by_book(&address_book_id, user_id)
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let mut page: Vec<ContactDto> =
+                Vec::with_capacity(CARDDAV_STREAM_PAGE_CONTACTS);
+            loop {
+                let next = rows
+                    .try_next()
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                let flush = match &next {
+                    Some(_) => page.len() >= CARDDAV_STREAM_PAGE_CONTACTS,
+                    None => !page.is_empty(),
+                };
+                if flush {
+                    let mut chunk = Vec::with_capacity(page.len() * 512 + 64);
+                    {
+                        let mut w = Writer::new(&mut chunk);
+                        CardDavAdapter::write_collection_contact_page(&mut w, &page, &base_href)
+                            .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    }
+                    page.clear();
+                    yield Bytes::from(chunk);
+                }
+                match next {
+                    Some(c) => page.push(c),
+                    None => break,
+                }
+            }
+        }
+
+        let mut buf = Vec::with_capacity(32);
+        {
+            let mut w = Writer::new(&mut buf);
+            CardDavAdapter::write_carddav_multistatus_end(&mut w)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        yield Bytes::from(buf);
+    };
+
+    use futures::TryStreamExt;
+    let stream = stream
+        .map_err(|e: std::io::Error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) });
+
+    Response::builder()
+        .status(StatusCode::MULTI_STATUS)
+        .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
+        .body(Body::from_stream(stream))
+        .unwrap()
+}
+
+fn get_contact_service(state: &AppState) -> Result<&Arc<ContactService>, AppError> {
     state.contact_use_case.as_ref().ok_or_else(|| {
         AppError::new(
             StatusCode::NOT_IMPLEMENTED,
@@ -254,9 +413,7 @@ async fn handle_propfind(
             addressbook_service
                 .list_user_address_books(user.id)
                 .await
-                .map_err(|e| {
-                    AppError::internal_error(format!("Failed to list address books: {}", e))
-                })?
+                .map_err(AppError::from)?
         };
 
         let mut response_body = Vec::new();
@@ -307,9 +464,7 @@ async fn handle_propfind(
         let address_books = addressbook_service
             .list_user_address_books(user.id)
             .await
-            .map_err(|e| {
-                AppError::internal_error(format!("Failed to list address books: {}", e))
-            })?;
+            .map_err(AppError::from)?;
 
         let user_part = path.split('/').next().unwrap_or(path);
         let base_href = format!("/carddav/{}/", user_part);
@@ -338,14 +493,19 @@ async fn handle_propfind(
                 .await
                 .map_err(|e| AppError::not_found(format!("Address book not found: {}", e)))?;
 
-            let contacts = if depth != "0" {
-                contact_svc
-                    .list_contacts(address_book_id, None, None, user.id)
-                    .await
-                    .unwrap_or_default()
-            } else {
-                vec![]
-            };
+            // Depth-1 streams the contact listing page by page; depth-0
+            // has no contact section and keeps the tiny buffered path.
+            if depth != "0" {
+                let base_href = format!("/carddav/{}/", address_book_id);
+                return Ok(build_streaming_book_propfind(
+                    contact_svc.clone(),
+                    address_book,
+                    propfind_request,
+                    address_book_id.to_string(),
+                    base_href,
+                    user.id,
+                ));
+            }
 
             let base_href = &format!("/carddav/{}/", address_book_id);
             let mut response_body = Vec::new();
@@ -353,7 +513,7 @@ async fn handle_propfind(
             CardDavAdapter::generate_addressbook_collection_propfind(
                 &mut response_body,
                 &address_book,
-                &contacts,
+                &[],
                 &propfind_request,
                 base_href,
                 &depth,
@@ -373,7 +533,7 @@ async fn handle_propfind(
             let contact = contact_svc
                 .get_contact_by_uid(address_book_id, contact_uid, user.id)
                 .await
-                .map_err(|e| AppError::internal_error(format!("Failed to look up contact: {}", e)))?
+                .map_err(AppError::from)?
                 .ok_or_else(|| {
                     AppError::not_found(format!("Contact not found: {}", contact_uid))
                 })?;
@@ -389,7 +549,6 @@ async fn handle_propfind(
             CardDavAdapter::generate_contacts_response(
                 &mut response_body,
                 std::slice::from_ref(&contact),
-                &[(contact.uid.clone(), contact_to_vcard(&contact))],
                 &report,
                 base_href,
             )
@@ -428,11 +587,25 @@ async fn handle_report(
         return Err(AppError::bad_request("Address book ID required in path"));
     }
 
+    // Whole-book shapes stream; bounded multiget keeps the buffered path.
+    if matches!(
+        &report,
+        CardDavReportType::AddressbookQuery { .. } | CardDavReportType::SyncCollection { .. }
+    ) {
+        let base_href = format!("/carddav/{}/", address_book_id);
+        return Ok(build_streaming_contacts_report(
+            contact_svc.clone(),
+            address_book_id.to_string(),
+            report,
+            base_href,
+            user.id,
+        ));
+    }
+
     let contacts = match &report {
-        CardDavReportType::AddressbookQuery { .. } => contact_svc
-            .list_contacts(address_book_id, None, None, user.id)
-            .await
-            .map_err(|e| AppError::internal_error(format!("Failed to list contacts: {}", e)))?,
+        CardDavReportType::AddressbookQuery { .. } => {
+            unreachable!("addressbook-query streams above")
+        }
         CardDavReportType::AddressbookMultiget { hrefs, .. } => {
             // Indexed batch lookup (`uid = ANY(...)`) — a multiget for a
             // handful of contacts must not pay for listing the whole
@@ -445,30 +618,17 @@ async fn handle_report(
             contact_svc
                 .get_contacts_by_uids(address_book_id, &uids, user.id)
                 .await
-                .map_err(|e| AppError::internal_error(format!("Failed to fetch contacts: {}", e)))?
+                .map_err(AppError::from)?
         }
-        CardDavReportType::SyncCollection { .. } => contact_svc
-            .list_contacts(address_book_id, None, None, user.id)
-            .await
-            .map_err(|e| AppError::internal_error(format!("Failed to list contacts: {}", e)))?,
+        CardDavReportType::SyncCollection { .. } => {
+            unreachable!("sync-collection streams above")
+        }
     };
-
-    // Generate vCards
-    let vcards: Vec<(String, String)> = contacts
-        .iter()
-        .map(|c| (c.uid.clone(), contact_to_vcard(c)))
-        .collect();
 
     let base_href = &format!("/carddav/{}/", address_book_id);
     let mut response_body = Vec::new();
-    CardDavAdapter::generate_contacts_response(
-        &mut response_body,
-        &contacts,
-        &vcards,
-        &report,
-        base_href,
-    )
-    .map_err(|e| AppError::internal_error(format!("Failed to generate XML: {}", e)))?;
+    CardDavAdapter::generate_contacts_response(&mut response_body, &contacts, &report, base_href)
+        .map_err(|e| AppError::internal_error(format!("Failed to generate XML: {}", e)))?;
 
     Ok(Response::builder()
         .status(StatusCode::MULTI_STATUS)
@@ -511,10 +671,13 @@ async fn handle_mkcol(
         is_public: Some(false),
     };
 
+    // See the comment on the vCard PUT path — kind-aware error mapping
+    // so a client MKCOL body with a bad name / duplicate returns
+    // 400 / 409 instead of an opaque 500.
     addressbook_service
         .create_address_book(create_dto)
         .await
-        .map_err(|e| AppError::internal_error(format!("Failed to create address book: {}", e)))?;
+        .map_err(AppError::from)?;
 
     Ok(Response::builder()
         .status(StatusCode::CREATED)
@@ -564,11 +727,17 @@ async fn handle_put(
     };
 
     if let Some(existing_contact) = existing {
-        // Update: delete + recreate from vCard
+        // Update: delete + recreate from vCard. `AppError::from` maps
+        // the domain-error ErrorKind onto the right status code:
+        // NotFound → 404 (contact/address-book gone), AccessDenied →
+        // 403, InvalidInput → 400 (malformed vCard PUT from the
+        // client). Naive `internal_error(...)` wrapping used to hide
+        // all client-input bugs as 500 — same class of bug as the
+        // CalDAV `create_event_from_ical` path (see #545).
         contact_svc
             .delete_contact(&existing_contact.id, user.id)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to update contact: {}", e)))?;
+            .map_err(AppError::from)?;
 
         let create_dto = CreateContactVCardDto {
             address_book_id: address_book_id.to_string(),
@@ -578,7 +747,7 @@ async fn handle_put(
         let contact = contact_svc
             .create_contact_from_vcard(create_dto)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to recreate contact: {}", e)))?;
+            .map_err(AppError::from)?;
 
         Ok(Response::builder()
             .status(StatusCode::NO_CONTENT)
@@ -592,10 +761,12 @@ async fn handle_put(
             user_id: user.id.to_string(),
         };
 
+        // See the comment above the update branch — same rationale for
+        // preferring `AppError::from` over blanket 500.
         let contact = contact_svc
             .create_contact_from_vcard(create_dto)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to create contact: {}", e)))?;
+            .map_err(AppError::from)?;
 
         Ok(Response::builder()
             .status(StatusCode::CREATED)
@@ -635,7 +806,7 @@ async fn handle_get(
         let contacts = contact_svc
             .list_contacts(address_book_id, None, None, user.id)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to list contacts: {}", e)))?;
+            .map_err(AppError::from)?;
 
         let mut vcf_data = String::new();
         for contact in &contacts {
@@ -655,7 +826,7 @@ async fn handle_get(
         let contact = contact_svc
             .get_contact_by_uid(address_book_id, contact_uid, user.id)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to look up contact: {}", e)))?
+            .map_err(AppError::from)?
             .ok_or_else(|| AppError::not_found(format!("Contact not found: {}", contact_uid)))?;
 
         let vcard = contact_to_vcard(&contact);
@@ -693,9 +864,7 @@ async fn handle_delete(
         addressbook_service
             .delete_address_book(address_book_id, user.id)
             .await
-            .map_err(|e| {
-                AppError::internal_error(format!("Failed to delete address book: {}", e))
-            })?;
+            .map_err(AppError::from)?;
     } else {
         // Delete contact — indexed lookup by vCard UID.
         let contact_file = parts[1];
@@ -704,13 +873,13 @@ async fn handle_delete(
         let contact = contact_svc
             .get_contact_by_uid(address_book_id, contact_uid, user.id)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to look up contact: {}", e)))?
+            .map_err(AppError::from)?
             .ok_or_else(|| AppError::not_found(format!("Contact not found: {}", contact_uid)))?;
 
         contact_svc
             .delete_contact(&contact.id, user.id)
             .await
-            .map_err(|e| AppError::internal_error(format!("Failed to delete contact: {}", e)))?;
+            .map_err(AppError::from)?;
     }
 
     Ok(Response::builder()
@@ -733,11 +902,10 @@ async fn handle_proppatch(
         .await
         .map_err(|e| AppError::bad_request(format!("Failed to read request body: {}", e)))?;
 
-    let (props_to_set, props_to_remove) =
-        crate::application::adapters::webdav_adapter::WebDavAdapter::parse_proppatch(
-            body_bytes.reader(),
-        )
-        .map_err(|e| AppError::bad_request(format!("Failed to parse PROPPATCH: {}", e)))?;
+    let ops = crate::application::adapters::webdav_adapter::WebDavAdapter::parse_proppatch(
+        body_bytes.reader(),
+    )
+    .map_err(|e| AppError::bad_request(format!("Failed to parse PROPPATCH: {}", e)))?;
 
     let effective_path = strip_username_prefix(path);
     let address_book_id = effective_path.split('/').next().unwrap_or(effective_path);
@@ -754,12 +922,14 @@ async fn handle_proppatch(
         user_id: user.id.to_string(),
     };
 
-    for prop in &props_to_set {
-        match prop.name.name.as_str() {
-            "displayname" => update.name = Some(prop.value.clone().unwrap_or_default()),
-            "addressbook-description" => update.description = prop.value.clone(),
-            "calendar-color" | "addressbook-color" => update.color = prop.value.clone(),
-            _ => {}
+    for op in &ops {
+        if let crate::application::adapters::webdav_adapter::PropPatchOp::Set(prop) = op {
+            match prop.name.name.as_str() {
+                "displayname" => update.name = Some(prop.value.clone().unwrap_or_default()),
+                "addressbook-description" => update.description = prop.value.clone(),
+                "calendar-color" | "addressbook-color" => update.color = prop.value.clone(),
+                _ => {}
+            }
         }
     }
 
@@ -767,17 +937,19 @@ async fn handle_proppatch(
         addressbook_service
             .update_address_book(address_book_id, update)
             .await
-            .map_err(|e| {
-                AppError::internal_error(format!("Failed to update address book: {}", e))
-            })?;
+            .map_err(AppError::from)?;
     }
 
     let mut results = Vec::new();
-    for prop in &props_to_set {
-        results.push((&prop.name, true));
-    }
-    for prop in &props_to_remove {
-        results.push((prop, true));
+    for op in &ops {
+        match op {
+            crate::application::adapters::webdav_adapter::PropPatchOp::Set(prop) => {
+                results.push((&prop.name, true));
+            }
+            crate::application::adapters::webdav_adapter::PropPatchOp::Remove(name) => {
+                results.push((name, true));
+            }
+        }
     }
 
     let href = format!("/carddav/{}", path);

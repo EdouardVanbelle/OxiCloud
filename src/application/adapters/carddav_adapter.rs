@@ -17,6 +17,21 @@ use crate::application::adapters::webdav_adapter::{
 use crate::application::dtos::address_book_dto::AddressBookDto;
 use crate::application::dtos::contact_dto::ContactDto;
 
+/// Emit a WebDAV `getetag` value as `"…"` with the surrounding quotes written
+/// as borrowed pre-escaped `&quot;` text events around the escaped etag body.
+///
+/// Byte-identical to escaping the whole `"{etag}"` String — `quick_xml` escapes
+/// a literal `"` to `&quot;`, so the one-String form re-allocated an owned `Cow`
+/// on write — but with **0 heap allocs per contact** (the NextCloud
+/// `write_etag_element` pattern, benches/ROUND20.md §C1). Called per contact on
+/// the CardDAV multiget/PROPFIND emit path.
+fn write_quoted_etag<W: Write>(xml_writer: &mut Writer<W>, etag: &str) -> Result<()> {
+    xml_writer.write_event(Event::Text(BytesText::from_escaped("&quot;")))?;
+    xml_writer.write_event(Event::Text(BytesText::new(etag)))?;
+    xml_writer.write_event(Event::Text(BytesText::from_escaped("&quot;")))?;
+    Ok(())
+}
+
 /// Render a requested property as a namespaced response element name, mapping
 /// the known namespaces to their response prefixes (`D:` for DAV, `CR:` for
 /// CardDAV). Used for the catch-all arms of the requested-property writers so
@@ -278,6 +293,27 @@ impl CardDavAdapter {
     ) -> Result<()> {
         let mut xml_writer = Writer::new(writer);
 
+        Self::write_collection_head(&mut xml_writer, address_book, request, base_href)?;
+
+        // Write contacts if depth > 0
+        if depth != "0" {
+            Self::write_collection_contact_page(&mut xml_writer, contacts, base_href)?;
+        }
+
+        Self::write_carddav_multistatus_end(&mut xml_writer)
+    }
+
+    /// Multistatus opening (DAV + CardDAV + CalendarServer namespaces)
+    /// plus the address book's own `D:response` — the head of a depth-1
+    /// collection PROPFIND. Streaming emitters call this once, then
+    /// [`Self::write_collection_contact_page`] per cursor page, then
+    /// [`Self::write_carddav_multistatus_end`].
+    pub fn write_collection_head<W: Write>(
+        xml_writer: &mut Writer<W>,
+        address_book: &AddressBookDto,
+        request: &PropFindRequest,
+        base_href: &str,
+    ) -> Result<()> {
         xml_writer.write_event(Event::Start(
             BytesStart::new("D:multistatus").with_attributes([
                 ("xmlns:D", "DAV:"),
@@ -285,19 +321,25 @@ impl CardDavAdapter {
                 ("xmlns:CS", "http://calendarserver.org/ns/"),
             ]),
         ))?;
+        Self::write_addressbook_response(xml_writer, address_book, request, base_href)
+    }
 
-        // Write the address book itself
-        Self::write_addressbook_response(&mut xml_writer, address_book, request, base_href)?;
-
-        // Write contacts if depth > 0
-        if depth != "0" {
-            for contact in contacts {
-                let contact_href = format!("{}{}.vcf", base_href, contact.uid);
-                Self::write_contact_response(&mut xml_writer, contact, &[], &contact_href)?;
-            }
+    /// One depth-1 collection page of contact entries (standard props;
+    /// href buffer reused across the page).
+    pub fn write_collection_contact_page<W: Write>(
+        xml_writer: &mut Writer<W>,
+        contacts: &[ContactDto],
+        base_href: &str,
+    ) -> Result<()> {
+        let mut href = String::with_capacity(base_href.len() + 48);
+        for contact in contacts {
+            href.clear();
+            let _ = std::fmt::Write::write_fmt(
+                &mut href,
+                format_args!("{}{}.vcf", base_href, contact.uid),
+            );
+            Self::write_contact_response(xml_writer, contact, &[], &href)?;
         }
-
-        xml_writer.write_event(Event::End(BytesEnd::new("D:multistatus")))?;
         Ok(())
     }
 
@@ -359,7 +401,7 @@ impl CardDavAdapter {
 
         // getetag
         xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
-        xml_writer.write_event(Event::Text(BytesText::new(&format!("\"{}\"", book.id))))?;
+        write_quoted_etag(xml_writer, &book.id)?;
         xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
 
         // getcontenttype
@@ -441,8 +483,7 @@ impl CardDavAdapter {
                 }
                 ("DAV:", "getetag") => {
                     xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
-                    xml_writer
-                        .write_event(Event::Text(BytesText::new(&format!("\"{}\"", book.id))))?;
+                    write_quoted_etag(xml_writer, &book.id)?;
                     xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
                 }
                 ("DAV:", "getcontenttype") => {
@@ -648,45 +689,63 @@ impl CardDavAdapter {
     }
 
     /// Generate response for contacts (for REPORT)
-    pub fn generate_contacts_response<W: Write>(
-        writer: W,
-        contacts: &[ContactDto],
-        vcards: &[(String, String)], // (uid, vcard_data)
-        report: &CardDavReportType,
-        base_href: &str,
-    ) -> Result<()> {
-        let mut xml_writer = Writer::new(writer);
-
+    /// REPORT `<D:multistatus>` opening tag (DAV + CardDAV namespaces).
+    /// Streaming emitters call this once, then
+    /// [`Self::write_contacts_report_page`] per cursor page, then
+    /// [`Self::write_carddav_multistatus_end`].
+    pub fn write_report_multistatus_start<W: Write>(xml_writer: &mut Writer<W>) -> Result<()> {
         xml_writer.write_event(Event::Start(
             BytesStart::new("D:multistatus").with_attributes([
                 ("xmlns:D", "DAV:"),
                 ("xmlns:CR", "urn:ietf:params:xml:ns:carddav"),
             ]),
         ))?;
+        Ok(())
+    }
 
-        let props = match report {
-            CardDavReportType::AddressbookQuery { props } => props.clone(),
-            CardDavReportType::AddressbookMultiget { props, .. } => props.clone(),
-            CardDavReportType::SyncCollection { props, .. } => props.clone(),
-        };
-
-        for contact in contacts {
-            let href = format!("{}{}.vcf", base_href, contact.uid);
-            let vcard = vcards
-                .iter()
-                .find(|(uid, _)| *uid == contact.uid)
-                .map(|(_, data)| data.as_str())
-                .unwrap_or("");
-            Self::write_contact_response(&mut xml_writer, contact, &props, &href)?;
-            // If address-data is requested, include vcard
-            if props.iter().any(|p| p.name == "address-data") || props.is_empty() {
-                // Already handled in write_contact_response
-            }
-            let _ = vcard; // suppress warning - used via contact_to_vcard fallback
-        }
-
+    /// Close a multistatus opened by either start writer.
+    pub fn write_carddav_multistatus_end<W: Write>(xml_writer: &mut Writer<W>) -> Result<()> {
         xml_writer.write_event(Event::End(BytesEnd::new("D:multistatus")))?;
         Ok(())
+    }
+
+    /// One REPORT page of contact responses. Props are borrowed from
+    /// the request; one href buffer is reused across the page.
+    pub fn write_contacts_report_page<W: Write>(
+        xml_writer: &mut Writer<W>,
+        contacts: &[ContactDto],
+        report: &CardDavReportType,
+        base_href: &str,
+    ) -> Result<()> {
+        let props = match report {
+            CardDavReportType::AddressbookQuery { props } => props,
+            CardDavReportType::AddressbookMultiget { props, .. } => props,
+            CardDavReportType::SyncCollection { props, .. } => props,
+        };
+        let mut href = String::with_capacity(base_href.len() + 48);
+        for contact in contacts {
+            href.clear();
+            let _ = std::fmt::Write::write_fmt(
+                &mut href,
+                format_args!("{}{}.vcf", base_href, contact.uid),
+            );
+            // `write_contact_response` generates the vCard on demand when (and
+            // only when) address-data is actually requested.
+            Self::write_contact_response(xml_writer, contact, props, &href)?;
+        }
+        Ok(())
+    }
+
+    pub fn generate_contacts_response<W: Write>(
+        writer: W,
+        contacts: &[ContactDto],
+        report: &CardDavReportType,
+        base_href: &str,
+    ) -> Result<()> {
+        let mut xml_writer = Writer::new(writer);
+        Self::write_report_multistatus_start(&mut xml_writer)?;
+        Self::write_contacts_report_page(&mut xml_writer, contacts, report, base_href)?;
+        Self::write_carddav_multistatus_end(&mut xml_writer)
     }
 
     /// Write a single contact response element
@@ -710,10 +769,7 @@ impl CardDavAdapter {
             xml_writer.write_event(Event::Empty(BytesStart::new("D:resourcetype")))?;
 
             xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
-            xml_writer.write_event(Event::Text(BytesText::new(&format!(
-                "\"{}\"",
-                contact.etag
-            ))))?;
+            write_quoted_etag(xml_writer, &contact.etag)?;
             xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
 
             xml_writer.write_event(Event::Start(BytesStart::new("D:getcontenttype")))?;
@@ -733,10 +789,7 @@ impl CardDavAdapter {
                     }
                     ("DAV:", "getetag") => {
                         xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
-                        xml_writer.write_event(Event::Text(BytesText::new(&format!(
-                            "\"{}\"",
-                            contact.etag
-                        ))))?;
+                        write_quoted_etag(xml_writer, &contact.etag)?;
                         xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
                     }
                     ("DAV:", "getcontenttype") => {
@@ -750,9 +803,24 @@ impl CardDavAdapter {
                     ("DAV:", "getlastmodified") => {
                         xml_writer
                             .write_event(Event::Start(BytesStart::new("D:getlastmodified")))?;
-                        xml_writer.write_event(Event::Text(BytesText::new(
-                            &contact.updated_at.to_rfc2822(),
-                        )))?;
+                        // Stack render (ROUND10 §13, byte-identical to
+                        // chrono) with the chrono fallback for
+                        // out-of-range timestamps — per-contact on the
+                        // multiget/PROPFIND path.
+                        let mut lm_buf = [0u8; 31];
+                        match crate::common::fmt::rfc2822_utc(
+                            &mut lm_buf,
+                            contact.updated_at.timestamp(),
+                        ) {
+                            Some(s) => {
+                                xml_writer.write_event(Event::Text(BytesText::new(s)))?;
+                            }
+                            None => {
+                                xml_writer.write_event(Event::Text(BytesText::new(
+                                    &contact.updated_at.to_rfc2822(),
+                                )))?;
+                            }
+                        }
                         xml_writer.write_event(Event::End(BytesEnd::new("D:getlastmodified")))?;
                     }
                     ("urn:ietf:params:xml:ns:carddav", "address-data") => {
@@ -868,92 +936,133 @@ impl CardDavAdapter {
 
 /// Convert a ContactDto to vCard 3.0 format
 pub fn contact_to_vcard(contact: &ContactDto) -> String {
+    // `write!` into a String is infallible; `let _ =` discards the Ok(()).
+    // Formatting straight into the buffer avoids one temporary String per
+    // vCard line compared to `push_str(&format!(…))`.
+    use std::fmt::Write as _;
+
     let mut vcard = String::from("BEGIN:VCARD\r\nVERSION:3.0\r\n");
 
-    vcard.push_str(&format!("UID:{}\r\n", contact.uid));
+    let _ = write!(vcard, "UID:{}\r\n", contact.uid);
 
     if let (Some(last), Some(first)) = (&contact.last_name, &contact.first_name) {
-        vcard.push_str(&format!("N:{};{};;;\r\n", last, first));
+        let _ = write!(vcard, "N:{};{};;;\r\n", last, first);
     } else if let Some(last) = &contact.last_name {
-        vcard.push_str(&format!("N:{};;;;\r\n", last));
+        let _ = write!(vcard, "N:{};;;;\r\n", last);
     } else if let Some(first) = &contact.first_name {
-        vcard.push_str(&format!("N:;{};;;\r\n", first));
+        let _ = write!(vcard, "N:;{};;;\r\n", first);
     }
 
     if let Some(fn_name) = &contact.full_name {
-        vcard.push_str(&format!("FN:{}\r\n", fn_name));
+        let _ = write!(vcard, "FN:{}\r\n", fn_name);
     } else {
-        // FN is mandatory in vCard 3.0
+        // FN is mandatory in vCard 3.0. Write the borrowed trim slice directly
+        // instead of copying it into a second owned String (benches/ROUND19.md §V1).
         let fn_name = format!(
             "{} {}",
             contact.first_name.as_deref().unwrap_or(""),
             contact.last_name.as_deref().unwrap_or(""),
-        )
-        .trim()
-        .to_string();
-        if !fn_name.is_empty() {
-            vcard.push_str(&format!("FN:{}\r\n", fn_name));
+        );
+        let trimmed = fn_name.trim();
+        if !trimmed.is_empty() {
+            let _ = write!(vcard, "FN:{}\r\n", trimmed);
         } else {
             vcard.push_str("FN:Unknown\r\n");
         }
     }
 
     if let Some(nickname) = &contact.nickname {
-        vcard.push_str(&format!("NICKNAME:{}\r\n", nickname));
+        let _ = write!(vcard, "NICKNAME:{}\r\n", nickname);
     }
 
     for email in &contact.email {
-        vcard.push_str(&format!(
-            "EMAIL;TYPE={}:{}\r\n",
-            email.r#type.to_uppercase(),
-            email.email
-        ));
+        vcard.push_str("EMAIL;TYPE=");
+        crate::common::fmt::push_upper(&mut vcard, &email.r#type);
+        vcard.push(':');
+        vcard.push_str(&email.email);
+        vcard.push_str("\r\n");
     }
 
     for phone in &contact.phone {
-        vcard.push_str(&format!(
-            "TEL;TYPE={}:{}\r\n",
-            phone.r#type.to_uppercase(),
-            phone.number
-        ));
+        vcard.push_str("TEL;TYPE=");
+        crate::common::fmt::push_upper(&mut vcard, &phone.r#type);
+        vcard.push(':');
+        vcard.push_str(&phone.number);
+        vcard.push_str("\r\n");
     }
 
     for addr in &contact.address {
-        let adr = format!(
-            ";;{};{};{};{};{}",
+        vcard.push_str("ADR;TYPE=");
+        crate::common::fmt::push_upper(&mut vcard, &addr.r#type);
+        let _ = write!(
+            vcard,
+            ":;;{};{};{};{};{}\r\n",
             addr.street.as_deref().unwrap_or(""),
             addr.city.as_deref().unwrap_or(""),
             addr.state.as_deref().unwrap_or(""),
             addr.postal_code.as_deref().unwrap_or(""),
             addr.country.as_deref().unwrap_or(""),
         );
-        vcard.push_str(&format!(
-            "ADR;TYPE={}:{}\r\n",
-            addr.r#type.to_uppercase(),
-            adr
-        ));
     }
 
     if let Some(org) = &contact.organization {
-        vcard.push_str(&format!("ORG:{}\r\n", org));
+        let _ = write!(vcard, "ORG:{}\r\n", org);
     }
     if let Some(title) = &contact.title {
-        vcard.push_str(&format!("TITLE:{}\r\n", title));
+        let _ = write!(vcard, "TITLE:{}\r\n", title);
     }
     if let Some(notes) = &contact.notes {
-        vcard.push_str(&format!("NOTE:{}\r\n", notes.replace('\n', "\\n")));
+        // Only a multi-line note needs the escaping copy; a note with no newline
+        // writes its borrowed slice directly (benches/ROUND19.md §V1).
+        if notes.contains('\n') {
+            let _ = write!(vcard, "NOTE:{}\r\n", notes.replace('\n', "\\n"));
+        } else {
+            vcard.push_str("NOTE:");
+            vcard.push_str(notes);
+            vcard.push_str("\r\n");
+        }
     }
     if let Some(bday) = &contact.birthday {
-        vcard.push_str(&format!("BDAY:{}\r\n", bday.format("%Y-%m-%d")));
+        // Stack render (byte-identical to chrono's `%Y-%m-%d`) with the chrono
+        // fallback for out-of-range years — drops the strftime interpreter + a
+        // heap alloc per contact-with-birthday (fmt::compact_date is the
+        // date-only companion to the §V2 REV renderer above).
+        use chrono::Datelike as _;
+        let mut bday_buf = [0u8; 10];
+        match crate::common::fmt::compact_date(&mut bday_buf, bday.year(), bday.month(), bday.day())
+        {
+            Some(s) => {
+                vcard.push_str("BDAY:");
+                vcard.push_str(s);
+                vcard.push_str("\r\n");
+            }
+            None => {
+                let _ = write!(vcard, "BDAY:{}\r\n", bday.format("%Y-%m-%d"));
+            }
+        }
     }
     if let Some(photo) = &contact.photo_url {
-        vcard.push_str(&format!("PHOTO;VALUE=URI:{}\r\n", photo));
+        let _ = write!(vcard, "PHOTO;VALUE=URI:{}\r\n", photo);
     }
 
-    vcard.push_str(&format!(
-        "REV:{}\r\n",
-        contact.updated_at.format("%Y%m%dT%H%M%SZ")
-    ));
+    // REV via the stack renderer — chrono's `.format("%Y%m%dT%H%M%SZ")` runs the
+    // strftime interpreter and allocates per contact (benches/ROUND19.md §V2:
+    // 11.8× faster, 3→0 allocs). Out-of-range falls back to chrono.
+    let mut rev_buf = [0u8; 16];
+    match crate::common::fmt::compact_ical_utc(&mut rev_buf, contact.updated_at.timestamp()) {
+        Some(rev) => {
+            vcard.push_str("REV:");
+            vcard.push_str(rev);
+            vcard.push_str("\r\n");
+        }
+        None => {
+            let _ = write!(
+                vcard,
+                "REV:{}\r\n",
+                contact.updated_at.format("%Y%m%dT%H%M%SZ")
+            );
+        }
+    }
     vcard.push_str("END:VCARD\r\n");
 
     vcard

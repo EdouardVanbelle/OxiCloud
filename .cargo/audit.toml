@@ -26,4 +26,17 @@ ignore = [
     # instant unmaintained — transitive via azure_core 0.21.0 (latest available).
     # No direct security impact; no upgrade path exists.
     "RUSTSEC-2024-0384",
+
+    # quick-xml 0.31.0 — transitive via azure_core 0.21.0 (unofficial SDK,
+    # now archived). Our direct dep is already on 0.41.0; the 0.31 copy is
+    # only reachable through the azure_storage_blobs chain, which parses
+    # XML responses received from Azure Storage over TLS. Neither CVE is
+    # exploitable without attacker-controlled XML, so the vector requires
+    # MitM of the TLS channel to Azure (or a compromised storage
+    # endpoint). Real fix is migrating to the official azure_core 1.0 /
+    # azure_storage_blob 1.0 SDK — tracked separately.
+    #   RUSTSEC-2026-0195: unbounded ns-declaration allocation → mem-DoS
+    #   RUSTSEC-2026-0194: quadratic dup-attribute check → CPU-DoS
+    "RUSTSEC-2026-0195",
+    "RUSTSEC-2026-0194",
 ]

@@ -1,6 +1,5 @@
 use bytes::Bytes;
 use futures::Stream;
-use serde_json::Value;
 use std::path::PathBuf;
 use std::pin::Pin;
 use uuid::Uuid;
@@ -31,39 +30,8 @@ pub trait FileReadPort: Send + Sync + 'static {
 
     async fn get_file_or_trashed(&self, id: &str) -> Result<File, DomainError>;
 
-    /// Gets a file by its ID, scoped to a specific owner.
-    ///
-    /// Returns `NotFound` if the file does not exist **or** belongs to a
-    /// different user.  This is the primary IDOR-safe accessor — handlers
-    /// serving end-user requests should always prefer this over `get_file`.
-    async fn get_file_for_owner(&self, id: &str, owner_id: Uuid) -> Result<File, DomainError>;
-
-    /// Verifies that the file identified by `id` belongs to `owner_id`.
-    ///
-    /// Returns `Ok(())` on success or `NotFound` when the file does not
-    /// exist or belongs to another user.
-    async fn verify_file_owner(&self, id: &str, owner_id: Uuid) -> Result<(), DomainError> {
-        self.get_file_for_owner(id, owner_id).await.map(|_| ())
-    }
-
     /// Lists files in a folder.
     async fn list_files(&self, folder_id: Option<&str>) -> Result<Vec<File>, DomainError>;
-
-    /// Lists files in a folder scoped to a specific owner (SQL-level).
-    ///
-    /// Default falls back to `list_files` + in-memory filter.
-    /// Repositories should override with a direct `AND user_id = $N` query.
-    async fn list_files_for_owner(
-        &self,
-        folder_id: Option<&str>,
-        owner_id: Uuid,
-    ) -> Result<Vec<File>, DomainError> {
-        let all = self.list_files(folder_id).await?;
-        Ok(all
-            .into_iter()
-            .filter(|f| f.owner_id() == Some(owner_id))
-            .collect())
-    }
 
     /// Gets content as a stream (ideal for large files).
     async fn get_file_stream(
@@ -139,38 +107,29 @@ pub trait FileReadPort: Send + Sync + 'static {
         Ok(None)
     }
 
-    /// Lists files in a folder with LIMIT/OFFSET pagination.
+    /// Lists files in a folder in name order, keyset-paginated.
     ///
     /// Used by streaming WebDAV PROPFIND to avoid loading all files at once.
+    /// `after_name` is the last name of the previous page (`None` = first
+    /// page); names are unique within a folder (unique index on
+    /// `(drive_id, folder_id, name)`), so `name > after_name` is a total,
+    /// stable cursor. Unlike LIMIT/OFFSET, every page is O(page) — the old
+    /// offset shape re-scanned and re-sorted the whole folder per page
+    /// (benches/PROPFIND-PAGING.md).
+    ///
     /// Default: falls back to `list_files` (loads all, then slices in memory).
     async fn list_files_batch(
         &self,
         folder_id: Option<&str>,
-        offset: i64,
+        after_name: Option<&str>,
         limit: i64,
     ) -> Result<Vec<File>, DomainError> {
-        let all = self.list_files(folder_id).await?;
-        let start = (offset as usize).min(all.len());
-        let end = (start + limit as usize).min(all.len());
-        Ok(all.into_iter().skip(start).take(end - start).collect())
-    }
-
-    /// Like [`list_files_batch`], but only returns files owned by `owner_id`.
-    ///
-    /// Used by streaming WebDAV PROPFIND to list files scoped to the
-    /// authenticated user, preventing cross-user data leakage.
-    async fn list_files_batch_for_owner(
-        &self,
-        folder_id: Option<&str>,
-        owner_id: Uuid,
-        offset: i64,
-        limit: i64,
-    ) -> Result<Vec<File>, DomainError> {
-        // Default: filter in-memory (repos should override with SQL)
-        let all = self.list_files_batch(folder_id, offset, limit).await?;
+        let mut all = self.list_files(folder_id).await?;
+        all.sort_by(|a, b| a.name().cmp(b.name()));
         Ok(all
             .into_iter()
-            .filter(|f| f.owner_id() == Some(owner_id))
+            .filter(|f| after_name.is_none_or(|a| f.name() > a))
+            .take(limit as usize)
             .collect())
     }
 
@@ -195,7 +154,10 @@ pub trait FileReadPort: Send + Sync + 'static {
     /// # Arguments
     /// * `folder_id` - Optional folder ID to scope the search (for recursive search, pass None)
     /// * `criteria` - Search criteria including name_contains, file_types, date ranges, size ranges
-    /// * `user_id` - User ID for ownership filtering
+    /// * `caller_id` - Caller user id — scoped by drive-membership grants
+    ///   (`role_grants` on `resource_type='drive'`) rather than the legacy
+    ///   `files.user_id` column. Group memberships (direct + transitive)
+    ///   are expanded inline via `storage.caller_group_ids($caller)`.
     ///
     /// # Returns
     /// A tuple of (files, total_count) where files are paginated and filtered
@@ -203,50 +165,50 @@ pub trait FileReadPort: Send + Sync + 'static {
         &self,
         folder_id: Option<&str>,
         criteria: &SearchCriteriaDto,
-        user_id: Uuid,
+        caller_id: Uuid,
     ) -> Result<(Vec<File>, usize), DomainError>;
 
     /// Search files recursively in a folder subtree using ltree.
     ///
     /// When `root_folder_id` is Some, uses ltree descendant queries to find
-    /// all files within the subtree rooted at that folder. When None, searches
-    /// all files for the user. This replaces the O(N) recursive spawn-per-folder
-    /// approach with O(1) SQL queries.
+    /// all files within the subtree rooted at that folder. When None,
+    /// delegates to `search_files_paginated`.
+    ///
+    /// Post-PR-B: scoped by drive-membership grants (same semantics as
+    /// `search_files_paginated`), not by `files.user_id`.
     ///
     /// Returns a tuple of (matching files, total count for pagination).
     async fn search_files_in_subtree(
         &self,
         root_folder_id: Option<&str>,
         criteria: &SearchCriteriaDto,
-        user_id: Uuid,
+        caller_id: Uuid,
     ) -> Result<(Vec<File>, usize), DomainError> {
         // Default: delegate to paginated search (non-recursive fallback)
-        self.search_files_paginated(root_folder_id, criteria, user_id)
+        self.search_files_paginated(root_folder_id, criteria, caller_id)
             .await
     }
-
-    /// Count files matching the search criteria (without loading them).
-    ///
-    /// Used for pagination metadata without fetching the actual files.
-    async fn count_files(
-        &self,
-        folder_id: Option<&str>,
-        criteria: &SearchCriteriaDto,
-        user_id: Uuid,
-    ) -> Result<usize, DomainError>;
 
     /// Return up to `limit` files whose name contains `query` (case-insensitive).
     ///
     /// Results are ordered by relevance (exact > starts-with > contains) so the
     /// caller can use them directly for autocomplete suggestions.
     ///
-    /// The default implementation falls back to `list_files` + in-memory filter
-    /// so that stubs and mocks compile without changes.
+    /// `caller_id` scopes results to files whose owning drive the caller can
+    /// Read (direct or group-mediated `role_grants`). Without it the endpoint
+    /// leaks names + paths across every tenant on the instance — closed as
+    /// AuthZ audit finding #1 (2026-07-12).
+    ///
+    /// The default implementation falls back to `list_files` + in-memory
+    /// filter so that stubs and mocks compile without changes. Stub-mode
+    /// callers already operate against a single tenant's data, so ignoring
+    /// `caller_id` here is safe; the PG impl enforces the real scope.
     async fn suggest_files_by_name(
         &self,
         folder_id: Option<&str>,
         query: &str,
         limit: usize,
+        _caller_id: Uuid,
     ) -> Result<Vec<File>, DomainError> {
         let all = self.list_files(folder_id).await?;
         let q = query.to_lowercase();
@@ -337,6 +299,14 @@ pub trait FileWritePort: Send + Sync + 'static {
     ///
     /// `caller_id` is stamped into `updated_by` alongside the
     /// `updated_at` bump (§14 provenance).
+    ///
+    /// `expected_hash`: when `Some`, makes this a true compare-and-swap —
+    /// the write only takes effect if the row's current `blob_hash`
+    /// still equals it, checked and applied atomically under the same
+    /// row lock (no gap between check and write for a concurrent writer
+    /// to land in). A mismatch returns `ErrorKind::PreconditionFailed`
+    /// and leaves the row untouched. `None` keeps the previous
+    /// blind-overwrite behaviour (PUT/WOPI/chunked-upload finalize).
     async fn update_file_content_with_blob(
         &self,
         file_id: &str,
@@ -344,6 +314,7 @@ pub trait FileWritePort: Send + Sync + 'static {
         size: u64,
         modified_at: Option<i64>,
         caller_id: Uuid,
+        expected_hash: Option<&str>,
     ) -> Result<(String, i64), DomainError>;
 
     /// Registers file metadata WITHOUT writing content to disk (write-behind).
@@ -453,10 +424,40 @@ pub trait StorageUsagePort: Send + Sync + 'static {
 
     /// Returns (used_bytes, quota_bytes) for a user.
     async fn get_user_storage_info(&self, user_id: Uuid) -> Result<(i64, i64), DomainError>;
-}
 
-/// Generic storage service interface for calendar and contact services
-pub trait StorageUseCase: Send + Sync + 'static {
-    /// Handle a request with the specified action and parameters
-    async fn handle_request(&self, action: &str, params: Value) -> Result<Value, DomainError>;
+    /// Incrementally adjust one drive's cached `storage.drives.used_bytes`
+    /// by `delta` bytes — O(1), the per-upload counterpart to the
+    /// O(N) full recompute below. Mirrors `add_user_storage_usage_delta`
+    /// in shape: single statement, `GREATEST(0, …)` clamp so a late or
+    /// duplicate adjustment can never drive the counter negative.
+    /// Deletes/trash do not decrement here (mirroring user-quota
+    /// design); the periodic reconciliation sweep is the correctness
+    /// backstop.
+    async fn add_drive_storage_usage_delta(
+        &self,
+        drive_id: Uuid,
+        delta: i64,
+    ) -> Result<(), DomainError>;
+
+    /// Reconcile every drive's cached `used_bytes` against the actual
+    /// sum of its non-trashed files in one set-based UPDATE. Same
+    /// shape as `update_all_users_storage_usage`: `LEFT JOIN` over a
+    /// `GROUP BY drive_id` aggregate, with an `IS DISTINCT FROM`
+    /// guard so idle drives don't churn dead tuples. Runs from the
+    /// same reconciliation ticker.
+    async fn update_all_drives_storage_usage(&self) -> Result<(), DomainError>;
+
+    /// Pre-upload quota check on a single drive.
+    ///
+    /// Returns `Ok(())` when `used_bytes + additional_bytes` fits under
+    /// `quota_bytes`, or `Err(QuotaExceeded)` otherwise.
+    /// `quota_bytes IS NULL` short-circuits to `Ok(())` — unlimited
+    /// drive. Single read-only `SELECT` on `storage.drives`; the
+    /// check/write window is a soft cap by design (same semantics as
+    /// the user-quota path), bounded by the sweep interval.
+    async fn check_drive_quota(
+        &self,
+        drive_id: Uuid,
+        additional_bytes: u64,
+    ) -> Result<(), DomainError>;
 }

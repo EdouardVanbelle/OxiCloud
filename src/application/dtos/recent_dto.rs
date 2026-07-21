@@ -4,9 +4,7 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use super::cursor::{CursorListResponse, CursorQuery, PageCursor};
-use super::display_helpers::{
-    category_for, format_file_size, icon_class_for, icon_special_class_for,
-};
+use super::display_helpers::{classify_display, format_file_size};
 use super::grant_dto::{ResourceContentDto, ResourceTypeDto};
 use crate::domain::services::authorization::ResourceKind;
 
@@ -80,9 +78,10 @@ impl RecentItemDto {
                 .item_mime_type
                 .as_deref()
                 .unwrap_or("application/octet-stream");
-            self.icon_class = icon_class_for(name, mime).to_string();
-            self.icon_special_class = icon_special_class_for(name, mime).to_string();
-            self.category = category_for(name, mime).to_string();
+            let classes = classify_display(name, mime);
+            self.icon_class = classes.icon_class.to_string();
+            self.icon_special_class = classes.icon_special_class.to_string();
+            self.category = classes.category.to_string();
             self.size_formatted = format_file_size(self.item_size.unwrap_or(0) as u64);
         }
         self
@@ -104,11 +103,25 @@ pub struct RecentResourceRow {
     pub size: i64,
     pub resource_created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
-    pub owner_id: Uuid,
+    /// Drive that owns this row. Surfaced on the recent listing
+    /// so a UI can tell when a recently-accessed item lives in a
+    /// different drive than the user's home (post-D6 cross-drive
+    /// moves + copies make this reachable).
+    pub drive_id: Uuid,
     /// Raw BLAKE3 content hash. `Some(_)` for file rows, `None` for
     /// folder rows. Feeds `File::compute_etag` so this listing's
     /// `etag` matches GET/HEAD/PROPFIND for the same file.
     pub blob_hash: Option<String>,
+    /// §14 provenance — who created the row. `None` when the creator
+    /// was deleted (FK `ON DELETE SET NULL`). Powers the owner column
+    /// on the `/recent` UI (aligned with `/files` and `/favorites`
+    /// for cross-surface consistency, rather than the finer-grained
+    /// but noisier "who touched this last" signal).
+    pub created_by: Option<Uuid>,
+    /// §14 provenance — who last touched the row. Not currently
+    /// consumed by the UI but surfaced for API parity with the other
+    /// listing endpoints.
+    pub updated_by: Option<Uuid>,
     /// `true` when `owner_id == requesting user_id`.
     pub is_owner: bool,
     pub accessed_at: DateTime<Utc>,

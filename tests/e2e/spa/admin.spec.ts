@@ -108,9 +108,14 @@ test('create and delete a user', async ({ page }) => {
   const uname = uniqUser();
   const row = await createUserRow(page, uname);
 
-  // Delete — admin uses its own confirm modal (admin-confirm-ok-btn).
+  // Delete now goes through a dedicated typed-email confirmation modal
+  // (destructive-action guard — see `.btn--danger` gate in +page.svelte).
+  // The Delete button stays disabled until the admin re-types the
+  // target's email.
   await row.locator('[data-testid^="admin-user-delete-"]').first().click();
-  await page.getByTestId('admin-confirm-ok-btn').click();
+  await expect(page.getByTestId('admin-delete-user-form')).toBeVisible({ timeout: 15_000 });
+  await page.getByTestId('admin-delete-user-email-input').fill(`${uname}@example.test`);
+  await page.getByTestId('admin-delete-user-confirm-btn').click();
   await expect(page.locator('tr').filter({ hasText: uname })).toHaveCount(0, { timeout: 15_000 });
 });
 
@@ -144,10 +149,15 @@ test('save a user quota and deactivate the user', async ({ page }) => {
   const uname = uniqUser();
   const row = await createUserRow(page, uname);
 
-  await row.locator('[data-testid^="admin-user-quota-"]').first().click();
-  await expect(page.getByTestId('admin-quota-form')).toBeVisible({ timeout: 15_000 });
-  await page.getByTestId('admin-quota-save-btn').click();
-  await expect(page.getByTestId('admin-quota-form')).toHaveCount(0, { timeout: 15_000 });
+  // The quota row-button and the QuotaEditor modal now share the
+  // `admin-user-quota-` prefix — the button is `admin-user-quota-<id>`
+  // and the modal's form / save button are `admin-user-quota-form` /
+  // `admin-user-quota-save-btn`. Scope the row lookup to the button
+  // shape (trailing UUID) so the modal's siblings don't match first.
+  await row.locator('button[data-testid^="admin-user-quota-"]').first().click();
+  await expect(page.getByTestId('admin-user-quota-form')).toBeVisible({ timeout: 15_000 });
+  await page.getByTestId('admin-user-quota-save-btn').click();
+  await expect(page.getByTestId('admin-user-quota-form')).toHaveCount(0, { timeout: 15_000 });
 
   // Deactivate (admin's own confirm modal).
   await row.locator('[data-testid^="admin-user-toggle-active-"]').first().click();

@@ -19,6 +19,8 @@ export interface SearchOptions {
 	limit?: number;
 	offset?: number;
 	sortBy?: SortBy;
+	/** Abort the request when a newer search supersedes it. */
+	signal?: AbortSignal;
 }
 
 export function searchFiles(query: string, opts: SearchOptions = {}): Promise<SearchResults> {
@@ -38,7 +40,10 @@ export function searchFiles(query: string, opts: SearchOptions = {}): Promise<Se
 	params.append('limit', String(opts.limit ?? 100));
 	params.append('offset', String(opts.offset ?? 0));
 	params.append('sort_by', opts.sortBy ?? 'relevance');
-	return apiJson<SearchResults>(`/api/search?${params.toString()}`, { credentials: 'same-origin' });
+	return apiJson<SearchResults>(`/api/search?${params.toString()}`, {
+		credentials: 'same-origin',
+		signal: opts.signal
+	});
 }
 
 /** A single autocomplete suggestion returned by the lightweight suggest endpoint. */
@@ -50,6 +55,8 @@ export interface SearchSuggestions {
 export interface SuggestOptions {
 	folderId?: string;
 	limit?: number;
+	/** Abort the request when a newer keystroke supersedes it. */
+	signal?: AbortSignal;
 }
 
 /**
@@ -65,13 +72,19 @@ export function searchSuggest(
 	if (opts.folderId) params.append('folder_id', opts.folderId);
 	if (opts.limit != null) params.append('limit', String(opts.limit));
 	return apiJson<SearchSuggestions>(`/api/search/suggest?${params.toString()}`, {
-		credentials: 'same-origin'
+		credentials: 'same-origin',
+		signal: opts.signal
 	});
 }
 
-/** Clear the server-side search cache (`DELETE /api/search/cache`). */
+/**
+ * Clear the shared server-side search cache
+ * (`DELETE /api/admin/search/cache`). Admin-only — moved from
+ * `/api/search/cache` on 2026-07-17 because the underlying
+ * `invalidate_all()` touches every tenant (see AuthZ audit #14).
+ */
 export async function clearSearchCache(): Promise<void> {
-	const res = await apiFetch('/api/search/cache', {
+	const res = await apiFetch('/api/admin/search/cache', {
 		method: 'DELETE',
 		credentials: 'same-origin'
 	});

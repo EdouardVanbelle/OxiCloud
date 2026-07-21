@@ -15,8 +15,8 @@ use crate::application::ports::trash_ports::TrashUseCase;
 use crate::common::di::AppState;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::nextcloud::webdav_handler::{
-    batch_resolve_ids, extract_nc_subpath_from_dest, format_oc_id, nc_to_internal_path,
-    write_text_element,
+    batch_resolve_ids, extract_nc_subpath_from_dest, format_oc_id, nc_id_of, nc_to_internal_path,
+    write_date_element, write_etag_element, write_text_element,
 };
 
 const HEADER_DAV: HeaderName = HeaderName::from_static("dav");
@@ -27,7 +27,7 @@ const HEADER_DAV: HeaderName = HeaderName::from_static("dav");
 pub async fn handle_nc_trashbin(
     state: Arc<AppState>,
     req: Request<Body>,
-    session: crate::interfaces::nextcloud::session::NcSession,
+    session: crate::interfaces::nextcloud::session::SharedNcSession,
     subpath: String,
 ) -> Result<Response<Body>, AppError> {
     let method = req.method().clone();
@@ -81,6 +81,14 @@ async fn handle_propfind(
     session: &crate::interfaces::nextcloud::session::NcSession,
 ) -> Result<Response<Body>, AppError> {
     let user = &session.user;
+    // Chroot-scope the trashbin view: `get_trash_items(user.id)`
+    // spans every drive the caller is a member of, but NC's
+    // trashbin surface is a single-drive concept from the client's
+    // POV. Items outside the chroot are dropped from the multistatus
+    // (see `write_trashbin_multistatus` → `strip_home_prefix` →
+    // `webdav_handler::strip_chroot_prefix`) and remain reachable
+    // via REST `/api/trash/resources`.
+    let chroot = session.require_chroot()?;
     let trash_svc = state
         .trash_service
         .as_ref()
@@ -94,8 +102,16 @@ async fn handle_propfind(
     let nc = state.nextcloud.as_ref();
     let file_id_svc = nc.map(|n| &n.file_ids);
 
+    // Emit hrefs with `session.raw_username` (composite `admin~<uuid>` on
+    // non-home drives), NOT `user.username` (bare `admin`). The
+    // `NcSession` extractor cross-checks the URL `{user}` segment
+    // against `raw_username` and 403s on mismatch (see
+    // `session.rs::from_request_parts`). Emitting the bare form here
+    // would make every follow-up MOVE/DELETE from a non-home client
+    // 403 before the handler runs — the composite-credential Hurl
+    // regression caught this (B5 in `nc_multidrive_move_regression`).
     let mut buf = Vec::new();
-    write_trashbin_multistatus(&mut buf, &items, &user.username, file_id_svc)
+    write_trashbin_multistatus(&mut buf, &items, &session.raw_username, chroot, file_id_svc)
         .await
         .map_err(|e| AppError::internal_error(format!("XML generation failed: {}", e)))?;
 
@@ -131,8 +147,17 @@ async fn handle_restore(
     // with 412 — there is no `Overwrite: T` workflow for trash restore in
     // either Sabre/DAV or the NC desktop client (a live file being
     // silently replaced by an undeleted one would be a footgun).
+    // Use `session.raw_username` (composite `admin~<drive-uuid>` on
+    // non-home drives) to strip the destination prefix, NOT
+    // `user.username` (bare `admin`). NC clients send `Destination:
+    // /remote.php/dav/files/{raw_username}/…`; passing the bare
+    // username would leave the `~<uuid>/` marker glued to the leading
+    // subpath segment and turn the collision-check into a lookup at
+    // a fabricated path. See `uploads_handler::handle_assemble` for
+    // the same fix in the chunked-upload MOVE.
     if let Some(dest_header) = dest_header
-        && let Some(dest_subpath) = extract_nc_subpath_from_dest(&dest_header, &user.username)
+        && let Some(dest_subpath) =
+            extract_nc_subpath_from_dest(&dest_header, &session.raw_username)
     {
         let dest_internal = nc_to_internal_path(chroot, &dest_subpath)?;
         let folder_service = &state.applications.folder_service;
@@ -259,18 +284,23 @@ fn mime_from_name(name: &str) -> String {
         .to_string()
 }
 
-/// Strip the home-folder prefix from an original path to produce the
-/// Nextcloud-relative original location.
+/// Strip the caller's chroot prefix from an original path to produce
+/// the Nextcloud-relative original-location value.
 ///
-/// TODO(D1): replace the hardcoded "Personal/" with the caller's actual
-/// default-drive root folder name read from `drives.root_folder_id`.
-/// Correct for D0-provisioned default drives; secondary drives keep
-/// their original root name. The `_username` arg stays for now so the
-/// upcoming dynamic lookup has a way to identify the caller.
-fn strip_home_prefix<'a>(original_path: &'a str, _username: &str) -> &'a str {
-    original_path
-        .strip_prefix("Personal/")
-        .unwrap_or(original_path)
+/// Delegates to `webdav_handler::strip_chroot_prefix` — chroot-aware,
+/// multi-segment safe, and returns `None` when the item is outside
+/// the chroot (e.g. a trashed item in another drive the caller is a
+/// member of). The `_username` arg stays for signature stability
+/// with call sites that thread it; the strip itself no longer uses it.
+///
+/// See the doc on `strip_chroot_prefix` for the AuthZ caveat — this
+/// is a display helper, not an ownership check.
+fn strip_home_prefix<'a>(
+    original_path: &'a str,
+    _username: &str,
+    chroot: &crate::application::dtos::folder_dto::FolderDto,
+) -> Option<&'a str> {
+    crate::interfaces::nextcloud::webdav_handler::strip_chroot_prefix(chroot, original_path)
 }
 
 // ────────────── Trashbin PROPFIND XML Generation ──────────────
@@ -278,12 +308,19 @@ fn strip_home_prefix<'a>(original_path: &'a str, _username: &str) -> &'a str {
 use crate::application::dtos::trash_dto::TrashedItemDto;
 use crate::application::services::nextcloud_file_id_service::NextcloudFileIdService;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 /// Generate a complete Nextcloud-compatible multistatus XML response for the trashbin.
+///
+/// `chroot` scopes the response — items whose original path is outside
+/// the chroot (other drives the caller is a member of) are dropped
+/// silently. NC's trashbin surface is single-drive from the client's
+/// perspective; cross-drive items remain reachable via REST.
 async fn write_trashbin_multistatus<W: std::io::Write>(
     writer: W,
     items: &[TrashedItemDto],
     username: &str,
+    chroot: &crate::application::dtos::folder_dto::FolderDto,
     file_id_svc: Option<&Arc<NextcloudFileIdService>>,
 ) -> Result<(), String> {
     let mut xml = Writer::new(writer);
@@ -301,23 +338,38 @@ async fn write_trashbin_multistatus<W: std::io::Write>(
 
     // Pre-resolve every oc:fileid in two batch queries by object type (was one
     // INSERT round-trip per item). File and folder UUIDs are disjoint, so the
-    // two maps merge cleanly into one keyed by original_id.
-    let mut file_uuids: Vec<String> = Vec::new();
-    let mut folder_uuids: Vec<String> = Vec::new();
+    // two maps merge cleanly into one keyed by parsed original-id UUID.
+    let mut file_uuids: Vec<&str> = Vec::new();
+    let mut folder_uuids: Vec<&str> = Vec::new();
     for item in items {
         if item.item_type == "folder" {
-            folder_uuids.push(item.original_id.clone());
+            folder_uuids.push(item.original_id.as_str());
         } else {
-            file_uuids.push(item.original_id.clone());
+            file_uuids.push(item.original_id.as_str());
         }
     }
     let (mut id_map, folder_id_map) =
         batch_resolve_ids(file_id_svc, &file_uuids, &folder_uuids).await;
     id_map.extend(folder_id_map);
 
-    // Individual trashed items.
+    // Individual trashed items — skip those whose original path is
+    // outside the chroot (other-drive trash reachable via REST).
     for item in items {
-        write_trash_item_response(&mut xml, item, username, file_id_svc, &id_map)?;
+        if crate::interfaces::nextcloud::webdav_handler::strip_chroot_prefix(
+            chroot,
+            &item.original_path,
+        )
+        .is_none()
+        {
+            tracing::debug!(
+                target: "oxicloud::nc",
+                "trashbin PROPFIND: dropping cross-chroot item '{}' at '{}'",
+                item.id,
+                item.original_path,
+            );
+            continue;
+        }
+        write_trash_item_response(&mut xml, item, username, chroot, file_id_svc, &id_map)?;
     }
 
     xml.write_event(Event::End(BytesEnd::new("d:multistatus")))
@@ -363,12 +415,20 @@ fn write_trash_root_response<W: std::io::Write>(
 }
 
 /// Write a single trashed item as a `<d:response>` element.
+///
+/// Caller is expected to have already verified the item is inside
+/// `chroot` — see the guard in `write_trashbin_multistatus`. This
+/// function trusts the invariant and expects `strip_home_prefix` to
+/// return `Some(_)`; if it ever returns `None` (chroot drift between
+/// the guard and the emit, defensive-only), the original-location
+/// falls back to an empty string.
 fn write_trash_item_response<W: std::io::Write>(
     xml: &mut Writer<W>,
     item: &TrashedItemDto,
     username: &str,
+    chroot: &crate::application::dtos::folder_dto::FolderDto,
     file_id_svc: Option<&Arc<NextcloudFileIdService>>,
-    id_map: &HashMap<String, i64>,
+    id_map: &HashMap<Uuid, i64>,
 ) -> Result<(), String> {
     xml.write_event(Event::Start(BytesStart::new("d:response")))
         .map_err(|e| e.to_string())?;
@@ -385,11 +445,12 @@ fn write_trash_item_response<W: std::io::Write>(
     // d:displayname
     write_text_element(xml, "d:displayname", &item.name)?;
 
-    // d:getlastmodified
-    write_text_element(xml, "d:getlastmodified", &item.trashed_at.to_rfc2822())?;
+    // d:getlastmodified — stack-rendered (common::fmt), chrono fallback for
+    // out-of-range timestamps; byte-identical to the old `to_rfc2822()`.
+    write_date_element(xml, "d:getlastmodified", item.trashed_at.timestamp(), true)?;
 
-    // d:getetag
-    write_text_element(xml, "d:getetag", &format!("\"{}\"", item.original_id))?;
+    // d:getetag — exact-size quoted alloc instead of the format! interpreter.
+    write_etag_element(xml, "d:getetag", &item.original_id)?;
 
     // d:resourcetype
     if item.item_type == "folder" {
@@ -404,11 +465,13 @@ fn write_trash_item_response<W: std::io::Write>(
             .map_err(|e| e.to_string())?;
     }
 
-    // d:getcontenttype
-    let content_type = if item.item_type == "folder" {
-        "httpd/unix-directory".to_string()
+    // d:getcontenttype — the folder constant is borrowed (`Cow::Borrowed`, 0
+    // allocs per trashed folder row); only the file branch (mime_guess) still
+    // allocates its owned String (ROUND16 §M1 `Cow<'static, str>` pattern).
+    let content_type: std::borrow::Cow<'static, str> = if item.item_type == "folder" {
+        std::borrow::Cow::Borrowed("httpd/unix-directory")
     } else {
-        mime_from_name(&item.name)
+        std::borrow::Cow::Owned(mime_from_name(&item.name))
     };
     write_text_element(xml, "d:getcontenttype", &content_type)?;
 
@@ -416,9 +479,10 @@ fn write_trash_item_response<W: std::io::Write>(
     write_text_element(xml, "d:getcontentlength", "0")?;
 
     // oc:fileid and oc:id — resolved up front in a batch query.
-    let file_id = id_map.get(&item.original_id).copied();
+    let file_id = nc_id_of(id_map, &item.original_id);
     if let Some(id) = file_id {
-        write_text_element(xml, "oc:fileid", &id.to_string())?;
+        let mut ibuf = [0u8; 21];
+        write_text_element(xml, "oc:fileid", crate::common::fmt::i64_str(&mut ibuf, id))?;
         let oc_id = format_oc_id(id, file_id_svc);
         write_text_element(xml, "oc:id", &oc_id)?;
     }
@@ -427,15 +491,18 @@ fn write_trash_item_response<W: std::io::Write>(
     write_text_element(xml, "nc:trashbin-filename", &item.name)?;
 
     // nc:trashbin-original-location
-    let original_location = strip_home_prefix(&item.original_path, username);
+    let original_location = strip_home_prefix(&item.original_path, username, chroot).unwrap_or("");
     write_text_element(xml, "nc:trashbin-original-location", original_location)?;
 
     // nc:trashbin-deletion-time
-    write_text_element(
-        xml,
-        "nc:trashbin-deletion-time",
-        &item.trashed_at.timestamp().to_string(),
-    )?;
+    {
+        let mut ibuf = [0u8; 21];
+        write_text_element(
+            xml,
+            "nc:trashbin-deletion-time",
+            crate::common::fmt::i64_str(&mut ibuf, item.trashed_at.timestamp()),
+        )?;
+    }
 
     // oc:permissions — empty in trash
     write_text_element(xml, "oc:permissions", "")?;

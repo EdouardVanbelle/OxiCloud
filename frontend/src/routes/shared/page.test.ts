@@ -46,7 +46,8 @@ function grantItem() {
 			is_root: false,
 			modified_at: 0,
 			name: 'Docs',
-			owner_id: 'me',
+			created_by: 'me',
+			updated_by: 'me',
 			parent_id: null,
 			path: '/Docs',
 			etag: 'e'

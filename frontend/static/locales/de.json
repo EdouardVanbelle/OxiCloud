@@ -58,6 +58,8 @@
   "photos": {
     "empty_state": "Noch keine Fotos",
     "empty_hint": "Laden Sie Bilder oder Videos hoch, um sie hier zu sehen",
+    "empty_hidden": "{{n}} Foto(s) durch Ihre Einstellung ausgeblendet",
+    "empty_hidden_hint": "Deaktivieren Sie \"Verborgene Dateien ausblenden\" in Ihrem Profil, um sie anzuzeigen.",
     "items_selected": "ausgewählt",
     "view_daily": "Tag",
     "view_monthly": "Monat",
@@ -232,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "Per E-Mail benachrichtigen",
     "revoke": "Remove",
-    "role_label": "Rolle"
+    "role_label": "Rolle",
+    "col_shared_by": "Geteilt von",
+    "col_shared": "Geteilt"
   },
   "share_dialogTitle": "Link teilen",
   "share_linkLabel": "Geteilter Link:",
@@ -335,6 +339,7 @@
     "modified": "Geändert",
     "no_files": "Keine Dateien in diesem Ordner",
     "empty_hint": "Laden Sie Dateien hoch oder erstellen Sie Ordner, um loszulegen",
+    "drop_to_upload": "Dateien zum Hochladen hier ablegen",
     "loading": "Dateien werden geladen…",
     "view_grid": "Rasteransicht",
     "view_list": "Listenansicht",
@@ -365,7 +370,21 @@
     "folder": "Ordner",
     "new_folder": "Neuer Ordner",
     "share": "Teilen",
-    "view": "Anzeigen"
+    "view": "Anzeigen",
+    "empty_hidden_title": "{{n}} verborgene(s) Element(e) in diesem Ordner",
+    "empty_hidden_hint": "Dateien, deren Name mit '.' beginnt, sind ausgeblendet. Ändern Sie die Einstellung, um sie anzuzeigen.",
+    "show_hidden": "Verborgene Dateien anzeigen",
+    "upload_dotfile_hidden": "{{n}} Datei(en) hochgeladen, aber durch Ihre Einstellung ausgeblendet.",
+    "rename_dotfile_hidden": "In \"{{name}}\" umbenannt — jetzt durch Ihre Einstellung ausgeblendet.",
+    "new_folder_dotfile_hidden": "Ordner \"{{name}}\" erstellt — durch Ihre Einstellung ausgeblendet.",
+    "dotfiles_hidden_toast": "Verborgene Dateien ausgeblendet",
+    "dotfiles_shown_toast": "Verborgene Dateien angezeigt",
+    "col_modified": "Geändert",
+    "col_added": "Hinzugefügt",
+    "col_created_by": "Erstellt von",
+    "col_opened": "Geöffnet",
+    "col_path": "Speicherort",
+    "new_elements": "Neue Elemente"
   },
   "dialogs": {
     "rename_folder": "Ordner umbenennen",
@@ -451,7 +470,8 @@
       "trashed_time": "Löschzeit"
     },
     "delete": "Endgültig löschen",
-    "empty_action": "Papierkorb leeren"
+    "empty_action": "Papierkorb leeren",
+    "expires_at": "Läuft ab"
   },
   "daysRemaining": {
     "expired": "Abgelaufen",
@@ -570,7 +590,10 @@
     "accessed": "Zugegriffen",
     "empty_state": "Keine zuletzt verwendeten Dateien",
     "empty_hint": "Dateien, die Sie öffnen, werden hier angezeigt",
-    "loadMore": "Mehr laden"
+    "empty_hidden_state": "{{n}} zuletzt verwendete(s) Element(e) durch Ihre Einstellung ausgeblendet",
+    "empty_hidden_hint": "Deaktivieren Sie \"Verborgene Dateien ausblenden\" in Ihrem Profil, um sie anzuzeigen.",
+    "loadMore": "Mehr laden",
+    "remove_item": "Aus zuletzt verwendet entfernen"
   },
   "notifications": {
     "file_renamed": "Datei umbenannt",
@@ -806,7 +829,70 @@
     "title": "Admin",
     "user": "Benutzer",
     "username": "Benutzername",
-    "users": "Benutzer"
+    "users": "Benutzer",
+    "drive_manage_policies": "Richtlinien verwalten",
+    "drive_manage_policies_for": "Richtlinien — {{name}}",
+    "drive_manage_policies_help": "Richtlinien sind nur für Administratoren. Laufwerk-Eigentümer können sie nicht ändern. Jeder Schalter steuert eine Durchsetzungsregel.",
+    "drive_policy": {
+      "forbid_sharing": "Freigabe pro Ressource verbieten",
+      "forbid_sharing_help": "Blockiert Freigaben pro Datei / Ordner (umfasst auch öffentliche Links und externe Freigabe). Laufwerk-Mitgliedschaft bleibt möglich.",
+      "forbid_public_links": "Öffentliche Links verbieten",
+      "forbid_public_links_help": "Blockiert anonyme Freigabelinks für Ressourcen in diesem Laufwerk.",
+      "forbid_external_sharing": "Externe Freigabe verbieten",
+      "forbid_external_sharing_help": "Blockiert Freigaben an externe Benutzer (E-Mail-Einladungen und bereits vorhandene externe Konten).",
+      "forbid_cross_drive_move": "Verschieben zwischen Laufwerks verbieten",
+      "forbid_cross_drive_move_help": "Blockiert das Verschieben von Dateien oder Ordnern in einen anderen Laufwerk. Verhindert kein Herunterladen + erneutes Hochladen.",
+      "forbid_owner_role_change": "Eigentümerliste sperren",
+      "forbid_owner_role_change_help": "Nur Administratoren können Laufwerk-Eigentümer hinzufügen, entfernen oder zurückstufen, solange diese Regel aktiv ist.",
+      "include_in_photo_index": "In Fotos einschließen",
+      "include_in_photo_index_help": "Bilder und Videos aus diesem Laufwerk im Fotos-Zeitstrahl und auf der Orte-Karte anzeigen. Standardmäßig persönliche Laufwerks sind automatisch enthalten; für freigegebene Laufwerks einschalten, die tatsächlich Fotos enthalten (z. B. „Familienfotos\").",
+      "include_in_music_index": "In Musik einschließen",
+      "include_in_music_index_help": "Audiodateien aus diesem Laufwerk in die Musikbibliothek aufnehmen. Standardmäßig persönliche Laufwerks sind automatisch enthalten; für freigegebene Laufwerks einschalten, die tatsächlich eine Musiksammlung enthalten (z. B. „Familienmusik\", „Bandkooperation\").",
+      "implied_by_forbid_sharing": "Bereits durch „Freigabe pro Ressource verbieten\" durchgesetzt.",
+      "read_only": "Schreibgeschützt (Sperren)",
+      "read_only_help": "Das Laufwerk vollständig sperren — jede Änderung wird abgelehnt (Uploads, Bearbeitungen, Löschungen, Umbenennungen, Freigaben, Mitgliedschaftsänderungen). Lesen und Herunterladen funktionieren weiterhin. Auch die automatische Bereinigung des Papierkorbs pausiert. Für Archive, gesetzliche Sperren oder Kontoschließungen. Nur ein Administrator kann die Sperre aufheben."
+    },
+    "drives": "Laufwerke",
+    "drive_name": "Name",
+    "drive_kind": "Typ",
+    "drive_owners": "Eigentümer",
+    "drive_usage": "Nutzung",
+    "drive_created_at": "Erstellt",
+    "drive_kind_shared": "Geteilt",
+    "drive_kind_personal": "Persönlich",
+    "drive_kind_default_suffix": "(Standard)",
+    "drive_manage_owners": "Eigentümer verwalten",
+    "drive_manage_owners_for": "Eigentümer verwalten — {{name}}",
+    "drive_edit_quota": "Kontingent bearbeiten",
+    "drive_delete": "Laufwerk löschen",
+    "drive_delete_confirm": "Laufwerk „{{name}}“ löschen? Dies kann nicht rückgängig gemacht werden.",
+    "drive_deleted": "Laufwerk gelöscht.",
+    "drive_created": "Laufwerk erstellt.",
+    "drive_add_owner": "Eigentümer hinzufügen",
+    "drive_current_owners": "Aktuelle Eigentümer",
+    "drive_no_owners": "Keine Eigentümer",
+    "drive_owner": "Eigentümer",
+    "drive_owner_hint": "Wähle einen Benutzer (alleiniger Eigentümer) oder eine Gruppe (jedes Mitglied wird per Subjekt-Expansion Eigentümer).",
+    "drive_owner_picked": "Eigentümer: {{name}}",
+    "drive_owner_placeholder": "Benutzer oder Gruppe suchen…",
+    "drive_owner_remove_confirm": "Diesen Eigentümer vom Laufwerk entfernen?",
+    "drive_name_placeholder": "z. B. Engineering",
+    "drive_error_name_required": "Laufwerk-Name ist erforderlich.",
+    "drive_error_owner_required": "Wähle einen Benutzer oder eine Gruppe als Eigentümer des Laufwerks.",
+    "create_drive": "Gemeinsames Laufwerk erstellen",
+    "no_drives": "Noch keine Laufwerke.",
+    "external_user": "extern",
+    "external_user_hint": "Nur-Einladung-Konto (Magic-Link oder OCM). Kann kein Administrator sein und hat keinen Speicherumfang.",
+    "no_storage_for_external": "Externe Konten haben keinen Speicherumfang.",
+    "promote_to_internal_title": "Zu internem Benutzer heraufstufen",
+    "confirm_promote_user": "{{name}} zu einem internen Benutzer heraufstufen? Dies richtet ein persönliches Laufwerk ein und weist einen normalen Speicherumfang zu. Die Kontoidentität bleibt erhalten; der Magic-Link-Login bleibt der Zugang, solange kein Passwort gesetzt wird.",
+    "delete_user_title": "Benutzer löschen",
+    "delete_user_warning": "Du bist dabei „{{name}}\" endgültig zu löschen. Das Konto wird entfernt, alle Sitzungen widerrufen und das persönliche Laufwerk gelöscht. Dies kann nicht rückgängig gemacht werden.",
+    "delete_user_confirm_hint": "Zur Bestätigung tippe die Konto-E-Mail unten ein: {{email}}",
+    "deleting": "Löschen…",
+    "auth": "Authentifizierung",
+    "quota": "Speichernutzung",
+    "last_login": "Letzter Login"
   },
   "profile": {
     "page_title": "Profil",
@@ -859,6 +945,7 @@
     "family_name": "Nachname",
     "notify_on_share": "Mich per E-Mail benachrichtigen, wenn jemand mit mir teilt",
     "notify_on_share_hint": "Wenn deaktiviert, werden Freigaben weiterhin in deinem Konto angezeigt — du erhältst nur keine E-Mail dazu.",
+    "hide_dotfiles": "Dateien ausblenden, deren Name mit einem Punkt beginnt (.env, .git, …)",
     "save_profile": "Änderungen speichern",
     "profile_saved": "Profil aktualisiert",
     "profile_no_changes": "Keine Änderungen zu speichern.",
@@ -979,7 +1066,17 @@
     "notifyRateLimited": "Zu viele Benachrichtigungen für diesen Empfänger — versuchen Sie es später erneut.",
     "removeAccess": "Zugriff entfernen",
     "resendInvitation": "Einladungs-E-Mail erneut senden",
-    "publicLinks": "Public links"
+    "publicLinks": "Public links",
+    "filter": {
+      "button": "Arten",
+      "title": "Nach Art filtern",
+      "files": "Dateien",
+      "folders": "Ordner",
+      "drives": "Laufwerke",
+      "emptyTitle": "Keine Freigaben entsprechen dem aktuellen Filter",
+      "emptyHint": "Passen Sie den Art-Filter an oder setzen Sie ihn auf den Standard zurück (Dateien + Ordner).",
+      "reset": "Filter zurücksetzen"
+    }
   },
   "sort": {
     "asc": "aufsteigend",
@@ -1078,7 +1175,9 @@
     "rename": "Umbenennen",
     "save": "Speichern",
     "search": "Suchen",
-    "yes": "Ja"
+    "yes": "Ja",
+    "saving": "Speichern…",
+    "deleting": "Löschen…"
   },
   "device": {
     "continue": "Weiter",
@@ -1108,5 +1207,79 @@
   "view": {
     "grid": "Rasteransicht",
     "list": "Listenansicht"
+  },
+  "preferences": {
+    "save_failed": "Ihre Einstellung konnte nicht gespeichert werden. Bitte versuchen Sie es erneut."
+  },
+  "upgrade": {
+    "title": "Auf vollständiges Konto upgraden",
+    "lede": "Erhalten Sie Ihren eigenen Speicher und beginnen Sie, Dateien hochzuladen. Ihre bestehenden Freigaben bleiben unverändert.",
+    "busy": "Upgrade läuft…",
+    "submit": "Mein Konto upgraden",
+    "cancel": "Nicht jetzt — zurück zu den Freigaben",
+    "success": "Ihr Konto wurde upgegradet. Weiterleitung zu Ihren Dateien…",
+    "error": "Upgrade fehlgeschlagen.",
+    "password_required": "Ein Passwort ist erforderlich — diese Instanz bietet keine E-Mail-Link-Anmeldung.",
+    "password_too_short": "Das Passwort muss mindestens 8 Zeichen lang sein.",
+    "oidc_user": "SSO/OIDC-Konten werden von Ihrem Identitätsanbieter verwaltet. Ein Upgrade ist nicht verfügbar.",
+    "domain_not_allowed": "Diese Instanz akzeptiert keine neuen Konten von Ihrer E-Mail-Domäne. Wenden Sie sich an den Administrator, um dies zu aktivieren.",
+    "banner_aria": "Upgrade-Aufforderung",
+    "banner_title": "Erhalten Sie Ihren eigenen Speicher",
+    "banner_body": "Sie verwenden ein Gast-Konto. Upgraden Sie, um einen persönlichen Speicher zu erhalten und Dateien hochzuladen.",
+    "banner_cta": "Upgraden"
+  },
+  "drive": {
+    "read_only_banner": {
+      "title": "Dieses Laufwerk ist schreibgeschützt",
+      "title_named": "Das Laufwerk „{{name}}\" ist schreibgeschützt",
+      "body": "Uploads, Bearbeitungen, Löschungen, Umbenennungen, Freigaben und Mitgliedschaftsänderungen werden abgelehnt. Lesen und Herunterladen funktionieren weiterhin. Wende dich an einen Administrator, um die Sperre aufzuheben.",
+      "aria": "Dieses Laufwerk ist schreibgeschützt"
+    },
+    "back_to_files": "Zurück zu Dateien",
+    "danger_zone": "Gefahrenzone",
+    "delete": "Laufwerk löschen",
+    "delete_confirm": "Laufwerk „{{name}}“ löschen? Dies kann nicht rückgängig gemacht werden — das Laufwerk muss leer sein, sonst weist der Server es zurück.",
+    "delete_hint": "Ein Laufwerk zu löschen ist endgültig. Das Laufwerk muss leer sein (keine aktiven Dateien oder Ordner), bevor gelöscht werden kann.",
+    "deleted": "Laufwerk gelöscht.",
+    "field": {
+      "created": "Erstellt",
+      "default": "Standard",
+      "default_yes": "Dies ist dein Standard-Laufwerk",
+      "id": "Kennung",
+      "kind": "Typ",
+      "updated": "Zuletzt aktualisiert"
+    },
+    "info": "Laufwerksinfo",
+    "kind_personal": "Persönliches Laufwerk",
+    "kind_shared": "Gemeinsames Laufwerk",
+    "manage_members": "Mitglieder verwalten",
+    "members": "Mitglieder",
+    "members_empty": "Keine Mitglieder.",
+    "not_found_body": "Dieses Laufwerk existiert nicht oder du hast keinen Zugriff.",
+    "not_found_title": "Laufwerk nicht gefunden",
+    "policies": "Regeln",
+    "policies_help": "Regeln, die ein OxiCloud-Administrator für dieses Laufwerk gesetzt hat. Nur Administratoren können sie ändern; du siehst den aktuellen Stand.",
+    "quota": "Kontingent",
+    "rename": "Laufwerk umbenennen",
+    "role": {
+      "commenter": "Kommentator",
+      "contributor": "Mitwirkender",
+      "editor": "Bearbeiter",
+      "owner": "Eigentümer",
+      "viewer": "Betrachter"
+    },
+    "storage": "Speicher",
+    "usage": "Nutzung",
+    "used": "Belegt",
+    "members_personal_immutable": "Persönliche Laufwerke haben eine feste Einzeleigentümer-Mitgliedschaft."
+  },
+  "group": {
+    "members_empty": "Keine Mitglieder",
+    "member_count": "{{n}} Mitglieder"
+  },
+  "resource_list": {
+    "location": "Speicherort",
+    "wrong_drop_zone_msg": "Uploads funktionieren nur in Dateien — öffne den Bereich Dateien und lege die Elemente dort ab.",
+    "wrong_drop_zone_action": "Zu Dateien wechseln"
   }
 }

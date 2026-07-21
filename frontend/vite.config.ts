@@ -3,6 +3,13 @@ import { defineConfig } from 'vitest/config';
 import istanbul from 'vite-plugin-istanbul';
 import { svelteTesting } from '@testing-library/svelte/vite';
 
+// `static-dist/askama-common.css` is emitted by `scripts/emit-askama-common.mjs`,
+// wired into `package.json` as a `postbuild` step. That runs AFTER
+// `@sveltejs/adapter-static` finalises `static-dist/`, avoiding the
+// wipe-and-copy race that would eat any file a `writeBundle` hook wrote
+// during the Vite build phase. See the script header for the pipeline
+// rationale and the single-source-of-truth invariant it preserves.
+
 // Backend dev server (cargo run) — the Vite dev server proxies API/protocol
 // traffic here so cookies, CSRF, and the auth-refresh flow are same-origin.
 const BACKEND = process.env.OXICLOUD_BACKEND ?? 'http://localhost:8086';

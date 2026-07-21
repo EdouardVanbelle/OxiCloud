@@ -41,55 +41,50 @@ impl NextcloudFileIdService {
 
     /// Resolve — creating when absent — stable numeric file IDs for many
     /// UUIDs at once. Cache hits cost nothing; the misses are resolved with a
-    /// single backing query. The returned map is keyed by the caller's
-    /// original id strings; unresolvable inputs are simply absent (mirroring
-    /// the `.ok()` behaviour the callers relied on).
-    pub async fn get_or_create_file_ids(
-        &self,
-        file_ids: &[String],
-    ) -> Result<HashMap<String, i64>> {
+    /// single backing query. The returned map is keyed by parsed UUID;
+    /// unparseable/unresolvable inputs are simply absent (mirroring the
+    /// `.ok()` behaviour the callers relied on).
+    pub async fn get_or_create_file_ids(&self, file_ids: &[&str]) -> Result<HashMap<Uuid, i64>> {
         self.get_or_create_many("file", file_ids).await
     }
 
     /// Folder counterpart of [`Self::get_or_create_file_ids`].
     pub async fn get_or_create_folder_ids(
         &self,
-        folder_ids: &[String],
-    ) -> Result<HashMap<String, i64>> {
+        folder_ids: &[&str],
+    ) -> Result<HashMap<Uuid, i64>> {
         self.get_or_create_many("folder", folder_ids).await
     }
 
     async fn get_or_create_many(
         &self,
         object_type: &str,
-        raw_ids: &[String],
-    ) -> Result<HashMap<String, i64>> {
+        raw_ids: &[&str],
+    ) -> Result<HashMap<Uuid, i64>> {
         let mut result = HashMap::with_capacity(raw_ids.len());
-        // Parsed-UUID → caller's original string; also dedupes the miss list.
-        let mut pending: HashMap<Uuid, String> = HashMap::new();
+        let mut misses: Vec<Uuid> = Vec::new();
 
         for raw in raw_ids {
             let Ok(uuid) = Uuid::parse_str(raw) else {
                 continue; // Unparseable ids never had a mapping — skip silently.
             };
             if let Some(id) = self.cache.get(&uuid).await {
-                result.insert(raw.clone(), id);
+                result.insert(uuid, id);
             } else {
-                pending.entry(uuid).or_insert_with(|| raw.clone());
+                misses.push(uuid);
             }
         }
 
-        if !pending.is_empty() {
-            let misses: Vec<Uuid> = pending.keys().copied().collect();
+        if !misses.is_empty() {
+            misses.sort_unstable();
+            misses.dedup();
             let resolved = self
                 .repo()?
                 .get_or_create_many(object_type, &misses)
                 .await?;
             for (uuid, id) in resolved {
                 self.cache.insert(uuid, id).await;
-                if let Some(original) = pending.get(&uuid) {
-                    result.insert(original.clone(), id);
-                }
+                result.insert(uuid, id);
             }
         }
 
@@ -184,10 +179,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_or_create_file_ids_skips_unparseable() {
         let svc = NextcloudFileIdService::new_stub();
-        let map = svc
-            .get_or_create_file_ids(&["not-a-uuid".to_string()])
-            .await
-            .unwrap();
+        let map = svc.get_or_create_file_ids(&["not-a-uuid"]).await.unwrap();
         assert!(map.is_empty());
     }
 }

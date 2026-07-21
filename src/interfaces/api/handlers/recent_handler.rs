@@ -5,10 +5,10 @@ use axum::{
     response::IntoResponse,
 };
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::info;
 
 use crate::application::dtos::display_helpers::{
-    category_for, format_file_size, icon_class_for, icon_special_class_for,
+    classify_display, format_file_size, intern_display, intern_mime,
 };
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
@@ -56,8 +56,10 @@ pub async fn record_item_access(
             .into_response();
     }
 
+    let mut id_buf = [0u8; 36];
+    let item_id_str: &str = item_id.as_hyphenated().encode_lower(&mut id_buf);
     match recent_service
-        .record_item_access(user_id, &item_id.to_string(), &item_type)
+        .record_item_access(user_id, item_id_str, &item_type)
         .await
     {
         Ok(_) => {
@@ -70,16 +72,10 @@ pub async fn record_item_access(
             )
                 .into_response()
         }
-        Err(err) => {
-            error!("Error recording access in recents: {}", err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to record access"
-                })),
-            )
-                .into_response()
-        }
+        // Preserve DomainError→HTTP status mapping — the Round 1
+        // AuthZ fix relies on the NotFound from `authz.require`
+        // propagating as 404 (anti-enum), not being masked as 500.
+        Err(err) => AppError::from(err).into_response(),
     }
 }
 
@@ -105,8 +101,10 @@ pub async fn remove_from_recent(
 ) -> impl IntoResponse {
     let user_id = auth_user.id;
 
+    let mut id_buf = [0u8; 36];
+    let item_id_str: &str = item_id.as_hyphenated().encode_lower(&mut id_buf);
     match recent_service
-        .remove_from_recent(user_id, &item_id.to_string(), &item_type)
+        .remove_from_recent(user_id, item_id_str, &item_type)
         .await
     {
         Ok(removed) => {
@@ -130,16 +128,9 @@ pub async fn remove_from_recent(
                     .into_response()
             }
         }
-        Err(err) => {
-            error!("Error removing from recents: {}", err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to remove from recents"
-                })),
-            )
-                .into_response()
-        }
+        // Same rationale as `record_item_access` — preserve the
+        // DomainError→HTTP mapping instead of collapsing to 500.
+        Err(err) => AppError::from(err).into_response(),
     }
 }
 
@@ -170,16 +161,9 @@ pub async fn clear_recent_items(
             )
                 .into_response()
         }
-        Err(err) => {
-            error!("Error clearing recent items: {}", err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to clear recent items"
-                })),
-            )
-                .into_response()
-        }
+        // Same rationale as `record_item_access` — preserve the
+        // DomainError→HTTP mapping instead of collapsing to 500.
+        Err(err) => AppError::from(err).into_response(),
     }
 }
 
@@ -233,7 +217,7 @@ pub async fn list_recent_resources(
                     // Path is only shown to the owner; non-owners see ""
                     // to avoid leaking another user's folder hierarchy.
                     let path = if row.is_owner {
-                        row.path.clone().unwrap_or_default()
+                        row.path.unwrap_or_default()
                     } else {
                         String::new()
                     };
@@ -243,24 +227,18 @@ pub async fn list_recent_resources(
                         let dto = FolderDto {
                             etag: resource_id.clone(),
                             id: resource_id,
-                            name: row.name.clone(),
+                            name: row.name,
                             path,
                             parent_id: row.parent_id.map(|u| u.to_string()),
-                            owner_id: Some(row.owner_id.to_string()),
-                            // Listing handler — drive_id is informational
-                            // and the recents row doesn't currently SELECT
-                            // it. Path-based lookups never enter this code
-                            // path.
-                            drive_id: uuid::Uuid::nil(),
+                            drive_id: row.drive_id,
                             created_at: row.resource_created_at.timestamp() as u64,
                             modified_at: row.modified_at.timestamp() as u64,
                             is_root: false,
-                            icon_class: std::sync::Arc::from("fas fa-folder"),
-                            icon_special_class: std::sync::Arc::from("folder-icon"),
-                            category: std::sync::Arc::from("Folder"),
-                            // §14 provenance not selected by the recents query.
-                            created_by: None,
-                            updated_by: None,
+                            icon_class: intern_display("fas fa-folder"),
+                            icon_special_class: intern_display("folder-icon"),
+                            category: intern_display("Folder"),
+                            created_by: row.created_by,
+                            updated_by: row.updated_by,
                         };
                         RecentResourceItemDto {
                             resource_type: ResourceTypeDto::Folder,
@@ -277,34 +255,36 @@ pub async fn list_recent_resources(
                         // listing matches GET/HEAD/PROPFIND byte-for-byte
                         // for the same file.
                         let modified_at_u = row.modified_at.timestamp() as u64;
-                        let content_hash = row.blob_hash.clone().unwrap_or_default();
+                        let content_hash = row.blob_hash.unwrap_or_default();
                         let etag = if content_hash.is_empty() {
                             String::new()
                         } else {
                             File::compute_etag(&content_hash, modified_at_u)
                         };
+                        // Name-derived display classes borrow `row.name`;
+                        // compute them before the name moves into the DTO.
+                        let classes = classify_display(&row.name, mime);
+                        let icon_class = intern_display(classes.icon_class);
+                        let icon_special_class = intern_display(classes.icon_special_class);
+                        let category = intern_display(classes.category);
                         let dto = FileDto {
                             id: row.resource_id.to_string(),
-                            name: row.name.clone(),
+                            name: row.name,
                             path,
                             size: size_bytes,
-                            mime_type: std::sync::Arc::from(mime),
+                            mime_type: intern_mime(mime),
                             folder_id: row.parent_id.map(|u| u.to_string()),
                             created_at: row.resource_created_at.timestamp() as u64,
                             modified_at: modified_at_u,
-                            icon_class: std::sync::Arc::from(icon_class_for(&row.name, mime)),
-                            icon_special_class: std::sync::Arc::from(icon_special_class_for(
-                                &row.name, mime,
-                            )),
-                            category: std::sync::Arc::from(category_for(&row.name, mime)),
+                            icon_class,
+                            icon_special_class,
+                            category,
                             size_formatted: format_file_size(size_bytes),
-                            owner_id: Some(row.owner_id.to_string()),
                             sort_date: None,
                             content_hash,
                             etag,
-                            // §14 provenance not selected by the recents query.
-                            created_by: None,
-                            updated_by: None,
+                            created_by: row.created_by,
+                            updated_by: row.updated_by,
                         };
                         RecentResourceItemDto {
                             resource_type: ResourceTypeDto::File,

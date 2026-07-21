@@ -35,20 +35,51 @@ fn ocs_err(statuscode: u16, message: &str) -> serde_json::Value {
 }
 
 pub async fn handle_capabilities_v1(State(state): State<Arc<AppState>>) -> Response {
-    let payload = capabilities_payload(&state, 1);
-    tracing::info!("[NC] capabilities v1 requested, returning payload");
-    Json(payload).into_response()
+    tracing::debug!("[NC] capabilities v1 requested, returning payload");
+    capabilities_response(&state, 1)
 }
 
 pub async fn handle_capabilities_v2(State(state): State<Arc<AppState>>) -> Response {
-    let payload = capabilities_payload(&state, 2);
-    tracing::info!("[NC] capabilities v2 requested, returning payload");
-    Json(payload).into_response()
+    tracing::debug!("[NC] capabilities v2 requested, returning payload");
+    capabilities_response(&state, 2)
+}
+
+/// Pre-serialized capabilities bodies, `[v1, v2]`. The payload is
+/// process-invariant (pure config: base URL + emulated NC version), yet
+/// every desktop/mobile client polls it periodically — the old handler
+/// re-built the ~40-node `json!` tree, re-read `OXICLOUD_BASE_URL` from
+/// the environment and re-serialized on every poll. Now that work runs
+/// once; a poll is a `Bytes` refcount bump.
+static CAPABILITIES_BODIES: std::sync::OnceLock<[bytes::Bytes; 2]> = std::sync::OnceLock::new();
+
+fn capabilities_response(state: &AppState, ocs_version: u8) -> Response {
+    let bodies = CAPABILITIES_BODIES.get_or_init(|| {
+        let base_url = state.core.config.base_url();
+        let emulated = state.core.config.nextcloud.emulated_version;
+        let version_string = state.core.config.nextcloud.version_string();
+        [1u8, 2u8].map(|v| {
+            bytes::Bytes::from(
+                serde_json::to_vec(&capabilities_payload(
+                    &base_url,
+                    emulated,
+                    &version_string,
+                    v,
+                ))
+                .expect("static capabilities JSON serializes"),
+            )
+        })
+    });
+    let body = bodies[usize::from(ocs_version != 1)].clone();
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
 }
 
 pub async fn handle_user_info(
     State(state): State<Arc<AppState>>,
-    session: crate::interfaces::nextcloud::session::NcSession,
+    session: crate::interfaces::nextcloud::session::SharedNcSession,
 ) -> Response {
     let quota: (i64, i64) = match state.storage_usage_service.as_ref() {
         Some(service) => match service.get_user_storage_info(session.user.id).await {
@@ -78,11 +109,11 @@ pub async fn handle_user_info(
     // than the raw UUID the wire form carries.
     let id = session.raw_username.clone();
     let displayname = if session.is_home() {
-        session.user.username.clone()
+        session.user.username.to_string()
     } else {
         match session.chroot.as_ref() {
             Some(chroot) => format!("{}@{}", session.user.username, chroot.name),
-            None => session.user.username.clone(),
+            None => session.user.username.to_string(),
         }
     };
 
@@ -135,19 +166,40 @@ async fn user_provisioning_response(
 ) -> Response {
     let statuscode = if ocs_version == 1 { 100 } else { 200 };
 
-    // Only allow users to view their own profile, unless they are admin.
-    if user.username != userid && user.role != "admin" {
-        return Json(ocs_err(403, "Insufficient privileges")).into_response();
-    }
-
+    // AuthZ audit #11 (2026-07-12): the pre-fix path here rolled its
+    // own gate ("caller is `userid`, else must be admin") and then
+    // called bare `get_user_by_username` — bypassing every visibility
+    // rule the id-keyed `/api/users/{id}` endpoint enforces. Cross-user
+    // probes returned 403 (leaking existence via the differential vs a
+    // genuine 404 for missing users); admins bypassed
+    // `expose_system_users`; no audit line ever fired.
+    //
+    // Now routing through `get_user_profile_by_username_with_perms`,
+    // which delegates to the same visibility engine as the REST
+    // endpoint (self / shared-grant / expose_system_users / admin
+    // paths, all audit-logged on denial). The OCS wire shape stays
+    // `ocs_err(404, ...)` for every denied case — the NC client can't
+    // tell "no such user" from "you can't see this user" from "you're
+    // not admin" apart, which is the anti-enum invariant.
     let auth_service = match state.auth_service.as_ref() {
         Some(svc) => &svc.auth_application_service,
         None => {
             return Json(ocs_err(997, "Authentication not configured")).into_response();
         }
     };
+    let Some(pool) = state.db_pool.as_ref() else {
+        return Json(ocs_err(997, "Database pool not available")).into_response();
+    };
 
-    let user_dto = match auth_service.get_user_by_username(&userid).await {
+    let user_dto = match auth_service
+        .get_user_profile_by_username_with_perms(
+            user.id,
+            &userid,
+            state.core.config.features.expose_system_users,
+            pool,
+        )
+        .await
+    {
         Ok(u) => u,
         Err(_) => {
             return Json(ocs_err(404, "User not found")).into_response();
@@ -290,21 +342,22 @@ pub async fn handle_sharees_search(
         None => return sharees_response(vec![]).into_response(),
     };
 
-    // SQL-level ILIKE search with limit — avoids loading all users into memory.
-    let users = auth_service
-        .search_users(&search, 26)
+    // SQL-level ILIKE search with limit — avoids loading all users into
+    // memory. Username-only projection: the wide `search_users` row drags
+    // the up-to-512 KiB avatar `image` per matched user, per keystroke
+    // (benches/ROUND12.md §1). NULL-username (email-only signup) rows are
+    // already filtered by the service, preserving the old post-limit
+    // filtering semantics.
+    let usernames = auth_service
+        .search_sharee_usernames(&search, 26)
         .await
         .unwrap_or_default();
 
-    // Skip users with no claimed username — NC sharees autocomplete relies
-    // on a username being typeable; users still on the email-only signup
-    // path can't be addressed here. Also skip self (don't suggest sharing
-    // with yourself).
-    let matches: Vec<serde_json::Value> = users
+    // Skip self (don't suggest sharing with yourself).
+    let matches: Vec<serde_json::Value> = usernames
         .into_iter()
-        .filter_map(|u| {
-            let handle = u.username.clone()?;
-            if handle == user.username {
+        .filter_map(|handle| {
+            if handle.as_str() == &*user.username {
                 return None;
             }
             Some(json!({
@@ -411,8 +464,8 @@ pub async fn handle_search(
 
     // Pre-resolve numeric ids for every file result in a single batch query
     // (was one INSERT round-trip per result).
-    let file_uuids: Vec<String> = results.files.iter().map(|f| f.id.clone()).collect();
-    let file_id_map: HashMap<String, i64> = match file_id_svc {
+    let file_uuids: Vec<&str> = results.files.iter().map(|f| f.id.as_str()).collect();
+    let file_id_map: HashMap<uuid::Uuid, i64> = match file_id_svc {
         Some(svc) => svc
             .get_or_create_file_ids(&file_uuids)
             .await
@@ -422,16 +475,21 @@ pub async fn handle_search(
 
     let mut entries: Vec<serde_json::Value> = Vec::new();
 
-    // Map file results
-    // TODO(D1): drop the hardcoded "Personal/" prefix and read the
-    // caller's default-drive root folder name from `drives.root_folder_id`
-    // instead. Correct for D0-provisioned default drives; secondary
-    // drives keep their original root name.
+    // Map file results.
+    //
+    // `strip_drive_root_segment` handles both default and secondary
+    // drives — post-D0 the first path segment is the drive's root
+    // folder name (`"Personal"` for D0-provisioned defaults, the
+    // original sibling-root name for M2 backfilled secondaries).
+    // Read-scope is upstream in `state.applications.search_service`;
+    // this handler only formats display paths.
     for file in &results.files {
-        let display_path = file.path.strip_prefix("Personal/").unwrap_or(&file.path);
+        let display_path =
+            crate::interfaces::nextcloud::webdav_handler::strip_drive_root_segment(&file.path);
         let display_path = format!("/{}", display_path);
 
-        let numeric_id = file_id_map.get(&file.id).copied();
+        let numeric_id =
+            crate::interfaces::nextcloud::webdav_handler::nc_id_of(&file_id_map, &file.id);
 
         let thumbnail_url = match numeric_id {
             Some(nid) => format!("/index.php/core/preview?fileId={}&x=32&y=32", nid),
@@ -452,12 +510,10 @@ pub async fn handle_search(
         }));
     }
 
-    // Map folder results — same TODO(D1) as above.
+    // Map folder results — same drive-agnostic strip as above.
     for folder in &results.folders {
-        let display_path = folder
-            .path
-            .strip_prefix("Personal/")
-            .unwrap_or(&folder.path);
+        let display_path =
+            crate::interfaces::nextcloud::webdav_handler::strip_drive_root_segment(&folder.path);
         let display_path = format!("/{}", display_path);
 
         entries.push(json!({
@@ -506,11 +562,19 @@ fn empty_search_response() -> Json<serde_json::Value> {
     }))
 }
 
-fn capabilities_payload(state: &AppState, ocs_version: u8) -> serde_json::Value {
+/// Build the capabilities JSON tree from its three config inputs. Public
+/// only under the `bench` feature caller path via
+/// [`capabilities_payload_for_bench`]; production reaches it once through
+/// the [`CAPABILITIES_BODIES`] init.
+fn capabilities_payload(
+    base_url: &str,
+    emulated_version: (u32, u32, u32),
+    version_string: &str,
+    ocs_version: u8,
+) -> serde_json::Value {
     let statuscode = if ocs_version == 1 { 100 } else { 200 };
-    let base_url = state.core.config.base_url();
-    let (nc_major, nc_minor, nc_micro) = state.core.config.nextcloud.emulated_version;
-    let nc_version_str = state.core.config.nextcloud.version_string();
+    let (nc_major, nc_minor, nc_micro) = emulated_version;
+    let nc_version_str = version_string;
 
     json!({
         "ocs": {
@@ -576,6 +640,19 @@ fn capabilities_payload(state: &AppState, ocs_version: u8) -> serde_json::Value 
             }
         }
     })
+}
+
+/// Bench-only public wrapper (feature = "bench") over the private payload
+/// builder so `examples/bench_capabilities_static.rs` can A/B the
+/// rebuild-per-poll flow against the memoized bytes.
+#[cfg(feature = "bench")]
+pub fn capabilities_payload_for_bench(
+    base_url: &str,
+    emulated_version: (u32, u32, u32),
+    version_string: &str,
+    ocs_version: u8,
+) -> serde_json::Value {
+    capabilities_payload(base_url, emulated_version, version_string, ocs_version)
 }
 
 fn extract_basic_password(headers: &axum::http::HeaderMap) -> Option<String> {

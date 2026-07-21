@@ -123,26 +123,45 @@ impl TrashRepository for TrashDbRepository {
     }
 
     async fn get_trash_items(&self, user_id: &Uuid) -> Result<Vec<TrashedItem>> {
-        let rows =
-            sqlx::query_as::<_, (Uuid, String, String, Uuid, Option<DateTime<Utc>>, String)>(
-                r#"
-            SELECT t.id, t.name, t.item_type, t.user_id, t.trashed_at,
+        // Post-D7: the `WHERE t.user_id = $1` filter is gone — the
+        // `user_id` column was dropped from `storage.{files,folders}`
+        // and the view no longer projects it. Scope is drive-membership
+        // via role_grants; group memberships expand inline through
+        // `storage.caller_group_ids`. Same predicate shape as
+        // `list_root_folders_for_caller` / the file listings.
+        //
+        // Legacy method — the paginated `list_resources_paged` is the
+        // modern shape and takes explicit drive_ids from the service
+        // layer.
+        let rows = sqlx::query_as::<_, (Uuid, String, String, Option<DateTime<Utc>>, String)>(
+            r#"
+            SELECT t.id, t.name, t.item_type, t.trashed_at,
                    COALESCE(p.path || '/' || t.name, t.name) AS original_path
               FROM storage.trash_items t
               LEFT JOIN storage.folders p ON p.id = t.original_parent_id
-             WHERE t.user_id = $1
+             WHERE EXISTS (
+                     SELECT 1 FROM storage.role_grants g
+                      WHERE g.resource_type = 'drive'
+                        AND g.resource_id   = t.drive_id
+                        AND (g.expires_at IS NULL OR g.expires_at > NOW())
+                        AND (
+                              (g.subject_type = 'user'  AND g.subject_id = $1)
+                           OR (g.subject_type = 'group' AND g.subject_id IN
+                                   (SELECT storage.caller_group_ids($1)))
+                            )
+                   )
              ORDER BY t.trashed_at DESC
             "#,
-            )
-            .bind(user_id)
-            .fetch_all(self.pool.as_ref())
-            .await
-            .map_err(|e| DomainError::internal_error("TrashDb", format!("list: {e}")))?;
+        )
+        .bind(user_id)
+        .fetch_all(self.pool.as_ref())
+        .await
+        .map_err(|e| DomainError::internal_error("TrashDb", format!("list: {e}")))?;
 
         Ok(rows
             .into_iter()
-            .map(|(id, name, item_type, uid, trashed_at, path)| {
-                self.row_to_trashed_item(id, name, item_type, uid, trashed_at, path)
+            .map(|(id, name, item_type, trashed_at, path)| {
+                self.row_to_trashed_item(id, name, item_type, *user_id, trashed_at, path)
             })
             .collect())
     }
@@ -153,9 +172,16 @@ impl TrashRepository for TrashDbRepository {
         // …)` in the service callers (`restore_item`, `delete_permanently`).
         // The drive precheck in `pg_acl_engine` then resolves Owner-on-drive
         // → Delete-permission for items in shared drives.
-        let row = sqlx::query_as::<_, (Uuid, String, String, Uuid, Option<DateTime<Utc>>, String)>(
+        //
+        // Post-D7: `t.user_id` no longer exists — the column is dropped
+        // from `storage.{files,folders}` and no longer projected by the
+        // view. The entity's `user_id` field is still non-optional;
+        // synthesize `Uuid::nil()`. AuthZ decisions don't consult this
+        // field — they've already resolved the caller's role on the
+        // target's drive.
+        let row = sqlx::query_as::<_, (Uuid, String, String, Option<DateTime<Utc>>, String)>(
             r#"
-            SELECT t.id, t.name, t.item_type, t.user_id, t.trashed_at,
+            SELECT t.id, t.name, t.item_type, t.trashed_at,
                    COALESCE(p.path || '/' || t.name, t.name) AS original_path
               FROM storage.trash_items t
               LEFT JOIN storage.folders p ON p.id = t.original_parent_id
@@ -167,8 +193,8 @@ impl TrashRepository for TrashDbRepository {
         .await
         .map_err(|e| DomainError::internal_error("TrashDb", format!("get: {e}")))?;
 
-        Ok(row.map(|(id, name, item_type, uid, trashed_at, path)| {
-            self.row_to_trashed_item(id, name, item_type, uid, trashed_at, path)
+        Ok(row.map(|(id, name, item_type, trashed_at, path)| {
+            self.row_to_trashed_item(id, name, item_type, Uuid::nil(), trashed_at, path)
         }))
     }
 
@@ -226,15 +252,35 @@ impl TrashRepository for TrashDbRepository {
     async fn delete_expired_bulk(&self) -> Result<(u64, u64)> {
         let cutoff = Utc::now() - chrono::Duration::days(self.retention_days);
 
+        // The `read_only` policy on a drive is a compliance-grade freeze:
+        // NO state on the drive changes while the policy is on, including
+        // background retention. The `JOIN storage.drives d ... AND
+        // (d.policies->>'read_only')::boolean IS NOT TRUE` filter excludes
+        // frozen drives at SELECT time. Retention clock keeps ticking; on
+        // unfreeze, the next sweep tick catches up on anything past its
+        // TTL. Legal-hold guarantee documented in `docs/plan/drive.md` §8
+        // and `docs/guide/trash.md`.
+        //
+        // `(policies->>'read_only')::boolean IS NOT TRUE` semantics:
+        //   - key missing        → NULL::boolean → IS NOT TRUE → included
+        //   - explicit `false`   → FALSE         → IS NOT TRUE → included
+        //   - explicit `true`    → TRUE          → IS TRUE     → excluded
+        // Correct for both current data (most drives omit the key) and
+        // freshly-frozen drives.
+
         // 1. Bulk-delete expired trashed files in batches.
         //    The PG trigger `trg_files_decrement_blob_ref` automatically
         //    decrements blob ref_count for every deleted row.
         let files_deleted = self
             .delete_expired_batch_loop(
                 "DELETE FROM storage.files
-                  WHERE id IN (SELECT id FROM storage.files
-                                WHERE is_trashed = TRUE AND trashed_at < $1
-                                ORDER BY trashed_at
+                  WHERE id IN (SELECT f.id
+                                 FROM storage.files f
+                                 JOIN storage.drives d ON d.id = f.drive_id
+                                WHERE f.is_trashed = TRUE
+                                  AND f.trashed_at < $1
+                                  AND (d.policies->>'read_only')::boolean IS NOT TRUE
+                                ORDER BY f.trashed_at
                                 LIMIT $2)",
                 cutoff,
                 1_000,
@@ -244,13 +290,19 @@ impl TrashRepository for TrashDbRepository {
         // 2. Bulk-delete expired trashed folders in batches.
         //    FK ON DELETE CASCADE handles descendant folders and their
         //    files, so each row can fan out to an entire subtree — hence
-        //    the smaller batch size.
+        //    the smaller batch size. Same read_only exclusion applies:
+        //    a subtree rooted in a frozen drive isn't purged even if the
+        //    folder's own trashed_at is past retention.
         let folders_deleted = self
             .delete_expired_batch_loop(
                 "DELETE FROM storage.folders
-                  WHERE id IN (SELECT id FROM storage.folders
-                                WHERE is_trashed = TRUE AND trashed_at < $1
-                                ORDER BY trashed_at
+                  WHERE id IN (SELECT f.id
+                                 FROM storage.folders f
+                                 JOIN storage.drives d ON d.id = f.drive_id
+                                WHERE f.is_trashed = TRUE
+                                  AND f.trashed_at < $1
+                                  AND (d.policies->>'read_only')::boolean IS NOT TRUE
+                                ORDER BY f.trashed_at
                                 LIMIT $2)",
                 cutoff,
                 100,
@@ -313,9 +365,10 @@ impl TrashDbRepository {
         -1::bigint                                           AS size,
         fld.created_at                                       AS resource_created_at,
         fld.updated_at                                       AS modified_at,
-        fld.user_id                                          AS owner_id,
         fld.drive_id                                         AS drive_id,
         NULL::text                                           AS blob_hash,
+        fld.created_by                                       AS created_by,
+        fld.updated_by                                       AS updated_by,
         fld.trashed_at                                       AS trashed_at,
         (fld.trashed_at + ($7::int * INTERVAL '1 day'))      AS deletion_date,
         fld.path::text                                       AS resource_path,
@@ -340,9 +393,10 @@ impl TrashDbRepository {
         f.size::bigint                                       AS size,
         f.created_at                                         AS resource_created_at,
         f.updated_at                                         AS modified_at,
-        f.user_id                                            AS owner_id,
         f.drive_id                                           AS drive_id,
         f.blob_hash,
+        f.created_by                                         AS created_by,
+        f.updated_by                                         AS updated_by,
         f.trashed_at                                         AS trashed_at,
         (f.trashed_at + ($7::int * INTERVAL '1 day'))        AS deletion_date,
         COALESCE(pfld.path::text || '/' || f.name, f.name)   AS resource_path,
@@ -472,7 +526,8 @@ impl TrashDbRepository {
 SELECT
     r.resource_type, r.resource_id, r.name, r.parent_id,
     r.mime_type, r.size, r.resource_created_at, r.modified_at,
-    r.owner_id, r.drive_id, r.trashed_at, r.deletion_date, r.resource_path,
+    r.drive_id, r.blob_hash, r.created_by, r.updated_by,
+    r.trashed_at, r.deletion_date, r.resource_path,
     r.sort_str, r.type_order, r.folder_first
 FROM resources r
 {keyset}
@@ -529,9 +584,10 @@ LIMIT $6"
                     size,
                     resource_created_at: row.get("resource_created_at"),
                     modified_at: row.get("modified_at"),
-                    owner_id: row.get("owner_id"),
                     drive_id: row.get("drive_id"),
                     blob_hash: row.try_get("blob_hash").ok(),
+                    created_by: row.try_get("created_by").ok(),
+                    updated_by: row.try_get("updated_by").ok(),
                     trashed_at,
                     deletion_date,
                     path: row.try_get("resource_path").ok(),

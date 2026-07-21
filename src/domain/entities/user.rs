@@ -11,12 +11,20 @@ pub enum UserRole {
     User,
 }
 
+impl UserRole {
+    /// Canonical wire/DB spelling — the single source the `Display` impl
+    /// and every hot-path role render go through (no format machinery).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UserRole::Admin => "admin",
+            UserRole::User => "user",
+        }
+    }
+}
+
 impl std::fmt::Display for UserRole {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            UserRole::Admin => write!(f, "admin"),
-            UserRole::User => write!(f, "user"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -107,9 +115,108 @@ pub struct User {
     /// and opts out, subsequent shares from other granters honor the
     /// flag.
     notify_on_share: bool,
+    /// Opaque UI preferences bag (PR — this session). Stored as JSONB
+    /// on `auth.users.ui_preferences`; the server NEVER inspects the
+    /// contents. This is the SPA's cross-device backing store for pure
+    /// UI toggles (hide-dotfiles, view mode, sidebar collapse, …).
+    ///
+    /// Merge semantics live in the repo layer: `PATCH /me/profile` does
+    /// a SHALLOW merge via `ui_preferences || $1::jsonb`, so partial
+    /// writes from one device don't clobber keys set on another.
+    ///
+    /// Load-bearing rule: if a preference EVER becomes something the
+    /// server reads (like `preferred_locale` did), promote it out of
+    /// this bag into a typed column. Keep this field for UI-only
+    /// toggles.
+    ///
+    /// Invariant: always a JSON object (enforced by the schema CHECK
+    /// `users_ui_preferences_is_object`). Empty bag is `{}`, never
+    /// `null` or missing.
+    ui_preferences: serde_json::Value,
+}
+
+/// Owned decomposition of a [`User`] (mirrors `FileParts` / `FolderParts` /
+/// `ContactParts`). Lets a consumer MOVE the heap fields out instead of cloning
+/// them through the borrowing accessors — notably `image` (a data URI up to
+/// 512 KiB) and `ui_preferences` (a JSON tree). See `UserDto::from`
+/// (benches/ROUND20.md §A2).
+pub struct UserParts {
+    pub id: Uuid,
+    pub username: Option<String>,
+    pub email: String,
+    pub password_hash: Option<String>,
+    pub role: UserRole,
+    pub storage_quota_bytes: i64,
+    pub storage_used_bytes: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_login_at: Option<DateTime<Utc>>,
+    pub active: bool,
+    pub oidc_provider: Option<String>,
+    pub oidc_subject: Option<String>,
+    pub image: Option<String>,
+    pub is_external: bool,
+    pub given_name: Option<String>,
+    pub family_name: Option<String>,
+    pub email_verified_at: Option<DateTime<Utc>>,
+    pub preferred_locale: Option<String>,
+    pub notify_on_share: bool,
+    pub ui_preferences: serde_json::Value,
 }
 
 impl User {
+    /// Decompose into [`UserParts`], moving every owned field out. The
+    /// exhaustive destructure is compiler-checked, so a future field can't be
+    /// silently dropped.
+    pub fn into_parts(self) -> UserParts {
+        let User {
+            id,
+            username,
+            email,
+            password_hash,
+            role,
+            storage_quota_bytes,
+            storage_used_bytes,
+            created_at,
+            updated_at,
+            last_login_at,
+            active,
+            oidc_provider,
+            oidc_subject,
+            image,
+            is_external,
+            given_name,
+            family_name,
+            email_verified_at,
+            preferred_locale,
+            notify_on_share,
+            ui_preferences,
+        } = self;
+        UserParts {
+            id,
+            username,
+            email,
+            password_hash,
+            role,
+            storage_quota_bytes,
+            storage_used_bytes,
+            created_at,
+            updated_at,
+            last_login_at,
+            active,
+            oidc_provider,
+            oidc_subject,
+            image,
+            is_external,
+            given_name,
+            family_name,
+            email_verified_at,
+            preferred_locale,
+            notify_on_share,
+            ui_preferences,
+        }
+    }
+
     /// Create a new user.
     ///
     /// One unified constructor for every kind of user (internal, OIDC-linked,
@@ -205,6 +312,11 @@ impl User {
             // `users_notify_on_share` mirrors this for rows reconstructed
             // from disk without going through `new`.
             notify_on_share: true,
+            // Empty bag on creation. The SPA writes into it via
+            // `PATCH /me/profile { ui_preferences: {...} }` after
+            // login. Never NULL — the DB CHECK enforces JSON object
+            // shape.
+            ui_preferences: serde_json::json!({}),
         })
     }
 
@@ -249,6 +361,7 @@ impl User {
             email_verified_at: None,
             preferred_locale: None,
             notify_on_share: true,
+            ui_preferences: serde_json::json!({}),
         }
     }
 
@@ -274,6 +387,10 @@ impl User {
         email_verified_at: Option<DateTime<Utc>>,
         preferred_locale: Option<String>,
         notify_on_share: bool,
+        // Opaque UI-preferences bag. Callers reading from the DB pass
+        // `row.get("ui_preferences")`; tests that don't care can pass
+        // `serde_json::json!({})`.
+        ui_preferences: serde_json::Value,
     ) -> Self {
         Self {
             id,
@@ -296,6 +413,7 @@ impl User {
             email_verified_at,
             preferred_locale,
             notify_on_share,
+            ui_preferences,
         }
     }
 
@@ -483,6 +601,47 @@ impl User {
         }
     }
 
+    /// Promote a currently-external user to an internal account.
+    /// Atomically flips the invariant-linked fields:
+    ///   * `is_external`  → false
+    ///   * `password_hash` → provided (Some) or preserved (None)
+    ///   * `storage_quota_bytes` → quota (external users had 0; DB CHECK
+    ///     `users_external_no_storage` enforces the pair before this call
+    ///     and would refuse a non-zero quota on an external row — the
+    ///     write MUST flip `is_external` first, which happens
+    ///     transactionally at persist time via the sqlx UPDATE).
+    ///
+    /// Password is `Option<String>` because the service allows password-
+    /// less upgrades when magic-link login is available on the
+    /// deployment. When `None`, `password_hash` stays as it was (either
+    /// NULL, or a hash left over from an admin-created invitation —
+    /// externals don't authenticate with it either way).
+    ///
+    /// Refuses if the caller is already internal — the upgrade path
+    /// only makes sense on `is_external = true` users. Service pre-
+    /// checks `user.is_external()` before calling; this guard is
+    /// belt-and-braces against a race.
+    ///
+    /// Admin combo is impossible by construction: external + admin was
+    /// refused at creation (see `User::new`), so a promoted external
+    /// user always retains their `UserRole::User` — role isn't changed.
+    pub fn promote_to_internal(
+        &mut self,
+        password_hash: Option<String>,
+        storage_quota_bytes: i64,
+    ) -> UserResult<()> {
+        if !self.is_external {
+            return Err(UserError::AlreadyInternal);
+        }
+        self.is_external = false;
+        if let Some(hash) = password_hash {
+            self.password_hash = Some(hash);
+        }
+        self.storage_quota_bytes = storage_quota_bytes;
+        self.updated_at = Utc::now();
+        Ok(())
+    }
+
     pub fn set_image(&mut self, image: Option<String>) {
         self.image = image;
         self.updated_at = Utc::now();
@@ -534,6 +693,16 @@ impl User {
     pub fn set_notify_on_share(&mut self, notify: bool) {
         self.notify_on_share = notify;
         self.updated_at = Utc::now();
+    }
+
+    /// Opaque UI preferences bag. Read-only accessor for the DTO
+    /// conversion; mutation goes through the repo's shallow-merge SQL
+    /// (`UserPgRepository::update_ui_preferences`) rather than a
+    /// setter here — the DB is authoritative on the merged state
+    /// because two devices can PATCH concurrently and the merge has
+    /// to happen at write time, not at read time.
+    pub fn ui_preferences(&self) -> &serde_json::Value {
+        &self.ui_preferences
     }
 
     /// Claim or change the username. Runs the same validation as the
@@ -722,6 +891,7 @@ mod tests {
             None,
             None,
             true,
+            serde_json::json!({}),
         )
     }
 

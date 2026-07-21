@@ -44,6 +44,11 @@ pub struct SubjectGroupService {
     /// 30 s TTL. Without this, fresh group-mediated drive grants
     /// don't appear in `/api/drives` for up to 30 s after `add_member`.
     engine: Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine>,
+    /// Same freshness contract for the drive repository's per-user
+    /// readable-drives cache: a membership change on a group that holds
+    /// drive grants changes every affected user's visible drive list,
+    /// so the cached lists drop alongside `user_groups_cache`.
+    drive_repo: Arc<crate::infrastructure::repositories::pg::DrivePgRepository>,
 }
 
 impl SubjectGroupService {
@@ -52,12 +57,14 @@ impl SubjectGroupService {
         pool: Arc<PgPool>,
         user_storage: Arc<UserPgRepository>,
         engine: Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine>,
+        drive_repo: Arc<crate::infrastructure::repositories::pg::DrivePgRepository>,
     ) -> Self {
         Self {
             repo,
             pool,
             user_storage,
             engine,
+            drive_repo,
         }
     }
 
@@ -207,6 +214,69 @@ impl SubjectGroupService {
                 ErrorKind::AccessDenied,
                 "SubjectGroup",
                 "virtual groups cannot be modified".to_string(),
+            ));
+        }
+
+        // Refuse if this group is the **sole Owner** of any drive — the
+        // cascade-delete below would otherwise wipe the only `owner`
+        // grant on that drive and leave it orphaned (no one can ever
+        // manage it again). The check is "for every drive where this
+        // group holds Owner, does another Owner exist?". A single drive
+        // failing the check is enough to refuse.
+        //
+        // Matching D3a's last-owner-protection rule on `set_member_role`
+        // / `remove_member` — they catch the case where the drive's
+        // last Owner is *directly* a user or group being demoted /
+        // removed via the membership API. This guard catches the same
+        // invariant from the group-lifecycle side.
+        let orphaning: Option<(Uuid,)> = sqlx::query_as(
+            r#"
+            WITH group_owned AS (
+                SELECT resource_id
+                  FROM storage.role_grants
+                 WHERE subject_type = 'group'
+                   AND subject_id   = $1
+                   AND resource_type = 'drive'
+                   AND role         = 'owner'
+                   AND (expires_at IS NULL OR expires_at > NOW())
+            )
+            SELECT resource_id
+              FROM storage.role_grants
+             WHERE resource_type = 'drive'
+               AND role         = 'owner'
+               AND (expires_at IS NULL OR expires_at > NOW())
+               AND resource_id IN (SELECT resource_id FROM group_owned)
+             GROUP BY resource_id
+            HAVING COUNT(*) = 1
+             LIMIT 1
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(|e| {
+            DomainError::new(
+                ErrorKind::InternalError,
+                "SubjectGroup",
+                format!("sole-owner check: {e}"),
+            )
+        })?;
+        if let Some((drive_id,)) = orphaning {
+            tracing::info!(
+                target: "audit",
+                event = "group_delete.rejected",
+                reason = "sole_drive_owner",
+                group_id = %id,
+                drive_id = %drive_id,
+                by = %caller_id,
+                "👮🏻‍♂️ refused group delete — sole Owner of drive {drive_id}",
+            );
+            return Err(DomainError::new(
+                ErrorKind::Conflict,
+                "SubjectGroup",
+                "Group is the sole Owner of at least one shared drive — \
+                 promote another Owner first or delete the drive."
+                    .to_string(),
             ));
         }
 
@@ -363,6 +433,7 @@ impl SubjectGroupService {
         // call for up to 30 s.
         for uid in self.invalidation_targets(member).await? {
             self.engine.invalidate_user_groups_cache(uid).await;
+            self.drive_repo.invalidate_readable_for_user(uid).await;
         }
 
         tracing::info!(
@@ -406,6 +477,23 @@ impl SubjectGroupService {
         // user is still reachable via another path after this remove,
         // they stay in the set on the post-state, so the check would
         // pass on the next remove instead.
+        // For a nested child-group removal the child's transitive user set is
+        // needed twice: by the would-empty pre-check below AND, after the
+        // remove, as the cache-invalidation set. The edge delete is ABOVE the
+        // child, so it cannot change the child's descendants — compute the
+        // recursive CTE ONCE here and reuse it, instead of the identical query
+        // running twice (the second was hidden inside `invalidation_targets`).
+        // (benches/ROUND23.md §G1)
+        let child_users: Option<Vec<uuid::Uuid>> = match member {
+            GroupMember::Group(child_id) => Some(
+                self.repo
+                    .list_transitive_users(child_id)
+                    .await
+                    .map_err(map_repo_err)?,
+            ),
+            GroupMember::User(_) => None,
+        };
+
         let users_before = self
             .repo
             .list_transitive_users(group_id)
@@ -414,18 +502,17 @@ impl SubjectGroupService {
         if !users_before.is_empty() {
             let would_be_empty = match member {
                 GroupMember::User(uid) => users_before.len() == 1 && users_before.contains(&uid),
-                GroupMember::Group(child_id) => {
-                    // For child-group removal: would this drop the
-                    // parent's transitive user set to 0? Look up the
-                    // child's transitive users — if every user in the
-                    // parent's set comes through the child, removing the
-                    // child empties the parent.
-                    let child_users = self
-                        .repo
-                        .list_transitive_users(child_id)
-                        .await
-                        .map_err(map_repo_err)?;
-                    !child_users.is_empty() && users_before.iter().all(|u| child_users.contains(u))
+                GroupMember::Group(_) => {
+                    // Would removing this child drop the parent's transitive
+                    // user set to 0? Reuse the child's transitive users
+                    // computed above — if every user in the parent's set comes
+                    // through the child, removing the child empties the parent.
+                    let child_users = child_users.as_deref().unwrap_or(&[]);
+                    // Set probe instead of an O(|before|·|child|) slice scan
+                    // (benches/ROUND11.md §13: 5.7x at 500×500).
+                    let child_set: std::collections::HashSet<&uuid::Uuid> =
+                        child_users.iter().collect();
+                    !child_users.is_empty() && users_before.iter().all(|u| child_set.contains(u))
                 }
             };
             if would_be_empty {
@@ -460,8 +547,17 @@ impl SubjectGroupService {
         // ancestor. Without this, a removed-from-group user keeps
         // appearing as a transitive member in `expand_subject_for_listing`
         // for up to 30 s, surfacing grants they no longer have.
-        for uid in self.invalidation_targets(member).await? {
+        //
+        // Reuse the child's transitive users computed above (unchanged by the
+        // edge delete) as the invalidation set — no second recursive CTE. For a
+        // `User` member it's just that user. (benches/ROUND23.md §G1)
+        let invalidation: Vec<uuid::Uuid> = match member {
+            GroupMember::User(uid) => vec![uid],
+            GroupMember::Group(_) => child_users.unwrap_or_default(),
+        };
+        for uid in invalidation {
             self.engine.invalidate_user_groups_cache(uid).await;
+            self.drive_repo.invalidate_readable_for_user(uid).await;
         }
 
         tracing::info!(
@@ -571,7 +667,9 @@ mod integration_tests {
         // future test starts exercising real authz lookups.
         let engine =
             Arc::new(crate::infrastructure::services::pg_acl_engine::PgAclEngine::new_stub());
-        SubjectGroupService::new(repo, pool, user_storage, engine)
+        let drive_repo =
+            Arc::new(crate::infrastructure::repositories::pg::DrivePgRepository::new(pool.clone()));
+        SubjectGroupService::new(repo, pool, user_storage, engine, drive_repo)
     }
 
     async fn first_admin(pool: &sqlx::PgPool) -> Uuid {

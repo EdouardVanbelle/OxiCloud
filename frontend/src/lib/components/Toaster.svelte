@@ -12,6 +12,18 @@
 	{#each ui.toasts as toast (toast.id)}
 		<div class="toast toast--{toast.kind}" role="status" data-testid={`toaster-toast-${toast.id}`}>
 			<span class="toast__msg">{toast.message}</span>
+			{#if toast.action}
+				<button
+					class="toast__action"
+					data-testid={`toaster-action-btn-${toast.id}`}
+					onclick={() => {
+						toast.action?.onClick();
+						ui.dismiss(toast.id);
+					}}
+				>
+					{toast.action.label}
+				</button>
+			{/if}
 			<button
 				class="toast__close"
 				data-testid={`toaster-dismiss-btn-${toast.id}`}
@@ -71,6 +83,22 @@
 
 	.toast__msg {
 		flex: 1;
+	}
+
+	.toast__action {
+		flex-shrink: 0;
+		background: var(--color-accent);
+		color: var(--color-accent-contrast);
+		border: none;
+		border-radius: var(--radius-md);
+		padding: var(--space-1-5) var(--space-3);
+		font-size: var(--text-sm);
+		font-weight: var(--weight-medium);
+		cursor: pointer;
+	}
+
+	.toast__action:hover {
+		filter: brightness(0.95);
 	}
 
 	.toast__close {

@@ -85,6 +85,33 @@ impl UserPgRepository {
         })
     }
 
+    /// Fetch only `(storage_used_bytes, storage_quota_bytes)`. Not part of
+    /// the `UserRepository` trait — called from `StorageUsageService`.
+    ///
+    /// Same rationale as [`Self::get_user_flags`]: the full-row SELECT drags
+    /// `image` (a data URI of up to 512 KiB), `password_hash`,
+    /// `ui_preferences`, … across the wire, and the quota path runs on every
+    /// folder PROPFIND and every upload quota check just to read two i64s.
+    /// Measured in `benches/QUOTA-PATH.md`.
+    pub async fn get_storage_usage(&self, id: Uuid) -> UserRepositoryResult<(i64, i64)> {
+        let row = sqlx::query(
+            r#"
+            SELECT storage_used_bytes, storage_quota_bytes
+            FROM auth.users
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .fetch_one(&*self.pool)
+        .await
+        .map_err(Self::map_sqlx_error)?;
+
+        Ok((
+            row.get("storage_used_bytes"),
+            row.get("storage_quota_bytes"),
+        ))
+    }
+
     /// Updates a user's profile image (URL or data URI). Not part of the
     /// `UserRepository` trait — called directly from `AuthApplicationService`.
     pub async fn update_image(
@@ -101,6 +128,48 @@ impl UserPgRepository {
         )
         .bind(user_id)
         .bind(&image)
+        .execute(&*self.pool)
+        .await
+        .map_err(Self::map_sqlx_error)?;
+        Ok(())
+    }
+
+    /// Shallow-merge a partial UI-preferences patch into
+    /// `ui_preferences`. The Postgres `||` operator merges top-level
+    /// keys — `{"a":1,"b":2} || {"b":3,"c":4}` → `{"a":1,"b":3,"c":4}`,
+    /// which is exactly the semantic PATCH callers want: a partial
+    /// write only touches the keys it mentions, so a preference set on
+    /// one device isn't wiped by a partial write from another.
+    ///
+    /// `jsonb_strip_nulls` removes any key whose incoming value is
+    /// null, giving callers a documented delete-a-key path (`PATCH
+    /// {"foo": null}` clears `foo`). Nested nulls inside a value
+    /// object survive — we only strip at the top level via the merge
+    /// result.
+    ///
+    /// Not part of the `UserRepository` trait — called directly from
+    /// `AuthApplicationService::update_profile`. Bumps `updated_at`
+    /// so the standard "when did this row change" audits stay useful.
+    ///
+    /// The CHECK constraints
+    /// (`users_ui_preferences_is_object` + `_size_cap`) enforce shape
+    /// and cap at the schema layer; a violating patch surfaces as an
+    /// sqlx error and returns to the handler as 400.
+    pub async fn update_ui_preferences(
+        &self,
+        user_id: Uuid,
+        patch: &serde_json::Value,
+    ) -> UserRepositoryResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE auth.users
+            SET ui_preferences = jsonb_strip_nulls(ui_preferences || $2::jsonb),
+                updated_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(user_id)
+        .bind(patch)
         .execute(&*self.pool)
         .await
         .map_err(Self::map_sqlx_error)?;
@@ -123,18 +192,25 @@ impl UserRepository for UserPgRepository {
                 let role_str = user_clone.role().to_string();
 
                 // Modify the SQL to do an explicit cast to the auth.userrole type
+                // `image` is included here (was missing pre-fix); without
+                // it a JIT-provisioned OIDC user landed in the row with
+                // a NULL profile picture even when the IdP's `picture`
+                // claim was non-empty. `update_user` already wrote the
+                // column so existing-user re-logins worked, but the
+                // first-time INSERT silently dropped it — surfaced by
+                // tests/oidc/oidc.hurl Step 6 asserting on `$.image`.
                 let _result = sqlx::query(
                     r#"
                         INSERT INTO auth.users (
                             id, username, email, password_hash, role,
                             storage_quota_bytes, storage_used_bytes,
                             created_at, updated_at, last_login_at, active,
-                            oidc_provider, oidc_subject, is_external,
+                            oidc_provider, oidc_subject, image, is_external,
                             given_name, family_name, email_verified_at,
-                            preferred_locale, notify_on_share
+                            preferred_locale, notify_on_share, ui_preferences
                         ) VALUES (
                             $1, $2, $3, $4, $5::auth.userrole, $6, $7, $8, $9, $10, $11,
-                            $12, $13, $14, $15, $16, $17, $18, $19
+                            $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
                         )
                         RETURNING *
                         "#,
@@ -152,12 +228,17 @@ impl UserRepository for UserPgRepository {
                 .bind(user_clone.is_active())
                 .bind(user_clone.oidc_provider())
                 .bind(user_clone.oidc_subject())
+                .bind(user_clone.image())
                 .bind(user_clone.is_external())
                 .bind(user_clone.given_name())
                 .bind(user_clone.family_name())
                 .bind(user_clone.email_verified_at())
                 .bind(user_clone.preferred_locale())
                 .bind(user_clone.notify_on_share())
+                // ui_preferences bind: always a JSON object. `User::new`
+                // initialises the bag to `{}`; ownership stays with the
+                // repo for shallow-merge writes via `update_ui_preferences`.
+                .bind(user_clone.ui_preferences())
                 .execute(&mut **tx)
                 .await
                 .map_err(Self::map_sqlx_error)?;
@@ -182,7 +263,8 @@ impl UserRepository for UserPgRepository {
                 storage_quota_bytes, storage_used_bytes,
                 created_at, updated_at, last_login_at, active,
                 oidc_provider, oidc_subject, image, is_external,
-                given_name, family_name, email_verified_at, preferred_locale, notify_on_share
+                given_name, family_name, email_verified_at, preferred_locale, notify_on_share,
+                ui_preferences
             FROM auth.users
             WHERE id = $1
             "#,
@@ -220,6 +302,7 @@ impl UserRepository for UserPgRepository {
             row.get("email_verified_at"),
             row.get("preferred_locale"),
             row.get("notify_on_share"),
+            row.get::<serde_json::Value, _>("ui_preferences"),
         ))
     }
 
@@ -232,7 +315,8 @@ impl UserRepository for UserPgRepository {
                 storage_quota_bytes, storage_used_bytes,
                 created_at, updated_at, last_login_at, active,
                 oidc_provider, oidc_subject, image, is_external,
-                given_name, family_name, email_verified_at, preferred_locale, notify_on_share
+                given_name, family_name, email_verified_at, preferred_locale, notify_on_share,
+                ui_preferences
             FROM auth.users
             WHERE username = $1
             "#,
@@ -270,6 +354,7 @@ impl UserRepository for UserPgRepository {
             row.get("email_verified_at"),
             row.get("preferred_locale"),
             row.get("notify_on_share"),
+            row.get::<serde_json::Value, _>("ui_preferences"),
         ))
     }
 
@@ -282,7 +367,8 @@ impl UserRepository for UserPgRepository {
                 storage_quota_bytes, storage_used_bytes,
                 created_at, updated_at, last_login_at, active,
                 oidc_provider, oidc_subject, image, is_external,
-                given_name, family_name, email_verified_at, preferred_locale, notify_on_share
+                given_name, family_name, email_verified_at, preferred_locale, notify_on_share,
+                ui_preferences
             FROM auth.users
             WHERE email = $1
             "#,
@@ -320,6 +406,7 @@ impl UserRepository for UserPgRepository {
             row.get("email_verified_at"),
             row.get("preferred_locale"),
             row.get("notify_on_share"),
+            row.get::<serde_json::Value, _>("ui_preferences"),
         ))
     }
 
@@ -327,6 +414,16 @@ impl UserRepository for UserPgRepository {
     /// recipient expansion). Missing ids are silently skipped — the
     /// caller treats absent rows as "no such recipient", same as
     /// `get_user_by_id` returning `NotFound` for a single lookup.
+    ///
+    /// Notification-recipient projection: the up-to-512 KiB avatar `image`
+    /// and the `ui_preferences` JSONB are NOT hydrated (both come back as
+    /// `None`/`Null`) — the sole caller
+    /// (`RecipientNotificationService`) reads only the email/eligibility
+    /// fields, and a group fan-out of M members otherwise detoasted +
+    /// shipped + parsed M avatars purely to discard them (the ROUND12 §Q1
+    /// avatar-narrowing pattern; benches/ROUND13.md §Q1). If a future
+    /// caller needs the avatar, add a wide sibling rather than widening
+    /// this one back.
     async fn get_users_by_ids(&self, ids: Vec<Uuid>) -> UserRepositoryResult<Vec<User>> {
         if ids.is_empty() {
             return Ok(Vec::new());
@@ -338,7 +435,7 @@ impl UserRepository for UserPgRepository {
                 id, username, email, password_hash, role::text as role_text,
                 storage_quota_bytes, storage_used_bytes,
                 created_at, updated_at, last_login_at, active,
-                oidc_provider, oidc_subject, image, is_external,
+                oidc_provider, oidc_subject, is_external,
                 given_name, family_name, email_verified_at, preferred_locale, notify_on_share
             FROM auth.users
             WHERE id = ANY($1)
@@ -372,13 +469,14 @@ impl UserRepository for UserPgRepository {
                     row.get("active"),
                     row.get("oidc_provider"),
                     row.get("oidc_subject"),
-                    row.get("image"),
+                    None, // image — not projected (notification-recipient path)
                     row.get("is_external"),
                     row.get("given_name"),
                     row.get("family_name"),
                     row.get("email_verified_at"),
                     row.get("preferred_locale"),
                     row.get("notify_on_share"),
+                    serde_json::Value::Null, // ui_preferences — not projected
                 )
             })
             .collect())
@@ -410,7 +508,19 @@ impl UserRepository for UserPgRepository {
                             family_name = $13,
                             email_verified_at = $14,
                             preferred_locale = $15,
-                            notify_on_share = $16
+                            notify_on_share = $16,
+                            -- Include `is_external` so the external →
+                            -- internal upgrade path
+                            -- (`AuthApplicationService::upgrade_to_internal`)
+                            -- can flip this flag. Previously omitted
+                            -- because no code path mutated it after
+                            -- creation. The DB CHECK
+                            -- `users_external_no_storage`
+                            -- (`is_external=false OR quota=0`) is
+                            -- satisfied by the upgrade because it
+                            -- writes both fields in the same UPDATE:
+                            -- `is_external=false, quota>0`.
+                            is_external = $17
                         WHERE id = $1
                         "#,
                 )
@@ -430,6 +540,7 @@ impl UserRepository for UserPgRepository {
                 .bind(user_clone.email_verified_at())
                 .bind(user_clone.preferred_locale())
                 .bind(user_clone.notify_on_share())
+                .bind(user_clone.is_external())
                 .execute(&mut **tx)
                 .await
                 .map_err(Self::map_sqlx_error)?;
@@ -506,7 +617,8 @@ impl UserRepository for UserPgRepository {
                 storage_quota_bytes, storage_used_bytes,
                 created_at, updated_at, last_login_at, active,
                 oidc_provider, oidc_subject, image, is_external,
-                given_name, family_name, email_verified_at, preferred_locale, notify_on_share
+                given_name, family_name, email_verified_at, preferred_locale, notify_on_share,
+                ui_preferences
             FROM auth.users
             WHERE ($3 OR is_external = FALSE)
             ORDER BY created_at DESC
@@ -551,6 +663,7 @@ impl UserRepository for UserPgRepository {
                     row.get("email_verified_at"),
                     row.get("preferred_locale"),
                     row.get("notify_on_share"),
+                    row.get::<serde_json::Value, _>("ui_preferences"),
                 )
             })
             .collect();
@@ -572,7 +685,8 @@ impl UserRepository for UserPgRepository {
                 storage_quota_bytes, storage_used_bytes,
                 created_at, updated_at, last_login_at, active,
                 oidc_provider, oidc_subject, image, is_external,
-                given_name, family_name, email_verified_at, preferred_locale, notify_on_share
+                given_name, family_name, email_verified_at, preferred_locale, notify_on_share,
+                ui_preferences
             FROM auth.users
             WHERE (username ILIKE $1 OR email ILIKE $1)
               AND ($3 OR is_external = FALSE)
@@ -617,6 +731,7 @@ impl UserRepository for UserPgRepository {
                     row.get("email_verified_at"),
                     row.get("preferred_locale"),
                     row.get("notify_on_share"),
+                    row.get::<serde_json::Value, _>("ui_preferences"),
                 )
             })
             .collect();
@@ -695,6 +810,15 @@ impl UserRepository for UserPgRepository {
         Ok(())
     }
 
+    /// Counts users by role with a scalar `COUNT(*)` — no row hydration.
+    async fn count_users_by_role(&self, role: &str) -> UserRepositoryResult<i64> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM auth.users WHERE role::text = $1")
+            .bind(role)
+            .fetch_one(&*self.pool)
+            .await
+            .map_err(Self::map_sqlx_error)
+    }
+
     /// Lists users by role
     async fn list_users_by_role(&self, role: &str) -> UserRepositoryResult<Vec<User>> {
         let rows = sqlx::query(
@@ -704,7 +828,8 @@ impl UserRepository for UserPgRepository {
                 storage_quota_bytes, storage_used_bytes,
                 created_at, updated_at, last_login_at, active,
                 oidc_provider, oidc_subject, image, is_external,
-                given_name, family_name, email_verified_at, preferred_locale, notify_on_share
+                given_name, family_name, email_verified_at, preferred_locale, notify_on_share,
+                ui_preferences
             FROM auth.users
             WHERE role::text = $1
             ORDER BY created_at DESC
@@ -746,6 +871,7 @@ impl UserRepository for UserPgRepository {
                     row.get("email_verified_at"),
                     row.get("preferred_locale"),
                     row.get("notify_on_share"),
+                    row.get::<serde_json::Value, _>("ui_preferences"),
                 )
             })
             .collect();
@@ -782,7 +908,8 @@ impl UserRepository for UserPgRepository {
                 storage_quota_bytes, storage_used_bytes,
                 created_at, updated_at, last_login_at, active,
                 oidc_provider, oidc_subject, image, is_external,
-                given_name, family_name, email_verified_at, preferred_locale, notify_on_share
+                given_name, family_name, email_verified_at, preferred_locale, notify_on_share,
+                ui_preferences
             FROM auth.users
             WHERE oidc_provider = $1 AND oidc_subject = $2
             "#,
@@ -820,6 +947,7 @@ impl UserRepository for UserPgRepository {
             row.get("email_verified_at"),
             row.get("preferred_locale"),
             row.get("notify_on_share"),
+            row.get::<serde_json::Value, _>("ui_preferences"),
         ))
     }
 
@@ -957,8 +1085,89 @@ impl UserStoragePort for UserPgRepository {
             .map_err(DomainError::from)
     }
 
+    async fn search_usernames(
+        &self,
+        query: &str,
+        limit: i64,
+        include_external: bool,
+    ) -> Result<Vec<Option<String>>, DomainError> {
+        // Same predicate / order / limit as `search_users`, username-only
+        // projection — the sharee autocomplete path reads nothing else, and
+        // the wide row drags the avatar `image` per matched user.
+        let pattern = format!("%{}%", query);
+        let rows = sqlx::query(
+            r#"
+            SELECT username
+            FROM auth.users
+            WHERE (username ILIKE $1 OR email ILIKE $1)
+              AND ($3 OR is_external = FALSE)
+            ORDER BY username
+            LIMIT $2
+            "#,
+        )
+        .bind(&pattern)
+        .bind(limit)
+        .bind(include_external)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(Self::map_sqlx_error)
+        .map_err(DomainError::from)?;
+        Ok(rows.into_iter().map(|row| row.get("username")).collect())
+    }
+
+    async fn mark_email_verified(&self, user_id: Uuid) -> Result<(), DomainError> {
+        // SQL twin of `User::mark_email_verified` — stamps once, keeps the
+        // first timestamp, and touches only the two columns involved.
+        sqlx::query(
+            r#"
+            UPDATE auth.users
+            SET email_verified_at = NOW(), updated_at = NOW()
+            WHERE id = $1 AND email_verified_at IS NULL
+            "#,
+        )
+        .bind(user_id)
+        .execute(&*self.pool)
+        .await
+        .map_err(Self::map_sqlx_error)
+        .map_err(DomainError::from)?;
+        Ok(())
+    }
+
+    async fn sync_oidc_login_profile(
+        &self,
+        user_id: Uuid,
+        image: Option<&str>,
+    ) -> Result<(), DomainError> {
+        // `IS DISTINCT FROM` guard (the `update_storage_usage` pattern): the
+        // common repeat-login case — same IdP avatar, already verified —
+        // writes nothing at all (no dead tuple, no WAL).
+        sqlx::query(
+            r#"
+            UPDATE auth.users
+            SET image = $2,
+                email_verified_at = COALESCE(email_verified_at, NOW()),
+                updated_at = NOW()
+            WHERE id = $1
+              AND (image IS DISTINCT FROM $2 OR email_verified_at IS NULL)
+            "#,
+        )
+        .bind(user_id)
+        .bind(image)
+        .execute(&*self.pool)
+        .await
+        .map_err(Self::map_sqlx_error)
+        .map_err(DomainError::from)?;
+        Ok(())
+    }
+
     async fn list_users_by_role(&self, role: &str) -> Result<Vec<User>, DomainError> {
         UserRepository::list_users_by_role(self, role)
+            .await
+            .map_err(DomainError::from)
+    }
+
+    async fn count_users_by_role(&self, role: &str) -> Result<i64, DomainError> {
+        UserRepository::count_users_by_role(self, role)
             .await
             .map_err(DomainError::from)
     }

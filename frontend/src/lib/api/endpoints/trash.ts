@@ -111,3 +111,19 @@ export async function emptyTrash(): Promise<void> {
 	});
 	if (!res.ok) throw new Error(`empty trash failed: ${res.status}`);
 }
+
+/**
+ * `DELETE /api/trash/drive/{drive_id}` — empty the trash within a
+ * single drive. Used by the trash page's Drive group-by, where each
+ * bucket header carries a per-drive Empty button so multi-drive
+ * owners don't have to wipe everything at once. Refused 404 when the
+ * caller lacks Delete on the named drive (anti-enum).
+ */
+export async function emptyTrashForDrive(driveId: string): Promise<void> {
+	const res = await apiFetch(`/api/trash/drive/${encodeURIComponent(driveId)}`, {
+		method: 'DELETE',
+		credentials: 'same-origin',
+		headers: getCsrfHeaders()
+	});
+	if (!res.ok) throw new Error(`empty drive trash failed: ${res.status}`);
+}

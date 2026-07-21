@@ -60,6 +60,25 @@ pub trait FileUploadUseCase: Send + Sync + 'static {
         caller_id: Uuid,
     ) -> Result<FileDto, DomainError>;
 
+    /// `_with_perms` variant of `upload_file_streaming` — enforces
+    /// `Create` on the target folder before registering the row.
+    ///
+    /// AuthZ audit #17 (2026-07-12): the chunked-upload `complete`
+    /// path called plain `upload_file_streaming` at finalize; a grant
+    /// revoked between session open and finalize stayed effective
+    /// until the caller landed the final chunk (up to 24h JWT TTL,
+    /// forever with app-passwords). Handlers now call this variant
+    /// so the engine re-checks at finalize regardless of how long
+    /// the session was open.
+    async fn upload_file_streaming_with_perms(
+        &self,
+        name: String,
+        folder_id: Option<String>,
+        content_type: String,
+        blob: StoredBlob,
+        caller_id: Uuid,
+    ) -> Result<FileDto, DomainError>;
+
     /// Replace the content of the file at `path` with an already-ingested
     /// blob, or create the file when it doesn't exist (WebDAV/WOPI PUT).
     ///
@@ -75,7 +94,22 @@ pub trait FileUploadUseCase: Send + Sync + 'static {
     /// `updated_by` column reflects the principal that performed the
     /// PUT — not the file's existing owner (D2 shared drives let
     /// non-owners overwrite content).
-    async fn update_file_streaming(
+    /// `_with_perms` suffix (AGENTS.md AuthZ convention): the
+    /// implementation calls `authz.require(caller, Update, File(id))`
+    /// on the overwrite branch and `authz.require(caller, Create,
+    /// Folder|Drive(id))` on the new-file branch. Handlers just plumb
+    /// `caller_id` through — no protocol-layer authz.
+    ///
+    /// `expected_hash`: forwarded to
+    /// `FileWritePort::update_file_content_with_blob` on the overwrite
+    /// branch for compare-and-swap; ignored on the new-file branch
+    /// (nothing to compare against). Pass `None` for plain PUT/WOPI/
+    /// chunked-upload last-write-wins semantics; pass the pre-write
+    /// snapshot's content hash for PATCH, where a concurrent write
+    /// during the (potentially slow) splice must be rejected rather
+    /// than silently clobbered.
+    #[allow(clippy::too_many_arguments)]
+    async fn update_file_streaming_with_perms(
         &self,
         path: &str,
         drive_id: Uuid,
@@ -83,6 +117,7 @@ pub trait FileUploadUseCase: Send + Sync + 'static {
         content_type: &str,
         modified_at: Option<i64>,
         caller_id: Uuid,
+        expected_hash: Option<&str>,
     ) -> Result<FileDto, DomainError>;
 }
 
@@ -104,6 +139,17 @@ pub enum OptimizedFileContent {
     },
     /// Streaming download for everything above the in-RAM cache threshold.
     Stream(Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>),
+}
+
+/// Result of a cache-aware HTTP-Range read
+/// (`FileRetrievalService::get_file_range_preloaded`). Same split as
+/// [`OptimizedFileContent`]: handlers map each variant onto a response body.
+pub enum RangeContent {
+    /// Zero-copy slice out of the RAM content cache (a `Bytes::slice` is a
+    /// refcount bump — no allocation, no I/O, no DB).
+    Bytes(Bytes),
+    /// Streaming range read from the blob store (cache miss / large file).
+    Stream(Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>),
 }
 
 /// Primary port for file retrieval operations
@@ -230,34 +276,33 @@ pub trait FileRetrievalUseCase: Send + Sync + 'static {
     async fn list_files_batch(
         &self,
         folder_id: Option<&str>,
-        offset: i64,
+        after_name: Option<&str>,
         limit: i64,
     ) -> Result<Vec<FileDto>, DomainError> {
-        let all = self.list_files(folder_id).await?;
+        let mut all = self.list_files(folder_id).await?;
+        all.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(all
             .into_iter()
-            .skip(offset as usize)
+            .filter(|f| after_name.is_none_or(|a| f.name.as_str() > a))
             .take(limit as usize)
             .collect())
     }
 
-    /// Like [`list_files_batch`], but scoped to a specific owner.
+    /// Like [`list_files_batch`], but scoped to a specific caller.
     ///
-    /// Used by streaming WebDAV PROPFIND so that each user only sees their
-    /// own files, even in shared folder_id namespaces.
+    /// Used by streaming WebDAV PROPFIND. Post-D7 the concrete
+    /// implementation in `FileRetrievalService` uses drive-membership
+    /// grants; this default falls back to the unscoped listing (the
+    /// caller passes through `owner_id` for interface parity but the
+    /// stub can't apply a real filter without a repo lookup).
     async fn list_files_batch_with_perms(
         &self,
         folder_id: Option<&str>,
-        owner_id: Uuid,
-        offset: i64,
+        _owner_id: Uuid,
+        after_name: Option<&str>,
         limit: i64,
     ) -> Result<Vec<FileDto>, DomainError> {
-        let all = self.list_files_batch(folder_id, offset, limit).await?;
-        let owner_str = owner_id.to_string();
-        Ok(all
-            .into_iter()
-            .filter(|f| f.owner_id.as_deref().is_some_and(|o| o == owner_str))
-            .collect())
+        self.list_files_batch(folder_id, after_name, limit).await
     }
 }
 

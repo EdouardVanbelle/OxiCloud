@@ -1,6 +1,6 @@
 use axum::{
     extract::{FromRequestParts, Request, State},
-    http::{HeaderMap, StatusCode, header, request::Parts},
+    http::{StatusCode, header, request::Parts},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -163,11 +163,17 @@ impl IntoResponse for AuthError {
 /// then the cookie fallback.
 pub async fn auth_middleware(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     mut request: Request,
     next: Next,
 ) -> Result<Response, AuthError> {
-    let auth_header = headers
+    // Borrow the Authorization header straight from the request instead of
+    // taking axum's `HeaderMap` extractor, which clones the whole map (~2
+    // allocs) on every authenticated request purely to read it
+    // (benches/ROUND14.md §A4). The borrow is dead by the time each arm
+    // reaches `request.extensions_mut()` / `next.run(request)` (NLL), so no
+    // owned copy is needed.
+    let auth_header = request
+        .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
 
@@ -186,9 +192,14 @@ pub async fn auth_middleware(
                                 "Token validated successfully for user: {}",
                                 claims.username
                             );
-                            let user_id = Uuid::parse_str(&claims.sub).map_err(|_| {
-                                AuthError::InvalidToken("Invalid user ID in token".to_string())
-                            })?;
+                            // Pre-parsed at decode time (benches/ROUND14.md §A3);
+                            // nil only for a malformed sub, which we reject as before.
+                            let user_id = claims.sub_id;
+                            if user_id.is_nil() {
+                                return Err(AuthError::InvalidToken(
+                                    "Invalid user ID in token".to_string(),
+                                ));
+                            }
                             // A cryptographically valid token must not outlive the
                             // account: re-check the live record so deactivation,
                             // deletion and demotion take effect within the flags-cache
@@ -204,14 +215,19 @@ pub async fn auth_middleware(
                                 LiveRole::Active(role) => role,
                                 LiveRole::Revoked => return Err(AuthError::AccountInactive),
                             };
+                            // `username`/`email` are `Arc<str>` refcount
+                            // bumps out of the cached claims; `role` is an
+                            // inline SmolStr — the whole build is 1 alloc
+                            // (the `Arc::new`) instead of 4.
                             let current_user = Arc::new(CurrentUser {
                                 id: user_id,
-                                username: claims.username.clone(),
-                                email: claims.email.clone(),
+                                username: Arc::clone(&claims.username),
+                                email: Arc::clone(&claims.email),
                                 role,
                             });
                             request.extensions_mut().insert(current_user);
-                            tracing::Span::current().record("user_id", user_id.to_string());
+                            tracing::Span::current()
+                                .record("user_id", tracing::field::display(user_id));
                             return Ok(next.run(request).await);
                         }
                         Err(e) => {
@@ -258,7 +274,8 @@ pub async fn auth_middleware(
                                 role,
                             });
                             request.extensions_mut().insert(current_user);
-                            tracing::Span::current().record("user_id", user_id.to_string());
+                            tracing::Span::current()
+                                .record("user_id", tracing::field::display(user_id));
                             return Ok(next.run(request).await);
                         }
                         Err(e) => {
@@ -290,19 +307,23 @@ pub async fn auth_middleware(
         use crate::interfaces::api::cookie_auth;
 
         if let Some(token_str) =
-            cookie_auth::extract_cookie_value(&headers, cookie_auth::ACCESS_COOKIE)
+            cookie_auth::extract_cookie_str(request.headers(), cookie_auth::ACCESS_COOKIE)
             && !token_str.is_empty()
         {
             tracing::debug!("Processing cookie-based authentication");
 
             if let Some(auth_service) = state.auth_service.as_ref() {
                 let token_service = &auth_service.token_service;
-                match token_service.validate_token(&token_str) {
+                match token_service.validate_token(token_str) {
                     Ok(claims) => {
                         tracing::debug!("Cookie token validated for user: {}", claims.username);
-                        let user_id = Uuid::parse_str(&claims.sub).map_err(|_| {
-                            AuthError::InvalidToken("Invalid user ID in token".to_string())
-                        })?;
+                        // Pre-parsed at decode time (benches/ROUND14.md §A3).
+                        let user_id = claims.sub_id;
+                        if user_id.is_nil() {
+                            return Err(AuthError::InvalidToken(
+                                "Invalid user ID in token".to_string(),
+                            ));
+                        }
                         // Same live-account re-check as the Bearer path. On
                         // revocation we fall through (rather than erroring) so the
                         // browser receives the standard 401 and redirects to
@@ -317,13 +338,14 @@ pub async fn auth_middleware(
                             LiveRole::Active(role) => {
                                 let current_user = Arc::new(CurrentUser {
                                     id: user_id,
-                                    username: claims.username.clone(),
-                                    email: claims.email.clone(),
+                                    username: Arc::clone(&claims.username),
+                                    email: Arc::clone(&claims.email),
                                     role,
                                 });
                                 request.extensions_mut().insert(current_user);
                                 request.extensions_mut().insert(CookieAuthenticated);
-                                tracing::Span::current().record("user_id", user_id.to_string());
+                                tracing::Span::current()
+                                    .record("user_id", tracing::field::display(user_id));
                                 return Ok(next.run(request).await);
                             }
                             LiveRole::Revoked => {
@@ -389,6 +411,13 @@ fn dav_basic_auth_challenge(message: &'static str) -> Response {
 /// `CurrentUser` is the *live* role resolved by `auth_middleware` (see
 /// [`resolve_live_role`]), not the JWT claim, so a demotion is honoured
 /// here within the flags-cache TTL.
+///
+/// Denial shapes distinguish authn from authz:
+///   - `CurrentUser` present, role != "admin" → 403 Forbidden.
+///   - `CurrentUser` absent → 401 Unauthorized. Should not happen in
+///     practice (auth_middleware guards against it), but the
+///     defensive fallback returns the honest shape: "we don't know
+///     who you are" is 401, not "we know you and refuse" (403).
 pub async fn require_admin(request: Request, next: Next) -> Response {
     // Get the CurrentUser inserted by auth_middleware
     if let Some(current_user) = request.extensions().get::<Arc<CurrentUser>>() {
@@ -404,18 +433,16 @@ pub async fn require_admin(request: Request, next: Next) -> Response {
             role = %current_user.role,
             "👮🏻‍♂️ admin-only route denied for non-admin caller"
         );
-    } else {
-        tracing::info!(
-            target: "audit",
-            event = "authz.admin_denied",
-            reason = "unauthenticated",
-            "👮🏻‍♂️ admin-only route reached with no authenticated user"
-        );
+        return AuthError::AccessDenied("Admin role required".to_string()).into_response();
     }
 
-    // Access denied
-    let error = AuthError::AccessDenied("Admin role required".to_string());
-    error.into_response()
+    tracing::info!(
+        target: "audit",
+        event = "authz.admin_denied",
+        reason = "unauthenticated",
+        "👮🏻‍♂️ admin-only route reached with no authenticated user"
+    );
+    AuthError::TokenNotProvided.into_response()
 }
 
 #[cfg(test)]

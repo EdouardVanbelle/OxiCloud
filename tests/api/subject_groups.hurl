@@ -334,13 +334,75 @@ HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 11 — Cleanup: delete engineering (cascades to qa membership + grants).
+# Step 11 — Sole-Owner group-delete guard (D3b).
+#
+# A group that is the only `Role::Owner` of a shared drive must NOT be
+# deletable — wiping it would orphan the drive (no live Owner grant
+# left). Symmetric to the last-owner-protection rule on `set_role` /
+# `remove_member` from the membership API side; this guard catches
+# the same invariant from the group-lifecycle side.
+#
+# Setup: admin creates a shared drive owned by `grp-engineering-hurl`,
+# then tries to delete the group. Refused with 409. Promote a second
+# Owner (a user), then the group delete succeeds.
 # ─────────────────────────────────────────────────────────────
+POST {{base_url}}/api/drives
+Authorization: Bearer {{alice_token}}
+Content-Type: application/json
+{
+  "kind": "shared",
+  "name": "grp-guarded-drive-hurl",
+  "owner": { "type": "group", "id": "{{engineers_id}}" }
+}
+
+HTTP 201
+[Captures]
+guarded_drive_id: jsonpath "$.id"
+
+
+# 11a — Group delete refused while it's the sole Owner of the drive.
+DELETE {{base_url}}/api/groups/{{engineers_id}}
+Authorization: Bearer {{alice_token}}
+
+HTTP 409
+
+
+# 11b — Add Grace as a co-Owner of the drive via the admin endpoint.
+#       Alice (the OxiCloud admin) created the drive but doesn't
+#       auto-grant herself a role on it, so she lacks `Manage` on the
+#       user-facing `/api/drives/{id}/members` — the admin route
+#       bypasses that check for exactly this case.
+POST {{base_url}}/api/admin/drives/{{guarded_drive_id}}/members
+Authorization: Bearer {{alice_token}}
+Content-Type: application/json
+{
+  "subject": { "type": "user", "id": "{{grace_user_id}}" },
+  "role": "owner"
+}
+
+HTTP 201
+
+
+# 11c — Group delete now succeeds — the drive still has Grace as Owner.
 DELETE {{base_url}}/api/groups/{{engineers_id}}
 Authorization: Bearer {{alice_token}}
 
 HTTP 204
 
+
+# 11d — Cleanup: trash the drive (no content) so subsequent test files
+#       don't see a dangling shared drive. After 11c, Grace is the
+#       only remaining Owner via her direct grant, so she's the one
+#       who can delete via the user-facing route.
+DELETE {{base_url}}/api/drives/{{guarded_drive_id}}
+Authorization: Bearer {{grace_token}}
+
+HTTP 204
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 12 — Cleanup: delete qa group.
+# ─────────────────────────────────────────────────────────────
 DELETE {{base_url}}/api/groups/{{qa_id}}
 Authorization: Bearer {{alice_token}}
 

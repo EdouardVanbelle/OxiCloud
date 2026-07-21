@@ -3,18 +3,25 @@
 # =============================================================
 # C4 from BASELINE_TESTS_NC_WEBDAV.md.
 #
-# Deferred from Batch 1 because it needed the bob fixture
-# that `nc_second_user_setup.hurl` now provides. Pins the
-# behaviour of the existing rule in
-# `interfaces/nextcloud/ocs_handler.rs::user_provisioning_response`:
+# Post AuthZ audit #11 (2026-07-17), `user_provisioning_response`
+# no longer rolls its own admin gate — it delegates to
+# `AuthApplicationService::get_user_profile_by_username_with_perms`,
+# which shares the visibility engine with the id-keyed REST
+# endpoint at `/api/users/{id}`. Consequences for this test:
 #
-#     if user.username != userid && user.role != "admin" {
-#         return Json(ocs_err(403, ...)).into_response();
-#     }
-#
-# i.e. you can read your own profile always; you can read
-# anyone's profile if you're admin. Bob is not admin, so bob
-# CANNOT read admin's profile (the symmetric assertion).
+#   - **admin → bob**: still 200 (admin bypass is one of the
+#     five visibility paths; see get_user_profile step 5).
+#   - **bob → admin**: with `OXICLOUD_EXPOSE_SYSTEM_USERS=true`
+#     (tests/common/server.env), both are internal so step 4
+#     of the visibility engine says the target is broadly
+#     visible via the system address book — bob CAN see
+#     admin's basic profile. Pre-fix, the bespoke gate returned
+#     `403 Insufficient privileges` and admin bypassed the
+#     expose gate silently; both anomalies are gone.
+#   - **bob → nonexistent**: `404 User not found`, anti-enum
+#     shape identical to "you can't see this user". Audit line
+#     `user_profile.rejected reason=target_username_not_found`
+#     fires server-side.
 #
 # Uses admin's app password for Basic Auth (same pattern as
 # `nc_ocs_user_info.hurl`).
@@ -82,8 +89,12 @@ jsonpath "$.ocs.data.email"      == "bob@example.com"
 
 
 # ─────────────────────────────────────────────────────────────
-# C4-symmetric — bob (non-admin) CANNOT read admin's profile
-#                (proves the admin-only branch isn't a no-op)
+# C4-symmetric — post-audit-#11: bob CAN read admin's profile
+#                because the visibility engine's
+#                `expose_system_users` branch treats internal
+#                users as broadly visible via the system address
+#                book. The bespoke `403 Insufficient privileges`
+#                the pre-fix handler emitted is gone.
 # ─────────────────────────────────────────────────────────────
 GET {{base_url}}/ocs/v1.php/cloud/users/{{username}}?format=json
 [BasicAuth]
@@ -91,7 +102,27 @@ GET {{base_url}}/ocs/v1.php/cloud/users/{{username}}?format=json
 
 HTTP 200
 [Asserts]
-jsonpath "$.ocs.meta.statuscode" == 403
+jsonpath "$.ocs.meta.statuscode" == 100
+jsonpath "$.ocs.data.id"         == "{{username}}"
+
+
+# ─────────────────────────────────────────────────────────────
+# C4-antienum — bob queries a genuinely nonexistent username.
+#               Response body is the SAME shape as any denial
+#               case: `statuscode=404 status="failure"`. The
+#               NC client cannot distinguish "user doesn't
+#               exist" from "you have no visibility on that
+#               user" (were expose_system_users off) — which
+#               is the anti-enumeration invariant this fix
+#               was meant to preserve.
+# ─────────────────────────────────────────────────────────────
+GET {{base_url}}/ocs/v1.php/cloud/users/nonexistent-audit-11-canary?format=json
+[BasicAuth]
+{{bob_nc_user}}: {{bob_nc_pw}}
+
+HTTP 200
+[Asserts]
+jsonpath "$.ocs.meta.statuscode" == 404
 jsonpath "$.ocs.meta.status"     == "failure"
 
 

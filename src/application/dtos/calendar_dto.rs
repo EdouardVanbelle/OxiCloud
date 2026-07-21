@@ -36,16 +36,20 @@ impl Default for CalendarDto {
 
 impl From<Calendar> for CalendarDto {
     fn from(calendar: Calendar) -> Self {
+        // `calendar` is owned and dropped here — move the heap fields (notably
+        // the `custom_properties` HashMap) instead of cloning them through the
+        // borrowing accessors (benches/ROUND20.md §A4).
+        let p = calendar.into_parts();
         Self {
-            id: calendar.id().to_string(),
-            name: calendar.name().to_string(),
-            owner_id: calendar.owner_id().to_string(),
-            description: calendar.description().map(|s| s.to_string()),
-            color: calendar.color().map(|s| s.to_string()),
+            id: p.id.to_string(),
+            name: p.name,
+            owner_id: p.owner_id.to_string(),
+            description: p.description,
+            color: p.color,
             is_public: false, // This needs to be set separately as it's not part of the domain entity
-            created_at: *calendar.created_at(),
-            updated_at: *calendar.updated_at(),
-            custom_properties: calendar.custom_properties().clone(),
+            created_at: p.created_at,
+            updated_at: p.updated_at,
+            custom_properties: p.custom_properties,
         }
     }
 }
@@ -89,6 +93,22 @@ pub struct CalendarEventDto {
     pub all_day: bool,
     pub rrule: Option<String>,
     pub ical_uid: String,
+    /// RFC 5545 §3.8.4.4 RECURRENCE-ID. `None` on masters and on
+    /// non-recurring events; `Some` on per-instance exception
+    /// overrides. Two rows sharing (`calendar_id`, `ical_uid`) but
+    /// distinguished by this field represent a recurring master and
+    /// its modified occurrence(s) respectively (see #528).
+    pub recurrence_id: Option<DateTime<Utc>>,
+    /// Full stored iCalendar body for this row — one VCALENDAR
+    /// containing exactly one VEVENT. Populated at every read
+    /// path from the entity's `ical_data()`. The CalDAV read
+    /// emitters serve this verbatim (extracted + bundled per
+    /// UID) instead of regenerating from the other DTO fields,
+    /// so properties beyond the structured columns
+    /// (ATTENDEE, VALARM, CATEGORIES, RECURRENCE-ID, X-*)
+    /// survive PUT → GET round-trips. See phase-4 read-side
+    /// unification.
+    pub ical_data: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -106,6 +126,8 @@ impl Default for CalendarEventDto {
             all_day: false,
             rrule: None,
             ical_uid: String::new(),
+            recurrence_id: None,
+            ical_data: String::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -114,19 +136,26 @@ impl Default for CalendarEventDto {
 
 impl From<CalendarEvent> for CalendarEventDto {
     fn from(event: CalendarEvent) -> Self {
+        // Move every owned field out of the consumed entity — the old
+        // getter-clone shape deep-copied 6 Strings per event, dominated by
+        // the ~11 KB `ical_data` blob, on every CalDAV listing row
+        // (benches/ROUND11.md §19: 1.45x + the 11 KB memcpy gone).
+        let parts = event.into_parts();
         Self {
-            id: event.id().to_string(),
-            calendar_id: event.calendar_id().to_string(),
-            summary: event.summary().to_string(),
-            description: event.description().map(|s| s.to_string()),
-            location: event.location().map(|s| s.to_string()),
-            start_time: *event.start_time(),
-            end_time: *event.end_time(),
-            all_day: event.all_day(),
-            rrule: event.rrule().map(|s| s.to_string()),
-            ical_uid: event.ical_uid().to_string(),
-            created_at: *event.created_at(),
-            updated_at: *event.updated_at(),
+            id: parts.id.to_string(),
+            calendar_id: parts.calendar_id.to_string(),
+            summary: parts.summary,
+            description: parts.description,
+            location: parts.location,
+            start_time: parts.start_time,
+            end_time: parts.end_time,
+            all_day: parts.all_day,
+            rrule: parts.rrule,
+            ical_uid: parts.ical_uid,
+            recurrence_id: parts.recurrence_id,
+            ical_data: parts.ical_data,
+            created_at: parts.created_at,
+            updated_at: parts.updated_at,
         }
     }
 }

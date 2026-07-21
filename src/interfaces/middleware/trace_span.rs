@@ -69,8 +69,11 @@ pub struct UuidRequestId;
 
 impl MakeRequestId for UuidRequestId {
     fn make_request_id<B>(&mut self, _request: &axum::http::Request<B>) -> Option<RequestId> {
-        let id = Uuid::now_v7().to_string();
-        axum::http::HeaderValue::from_str(&id)
+        // Stack-encode the UUID: `to_string()` allocated an intermediate
+        // String per request just for HeaderValue to copy it again.
+        let mut buf = [0u8; uuid::fmt::Hyphenated::LENGTH];
+        let id = Uuid::now_v7();
+        axum::http::HeaderValue::from_str(id.hyphenated().encode_lower(&mut buf))
             .ok()
             .map(RequestId::new)
     }
@@ -89,7 +92,11 @@ pub struct ClientIpMakeSpan;
 
 impl<B> MakeSpan<B> for ClientIpMakeSpan {
     fn make_span(&mut self, request: &axum::http::Request<B>) -> Span {
-        let ip = super::trusted_proxy::client_ip(request, true);
+        // Borrow-only IP resolution: the span records `client_ip` via `%ip`
+        // (Display), so a `ClientIpDisplay` that renders straight into the
+        // span's field storage avoids the per-request `String` the owned
+        // `client_ip()` allocated (benches/ROUND13.md §H2).
+        let ip = super::trusted_proxy::client_ip_display(request, true);
         let request_id = request
             .headers()
             .get("x-request-id")

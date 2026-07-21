@@ -4,7 +4,8 @@ vi.mock('$lib/api/endpoints/files', () => ({
 	deleteFile: vi.fn(),
 	fileDownloadUrl: () => '/d',
 	fileInlineUrl: () => '/i',
-	fileThumbnailUrl: () => '/t'
+	fileThumbnailUrl: () => '/t',
+	thumbSizeForView: () => 'preview' as const
 }));
 vi.mock('$lib/api/endpoints/favorites', () => ({ addFavorite: vi.fn() }));
 vi.mock('$lib/api/endpoints/photos', () => ({ fetchFileMetadata: vi.fn() }));
@@ -20,7 +21,8 @@ function item(id: string) {
 		mime_type: 'image/jpeg',
 		category: 'Image',
 		folder_id: '',
-		owner_id: '',
+		created_by: null,
+		updated_by: null,
 		path: '',
 		size: 1,
 		modified_at: 0,

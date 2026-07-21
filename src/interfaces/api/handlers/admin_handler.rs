@@ -1,7 +1,7 @@
 use axum::{
     Router,
     extract::{DefaultBodyLimit, Json, Multipart, Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{
         IntoResponse,
         sse::{Event, KeepAlive, Sse},
@@ -21,13 +21,17 @@ use crate::application::dtos::settings_dto::{
     SmtpTestResultDto, StartMigrationDto, TestOidcConnectionDto, TestStorageConnectionDto,
     UpdateUserActiveDto, UpdateUserQuotaDto, UpdateUserRoleDto, VerifyMigrationDto,
 };
+use crate::application::dtos::user_dto::UserDto;
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::plugin_ports::{LogQuery, PluginManagementPort, PluginMgmtError};
+use crate::application::ports::storage_ports::StorageUsagePort;
 use crate::common::di::AppState;
 use crate::domain::repositories::drive_repository::DriveRepository;
 use crate::domain::services::authorization::{Resource, Subject};
+use crate::interfaces::api::handlers::dedup_handler::{get_stats, recalculate_stats};
+use crate::interfaces::api::handlers::search_handler::clear_search_cache;
 use crate::interfaces::errors::AppError;
-use crate::interfaces::middleware::admin::require_admin;
+use crate::interfaces::middleware::auth::AuthUser;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -75,6 +79,10 @@ pub fn admin_routes() -> Router<Arc<AppState>> {
         .route("/users/{id}/active", put(update_user_active))
         .route("/users/{id}/quota", put(update_user_quota))
         .route("/users/{id}/password", put(reset_user_password))
+        .route(
+            "/users/{id}/promote-to-internal",
+            post(admin_promote_external_to_internal),
+        )
         // Registration control
         .route("/settings/registration", put(set_registration_setting))
         // Audio metadata
@@ -98,6 +106,22 @@ pub fn admin_routes() -> Router<Arc<AppState>> {
         .route("/plugins/{id}/logs/stream", get(stream_plugin_logs))
         .route("/plugins/{id}/retention", get(get_plugin_retention))
         .route("/plugins/{id}/retention", put(set_plugin_retention))
+        // Search — operator flush of the shared moka results cache
+        // (AuthZ audit #14, 2026-07-16). `invalidate_all()` semantics
+        // touch every tenant, so this is admin-only. Lived at
+        // `/api/search/cache` pre-2026-07-17; the URL now declares
+        // its admin intent up front.
+        .route("/search/cache", delete(clear_search_cache))
+        // Dedup — global storage stats + integrity recalculation
+        // (AuthZ audit #24 + #25, 2026-07-17). Both are operator-only
+        // observability / maintenance surfaces (blob-count-level data
+        // + verify_integrity sweep). Moved here from `/api/dedup/*`
+        // so the URL declares admin intent and the middleware layer
+        // enforces it — same pattern as `search/cache` above. The
+        // any-authenticated sibling routes (`/check`, `/check-batch`,
+        // `/blob/{hash}`) stay at `/api/dedup/*`.
+        .route("/dedup/stats", get(get_stats))
+        .route("/dedup/recalculate", post(recalculate_stats))
         // SMTP diagnostics
         .route("/smtp/info", get(get_smtp_info))
         .route("/smtp/test", post(send_smtp_test))
@@ -105,9 +129,21 @@ pub fn admin_routes() -> Router<Arc<AppState>> {
         // when `OXICLOUD_SMTP_MOCK` is off, so production deployments
         // can route the path freely without leaking inboxes.
         .route("/smtp/test/captured", get(get_captured_email))
+        // Test-only sweep triggers. Routes are always registered; the
+        // handlers themselves short-circuit to 404 when
+        // `features.enable_admin_internal_endpoints` is off — matches
+        // the `/smtp/test/captured` convention so production
+        // deployments don't need a different route table.
+        .route("/internal/trigger-sweep", post(internal_trigger_sweep))
+        .route("/internal/trigger-gc", post(internal_trigger_gc))
+        .route(
+            "/internal/trigger-grant-cleanup",
+            post(internal_trigger_grant_cleanup),
+        )
         // Drives — admin-wide view (distinct from `/api/drives` which
         // is filtered to the caller's role grants).
         .route("/drives", get(list_all_drives))
+        .route("/drives/{id}", delete(delete_drive_admin))
         .route(
             "/drives/{id}/members",
             get(list_drive_members_admin).post(add_drive_member_admin),
@@ -118,14 +154,13 @@ pub fn admin_routes() -> Router<Arc<AppState>> {
         )
 }
 
-/// Validate JWT and require admin role. Returns (user_id, role).
-///
-/// Thin wrapper over the shared `require_admin` middleware helper so this
-/// handler keeps a stable signature while the implementation lives next to
-/// the new `subject_group_handler` that also needs it.
-async fn admin_guard(state: &AppState, headers: &HeaderMap) -> Result<(Uuid, String), AppError> {
-    require_admin(state, headers).await
-}
+// Every route under `/api/admin/*` is gated by the
+// `require_admin` middleware layer wired at the router nest point
+// (`routes.rs::admin_router`). Handlers no longer need an inline
+// guard call — the caller is guaranteed to be admin by construction.
+// Callers that need the caller's id read it from the `AuthUser`
+// extractor (`middleware::auth::AuthUser`), populated by the outer
+// `auth_middleware`.
 
 /// GET /api/admin/settings/oidc — get OIDC settings for the admin panel
 #[utoipa::path(
@@ -141,10 +176,7 @@ async fn admin_guard(state: &AppState, headers: &HeaderMap) -> Result<(Uuid, Str
 )]
 pub async fn get_oidc_settings(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
-
     let svc = state
         .admin_settings_service
         .as_ref()
@@ -172,10 +204,10 @@ pub async fn get_oidc_settings(
 )]
 pub async fn save_oidc_settings(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_user: AuthUser,
     Json(dto): Json<SaveOidcSettingsDto>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (user_id, _) = admin_guard(&state, &headers).await?;
+    let user_id = auth_user.id;
 
     let svc = state
         .admin_settings_service
@@ -197,11 +229,8 @@ pub async fn save_oidc_settings(
 /// POST /api/admin/settings/oidc/test — test OIDC discovery
 async fn test_oidc_connection(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(dto): Json<TestOidcConnectionDto>,
 ) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
-
     let svc = state
         .admin_settings_service
         .as_ref()
@@ -233,10 +262,7 @@ async fn test_oidc_connection(
 )]
 pub async fn get_storage_settings(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
-
     let svc = state
         .storage_settings_service
         .as_ref()
@@ -264,10 +290,10 @@ pub async fn get_storage_settings(
 )]
 pub async fn save_storage_settings(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_user: AuthUser,
     Json(dto): Json<SaveStorageSettingsDto>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (user_id, _) = admin_guard(&state, &headers).await?;
+    let user_id = auth_user.id;
 
     let svc = state
         .storage_settings_service
@@ -289,11 +315,8 @@ pub async fn save_storage_settings(
 /// POST /api/admin/settings/storage/test — test storage backend connection
 async fn test_storage_connection(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(dto): Json<TestStorageConnectionDto>,
 ) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
-
     let svc = state
         .storage_settings_service
         .as_ref()
@@ -325,9 +348,7 @@ async fn test_storage_connection(
 )]
 pub async fn get_migration_status(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
     let s = state.migration_state.read().await;
     Ok(Json(migration_state_to_dto(&s)))
 }
@@ -347,12 +368,9 @@ pub async fn get_migration_status(
 )]
 pub async fn start_migration(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(dto): Json<StartMigrationDto>,
 ) -> Result<impl IntoResponse, AppError> {
     use crate::infrastructure::services::migration_blob_backend::MigrationStatus;
-
-    admin_guard(&state, &headers).await?;
 
     // Check not already running.
     {
@@ -425,10 +443,8 @@ pub async fn start_migration(
 )]
 pub async fn pause_migration(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     use crate::infrastructure::services::migration_blob_backend::MigrationStatus;
-    admin_guard(&state, &headers).await?;
 
     let mut s = state.migration_state.write().await;
     if s.status != MigrationStatus::Running {
@@ -456,10 +472,8 @@ pub async fn pause_migration(
 )]
 pub async fn resume_migration(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     use crate::infrastructure::services::migration_blob_backend::MigrationStatus;
-    admin_guard(&state, &headers).await?;
 
     // Set status back to Running — the background task checks on each blob.
     let mut s = state.migration_state.write().await;
@@ -488,10 +502,8 @@ pub async fn resume_migration(
 )]
 pub async fn complete_migration(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     use crate::infrastructure::services::migration_blob_backend::MigrationStatus;
-    admin_guard(&state, &headers).await?;
 
     let s = state.migration_state.read().await;
     if s.status != MigrationStatus::Completed {
@@ -528,11 +540,8 @@ pub async fn complete_migration(
 )]
 pub async fn verify_migration(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(dto): Json<VerifyMigrationDto>,
 ) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
-
     let pool = state
         .db_pool
         .clone()
@@ -604,12 +613,7 @@ fn migration_state_to_dto(
     security(("bearerAuth" = [])),
     tag = "admin"
 )]
-pub async fn generate_encryption_key(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
-
+pub async fn generate_encryption_key() -> Result<impl IntoResponse, AppError> {
     let key =
         crate::infrastructure::services::encrypted_blob_backend::EncryptedBlobBackend::generate_key(
         );
@@ -667,10 +671,7 @@ fn build_backend_from_config(
 )]
 pub async fn get_dashboard_stats(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
-
     let auth = state
         .auth_service
         .as_ref()
@@ -684,7 +685,16 @@ pub async fn get_dashboard_stats(
         .as_ref()
         .ok_or_else(|| AppError::internal_error("Database not available"))?;
 
-    // Use direct SQL for aggregated stats — more efficient than loading all users
+    // Use direct SQL for aggregated stats — more efficient than loading all users.
+    //
+    // Scope: internal users only (`is_external = false`). External
+    // accounts (grant-only magic-link / OCM recipients) have no
+    // storage envelope by construction (DB CHECK
+    // `users_external_no_storage`) and cannot be admin
+    // (`users_external_not_admin`), so they'd inflate `total_users`
+    // and `active_users` with rows that don't represent operational
+    // seats. The audit list (`/api/admin/users`) still shows every
+    // account; only the dashboard totals filter externals out.
     let stats_row = sqlx::query(
         r#"
         SELECT
@@ -696,6 +706,7 @@ pub async fn get_dashboard_stats(
             COUNT(*) FILTER (WHERE storage_quota_bytes > 0 AND storage_used_bytes > storage_quota_bytes * 0.8)::INT8 as users_over_80,
             COUNT(*) FILTER (WHERE storage_quota_bytes > 0 AND storage_used_bytes > storage_quota_bytes)::INT8 as users_over_quota
         FROM auth.users
+        WHERE is_external = false
         "#
     )
     .fetch_one(db_pool.as_ref())
@@ -758,11 +769,8 @@ pub async fn get_dashboard_stats(
 )]
 pub async fn list_users(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Query(query): Query<ListUsersQueryDto>,
 ) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
-
     let auth = state
         .auth_service
         .as_ref()
@@ -771,9 +779,14 @@ pub async fn list_users(
     let limit = query.limit.unwrap_or(100).min(500);
     let offset = query.offset.unwrap_or(0);
 
+    // Admin surface must show *every* account for audit — grant-only
+    // magic-link / OCM recipients (is_external = true) included. The
+    // internal-only variant is used by system address book / sharee
+    // search, where surfacing externals would leak identities. See
+    // `auth_application_service::list_users` doc for the split.
     let users = auth
         .auth_application_service
-        .list_users(limit, offset)
+        .list_users_including_external(limit, offset)
         .await
         .map_err(|e| AppError::internal_error(format!("Failed to list users: {}", e)))?;
 
@@ -807,11 +820,8 @@ pub async fn list_users(
 )]
 pub async fn get_user(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
-
     let id = Uuid::parse_str(&id).map_err(|_| AppError::bad_request("Invalid UUID"))?;
 
     let auth = state
@@ -844,10 +854,10 @@ pub async fn get_user(
 )]
 pub async fn delete_user(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (admin_id, _) = admin_guard(&state, &headers).await?;
+    let admin_id = auth_user.id;
 
     let id = Uuid::parse_str(&id).map_err(|_| AppError::bad_request("Invalid UUID"))?;
 
@@ -894,11 +904,11 @@ pub async fn delete_user(
 )]
 pub async fn update_user_role(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_user: AuthUser,
     Path(id): Path<String>,
     Json(dto): Json<UpdateUserRoleDto>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (admin_id, _) = admin_guard(&state, &headers).await?;
+    let admin_id = auth_user.id;
 
     let id = Uuid::parse_str(&id).map_err(|_| AppError::bad_request("Invalid UUID"))?;
 
@@ -945,11 +955,11 @@ pub async fn update_user_role(
 )]
 pub async fn update_user_active(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_user: AuthUser,
     Path(id): Path<String>,
     Json(dto): Json<UpdateUserActiveDto>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (admin_id, _) = admin_guard(&state, &headers).await?;
+    let admin_id = auth_user.id;
 
     let id = Uuid::parse_str(&id).map_err(|_| AppError::bad_request("Invalid UUID"))?;
 
@@ -1000,12 +1010,9 @@ pub async fn update_user_active(
 )]
 pub async fn update_user_quota(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(dto): Json<UpdateUserQuotaDto>,
 ) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
-
     let id = Uuid::parse_str(&id).map_err(|_| AppError::bad_request("Invalid UUID"))?;
 
     let auth = state
@@ -1046,11 +1053,8 @@ pub async fn update_user_quota(
 )]
 pub async fn create_user(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(dto): Json<AdminCreateUserDto>,
 ) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
-
     let auth = state
         .auth_service
         .as_ref()
@@ -1087,12 +1091,9 @@ pub async fn create_user(
 )]
 pub async fn reset_user_password(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(dto): Json<AdminResetPasswordDto>,
 ) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
-
     let id = Uuid::parse_str(&id).map_err(|_| AppError::bad_request("Invalid UUID"))?;
 
     let auth = state
@@ -1119,6 +1120,48 @@ pub async fn reset_user_password(
     ))
 }
 
+/// POST /api/admin/users/{id}/promote-to-internal — flip an external
+/// (grant-only) account into a normal internal account, provisioning
+/// its personal drive on the way. The deployment MUST have magic-link
+/// login enabled (the admin doesn't set the user's password on their
+/// behalf, so the promoted user needs some way to log in). Refuses
+/// OIDC-linked users and users who are already internal.
+#[utoipa::path(
+    post,
+    path = "/api/admin/users/{id}/promote-to-internal",
+    params(("id" = String, Path, description = "Target user id")),
+    responses(
+        (status = 200, description = "User promoted", body = UserDto),
+        (status = 400, description = "Magic-link login is disabled on this deployment"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin required (or target is OIDC-linked)"),
+        (status = 404, description = "User not found"),
+        (status = 409, description = "User is already internal"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin"
+)]
+pub async fn admin_promote_external_to_internal(
+    State(state): State<Arc<AppState>>,
+    auth_user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let target_id = Uuid::parse_str(&id).map_err(|_| AppError::bad_request("Invalid UUID"))?;
+
+    let auth = state
+        .auth_service
+        .as_ref()
+        .ok_or_else(|| AppError::internal_error("Auth service not configured"))?;
+
+    let dto = auth
+        .auth_application_service
+        .admin_promote_external_to_internal(auth_user.id, target_id)
+        .await
+        .map_err(AppError::from)?;
+
+    Ok((StatusCode::OK, Json(dto)))
+}
+
 // ============================================================================
 // Registration Control
 // ============================================================================
@@ -1138,10 +1181,10 @@ pub async fn reset_user_password(
 )]
 pub async fn set_registration_setting(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_user: AuthUser,
     Json(body): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (admin_id, _) = admin_guard(&state, &headers).await?;
+    let admin_id = auth_user.id;
 
     let enabled = body
         .get("registration_enabled")
@@ -1174,10 +1217,7 @@ pub async fn set_registration_setting(
 
 async fn reextract_audio_metadata(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
-
     let audio_service = state
         .applications
         .audio_metadata_service
@@ -1204,10 +1244,7 @@ async fn reextract_audio_metadata(
 /// Photos timeline by real capture date. Safe to re-run (idempotent upsert).
 async fn reextract_image_metadata(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
-
     let result = state
         .applications
         .media_metadata_service
@@ -1250,12 +1287,7 @@ async fn reextract_image_metadata(
     security(("bearerAuth" = [])),
     tag = "admin"
 )]
-async fn get_smtp_info(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
-
+async fn get_smtp_info(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
     let smtp = &state.core.config.smtp;
     let info = SmtpInfoDto {
         enabled: smtp.is_enabled() && state.email_sender.is_some(),
@@ -1284,11 +1316,8 @@ async fn get_smtp_info(
 /// returns 404 to keep the endpoint inert.
 async fn get_captured_email(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Query(params): Query<CapturedEmailQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
-
     if !std::env::var("OXICLOUD_SMTP_MOCK")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false)
@@ -1344,10 +1373,10 @@ struct CapturedEmailQuery {
 )]
 async fn send_smtp_test(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_user: AuthUser,
     Json(dto): Json<SendSmtpTestDto>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (admin_id, _) = admin_guard(&state, &headers).await?;
+    let admin_id = auth_user.id;
 
     let recipient = dto.to.trim().to_string();
     if recipient.is_empty() {
@@ -1459,9 +1488,7 @@ fn map_mgmt_err(err: &PluginMgmtError) -> AppError {
 /// GET /api/admin/plugins — list installed plugins.
 pub async fn list_plugins(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
     let mgmt = plugin_mgmt(&state)?;
     let plugins: Vec<PluginInfoDto> = mgmt.list().into_iter().map(PluginInfoDto::from).collect();
     // `enabled` reports that the plugin *subsystem* is active (reaching here
@@ -1476,11 +1503,11 @@ pub async fn list_plugins(
 /// PUT /api/admin/plugins/{id}/enabled — enable or disable a plugin.
 pub async fn set_plugin_enabled(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_user: AuthUser,
     Path(id): Path<String>,
     Json(dto): Json<SetEnabledDto>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (admin_id, _) = admin_guard(&state, &headers).await?;
+    let admin_id = auth_user.id;
     let mgmt = plugin_mgmt(&state)?;
     mgmt.set_enabled(&id, dto.enabled)
         .map_err(|e| map_mgmt_err(&e))?;
@@ -1517,10 +1544,10 @@ pub async fn set_plugin_enabled(
 /// single `bundle` part: a `.zip` containing `plugin.toml` and its `.wasm`.
 pub async fn install_plugin(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_user: AuthUser,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, AppError> {
-    let (admin_id, _) = admin_guard(&state, &headers).await?;
+    let admin_id = auth_user.id;
     let mgmt = plugin_mgmt(&state)?;
 
     let mut bundle: Option<Vec<u8>> = None;
@@ -1581,10 +1608,10 @@ pub async fn install_plugin(
 /// DELETE /api/admin/plugins/{id} — uninstall a plugin and delete its files.
 pub async fn delete_plugin(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (admin_id, _) = admin_guard(&state, &headers).await?;
+    let admin_id = auth_user.id;
     let mgmt = plugin_mgmt(&state)?;
     mgmt.remove(&id).map_err(|e| map_mgmt_err(&e))?;
 
@@ -1606,11 +1633,9 @@ pub async fn delete_plugin(
 /// structured log entries (newest first).
 pub async fn get_plugin_logs(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Query(q): Query<PluginLogQueryDto>,
 ) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
     let mgmt = plugin_mgmt(&state)?;
 
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
@@ -1634,10 +1659,10 @@ pub async fn get_plugin_logs(
 /// DELETE /api/admin/plugins/{id}/logs — wipe a plugin's persisted logs.
 pub async fn clear_plugin_logs(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (admin_id, _) = admin_guard(&state, &headers).await?;
+    let admin_id = auth_user.id;
     let mgmt = plugin_mgmt(&state)?;
     mgmt.clear_logs(&id).await.map_err(|e| map_mgmt_err(&e))?;
 
@@ -1661,13 +1686,11 @@ pub async fn clear_plugin_logs(
 /// so `EventSource` works without setting headers.
 pub async fn stream_plugin_logs(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     use tokio_stream::StreamExt;
     use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 
-    admin_guard(&state, &headers).await?;
     let mgmt = plugin_mgmt(&state)?;
     if !mgmt.list().iter().any(|p| p.id == id) {
         return Err(AppError::not_found("Plugin not found"));
@@ -1695,10 +1718,8 @@ pub async fn stream_plugin_logs(
 /// GET /api/admin/plugins/{id}/retention — the plugin's effective retention.
 pub async fn get_plugin_retention(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
     let mgmt = plugin_mgmt(&state)?;
     let settings = mgmt
         .get_retention(&id)
@@ -1710,11 +1731,11 @@ pub async fn get_plugin_retention(
 /// PUT /api/admin/plugins/{id}/retention — set the plugin's retention policy.
 pub async fn set_plugin_retention(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_user: AuthUser,
     Path(id): Path<String>,
     Json(dto): Json<PluginRetentionDto>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (admin_id, _) = admin_guard(&state, &headers).await?;
+    let admin_id = auth_user.id;
     let mgmt = plugin_mgmt(&state)?;
     mgmt.set_retention(&id, dto.into())
         .await
@@ -1758,9 +1779,7 @@ pub async fn set_plugin_retention(
 )]
 pub async fn list_all_drives(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
     let drives = state
         .drive_repo
         .list_all()
@@ -1796,10 +1815,8 @@ pub async fn list_all_drives(
 )]
 pub async fn list_drive_members_admin(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     axum::extract::Path(drive_id): axum::extract::Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    admin_guard(&state, &headers).await?;
     let grants = state
         .authorization
         .list_grants_on_resource(Resource::Drive(drive_id))
@@ -1859,11 +1876,11 @@ fn admin_parse_subject(kind: SubjectTypeDto, id: Uuid) -> Subject {
 )]
 pub async fn add_drive_member_admin(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_user: AuthUser,
     axum::extract::Path(drive_id): axum::extract::Path<Uuid>,
     Json(dto): Json<AdminAddDriveMemberDto>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (admin_id, _) = admin_guard(&state, &headers).await?;
+    let admin_id = auth_user.id;
     let subject = admin_parse_subject(dto.subject.kind, dto.subject.id);
     let grant = state
         .drive_management_service
@@ -1904,7 +1921,7 @@ pub async fn add_drive_member_admin(
 )]
 pub async fn update_drive_member_admin(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_user: AuthUser,
     axum::extract::Path((drive_id, kind, subject_id)): axum::extract::Path<(
         Uuid,
         SubjectTypeDto,
@@ -1912,7 +1929,7 @@ pub async fn update_drive_member_admin(
     )>,
     Json(dto): Json<AdminUpdateDriveMemberDto>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (admin_id, _) = admin_guard(&state, &headers).await?;
+    let admin_id = auth_user.id;
     let subject = admin_parse_subject(kind, subject_id);
     let grant = state
         .drive_management_service
@@ -1951,14 +1968,14 @@ pub async fn update_drive_member_admin(
 )]
 pub async fn remove_drive_member_admin(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_user: AuthUser,
     axum::extract::Path((drive_id, kind, subject_id)): axum::extract::Path<(
         Uuid,
         SubjectTypeDto,
         Uuid,
     )>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (admin_id, _) = admin_guard(&state, &headers).await?;
+    let admin_id = auth_user.id;
     let subject = admin_parse_subject(kind, subject_id);
     state
         .drive_management_service
@@ -1966,4 +1983,276 @@ pub async fn remove_drive_member_admin(
         .await
         .map_err(AppError::from)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/admin/drives/{id}` — admin-only drive delete (D3b).
+///
+/// Same shape as the user-facing `DELETE /api/drives/{id}`, but
+/// bypasses the per-drive `Manage` check (the admin guard at the
+/// route edge is the access control). The remaining invariants —
+/// default Personal drive is undeletable, drive must be empty — still
+/// apply: an admin can't accidentally wipe a populated drive or the
+/// default home folder of any user. Audit emits
+/// `drive.deleted_via_admin` on success.
+#[utoipa::path(
+    delete,
+    path = "/api/admin/drives/{id}",
+    params(("id" = Uuid, Path, description = "Drive UUID")),
+    responses(
+        (status = 204, description = "Drive deleted"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin required"),
+        (status = 405, description = "Default Personal drive — undeletable"),
+        (status = 409, description = "Drive is not empty"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin"
+)]
+pub async fn delete_drive_admin(
+    State(state): State<Arc<AppState>>,
+    auth_user: AuthUser,
+    axum::extract::Path(drive_id): axum::extract::Path<Uuid>,
+) -> Result<impl IntoResponse, AppError> {
+    let admin_id = auth_user.id;
+    state
+        .drive_management_service
+        .delete_drive(admin_id, true, drive_id)
+        .await
+        .map_err(AppError::from)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Test-only sweep triggers (`/api/admin/internal/*`)
+//
+// Wraps the periodic background jobs (storage-usage reconciliation,
+// blob garbage collection) behind admin-gated synchronous endpoints
+// so Hurl / integration tests can wait for them deterministically
+// rather than polling the cached value. Disabled at the handler edge
+// when `features.enable_admin_internal_endpoints == false` — match
+// the `/smtp/test/captured` convention so production deployments
+// don't need a different route table.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Refusal when the test-only endpoints are disabled. Returns 404
+/// rather than 403 to avoid leaking the route's existence (and the
+/// corresponding config flag) to an unauthenticated probe — the
+/// legitimate test runner sets the env explicitly.
+fn internal_endpoints_disabled() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": "endpoint not available" })),
+    )
+        .into_response()
+}
+
+/// `POST /api/admin/internal/trigger-sweep` — run the storage-usage
+/// reconciliation sweep synchronously.
+///
+/// Test-only. Recomputes `users.storage_used_bytes` and
+/// `drives.used_bytes` from `SUM(size) WHERE NOT is_trashed`, in the
+/// same set-based UPDATEs the periodic ticker runs. Used by Hurl
+/// suites that need to assert post-delete quota convergence without
+/// waiting out the sweep interval (default 600 s).
+#[utoipa::path(
+    post,
+    path = "/api/admin/internal/trigger-sweep",
+    responses(
+        (status = 200, description = "Sweep ran"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin required"),
+        (status = 404, description = "Endpoint disabled (set OXICLOUD_ENABLE_ADMIN_INTERNAL_ENDPOINTS=true)"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin"
+)]
+pub async fn internal_trigger_sweep(
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !state.core.config.features.enable_admin_internal_endpoints {
+        return internal_endpoints_disabled();
+    }
+    let svc = match state.storage_usage_service.as_ref() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "storage_usage_service not available",
+                })),
+            )
+                .into_response();
+        }
+    };
+    // Order matches the periodic ticker (`start_reconciliation_job`):
+    // drive sweep first because the user sweep reads `drives.used_bytes`
+    // (sum-of-personal-drives — `docs/plan/drive.md` §7). Running them
+    // in the other order makes the user counter freeze on the previous
+    // tick's drive numbers — invisible in steady state but breaks any
+    // Hurl that trashes + sweeps within one call.
+    if let Err(e) = svc.update_all_drives_storage_usage().await {
+        return AppError::internal_error(format!("drive sweep failed: {e}")).into_response();
+    }
+    if let Err(e) = svc.update_all_users_storage_usage().await {
+        return AppError::internal_error(format!("user sweep failed: {e}")).into_response();
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "ran": ["drives", "users"] })),
+    )
+        .into_response()
+}
+
+/// Query parameters for `POST /api/admin/internal/trigger-gc`.
+///
+/// `force=true` bypasses the orphan-grace window so the sweep reaps
+/// just-orphaned blobs in the same call. Without this, a blob orphaned
+/// less than `GC_ORPHAN_GRACE_SECS` (1 h) ago survives the sweep — the
+/// grace exists so a concurrent uploader pinning a just-orphaned chunk
+/// can't race the row-delete → file-unlink gap. Integration tests
+/// don't have concurrent uploaders, so the test runner sets
+/// `force=true` to make the sweep deterministic within a test's
+/// runtime.
+#[derive(Debug, serde::Deserialize, Default)]
+pub struct InternalTriggerGcQuery {
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `POST /api/admin/internal/trigger-gc` — run the blob garbage
+/// collector synchronously.
+///
+/// Test-only. Drops `file_blobs` rows with `ref_count = 0` (subject
+/// to the orphan-grace window) and their on-disk content. Same call
+/// as the inline post-purge GC and the periodic blob-GC sweep — just
+/// exposed under an admin route so Hurl can wait for it
+/// deterministically. Add `?force=true` to bypass the grace window —
+/// see [`InternalTriggerGcQuery`].
+#[utoipa::path(
+    post,
+    path = "/api/admin/internal/trigger-gc",
+    params(("force" = Option<bool>, Query, description = "Bypass the orphan-grace window (test-only)")),
+    responses(
+        (status = 200, description = "GC ran"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin required"),
+        (status = 404, description = "Endpoint disabled (set OXICLOUD_ENABLE_ADMIN_INTERNAL_ENDPOINTS=true)"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin"
+)]
+pub async fn internal_trigger_gc(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<InternalTriggerGcQuery>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !state.core.config.features.enable_admin_internal_endpoints {
+        return internal_endpoints_disabled();
+    }
+    let result = if query.force {
+        state.core.dedup_service.garbage_collect_force().await
+    } else {
+        state.core.dedup_service.garbage_collect().await
+    };
+    match result {
+        Ok((blobs_deleted, bytes_freed)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true,
+                "blobs_deleted": blobs_deleted,
+                "bytes_freed": bytes_freed,
+                "forced": query.force,
+            })),
+        )
+            .into_response(),
+        Err(e) => AppError::internal_error(format!("gc failed: {e}")).into_response(),
+    }
+}
+
+/// Query parameters for `POST /api/admin/internal/trigger-grant-cleanup`.
+///
+/// `force=true` sets the grace window to `0` for this call — deletes
+/// every row whose `expires_at` is in the past, right now. Enables
+/// Hurl regressions to plant a past-dated grant and immediately
+/// observe it purged, without waiting the configured
+/// `OXICLOUD_GRANT_CLEANUP_GRACE_DAYS` out.
+///
+/// Without `force`, the daemon's configured grace applies — the same
+/// SQL the daily loop runs.
+#[derive(Debug, serde::Deserialize, Default)]
+pub struct InternalTriggerGrantCleanupQuery {
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `POST /api/admin/internal/trigger-grant-cleanup` — run the expired-
+/// grant purge synchronously.
+///
+/// Test-only. Deletes rows from `storage.role_grants` whose
+/// `expires_at` is more than `grace_days` in the past (or immediately,
+/// with `?force=true`). Same SQL as the periodic `GrantCleanupService`
+/// daemon — exposed under an admin route so Hurl can wait for it
+/// deterministically.
+///
+/// Response fields:
+///   `grants_deleted` — count of rows removed by this invocation
+///   `grace_days`    — the grace window that was applied (0 when
+///                     `?force=true`, otherwise the config value)
+///   `forced`        — echoes the query param
+#[utoipa::path(
+    post,
+    path = "/api/admin/internal/trigger-grant-cleanup",
+    params(("force" = Option<bool>, Query, description = "Force grace = 0 for this run (test-only)")),
+    responses(
+        (status = 200, description = "Purge ran"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin required"),
+        (status = 404, description = "Endpoint disabled (set OXICLOUD_ENABLE_ADMIN_INTERNAL_ENDPOINTS=true)"),
+        (status = 503, description = "Grant-cleanup daemon disabled (OXICLOUD_GRANT_CLEANUP_ENABLED=false)"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin"
+)]
+pub async fn internal_trigger_grant_cleanup(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<InternalTriggerGrantCleanupQuery>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !state.core.config.features.enable_admin_internal_endpoints {
+        return internal_endpoints_disabled();
+    }
+    // Daemon may be disabled by config even when the internal-endpoint
+    // gate is on. Return 503 (rather than 404 or 500) so integration
+    // tests can distinguish "surface not exposed" from "surface
+    // exposed but backing service off".
+    let svc = match state.grant_cleanup_service.as_ref() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "grant_cleanup_service not available (disabled by OXICLOUD_GRANT_CLEANUP_ENABLED=false)",
+                })),
+            )
+                .into_response();
+        }
+    };
+    // `force=true` collapses the grace window to zero for this run
+    // only — the daemon's configured grace is untouched. Mirrors the
+    // `trigger-gc?force=true` shape.
+    let grace_override = if query.force { Some(0) } else { None };
+    let grants_deleted = svc.purge(grace_override).await;
+    let grace_days = grace_override.unwrap_or_else(|| svc.grace_days());
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "ok": true,
+            "grants_deleted": grants_deleted,
+            "grace_days": grace_days,
+            "forced": query.force,
+        })),
+    )
+        .into_response()
 }

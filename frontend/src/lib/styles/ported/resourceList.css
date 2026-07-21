@@ -266,9 +266,12 @@
     min-width: 0;
 }
 
-/* Size column: always nth-child(5) because .owner-cell is always in the DOM
-   (even when hidden via display:none, it still occupies a child slot). */
-.list-header > div:nth-child(5),
+/* Column alignment — targets classes on BOTH the header divs AND the value
+   cells, so the header label always matches its column's value alignment
+   regardless of which optional columns (path/type/owner/…) are on. The
+   previous shape keyed off `nth-child(N)` and drifted the moment a
+   ResourceList caller toggled a `show*` prop. */
+.list-header > .size-cell,
 .files-list-view .file-item .size-cell {
     justify-self: end;
     text-align: right;
@@ -325,7 +328,12 @@
    vignette sized to its content and the cell clipped it flat with
    no ellipsis. The cell's own `text-overflow` still ellipses
    plain-text fallback content (cells without a vignette child). */
-.owner-cell {
+/* Scoped to `.file-item` so the header div — which also carries the
+   `.owner-cell` class now (so column-alignment CSS keys off classes
+   instead of brittle nth-child indices) — doesn't inherit the muted
+   cell colour / cell font size. Header keeps `.list-header`'s
+   semibold + text colour. */
+.file-item .owner-cell {
     color: var(--color-text-secondary);
     font-size: var(--text-base);
     display: flex;
@@ -427,7 +435,7 @@
     flex-shrink: 0;
 }
 
-.list-header > div:nth-child(5),
+.list-header > .date-cell,
 .files-list-view .file-item .date-cell {
     justify-self: center;
     text-align: center;
@@ -708,13 +716,35 @@
     outline-offset: 2px;
 }
 
-/* More actions button (three dots) — top-right of the thumbnail on a scrim. */
-/* Grid cards surface actions through the corner kebab (.file-actions) + the
-   favorite star, both absolutely positioned below. The inline per-row action
-   buttons (share/move/rename/delete) belong to the list view only — hide them
-   here so they don't stack up along the bottom edge of the card. */
-.files-grid-view .file-item .action-cell .btn-action {
-    display: none;
+/* ── Grid card action cluster ─────────────────────────────────────
+   Every action a row can surface — favorite star, `.file-actions`
+   kebab, per-section `.btn-action` icons (e.g. trash's Restore /
+   Delete permanently) — lives in a single `.action-cell` container
+   pinned to the top-right of the card. The container carries the
+   position + hover-reveal + gap; its children just supply their
+   own chip visuals (30x30 scrim pill, etc.), no more one-off
+   absolute positioning per child.
+
+   Old rules put `.file-actions` and `.favorite-star` at hand-crafted
+   absolute coordinates and hid `.btn-action` entirely — that made
+   trash's per-item buttons invisible in grid view. The unified
+   container reads as one design pattern and takes whatever children
+   the row template hands it. */
+.files-grid-view .file-item .action-cell {
+    position: absolute;
+    top: calc(var(--space-3) + 8px);
+    right: calc(var(--space-3) + 8px);
+    z-index: 10;
+    display: flex;
+    gap: var(--space-1);
+    opacity: 0;
+    transition: opacity var(--motion-fast) var(--ease-standard);
+}
+
+.files-grid-view .file-item:hover .action-cell,
+.files-grid-view .file-item:focus-within .action-cell,
+.files-grid-view .file-item .action-cell:has(.favorite-star.active) {
+    opacity: 1;
 }
 
 /* The favorite state is already shown by the corner star button, so the inline
@@ -723,34 +753,37 @@
     display: none;
 }
 
-.files-grid-view .file-item .file-actions {
-    position: absolute;
-    top: calc(var(--space-3) + 8px);
-    right: calc(var(--space-3) + 8px);
+/* Chip visuals for anything inside the corner cluster — the kebab, the star,
+   any `.btn-action`. Uniform 30x30 scrim pill so they line up in the flex row. */
+.files-grid-view .file-item .action-cell .file-actions,
+.files-grid-view .file-item .action-cell .favorite-star,
+.files-grid-view .file-item .action-cell .btn-action {
+    position: static;
     width: 30px;
     height: 30px;
-    border-radius: var(--radius-full);
+    /* `margin: 0` overrides the legacy `.files-grid-view .file-item
+       .btn-action { margin-top: var(--space-1) }` rule further down —
+       inside the corner cluster the parent's `gap` handles spacing
+       and any per-child margin would misalign the pills. */
+    margin: 0;
+    padding: 0;
     border: none;
+    border-radius: var(--radius-full);
     background: var(--color-scrim-control);
     backdrop-filter: blur(6px);
     -webkit-backdrop-filter: blur(6px);
     box-shadow: 0 1px 3px var(--color-shadow-sm);
-    display: flex;
+    display: inline-flex;
     align-items: center;
     justify-content: center;
-    opacity: 0;
-    z-index: 10;
-    cursor: pointer;
     color: var(--color-text);
     font-size: var(--text-md);
-    transition: opacity var(--motion-fast) var(--ease-standard);
-}
-
-.files-grid-view .file-item:hover .file-actions {
+    cursor: pointer;
+    /* Opacity/hover-reveal moves up to `.action-cell` — children stay opaque. */
     opacity: 1;
 }
 
-.files-grid-view .file-item .file-actions:hover {
+.files-grid-view .file-item .action-cell .file-actions:hover {
     color: var(--color-accent);
 }
 
@@ -782,34 +815,16 @@
     line-height: var(--leading-none);
 }
 
-/* Favorite star — top-right of the thumbnail, left of the kebab, on a scrim. */
+/* Favorite star — visual overrides only. Position, hover-reveal, chip
+   geometry all come from the shared corner-cluster rule on
+   `.files-grid-view .file-item .action-cell`. What's left here is just
+   the star's per-state colour: subtle at rest, active-gold when the
+   item is a favorite. `.active` still bumps the parent cluster's
+   opacity so an unhovered card can still show its star. */
 .files-grid-view .file-item button.favorite-star {
-    position: absolute;
-    top: calc(var(--space-3) + 8px);
-    right: calc(var(--space-3) + 8px + 34px);
-    width: 30px;
-    height: 30px;
-    border-radius: var(--radius-full);
-    border: none;
-    background: var(--color-scrim-control);
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
-    box-shadow: 0 1px 3px var(--color-shadow-sm);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    opacity: 0;
-    z-index: 12;
-    cursor: pointer;
     color: var(--color-text-subtle);
     font-size: 15px;
-    padding: 0;
     line-height: var(--leading-none);
-    transition: opacity var(--motion-fast) var(--ease-standard);
-}
-
-.files-grid-view .file-item:hover button.favorite-star {
-    opacity: 1;
 }
 
 .files-grid-view .file-item button.favorite-star:hover {
@@ -817,7 +832,6 @@
 }
 
 .files-grid-view .file-item button.favorite-star.active {
-    opacity: 1;
     color: var(--color-star-text-hover);
 }
 
@@ -1025,6 +1039,25 @@
     margin-top: 0;
 }
 
+/* Grouped-grid container (files route): a vertical stack of
+   (header + its own windowed card grid) per swimlane. Not a grid itself —
+   the card grid rides each VirtualList's inner window — so it just stacks. */
+.files-grouped-grid {
+    display: flex;
+    flex-direction: column;
+}
+
+/* In that flex stack the `grid-column: 1 / -1` span is inert; the header
+   spans naturally as a block-level flex child. First header needs no top
+   margin (there is no list-header sibling before it in the grid path). */
+.files-grouped-grid > .resource-list__swimlane-header--grid {
+    grid-column: auto;
+}
+
+.files-grouped-grid > .resource-list__swimlane-header--grid:first-child {
+    margin-top: 0;
+}
+
 /* When the header contains a rich DOM node (e.g. a user vignette for the
    "owner" group-by), reset the typographic overrides that only make sense
    for plain-text labels, and lay the node out inline. */
@@ -1168,6 +1201,11 @@
     color: var(--color-text-dark);
 }
 
+/* Legacy: a margin-top on `.btn-action` in grid view for the era when
+   these buttons flowed at the bottom of the card. Kept for any
+   free-standing use outside the corner cluster; reset inside
+   `.action-cell` (line ~745) so the broom / restore / delete pills
+   align with the kebab and star. */
 .files-grid-view .file-item .btn-action {
     margin-top: var(--space-1);
 }

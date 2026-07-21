@@ -140,22 +140,21 @@ pass "M2: 5 responses, trailing-slash semantics correct on native /webdav/ surfa
 # the lifecycle (which the existing test_dedup_webdav_* scripts
 # also exercise at root) actually validates.
 
-echo "  M3: PUT /webdav/m3-sample.txt (pinned: native always 204, NC would be 201 on new)"
+echo "  M3: PUT /webdav/m3-sample.txt → 201 (new resource, post 43cf4a2b)"
+# Post commit 43cf4a2b, the native WebDAV handler differentiates
+# new-vs-overwrite per RFC 7231 §4.3.4: 201 Created for a fresh PUT,
+# 204 No Content when replacing an existing resource. Aligns with the
+# NC handler — there's no more native-vs-NC split on this point.
+# (Prior to 43cf4a2b the native handler returned 204 for both; the M3
+# `case` block was a forward-looking trip-wire telling the next reader
+# to update this pin once the split happened. That moment is now.)
 STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X PUT \
     -H "Content-Type: text/plain" \
     --data-binary 'sample contents — exactly 31 bytes' \
     "$DAV_BASE/m3-sample.txt")
-case "$STATUS" in
-    204)
-        pass "M3: native PUT new → 204 (pinned current behaviour; differs from NC's 201/204 split)"
-        ;;
-    201)
-        fail "M3: native PUT now returns 201 for new — handler differentiates new-vs-overwrite. Update pin if intentional."
-        ;;
-    *)
-        fail "M3: unexpected status $STATUS"
-        ;;
-esac
+[[ "$STATUS" == "201" ]] \
+    || fail "M3: native PUT new expected 201, got $STATUS"
+pass "M3: native PUT new → 201"
 
 # ─────────────────────────────────────────────────────────────
 # M4 — Range GET bytes=0-9 → 206 + 10 bytes

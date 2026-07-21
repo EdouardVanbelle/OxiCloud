@@ -14,25 +14,36 @@ use axum::{
 };
 use bytes::{Buf, Bytes};
 use chrono::Utc;
+use futures::stream::{self, Stream};
 use quick_xml::Writer;
+use std::pin::Pin;
 use uuid::Uuid;
 
-use crate::application::adapters::webdav_adapter::{LockInfo, PropFindRequest, WebDavAdapter};
+use crate::application::adapters::webdav_adapter::{
+    LockInfo, PropFindRequest, PropPatchOp, QualifiedName, WebDavAdapter, is_protected_property,
+};
+use crate::application::dtos::display_helpers::intern_display;
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
+use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::file_ports::FileRetrievalUseCase;
 use crate::application::ports::file_ports::{FileManagementUseCase, FileUploadUseCase};
 use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::ports::storage_ports::StorageUsagePort;
 use crate::application::services::file_retrieval_service::FileRetrievalService;
+use crate::application::services::file_upload_service::FileUploadService;
 use crate::application::services::folder_service::FolderService;
 use crate::common::di::AppState;
 use crate::domain::repositories::drive_repository::DriveRepository;
+use crate::domain::services::authorization::{Permission, Resource, Subject};
 use crate::infrastructure::services::path_resolver_service::ResolvedResource;
+use crate::infrastructure::services::webdav_dead_property_store::{DeadPropertyStore, ResourceRef};
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::{AuthUser, CurrentUser};
 use crate::interfaces::range_requests::{not_modified_response, range_response};
+use crate::interfaces::upload_ingest::{IngestedBlob, RangeSegment, discard_ingested};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Characters that MUST NOT be percent-encoded inside a URI path segment.
@@ -59,10 +70,6 @@ const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'@');
 
 /// Percent-encode a single URI path segment (folder/file name).
-fn encode_path_segment(segment: &str) -> String {
-    utf8_percent_encode(segment, PATH_SEGMENT_ENCODE_SET).to_string()
-}
-
 /// Percent-encode a full slash-separated path, encoding each segment individually.
 pub(crate) fn encode_uri_path(path: &str) -> String {
     use std::fmt::Write as _;
@@ -150,19 +157,6 @@ fn extract_user(req: &Request<Body>) -> Result<AuthUser, AppError> {
         .ok_or_else(|| AppError::unauthorized("Authentication required"))
 }
 
-/// Assert that a resolved resource belongs to `user_id`.
-///
-/// Used in the legacy (no-PathResolver) fallback paths where
-/// `get_folder_by_path` / `get_file_by_path` are not user-scoped.
-/// Returns `AppError::not_found` on mismatch so we don't leak the
-/// existence of another user's resource.
-fn assert_owner(owner_id: Option<&str>, user_id: &str, path: &str) -> Result<(), AppError> {
-    match owner_id {
-        Some(oid) if oid == user_id => Ok(()),
-        _ => Err(AppError::not_found(format!("Resource not found: {}", path))),
-    }
-}
-
 /**
  * Creates and returns the WebDAV router with all required endpoints.
  *
@@ -230,45 +224,176 @@ async fn handle_webdav_methods(
     handle_webdav_dispatch(state, req, path).await
 }
 
-/// If `path` doesn't already start with the user's home folder name, prepend
-/// the home folder path so downstream services can find the resource in the DB.
-/// Returns `None` when the path already includes the prefix or resolution fails.
-async fn resolve_webdav_path(state: &Arc<AppState>, user_id: Uuid, path: &str) -> Option<String> {
-    let folder_service = &state.applications.folder_service;
-    let home_folders = folder_service
-        .list_folders_with_perms(None, user_id)
-        .await
-        .ok()?;
-    let home = home_folders.first()?;
-
-    if path.starts_with(&home.name) {
-        None // Already prefixed
-    } else {
-        Some(format!("{}/{}", home.path, path))
-    }
+/// Native WebDAV URL scheme (drive.md §9):
+///
+/// The exact wire shape depends on
+/// `FeaturesConfig::webdav_drive_listing_prefix` (env
+/// `OXICLOUD_WEBDAV_DRIVE_LISTING_PREFIX`, default `"@drive"`):
+///
+/// | Config | URL | Target |
+/// |---|---|---|
+/// | `"@drive"` | `/webdav/…` | default drive (back-compat) |
+/// | `"@drive"` | `/webdav/@drive/` | drive listing |
+/// | `"@drive"` | `/webdav/@drive/<sel>/…` | explicit drive |
+/// | `""` | `/webdav/` | drive listing |
+/// | `""` | `/webdav/<sel>/…` | explicit drive |
+/// | `"drives"` | `/webdav/…` | default drive |
+/// | `"drives"` | `/webdav/drives/<sel>/…` | explicit drive |
+///
+/// `<sel>` is a drive UUID **or** the drive's display name (matched
+/// against `storage.folders.name` of the drive root). Only drives the
+/// caller has Read on via `role_grants` resolve.
+///
+/// Legacy tolerance for the default-drive branch: bookmarks that
+/// already contain the drive-root name as their first segment
+/// (`/webdav/Personal/foo` under a Personal-default user) are passed
+/// through instead of double-prepended.
+enum WebdavTarget {
+    /// Render the synthetic drive-listing pseudo-root. Only PROPFIND
+    /// treats this as a real target; other verbs 405.
+    ListDrives,
+    /// Descend into a concrete drive.
+    Scope(DriveScope),
 }
 
-/// Native WebDAV protocol entry: resolve the caller's default drive
-/// once per handler so every downstream path-based lookup
-/// (`get_folder_by_path`, `get_file_by_path`, `update_file_streaming`)
-/// can pass the same `drive_id` scope.
-///
-/// Post-D0 `storage.{folders,files}.path` repeats across drives — the
-/// scope is mandatory. Native WebDAV today lives in a single-drive
-/// surface (one default drive per user), so the lookup is unambiguous.
-/// Multi-drive support via path segments (`/webdav/drives/<uuid>/…`)
-/// is tracked separately and will derive `drive_id` directly from the
-/// URL instead of going through `find_default_for_user`.
-async fn resolve_drive_id_for_native_webdav(
+struct DriveScope {
+    drive_id: Uuid,
+    /// Path in `storage.folders.path` format (drive-root name is the
+    /// leading segment; that prefix is stored per D7).
+    db_path: String,
+}
+
+/// Borrow-only `s.strip_prefix(&format!("{prefix}/"))` — the prefix tests
+/// below run on EVERY native WebDAV verb, so they must not allocate a
+/// throwaway `{prefix}/` String per request.
+fn strip_prefix_slash<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    s.strip_prefix(prefix)?.strip_prefix('/')
+}
+
+async fn resolve_webdav_scope(
     state: &Arc<AppState>,
     user_id: Uuid,
-) -> Result<Uuid, AppError> {
-    state
+    url_path: &str,
+) -> Result<WebdavTarget, AppError> {
+    let drive_prefix = state
+        .core
+        .config
+        .features
+        .webdav_drive_listing_prefix
+        .as_str();
+    let normalized = url_path.trim_matches('/');
+
+    // Mode A: empty prefix. `/webdav/` IS the drive listing.
+    if drive_prefix.is_empty() {
+        if normalized.is_empty() {
+            return Ok(WebdavTarget::ListDrives);
+        }
+        let (selector, subpath) = normalized.split_once('/').unwrap_or((normalized, ""));
+        let drive = lookup_drive_selector(state, user_id, selector).await?;
+        return Ok(WebdavTarget::Scope(DriveScope {
+            drive_id: drive.drive.id,
+            db_path: join_drive_path(&drive.root_folder_name, subpath),
+        }));
+    }
+
+    // Mode B: non-empty prefix (default `@drive`). Bare `/webdav/` is
+    // the caller's default drive; drive listing lives at
+    // `/webdav/<prefix>/`.
+    let listing_marker = drive_prefix;
+    if normalized == listing_marker {
+        return Ok(WebdavTarget::ListDrives);
+    }
+    if let Some(after_prefix) = strip_prefix_slash(normalized, listing_marker) {
+        if after_prefix.is_empty() {
+            return Ok(WebdavTarget::ListDrives);
+        }
+        let (selector, subpath) = after_prefix.split_once('/').unwrap_or((after_prefix, ""));
+        let drive = lookup_drive_selector(state, user_id, selector).await?;
+        return Ok(WebdavTarget::Scope(DriveScope {
+            drive_id: drive.drive.id,
+            db_path: join_drive_path(&drive.root_folder_name, subpath),
+        }));
+    }
+
+    // Default-drive back-compat.
+    let default = state
         .drive_repo
         .find_default_for_user(user_id)
         .await
-        .map(|d| d.drive.id)
-        .map_err(|e| AppError::internal_error(format!("Failed to resolve default drive: {:?}", e)))
+        .map_err(|e| {
+            AppError::internal_error(format!("Failed to resolve default drive: {:?}", e))
+        })?;
+    let root_name = default.root_folder_name.as_str();
+    let db_path = if normalized.is_empty() {
+        root_name.to_string()
+    } else if normalized == root_name || strip_prefix_slash(normalized, root_name).is_some() {
+        // Pre-refactor bookmark already carried the drive-root prefix.
+        normalized.to_string()
+    } else {
+        join_drive_path(root_name, normalized)
+    };
+    Ok(WebdavTarget::Scope(DriveScope {
+        drive_id: default.drive.id,
+        db_path,
+    }))
+}
+
+/// Convenience: unwrap the common Scope branch or map ListDrives to a
+/// 405-shape error. Used by every write verb (PUT/DELETE/MOVE/COPY/…)
+/// that can't sensibly operate on the drive-listing pseudo-root.
+async fn resolve_webdav_scope_or_405(
+    state: &Arc<AppState>,
+    user_id: Uuid,
+    url_path: &str,
+) -> Result<DriveScope, AppError> {
+    match resolve_webdav_scope(state, user_id, url_path).await? {
+        WebdavTarget::Scope(s) => Ok(s),
+        WebdavTarget::ListDrives => Err(AppError::method_not_allowed(
+            "Method not supported on the drive-listing pseudo-root",
+        )),
+    }
+}
+
+fn join_drive_path(root_name: &str, subpath: &str) -> String {
+    let subpath = subpath.trim_start_matches('/').trim_end_matches('/');
+    if subpath.is_empty() {
+        root_name.to_string()
+    } else {
+        format!("{}/{}", root_name, subpath)
+    }
+}
+
+/// Resolve `@drive/<selector>`: try the selector as a UUID first, then
+/// fall back to matching the drive-root folder's display name. Only
+/// drives the caller has Read access to via `role_grants` are
+/// considered — an unknown selector and a permission denial return the
+/// same `NotFound` to preserve anti-enumeration.
+async fn lookup_drive_selector(
+    state: &Arc<AppState>,
+    user_id: Uuid,
+    selector: &str,
+) -> Result<crate::domain::repositories::drive_repository::DriveWithRootName, AppError> {
+    let selector_decoded = percent_decode_str(selector).decode_utf8_lossy();
+    let uuid_opt = Uuid::parse_str(selector_decoded.as_ref()).ok();
+    let visible = state
+        .drive_repo
+        .list_readable_by(user_id)
+        .await
+        .map_err(|e| AppError::internal_error(format!("Failed to list drives: {:?}", e)))?;
+    for d in visible.iter() {
+        if let Some(uuid) = uuid_opt
+            && d.drive.id == uuid
+        {
+            return Ok(d.clone());
+        }
+        if d.root_folder_name == selector_decoded.as_ref() {
+            return Ok(d.clone());
+        }
+    }
+    Err(AppError::not_found(format!(
+        "Drive '{}' not found",
+        selector_decoded
+    )))
 }
 
 async fn handle_webdav_dispatch(
@@ -278,27 +403,16 @@ async fn handle_webdav_dispatch(
 ) -> Result<Response<Body>, AppError> {
     let method = req.method().clone();
 
-    // Translate WebDAV path → DB path by prepending user's home folder
-    // prefix when the path doesn't already include it.
-    // Extract user_id before any async call to keep the future Send.
-    let path = if !path.is_empty() && method.as_str() != "OPTIONS" {
-        let user_id = req.extensions().get::<Arc<CurrentUser>>().map(|u| u.id);
-        if let Some(uid) = user_id {
-            resolve_webdav_path(&state, uid, &path)
-                .await
-                .unwrap_or(path)
-        } else {
-            path
-        }
-    } else {
-        path
-    };
+    // Path is left as the raw URL path (post-`/webdav/`). Every handler
+    // that touches storage calls `resolve_webdav_scope` to translate the
+    // URL → (drive_id, db_path).
 
     match method.as_str() {
         "OPTIONS" => handle_options(path).await,
         "GET" => handle_get(state, req, path).await,
         "HEAD" => handle_head(state, req, path).await,
         "PUT" => handle_put(state, req, path).await,
+        "PATCH" => handle_patch(state, req, path).await,
         "MKCOL" => handle_mkcol(state, req, path).await,
         "DELETE" => handle_delete(state, req, path).await,
         "MOVE" => handle_move(state, req, path).await,
@@ -330,7 +444,7 @@ async fn handle_options(_path: String) -> Result<Response<Body>, AppError> {
         .header(HEADER_DAV, "1, 2") // Class 1 and 2 WebDAV support
         .header(
             header::ALLOW,
-            "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK",
+            "OPTIONS, GET, HEAD, PUT, PATCH, DELETE, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK",
         )
         .body(Body::empty())
         .unwrap())
@@ -391,6 +505,12 @@ async fn handle_propfind(
     // ── 2. Authenticate ──────────────────────────────────────────
     let user = extract_user(&req)?;
 
+    // Client-facing path for href construction — must be extracted before
+    // req.into_body() consumes the request. The `path` parameter already has
+    // the home-folder prefix prepended (e.g. `admin/docs`) so it's correct for
+    // DB lookups but wrong for WebDAV hrefs (clients see `/webdav/docs`).
+    let client_path = extract_webdav_path(req.uri());
+
     // ── 3. Parse PROPFIND XML body ───────────────────────────────
     let body_bytes = {
         let body = req.into_body();
@@ -413,54 +533,90 @@ async fn handle_propfind(
     let folder_service = state.applications.folder_service.clone();
     let file_retrieval_service = state.applications.file_retrieval_service.clone();
 
-    let base_href = if path.is_empty() || path == "/" {
+    // Use client-facing path for hrefs so responses match the request URL.
+    let base_href = if client_path.is_empty() || client_path == "/" {
         "/webdav/".to_string()
     } else {
-        format!("/webdav/{}/", encode_uri_path(&path))
+        format!("/webdav/{}/", encode_uri_path(&client_path))
     };
 
     // ── 5. Determine target resource ─────────────────────────────
-    if path.is_empty() || path == "/" {
-        // Root folder
-        let root_folder = FolderDto {
-            id: "root".to_string(),
-            etag: "root".to_string(),
-            name: "".to_string(),
-            path: "".to_string(),
-            parent_id: None,
-            owner_id: None,
-            // Synthetic root folder for PROPFIND on `/`; not an
-            // actual DB row, so drive_id has no meaningful value.
-            drive_id: Uuid::nil(),
-            created_at: Utc::now().timestamp() as u64,
-            modified_at: Utc::now().timestamp() as u64,
-            is_root: true,
-            icon_class: Arc::from("fas fa-folder"),
-            icon_special_class: Arc::from("folder-icon"),
-            category: Arc::from("Folder"),
-            // §14 provenance not applicable to the synthetic root.
-            created_by: None,
-            updated_by: None,
-        };
+    //
+    // `resolve_webdav_scope` handles the URL → scope translation using
+    // `OXICLOUD_WEBDAV_DRIVE_LISTING_PREFIX`. It can return either a concrete
+    // drive scope or the synthetic drive-listing pseudo-root. Only
+    // PROPFIND treats `ListDrives` as a valid target — other verbs use
+    // `resolve_webdav_scope_or_405` which errors on that branch.
+    let (drive_id, path) = match resolve_webdav_scope(&state, user.id, &path).await? {
+        WebdavTarget::ListDrives => {
+            let root_folder = FolderDto {
+                id: "root".to_string(),
+                etag: "root".to_string(),
+                name: "".to_string(),
+                path: "".to_string(),
+                parent_id: None,
+                // Synthetic root — not a real DB row.
+                drive_id: Uuid::nil(),
+                created_at: Utc::now().timestamp() as u64,
+                modified_at: Utc::now().timestamp() as u64,
+                is_root: true,
+                icon_class: intern_display("fas fa-folder"),
+                icon_special_class: intern_display("folder-icon"),
+                category: intern_display("Folder"),
+                created_by: None,
+                updated_by: None,
+            };
+            // Skip the 2-query quota resolution when the request's prop list
+            // never mentions quota (benches/QUOTA-PATH.md).
+            let quota = if propfind_request.wants_quota() {
+                state.resolve_webdav_quota(user.id, Uuid::nil()).await
+            } else {
+                None
+            };
+            return build_streaming_propfind_response(
+                root_folder,
+                None, // folder_id = None → root children (drive-root folders)
+                &depth_owned,
+                &base_href,
+                propfind_request,
+                folder_service,
+                file_retrieval_service,
+                user.id,
+                state.webdav_dead_props.clone(),
+                quota,
+            )
+            .await;
+        }
+        WebdavTarget::Scope(scope) => (scope.drive_id, scope.db_path),
+    };
 
-        return build_streaming_propfind_response(
-            root_folder,
-            None, // folder_id = None → root children
-            &depth_owned,
-            &base_href,
-            propfind_request,
-            folder_service,
-            file_retrieval_service,
-            user.id,
-        )
-        .await;
-    }
-
-    // Single-query path resolution: folder OR file in one DB round-trip
+    // Single-query path resolution: folder OR file in one DB round-trip.
+    //
+    // Post-D7 the resolver is drive-scoped (not owner-scoped), so we
+    // explicitly `authz.require(Read, …)` on the returned resource
+    // before rendering the multistatus. The streaming children of a
+    // Folder branch are separately per-item authorised inside
+    // `build_streaming_propfind_response` via `_with_perms` service
+    // methods.
     if let Some(resolver) = &state.path_resolver {
-        match resolver.resolve_path_for_user(&path, user.id).await {
+        match resolver.resolve_path_in_drive(&path, drive_id).await {
             Ok(ResolvedResource::Folder(folder)) => {
+                let folder_uuid = Uuid::parse_str(&folder.id)
+                    .map_err(|_| AppError::not_found(format!("Resource not found: {}", path)))?;
+                state
+                    .authorization
+                    .require(
+                        Subject::User(user.id),
+                        Permission::Read,
+                        Resource::Folder(folder_uuid),
+                    )
+                    .await?;
                 let folder_id = folder.id.clone();
+                let quota = if propfind_request.wants_quota() {
+                    state.resolve_webdav_quota(user.id, drive_id).await
+                } else {
+                    None
+                };
                 return build_streaming_propfind_response(
                     folder,
                     Some(folder_id),
@@ -470,20 +626,35 @@ async fn handle_propfind(
                     folder_service,
                     file_retrieval_service,
                     user.id,
+                    state.webdav_dead_props.clone(),
+                    quota,
                 )
                 .await;
             }
             Ok(ResolvedResource::File(file)) => {
+                let file_uuid = Uuid::parse_str(&file.id)
+                    .map_err(|_| AppError::not_found(format!("Resource not found: {}", path)))?;
+                state
+                    .authorization
+                    .require(
+                        Subject::User(user.id),
+                        Permission::Read,
+                        Resource::File(file_uuid),
+                    )
+                    .await?;
+                let dead_props = file_dead_props(&state, &file).await;
+                let file_href = webdav_href(&client_path);
                 let mut buf = Vec::with_capacity(1024);
                 {
                     let mut xml_writer = Writer::new(&mut buf);
                     WebDavAdapter::write_multistatus_start(&mut xml_writer)
                         .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
-                    WebDavAdapter::write_file_entry(
+                    WebDavAdapter::write_file_entry_with_dead_props(
                         &mut xml_writer,
                         &file,
                         &propfind_request,
-                        &base_href,
+                        &file_href,
+                        &dead_props,
                     )
                     .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
                     WebDavAdapter::write_multistatus_end(&mut xml_writer)
@@ -499,12 +670,23 @@ async fn handle_propfind(
         }
     } else {
         // Fallback: legacy double-query path when PathResolver is unavailable.
-        // `drive_id` is mandatory post-D0 for path-based lookups — derive
-        // the caller's default drive once and reuse it for both probes.
-        let drive_id = resolve_drive_id_for_native_webdav(&state, user.id).await?;
         if let Ok(folder) = folder_service.get_folder_by_path(&path, drive_id).await {
-            assert_owner(folder.owner_id.as_deref(), &user.id.to_string(), &path)?;
+            let folder_uuid = Uuid::parse_str(&folder.id)
+                .map_err(|_| AppError::not_found(format!("Resource not found: {}", path)))?;
+            state
+                .authorization
+                .require(
+                    Subject::User(user.id),
+                    Permission::Read,
+                    Resource::Folder(folder_uuid),
+                )
+                .await?;
             let folder_id = folder.id.clone();
+            let quota = if propfind_request.wants_quota() {
+                state.resolve_webdav_quota(user.id, drive_id).await
+            } else {
+                None
+            };
             return build_streaming_propfind_response(
                 folder,
                 Some(folder_id),
@@ -514,6 +696,8 @@ async fn handle_propfind(
                 folder_service,
                 file_retrieval_service,
                 user.id,
+                state.webdav_dead_props.clone(),
+                quota,
             )
             .await;
         }
@@ -521,17 +705,29 @@ async fn handle_propfind(
             .get_file_by_path(&path, drive_id)
             .await
         {
-            assert_owner(file.owner_id.as_deref(), &user.id.to_string(), &path)?;
+            let file_uuid = Uuid::parse_str(&file.id)
+                .map_err(|_| AppError::not_found(format!("Resource not found: {}", path)))?;
+            state
+                .authorization
+                .require(
+                    Subject::User(user.id),
+                    Permission::Read,
+                    Resource::File(file_uuid),
+                )
+                .await?;
+            let dead_props = file_dead_props(&state, &file).await;
+            let file_href = webdav_href(&client_path);
             let mut buf = Vec::with_capacity(1024);
             {
                 let mut xml_writer = Writer::new(&mut buf);
                 WebDavAdapter::write_multistatus_start(&mut xml_writer)
                     .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
-                WebDavAdapter::write_file_entry(
+                WebDavAdapter::write_file_entry_with_dead_props(
                     &mut xml_writer,
                     &file,
                     &propfind_request,
-                    &base_href,
+                    &file_href,
+                    &dead_props,
                 )
                 .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
                 WebDavAdapter::write_multistatus_end(&mut xml_writer)
@@ -564,6 +760,8 @@ async fn build_streaming_propfind_response(
     folder_service: std::sync::Arc<FolderService>,
     file_retrieval_service: std::sync::Arc<FileRetrievalService>,
     user_id: Uuid,
+    dead_props_store: Arc<DeadPropertyStore>,
+    quota: Option<(i64, Option<i64>)>,
 ) -> Result<Response<Body>, AppError> {
     let depth = depth.to_string();
     let base_href = base_href.to_string();
@@ -571,63 +769,91 @@ async fn build_streaming_propfind_response(
 
     let stream = async_stream::try_stream! {
         // ── XML header + <D:multistatus> + folder entry ──────────
+        //
+        // Dead-property lookups key on the resource's stable id, so we
+        // pass each FolderDto / FileDto to a small helper that parses
+        // its `id` field into a `ResourceRef` and queries the store.
+        // The synthetic root folder (id = "root") fails to parse and
+        // the helper returns an empty list — correct, since the root
+        // has no DB row to anchor properties on.
+        let folder_dead = folder_dead_props(&dead_props_store, &folder).await;
         let mut buf = Vec::with_capacity(4096);
         {
             let mut w = Writer::new(&mut buf);
             WebDavAdapter::write_multistatus_start(&mut w)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
-            WebDavAdapter::write_folder_entry(&mut w, &folder, &propfind_request, &base_href)
+            WebDavAdapter::write_folder_entry_with_dead_props(&mut w, &folder, &propfind_request, &base_href, &folder_dead, quota)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
         }
         yield Bytes::from(buf);
 
         // ── Children (only if Depth == 1) ────────────────────────
         if depth == "1" {
-            let pagination = crate::application::dtos::pagination::PaginationRequestDto {
-                page: 0,
-                page_size: PROPFIND_BATCH_SIZE as usize,
-            };
             let fid_ref = folder_id.as_deref();
 
-            // Stream sub-folders in pages (user-scoped)
-            let mut page = 0usize;
+            // Stream sub-folders in pages (user-scoped, keyset cursor —
+            // O(page) per page off idx_folders_unique_name instead of the
+            // quadratic COUNT(*) OVER() + LIMIT/OFFSET walk; 4.5x on a
+            // 5k-dir parent, benches/FOLDER-KEYSET.md).
+            let mut after_folder: Option<String> = None;
             loop {
-                let pag = crate::application::dtos::pagination::PaginationRequestDto {
-                    page,
-                    page_size: pagination.page_size,
-                };
-                let result = folder_service
-                    .list_folders_paginated_with_perms(fid_ref, user_id, &pag)
+                let batch = folder_service
+                    .list_folders_batch_with_perms(
+                        fid_ref,
+                        user_id,
+                        after_folder.as_deref(),
+                        PROPFIND_BATCH_SIZE as usize,
+                    )
                     .await
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-                if result.items.is_empty() {
+                if batch.is_empty() {
                     break;
                 }
 
-                let mut chunk = Vec::with_capacity(result.items.len() * 800);
+                // ONE batched dead-props query per page instead of a
+                // sequential per-child round-trip — the N+1 shape cost
+                // 1-4.5 s of pure DB chatter on a 2000-child folder
+                // (measured in benches/DEAD-PROPS.md).
+                let subfolder_deads =
+                    folders_dead_props_map(&dead_props_store, &batch).await;
+
+                let mut chunk = Vec::with_capacity(batch.len() * 800);
                 {
                     let mut w = Writer::new(&mut chunk);
-                    for subfolder in &result.items {
-                        let href = format!("{}{}/", base_href, encode_path_segment(&subfolder.name));
-                        WebDavAdapter::write_folder_entry(&mut w, subfolder, &propfind_request, &href)
+                    // One href buffer reused across the page instead of a fresh
+                    // `format!` String per child (benches/ROUND19.md §M6).
+                    let mut href = String::new();
+                    for subfolder in batch.iter() {
+                        let child_dead = dead_props_for(&subfolder.id, &subfolder_deads);
+                        href.clear();
+                        href.push_str(&base_href);
+                        href.extend(utf8_percent_encode(&subfolder.name, PATH_SEGMENT_ENCODE_SET));
+                        href.push('/');
+                        WebDavAdapter::write_folder_entry_with_dead_props(&mut w, subfolder, &propfind_request, &href, child_dead, quota)
                             .map_err(|e| std::io::Error::other(e.to_string()))?;
                     }
                 }
-                let has_more = result.pagination.has_next;
+                let has_more = (batch.len() as i64) == PROPFIND_BATCH_SIZE;
+                after_folder = batch.last().map(|f| f.name.clone());
                 yield Bytes::from(chunk);
 
                 if !has_more {
                     break;
                 }
-                page += 1;
             }
 
-            // Stream files in pages (user-scoped)
-            let mut offset: i64 = 0;
+            // Stream files in pages (user-scoped, keyset cursor — O(page)
+            // per page instead of the quadratic LIMIT/OFFSET walk).
+            let mut after_name: Option<String> = None;
             loop {
                 let batch: Vec<FileDto> = file_retrieval_service
-                    .list_files_batch_with_perms(fid_ref, user_id, offset, PROPFIND_BATCH_SIZE)
+                    .list_files_batch_with_perms(
+                        fid_ref,
+                        user_id,
+                        after_name.as_deref(),
+                        PROPFIND_BATCH_SIZE,
+                    )
                     .await
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
 
@@ -636,12 +862,20 @@ async fn build_streaming_propfind_response(
                 }
 
                 let batch_len = batch.len();
+                // Batched: one = ANY($1) query per 500-file page.
+                let file_deads = files_dead_props_map(&dead_props_store, &batch).await;
+
                 let mut chunk = Vec::with_capacity(batch_len * 800);
                 {
                     let mut w = Writer::new(&mut chunk);
-                    for file in &batch {
-                        let href = format!("{}{}", base_href, encode_path_segment(&file.name));
-                        WebDavAdapter::write_file_entry(&mut w, file, &propfind_request, &href)
+                    // One href buffer reused across the page (benches/ROUND19.md §M6).
+                    let mut href = String::new();
+                    for file in batch.iter() {
+                        let child_dead = dead_props_for(&file.id, &file_deads);
+                        href.clear();
+                        href.push_str(&base_href);
+                        href.extend(utf8_percent_encode(&file.name, PATH_SEGMENT_ENCODE_SET));
+                        WebDavAdapter::write_file_entry_with_dead_props(&mut w, file, &propfind_request, &href, child_dead)
                             .map_err(|e| std::io::Error::other(e.to_string()))?;
                     }
                 }
@@ -650,7 +884,7 @@ async fn build_streaming_propfind_response(
                 if (batch_len as i64) < PROPFIND_BATCH_SIZE {
                     break;
                 }
-                offset += batch_len as i64;
+                after_name = batch.last().map(|f| f.name.clone());
             }
         }
 
@@ -693,6 +927,15 @@ async fn handle_proppatch(
     path: String,
 ) -> Result<Response<Body>, AppError> {
     let user = extract_user(&req)?;
+    // Client-facing path for href construction (without home folder prefix).
+    let client_path = extract_webdav_path(req.uri());
+    // Scope the URL → (drive_id, db_path). The synthetic drive-listing
+    // pseudo-root has no DB row to anchor dead properties on; treat
+    // it as an empty target and reject the PROPPATCH itself below.
+    let (drive_id, path) = match resolve_webdav_scope(&state, user.id, &path).await? {
+        WebdavTarget::ListDrives => (Uuid::nil(), String::new()),
+        WebdavTarget::Scope(scope) => (scope.drive_id, scope.db_path),
+    };
 
     // Active-lock guard (RFC 4918 §9.10.4): PROPPATCH writes properties,
     // so a lock on the target must release them via `If:`. Captured
@@ -703,35 +946,69 @@ async fn handle_proppatch(
         .get("If")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
-    if let Some(resp) =
-        enforce_native_lock(&state.webdav_lock_store, if_header_owned.as_deref(), &path)
-    {
+    if let Some(resp) = enforce_native_lock(
+        &state.webdav_lock_store,
+        if_header_owned.as_deref(),
+        &path,
+        None,
+    ) {
         return Ok(resp);
     }
 
-    // Resolve the target resource type BEFORE consuming the body so
-    // we can pick the correct href shape in the multi-status
-    // response. RFC 4918 §5.2 + strict WebDAV-client parser rules
-    // require a trailing `/` for collection hrefs; emitting
-    // `/webdav/foo` for a folder breaks NC-desktop / Cyberduck /
-    // other multi-status consumers the same way the NC PROPFIND
-    // bug did. An empty / `/` path is the root, always a
-    // collection. A path that resolves to neither file nor folder
-    // (e.g. PROPPATCH on a resource that doesn't exist) defaults
-    // to non-collection — matches the request-line shape the
-    // client used, since collection paths conventionally arrive
-    // with trailing `/` already trimmed by routing.
-    let is_collection = if path.is_empty() || path == "/" {
-        true
+    // Resolve the target resource BEFORE consuming the body. We need
+    // the resolved kind for two reasons:
+    //
+    //   1. The store key is the resource id (folder_id XOR file_id)
+    //      after migration 20260830000001; we need to know which one
+    //      to bind into `ResourceRef`.
+    //   2. The href shape in the multi-status response differs for
+    //      collections vs leaves — RFC 4918 §5.2 + strict WebDAV-
+    //      client parser rules require a trailing `/` for collection
+    //      hrefs, and emitting `/webdav/foo` for a folder breaks
+    //      NC-desktop / Cyberduck / other multi-status consumers.
+    //
+    // PROPPATCH on a non-existent resource returns 404. This is a
+    // tighter contract than the pre-rekey code, which silently
+    // wrote a dead-prop row keyed by the ghost path — that was a
+    // foot-gun, not a feature.
+    let (resource_ref, is_collection) = if path.is_empty() || path == "/" {
+        // The synthetic root has no DB row to anchor properties on.
+        // Treat it as a collection for href shaping; reject the
+        // PROPPATCH itself below so we don't fabricate a target.
+        (None, true)
     } else {
-        let drive_id = resolve_drive_id_for_native_webdav(&state, user.id).await?;
-        state
-            .applications
-            .folder_service
-            .get_folder_by_path(&path, drive_id)
-            .await
-            .is_ok()
+        match resolve_or_legacy(&state, &path, drive_id).await {
+            Some(ResolvedResource::Folder(folder)) => {
+                let id = Uuid::parse_str(&folder.id).map_err(|e| {
+                    AppError::internal_error(format!("Folder id is not a UUID: {e}"))
+                })?;
+                (Some(ResourceRef::Folder(id)), true)
+            }
+            Some(ResolvedResource::File(file)) => {
+                let id = Uuid::parse_str(&file.id)
+                    .map_err(|e| AppError::internal_error(format!("File id is not a UUID: {e}")))?;
+                (Some(ResourceRef::File(id)), false)
+            }
+            None => return Err(AppError::not_found(format!("Resource not found: {}", path))),
+        }
     };
+    let resource_ref = resource_ref
+        .ok_or_else(|| AppError::forbidden("PROPPATCH on the WebDAV root is not supported"))?;
+
+    // AuthZ: PROPPATCH writes dead properties on the target — that's
+    // a mutation, requires `Update`. Without this check any caller who
+    // can Read (e.g. a Viewer-role grant) could persist dead-prop rows
+    // on someone else's file. Anti-enum-preserving: `require` maps
+    // denial to `NotFound`, matching the anonymous-not-found response
+    // above.
+    let resource = match resource_ref {
+        ResourceRef::Folder(id) => Resource::Folder(id),
+        ResourceRef::File(id) => Resource::File(id),
+    };
+    state
+        .authorization
+        .require(Subject::User(user.id), Permission::Update, resource)
+        .await?;
 
     // Read request body (XML — bounded to 1 MB)
     let body_bytes = body::to_bytes(req.into_body(), MAX_XML_BODY)
@@ -739,30 +1016,43 @@ async fn handle_proppatch(
         .map_err(|e| {
             AppError::payload_too_large(format!("PROPPATCH body too large or unreadable: {}", e))
         })?;
-    let (props_to_set, props_to_remove) = WebDavAdapter::parse_proppatch(body_bytes.reader())
+    let ops = WebDavAdapter::parse_proppatch(body_bytes.reader())
         .map_err(|e| AppError::bad_request(format!("Failed to parse PROPPATCH request: {}", e)))?;
 
-    // For now, we don't actually persist custom properties, but we respond as if we did
-    // In a full implementation, we would store these properties in a database
-
-    // Generate response - we'll pretend all operations succeeded
-    let mut results = Vec::new();
-
-    // For each property to set, indicate success
-    for prop in &props_to_set {
-        results.push((&prop.name, true));
+    // Apply operations in document order (RFC 4918 §9.2).
+    let dead_props = &state.webdav_dead_props;
+    let mut results: Vec<(&QualifiedName, bool)> = Vec::new();
+    for op in &ops {
+        match op {
+            PropPatchOp::Set(pv) if is_protected_property(&pv.name) => {
+                results.push((&pv.name, false));
+            }
+            PropPatchOp::Remove(name) if is_protected_property(name) => {
+                results.push((name, false));
+            }
+            PropPatchOp::Set(pv) => {
+                dead_props
+                    .set(resource_ref, pv.name.clone(), pv.value.clone())
+                    .await
+                    .map_err(|e| {
+                        AppError::internal_error(format!("Failed to store dead property: {e}"))
+                    })?;
+                results.push((&pv.name, true));
+            }
+            PropPatchOp::Remove(name) => {
+                dead_props.remove(resource_ref, name).await.map_err(|e| {
+                    AppError::internal_error(format!("Failed to remove dead property: {e}"))
+                })?;
+                results.push((name, true));
+            }
+        }
     }
 
-    // For each property to remove, indicate success
-    for prop in &props_to_remove {
-        results.push((prop, true));
-    }
-
-    // Generate response — collection vs file href chosen above.
+    // Generate response — use client-facing path so href matches the request URL.
     let href = if is_collection {
-        webdav_collection_href(&path)
+        webdav_collection_href(&client_path)
     } else {
-        webdav_href(&path)
+        webdav_href(&client_path)
     };
     let mut response_body = Vec::new();
     WebDavAdapter::generate_proppatch_response(&mut response_body, &href, &results).map_err(
@@ -801,10 +1091,40 @@ async fn handle_get(
         return Err(AppError::bad_request("Cannot GET a directory"));
     }
 
-    // Resolve file — user-scoped when PathResolver is available
+    // `drive_id` is the path-lookup scope post-D0 (paths repeat across
+    // drives), derived once from the caller's default drive and reused
+    // by both the resolver + legacy fallback.
+    let scope = resolve_webdav_scope_or_405(&state, user.id, &path).await?;
+    let drive_id = scope.drive_id;
+    let path = scope.db_path;
+
+    // Resolve file — drive-scoped when PathResolver is available.
+    // Post-D7 both branches enforce `Read` on the resolved file
+    // explicitly. The download stream call below also passes
+    // `caller_id`, so `get_file_stream_with_perms` re-verifies as
+    // defence-in-depth.
+    //
+    // (Fix, 2026-07-02: the legacy fallback branch previously used
+    // `Permission::Update`, a stale mapping from the retired
+    // `assert_owner` helper. That would have locked Viewers out of
+    // downloads once shared drives were exposed via WebDAV. Both
+    // branches now share the correct `Read` permission — see the
+    // post-D7 second AuthZ audit memo.)
     let file = if let Some(resolver) = &state.path_resolver {
-        match resolver.resolve_path_for_user(&path, user.id).await {
-            Ok(ResolvedResource::File(f)) => f,
+        match resolver.resolve_path_in_drive(&path, drive_id).await {
+            Ok(ResolvedResource::File(f)) => {
+                let file_uuid = Uuid::parse_str(&f.id)
+                    .map_err(|_| AppError::not_found(format!("File not found: {}", path)))?;
+                state
+                    .authorization
+                    .require(
+                        Subject::User(user.id),
+                        Permission::Read,
+                        Resource::File(file_uuid),
+                    )
+                    .await?;
+                f
+            }
             Ok(ResolvedResource::Folder(_)) => {
                 return Err(AppError::bad_request("Cannot GET a directory"));
             }
@@ -813,15 +1133,21 @@ async fn handle_get(
             }
         }
     } else {
-        // Legacy fallback — fetch + ownership check. `drive_id` is the
-        // path-lookup scope post-D0 (`storage.files.path` repeats across
-        // drives), derived once from the caller's default drive.
-        let drive_id = resolve_drive_id_for_native_webdav(&state, user.id).await?;
+        // Legacy fallback — fetch + AuthZ check.
         let f = file_retrieval_service
             .get_file_by_path(&path, drive_id)
             .await
             .map_err(|_e| AppError::not_found(format!("File not found: {}", path)))?;
-        assert_owner(f.owner_id.as_deref(), &user.id.to_string(), &path)?;
+        let file_uuid = Uuid::parse_str(&f.id)
+            .map_err(|_| AppError::not_found(format!("File not found: {}", path)))?;
+        state
+            .authorization
+            .require(
+                Subject::User(user.id),
+                Permission::Read,
+                Resource::File(file_uuid),
+            )
+            .await?;
         f
     };
 
@@ -832,6 +1158,14 @@ async fn handle_get(
     if let Some(resp) = not_modified_response(req.headers(), &etag) {
         return Ok(resp);
     }
+
+    // Recent recording deliberately does NOT fire here: native WebDAV
+    // is overwhelmingly a sync-engine surface (rclone, davfs2, Finder
+    // mounts) and a first descent would push every synced file into
+    // Recent, drowning out the SPA's "what I actually opened" signal.
+    // See memory note `project_recent_session_intent.md` — the planned
+    // session-intent gate (interactive JWT vs app-password) will turn
+    // this back on for the rare human-driven DAV access.
 
     // Range Requests — mount-style clients (rclone, davfs2, Finder) read
     // by ranges; serve 206/416 instead of re-sending the whole file on
@@ -885,10 +1219,28 @@ async fn handle_head(
             .unwrap());
     }
 
-    // Single-query path resolution (user-scoped)
+    // `drive_id` is the path-lookup scope post-D0 — derive once and
+    // reuse across the resolver + fallback branches below.
+    let scope = resolve_webdav_scope_or_405(&state, user.id, &path).await?;
+    let drive_id = scope.drive_id;
+    let path = scope.db_path;
+
+    // Single-query path resolution (drive-scoped). Both branches
+    // enforce `Read` on the resolved resource before emitting the
+    // metadata response — same permission as the legacy fallback below.
     if let Some(resolver) = &state.path_resolver {
-        match resolver.resolve_path_for_user(&path, user.id).await {
+        match resolver.resolve_path_in_drive(&path, drive_id).await {
             Ok(ResolvedResource::Folder(folder)) => {
+                let folder_uuid = Uuid::parse_str(&folder.id)
+                    .map_err(|_| AppError::not_found(format!("Resource not found: {}", path)))?;
+                state
+                    .authorization
+                    .require(
+                        Subject::User(user.id),
+                        Permission::Read,
+                        Resource::Folder(folder_uuid),
+                    )
+                    .await?;
                 return Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header(header::CONTENT_TYPE, "httpd/unix-directory")
@@ -898,6 +1250,16 @@ async fn handle_head(
                     .unwrap());
             }
             Ok(ResolvedResource::File(file)) => {
+                let file_uuid = Uuid::parse_str(&file.id)
+                    .map_err(|_| AppError::not_found(format!("Resource not found: {}", path)))?;
+                state
+                    .authorization
+                    .require(
+                        Subject::User(user.id),
+                        Permission::Read,
+                        Resource::File(file_uuid),
+                    )
+                    .await?;
                 return Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header(header::CONTENT_TYPE, &*file.mime_type)
@@ -917,11 +1279,17 @@ async fn handle_head(
     }
 
     // Fallback: legacy double-query path (with ownership check).
-    // `drive_id` is the path-lookup scope post-D0 — derive once and
-    // reuse for both the folder and file probes.
-    let drive_id = resolve_drive_id_for_native_webdav(&state, user.id).await?;
     if let Ok(folder) = folder_service.get_folder_by_path(&path, drive_id).await {
-        assert_owner(folder.owner_id.as_deref(), &user.id.to_string(), &path)?;
+        let folder_uuid = Uuid::parse_str(&folder.id)
+            .map_err(|_| AppError::not_found(format!("Resource not found: {}", path)))?;
+        state
+            .authorization
+            .require(
+                Subject::User(user.id),
+                Permission::Read,
+                Resource::Folder(folder_uuid),
+            )
+            .await?;
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "httpd/unix-directory")
@@ -936,7 +1304,16 @@ async fn handle_head(
         .get_file_by_path(&path, drive_id)
         .await
         .map_err(|_e| AppError::not_found(format!("Resource not found: {}", path)))?;
-    assert_owner(file.owner_id.as_deref(), &user.id.to_string(), &path)?;
+    let file_uuid = Uuid::parse_str(&file.id)
+        .map_err(|_| AppError::not_found(format!("Resource not found: {}", path)))?;
+    state
+        .authorization
+        .require(
+            Subject::User(user.id),
+            Permission::Read,
+            Resource::File(file_uuid),
+        )
+        .await?;
 
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -968,103 +1345,397 @@ async fn handle_head(
 /// path-match). MOVE / DELETE / COPY previously 404'd on every
 /// root-level file because they only used the optimized resolver.
 ///
-/// Ownership is enforced in both branches: the optimized resolver
-/// includes `user_id = $4` in its SQL; the fallback runs `assert_owner`
-/// explicitly so a foreign-owned hit can't leak through.
+/// Cross-drive isolation is enforced in both branches: the optimized
+/// resolver scopes by `drive_id`; the fallback derives the caller's
+/// default `drive_id` and `get_folder_by_path` / `get_file_by_path`
+/// scope by that. Callsites in the fallback additionally run
+/// `authz.require(Permission::…, Resource::…)` per operation, matching
+/// the modern AuthZ path.
 async fn resolve_or_legacy(
     state: &Arc<AppState>,
     path: &str,
-    user_id: Uuid,
+    drive_id: Uuid,
 ) -> Option<ResolvedResource> {
+    // `drive_id` is now passed in by the caller (already computed by
+    // `resolve_webdav_scope`) so the fallback probes stay consistent
+    // with the primary resolver — cross-drive URLs no longer silently
+    // fall back to the caller's default drive.
     if let Some(resolver) = &state.path_resolver
-        && let Ok(r) = resolver.resolve_path_for_user(path, user_id).await
+        && let Ok(r) = resolver.resolve_path_in_drive(path, drive_id).await
     {
         return Some(r);
     }
 
-    // Path-lookup scope post-D0 — derive the caller's default drive
-    // for both legacy probes. `find_default_for_user` returning Err
-    // (e.g. external user, or boot before the lifecycle hook fired)
-    // means no fallback resolution is possible: return None.
-    let drive_id = state
-        .drive_repo
-        .find_default_for_user(user_id)
-        .await
-        .ok()?
-        .drive
-        .id;
-
-    let user_id_str = user_id.to_string();
     let folder_service = &state.applications.folder_service;
-    if let Ok(folder) = folder_service.get_folder_by_path(path, drive_id).await
-        && folder.owner_id.as_deref() == Some(&user_id_str)
-    {
+    if let Ok(folder) = folder_service.get_folder_by_path(path, drive_id).await {
         return Some(ResolvedResource::Folder(folder));
     }
     let file_retrieval = &state.applications.file_retrieval_service;
-    if let Ok(file) = file_retrieval.get_file_by_path(path, drive_id).await
-        && file.owner_id.as_deref() == Some(&user_id_str)
-    {
+    if let Ok(file) = file_retrieval.get_file_by_path(path, drive_id).await {
         return Some(ResolvedResource::File(file));
     }
     None
 }
 
-/// Extract every `<...>` token from a WebDAV `If:` header value.
+/// Fetch a file's dead properties for a PROPFIND response.
 ///
-/// RFC 4918 §10.4 defines a richer grammar (tagged-list / no-tag-list of
-/// `(Condition)` items), but for our purposes the only thing that matters
-/// is what lock tokens the caller is claiming to hold. Forgivingly scoop
-/// every angle-bracketed value and let the caller compare against the
-/// active lock token(s).
-fn extract_if_header_tokens(if_header: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut inside = false;
-    for c in if_header.chars() {
-        match (inside, c) {
-            (false, '<') => {
-                inside = true;
-                current.clear();
-            }
-            (true, '>') => {
-                inside = false;
-                if !current.is_empty() {
-                    out.push(std::mem::take(&mut current));
-                }
-            }
-            (true, c) => current.push(c),
-            _ => {}
-        }
-    }
-    out
+/// Lenient on every failure mode: malformed id, DB error → empty list.
+/// PROPFIND must still emit the resource's live properties even when
+/// the dead-prop lookup is broken; surfacing a 500 here would mask the
+/// resource entirely from sync clients. The legacy path-keyed lookup
+/// behaved the same way (`.unwrap_or_default()`); we preserve it.
+///
+/// `pub(crate)` — also reused by the NextCloud-compatible PROPFIND
+/// handler (`interfaces::nextcloud::webdav_handler`), which needs the
+/// same lenient fetch for its own response writers.
+pub(crate) async fn file_dead_props(
+    state: &Arc<AppState>,
+    file: &FileDto,
+) -> Vec<(QualifiedName, Option<String>)> {
+    let Ok(file_id) = Uuid::parse_str(&file.id) else {
+        return Vec::new();
+    };
+    state
+        .webdav_dead_props
+        .get_all(ResourceRef::File(file_id))
+        .await
+        .unwrap_or_default()
 }
 
-/// RFC 4918 §9.10.4 — if `path` is locked, every mutating request MUST
-/// carry the lock's token in its `If:` header. Returns `Some(Response)`
-/// with a 423 Locked response when the request must be rejected; `None`
-/// when the path is unlocked or the caller's `If:` header carries the
-/// matching token (the cheap-and-cheerful submission check).
+/// Same shape as `file_dead_props` but for folder rows. Used by the
+/// streaming PROPFIND walker (and, via `pub(crate)`, by the NextCloud
+/// handler's own streaming walker).
+pub(crate) async fn folder_dead_props(
+    store: &DeadPropertyStore,
+    folder: &FolderDto,
+) -> Vec<(QualifiedName, Option<String>)> {
+    let Ok(folder_id) = Uuid::parse_str(&folder.id) else {
+        return Vec::new();
+    };
+    store
+        .get_all(ResourceRef::Folder(folder_id))
+        .await
+        .unwrap_or_default()
+}
+
+/// Batched dead-props fetch for a whole PROPFIND page of files: ONE
+/// `file_id = ANY($1)` round-trip instead of one query per child (the old
+/// per-child `streamed_file_dead_props` loop cost seconds on large folders —
+/// benches/DEAD-PROPS.md). Same leniency as the single-resource helpers:
+/// any failure → empty map, so the PROPFIND still emits live properties.
+pub(crate) async fn files_dead_props_map(
+    store: &DeadPropertyStore,
+    files: &[FileDto],
+) -> HashMap<Uuid, Vec<(QualifiedName, Option<String>)>> {
+    let ids: Vec<Uuid> = files
+        .iter()
+        .filter_map(|f| Uuid::parse_str(&f.id).ok())
+        .collect();
+    store.get_all_for_files(&ids).await.unwrap_or_default()
+}
+
+/// Folder-page variant of [`files_dead_props_map`].
+pub(crate) async fn folders_dead_props_map(
+    store: &DeadPropertyStore,
+    folders: &[FolderDto],
+) -> HashMap<Uuid, Vec<(QualifiedName, Option<String>)>> {
+    let ids: Vec<Uuid> = folders
+        .iter()
+        .filter_map(|f| Uuid::parse_str(&f.id).ok())
+        .collect();
+    store.get_all_for_folders(&ids).await.unwrap_or_default()
+}
+
+/// Looks up one resource's dead props in a batched map (resources with no
+/// dead properties are absent from the map → empty slice).
+pub(crate) fn dead_props_for<'a>(
+    id: &str,
+    map: &'a HashMap<Uuid, Vec<(QualifiedName, Option<String>)>>,
+) -> &'a [(QualifiedName, Option<String>)] {
+    Uuid::parse_str(id)
+        .ok()
+        .and_then(|u| map.get(&u))
+        .map(|v| v.as_slice())
+        .unwrap_or(&[])
+}
+
+/// A single condition inside a `List` of the WebDAV `If:` header
+/// (RFC 4918 §10.4.2 grammar):
+/// `Condition = ["Not"] (State-token | "[" entity-tag "]")`.
+#[derive(Debug, Clone, PartialEq)]
+enum IfCondition {
+    StateToken { negated: bool, token: String },
+    EntityTag { negated: bool, etag: String },
+}
+
+/// A parsed `If:` header — outer Vec is OR of `List`s, inner Vec is AND
+/// of `Condition`s (RFC 4918 §10.4.2). Tagged-list `Resource` URIs are
+/// accepted by the parser but their scoping is ignored — every List is
+/// treated as applying to the current request URI. That's a
+/// simplification adequate for litmus and NC clients; a real Tagged-list
+/// implementation would map each List to its preceding Resource.
+type IfLists = Vec<Vec<IfCondition>>;
+
+/// Best-effort parser for RFC 4918 §10.4.2 `If:` headers. Malformed
+/// input yields whatever Lists could be recovered; downstream evaluation
+/// treats an empty result as "no header".
+fn parse_if_header(header: &str) -> IfLists {
+    let mut lists: IfLists = Vec::new();
+    let bytes = header.as_bytes();
+    let n = bytes.len();
+    let mut i = 0;
+
+    while i < n {
+        match bytes[i] {
+            b' ' | b'\t' | b'\r' | b'\n' => i += 1,
+            b'<' => {
+                // Tagged-list Resource prefix — skip past the closing '>'.
+                i += 1;
+                while i < n && bytes[i] != b'>' {
+                    i += 1;
+                }
+                if i < n {
+                    i += 1;
+                }
+            }
+            b'(' => {
+                i += 1;
+                let mut list: Vec<IfCondition> = Vec::new();
+                loop {
+                    while i < n && matches!(bytes[i], b' ' | b'\t' | b'\r' | b'\n') {
+                        i += 1;
+                    }
+                    if i >= n {
+                        break;
+                    }
+                    if bytes[i] == b')' {
+                        i += 1;
+                        break;
+                    }
+
+                    // Optional "Not" prefix.
+                    let mut negated = false;
+                    if i + 3 <= n
+                        && bytes[i..i + 3].eq_ignore_ascii_case(b"Not")
+                        && (i + 3 == n
+                            || matches!(bytes[i + 3], b' ' | b'\t' | b'<' | b'[' | b'\r' | b'\n'))
+                    {
+                        negated = true;
+                        i += 3;
+                        while i < n && matches!(bytes[i], b' ' | b'\t' | b'\r' | b'\n') {
+                            i += 1;
+                        }
+                    }
+                    if i >= n {
+                        break;
+                    }
+
+                    match bytes[i] {
+                        b'<' => {
+                            i += 1;
+                            let start = i;
+                            while i < n && bytes[i] != b'>' {
+                                i += 1;
+                            }
+                            let token = std::str::from_utf8(&bytes[start..i])
+                                .unwrap_or_default()
+                                .to_string();
+                            if i < n {
+                                i += 1;
+                            }
+                            list.push(IfCondition::StateToken { negated, token });
+                        }
+                        b'[' => {
+                            i += 1;
+                            let start = i;
+                            while i < n && bytes[i] != b']' {
+                                i += 1;
+                            }
+                            let etag = std::str::from_utf8(&bytes[start..i])
+                                .unwrap_or_default()
+                                .trim()
+                                .trim_matches('"')
+                                .to_string();
+                            if i < n {
+                                i += 1;
+                            }
+                            list.push(IfCondition::EntityTag { negated, etag });
+                        }
+                        _ => {
+                            // Malformed — skip a byte and continue trying.
+                            i += 1;
+                        }
+                    }
+                }
+                if !list.is_empty() {
+                    lists.push(list);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    lists
+}
+
+/// Evaluate a parsed `If:` header against the current resource state.
 ///
-/// Shared by `handle_put` now and will be reused by `handle_delete`,
-/// `handle_move`, `handle_copy`, and `handle_proppatch` when each of
-/// those gets the same enforcement.
-fn enforce_native_lock(
+/// Returns `(header_true, submitted_active_lock)`:
+/// - `header_true` — at least one `List` (AND of Conditions) evaluates
+///   true, so the OR-across-Lists holds and the precondition passes.
+/// - `submitted_active_lock` — some non-negated `State-token` Condition
+///   presented the resource's actual lock token. Used to distinguish
+///   412 (precondition failed) from 423 (locked resource, no matching
+///   token submitted) per RFC 4918 §10.4.9 / §6.6.
+///
+/// Empty `lists` (parse failed / header absent) → treated as
+/// vacuously true. Callers handle the "no If: header on a locked
+/// resource" case separately.
+fn evaluate_if_header(
+    lists: &IfLists,
+    active_lock_token: Option<&str>,
+    current_etag: Option<&str>,
+) -> (bool, bool) {
+    if lists.is_empty() {
+        return (true, false);
+    }
+
+    // First pass — scan every non-negated State-token so we can flag
+    // "the caller did submit the lock" even for Lists that fail on other
+    // Conditions. This drives the 412-vs-423 discrimination downstream.
+    let mut submitted_active_lock = false;
+    if let Some(active) = active_lock_token {
+        for list in lists {
+            for cond in list {
+                if let IfCondition::StateToken {
+                    negated: false,
+                    token,
+                } = cond
+                    && token == active
+                {
+                    submitted_active_lock = true;
+                }
+            }
+        }
+    }
+
+    // Second pass — AND within each List, OR across Lists.
+    let any_list_true = lists.iter().any(|list| {
+        list.iter().all(|cond| {
+            let (negated, natural) = match cond {
+                IfCondition::StateToken { negated, token } => {
+                    let is_active = active_lock_token == Some(token.as_str());
+                    (*negated, is_active)
+                }
+                IfCondition::EntityTag {
+                    negated,
+                    etag: cond_etag,
+                } => {
+                    let matches = current_etag
+                        .map(|c| c.trim().trim_matches('"') == cond_etag.trim().trim_matches('"'))
+                        .unwrap_or(false);
+                    (*negated, matches)
+                }
+            };
+            natural ^ negated
+        })
+    });
+
+    (any_list_true, submitted_active_lock)
+}
+
+/// RFC 4918 §9.10.4 / §10.4 — evaluate the caller's `If:` header
+/// against the resource's active lock and current ETag.
+///
+/// Returns `Some(Response)` when the request must be rejected —
+/// **412 Precondition Failed** when the header's conditions can't be
+/// satisfied by the current state, **423 Locked** when the resource is
+/// locked and no submitted alternative includes its lock token (per
+/// §10.4.9 / §6.6). Returns `None` when the request may proceed.
+///
+/// `current_etag` is the resource's ETag (raw, unquoted) if it exists;
+/// pass `None` for a not-yet-existing target. Callers that don't have
+/// the resolved etag at the call site pass `None` — any `[etag]`
+/// condition then evaluates false, which is the correct fail-closed
+/// behaviour for the "resource doesn't exist yet" case.
+///
+/// Shared by `handle_put`, `handle_delete`, `handle_move`,
+/// `handle_copy`, and `handle_proppatch`.
+pub(crate) fn enforce_native_lock(
     lock_store: &crate::infrastructure::services::webdav_lock_service::WebDavLockStore,
     if_header: Option<&str>,
     path: &str,
+    current_etag: Option<&str>,
 ) -> Option<Response<Body>> {
-    let entry = lock_store.get_by_path(path)?;
-    if let Some(h) = if_header
-        && extract_if_header_tokens(h)
-            .iter()
-            .any(|t| t == &entry.info.token)
-    {
+    // Check the exact path, then walk up parent collections for depth-infinity
+    // locks (RFC 4918 §6.1: a lock on a collection with Depth: infinity also
+    // covers all descendant members).
+    let entry = lock_store.get_by_path(path).or_else(|| {
+        let mut p = path;
+        loop {
+            let idx = p.rfind('/')?;
+            p = &p[..idx];
+            if p.is_empty() {
+                return None;
+            }
+            if let Some(e) = lock_store.get_by_path(p)
+                && e.info.depth.eq_ignore_ascii_case("infinity")
+            {
+                return Some(e);
+            }
+        }
+    });
+
+    let active_lock_token = entry.as_ref().map(|e| e.info.token.as_str());
+    let locked = entry.is_some();
+
+    let lists = if_header.map(parse_if_header).unwrap_or_default();
+
+    // No parseable If: header at all.
+    if lists.is_empty() {
+        // Locked without an If: header → 423 Locked (§9.10.4).
+        if locked {
+            return Some(
+                Response::builder()
+                    .status(StatusCode::LOCKED)
+                    .body(Body::empty())
+                    .unwrap(),
+            );
+        }
         return None;
+    }
+
+    let (header_true, submitted_active_lock) =
+        evaluate_if_header(&lists, active_lock_token, current_etag);
+
+    if header_true {
+        // Header preconditions satisfied. If the resource is locked but
+        // the satisfying List did so via etag / Not-token alone (never
+        // presenting the real lock token), still return 423 — §10.4.9's
+        // "matching lock token" rule.
+        if locked && !submitted_active_lock {
+            return Some(
+                Response::builder()
+                    .status(StatusCode::LOCKED)
+                    .body(Body::empty())
+                    .unwrap(),
+            );
+        }
+        return None;
+    }
+
+    // Header evaluates false. 423 if the resource is locked and the
+    // caller never presented its lock token; otherwise 412.
+    if locked && !submitted_active_lock {
+        return Some(
+            Response::builder()
+                .status(StatusCode::LOCKED)
+                .body(Body::empty())
+                .unwrap(),
+        );
     }
     Some(
         Response::builder()
-            .status(StatusCode::LOCKED)
+            .status(StatusCode::PRECONDITION_FAILED)
             .body(Body::empty())
             .unwrap(),
     )
@@ -1093,79 +1764,155 @@ async fn handle_put(
 
     let user = extract_user(&req)?;
 
-    // Get file service from state
     let file_upload_service = &state.applications.file_upload_service;
 
-    // Check if path is empty (root folder)
     if path.is_empty() || path == "/" {
         return Err(AppError::bad_request("Cannot PUT to root folder"));
     }
 
-    // ── Active-lock guard (RFC 4918 §9.10.4) ──────────────────────────
-    // Reject a write that targets a locked resource unless the request
-    // carries the lock token in `If:`. Captured before we consume the
-    // body into the CDC ingester — a 423 mustn't waste any bandwidth.
+    // RFC 4918 §9.7.1: a server MUST NOT partially CREATE or UPDATE a resource
+    // based on a PUT request containing a Content-Range header.
+    if req.headers().contains_key(header::CONTENT_RANGE) {
+        return Err(AppError::bad_request(
+            "PUT with Content-Range is not allowed (RFC 4918 §9.7.1)",
+        ));
+    }
+
+    // Extract all headers before consuming `req` into the body stream.
     let if_header_owned = req
         .headers()
         .get("If")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
-    if let Some(resp) =
-        enforce_native_lock(&state.webdav_lock_store, if_header_owned.as_deref(), &path)
-    {
-        return Ok(resp);
-    }
-
-    // ── Ownership guard ────────────────────────────────────────
-    // Verify that the user owns the target file (update) or the
-    // parent folder (create). Without this check a user could
-    // overwrite another user's file via a crafted PUT path.
-    if let Some(resolver) = &state.path_resolver {
-        match resolver.resolve_path_for_user(&path, user.id).await {
-            Ok(ResolvedResource::File(_)) => { /* existing file owned by user — OK */ }
-            Ok(ResolvedResource::Folder(_)) => {
-                return Err(AppError::bad_request("Cannot PUT to a directory"));
-            }
-            Err(_) => {
-                // File doesn't exist yet — verify parent folder ownership
-                let parent_path = if let Some(idx) = path.rfind('/') {
-                    &path[..idx]
-                } else {
-                    ""
-                };
-                if !parent_path.is_empty() {
-                    resolver
-                        .resolve_path_for_user(parent_path, user.id)
-                        .await
-                        .map_err(|_| {
-                            AppError::not_found(format!("Parent folder not found: {}", parent_path))
-                        })?;
-                }
-                // root-level PUT is allowed (parent_path empty)
-            }
-        }
-    }
-    // (legacy path without resolver: update_file_streaming will create
-    //  under the folder with the resolved path, which may belong to
-    //  another user — acceptable risk since PathResolver should always
-    //  be enabled in production)
-
-    // Direct PUT cap — see `nextcloud/webdav_handler::handle_put` for
-    // the reasoning. Files above `direct_put_max_bytes` must go through
-    // the chunked-upload protocol (`/api/uploads/…`) which is resumable.
-    let max_upload = state.core.config.storage.direct_put_max_bytes;
-
-    // Extract content type before consuming the request
+    let if_none_match = req
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string());
+    let if_match = req
+        .headers()
+        .get(header::IF_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string());
     let content_type = req
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
+    let max_upload = state.core.config.storage.direct_put_max_bytes;
 
-    // ── Streaming ingest: body → CDC chunk store ──────────────
-    // Shared with the NextCloud-compat PUT handler; chunking + hashing +
-    // dedup checks run while the body arrives — no spool file, no re-read.
+    // `drive_id` is the path-lookup scope post-D0 — resolve once from
+    // the caller's default drive, reused by the resolver checks below
+    // and by the atomic-store call further down.
+    let scope = resolve_webdav_scope_or_405(&state, user.id, &path).await?;
+    let drive_id = scope.drive_id;
+    let path = scope.db_path;
+
+    // ── Existence check ───────────────────────────────────────────────
+    // Resolves to: File(existing), Folder(wrong), or Err(new file).
+    // Sets `file_existed` for 201 vs 204 and `current_etag` for If-Match.
+    //
+    // Post-D7 the resolver is drive-scoped, not owner-scoped, so we
+    // explicitly `authz.require(Read, …)` on every returned resource
+    // before consuming it. The actual overwrite is authorised as
+    // `Update` inside `update_file_streaming`; this Read check is the
+    // defence-in-depth existence-proof (see project_webdav_authz_second_audit).
+    let mut file_existed = false;
+    let mut current_etag: Option<String> = None;
+    if let Some(resolver) = &state.path_resolver {
+        match resolver.resolve_path_in_drive(&path, drive_id).await {
+            Ok(ResolvedResource::File(f)) => {
+                let file_uuid = Uuid::parse_str(&f.id)
+                    .map_err(|_| AppError::not_found(format!("File not found: {}", path)))?;
+                state
+                    .authorization
+                    .require(
+                        Subject::User(user.id),
+                        Permission::Read,
+                        Resource::File(file_uuid),
+                    )
+                    .await?;
+                file_existed = true;
+                current_etag = Some(f.etag.clone());
+            }
+            Ok(ResolvedResource::Folder(_)) => {
+                return Err(AppError::bad_request("Cannot PUT to a directory"));
+            }
+            Err(_) => {
+                // File doesn't exist — verify parent. RFC 4918 §9.7.1: missing
+                // parent MUST produce 409 Conflict, not 404.
+                let parent_path = path.rfind('/').map(|i| &path[..i]).unwrap_or("");
+                if !parent_path.is_empty() {
+                    let parent = resolver
+                        .resolve_path_in_drive(parent_path, drive_id)
+                        .await
+                        .map_err(|_| {
+                            AppError::conflict(format!("Parent folder not found: {}", parent_path))
+                        })?;
+                    if let ResolvedResource::Folder(folder) = parent {
+                        let folder_uuid = Uuid::parse_str(&folder.id).map_err(|_| {
+                            AppError::conflict(format!("Parent folder not found: {}", parent_path))
+                        })?;
+                        state
+                            .authorization
+                            .require(
+                                Subject::User(user.id),
+                                Permission::Read,
+                                Resource::Folder(folder_uuid),
+                            )
+                            .await
+                            .map_err(|_| {
+                                AppError::conflict(format!(
+                                    "Parent folder not found: {}",
+                                    parent_path
+                                ))
+                            })?;
+                    } else {
+                        return Err(AppError::conflict(format!(
+                            "Parent path is a file, not a collection: {}",
+                            parent_path
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Active-lock guard + RFC 4918 §10.4 If: evaluation ─────────────
+    // Deferred until after the existence check so `current_etag` is
+    // available to the If: header's `[etag]` conditions. `handle_put`
+    // is the only site where litmus exercises the full §10.4 grammar
+    // (locks/fail_complex_cond_put); other handlers pass `None` and
+    // fall back to the existence-only semantics.
+    if let Some(resp) = enforce_native_lock(
+        &state.webdav_lock_store,
+        if_header_owned.as_deref(),
+        &path,
+        current_etag.as_deref(),
+    ) {
+        return Ok(resp);
+    }
+
+    // ── RFC 7232 conditional preconditions ────────────────────────────
+    // Evaluated before ingesting the body to save bandwidth on doomed requests.
+    // Shared with `handle_patch` (both surfaces) — handles comma-separated
+    // multi-value lists and the weak/strong distinction the previous
+    // hand-rolled single-tag comparison here didn't.
+    if let Some(ref value) = if_none_match
+        && if_none_match_precondition_fails(value, current_etag.as_deref())
+    {
+        return Err(AppError::precondition_failed(
+            "If-None-Match — resource already exists with that ETag",
+        ));
+    }
+    if let Some(ref value) = if_match
+        && if_match_precondition_fails(value, current_etag.as_deref())
+    {
+        return Err(AppError::precondition_failed("If-Match — ETag mismatch"));
+    }
+
+    // ── Streaming ingest ──────────────────────────────────────────────
     let filename = crate::common::mime_detect::filename_from_path(&path).to_string();
     let ingested = upload_ingest::ingest_body_to_cas(
         req.into_body(),
@@ -1176,7 +1923,7 @@ async fn handle_put(
     )
     .await?;
 
-    // ── Quota enforcement ────────────────────────────────────
+    // ── Quota enforcement ─────────────────────────────────────────────
     if let Some(storage_svc) = state.storage_usage_service.as_ref()
         && let Err(err) = storage_svc
             .check_storage_quota(user.id, ingested.size)
@@ -1196,30 +1943,452 @@ async fn handle_put(
         ));
     }
 
-    // ── Atomic store: swap the file row onto the ingested blob ──
+    // ── Atomic store ──────────────────────────────────────────────────
+    // `drive_id` was resolved above (existence-check block) and is
+    // reused here — the same drive that scoped the resolver scopes the
+    // write. `update_file_streaming` enforces `Permission::Update`
+    // internally via its `_with_perms` shape.
     let content_type = ingested.content_type.clone();
-    let drive_id = resolve_drive_id_for_native_webdav(&state, user.id).await?;
     let result = file_upload_service
-        .update_file_streaming(
+        .update_file_streaming_with_perms(
             &path,
             drive_id,
             ingested.stored(),
             &content_type,
             None,
             user.id,
+            None,
         )
         .await;
 
     match result {
-        Ok(_file_dto) => Ok(Response::builder()
-            .status(StatusCode::NO_CONTENT)
-            .body(Body::empty())
-            .unwrap()),
-        Err(e) => Err(AppError::internal_error(format!(
-            "Failed to put file: {}",
-            e
-        ))),
+        Ok(file_dto) => {
+            // RFC 4918 §9.7.1: 201 Created for new resources, 204 No Content
+            // for overwrites. Always include ETag so clients can use it for
+            // subsequent conditional requests without a round-trip HEAD.
+            let status = if file_existed {
+                StatusCode::NO_CONTENT
+            } else {
+                StatusCode::CREATED
+            };
+            Ok(Response::builder()
+                .status(status)
+                .header(header::ETAG, format!("\"{}\"", file_dto.etag))
+                .body(Body::empty())
+                .unwrap())
+        }
+        // Propagate DomainError kinds — NotFound (authz denial via
+        // `require_target_folder_perm`), Conflict (missing parent) etc.
+        // Wrapping everything as InternalError swallowed 404s from the
+        // service's own AuthZ, surfacing them to callers as 500.
+        Err(e) => Err(AppError::from(e)),
     }
+}
+
+/// Parses the `X-Update-Range` header used by [`handle_patch`] (RFC 5789
+/// partial content updates): either `append`, or `bytes=<start>-<end>`
+/// (inclusive, 0-based). For the explicit-range form both bounds must fall
+/// strictly within the current file size — growing the file via a byte
+/// range isn't supported, use `append` or PUT for that.
+///
+/// Returns `(start, end)`; `end` is `None` for `append`.
+///
+/// `pub(crate)` so the NextCloud-surface PATCH handler
+/// (`nextcloud/webdav_handler.rs::handle_patch`) can reuse it instead of
+/// duplicating the parsing logic.
+pub(crate) fn parse_update_range(header: &str, size: u64) -> Result<(u64, Option<u64>), AppError> {
+    let header = header.trim();
+    if header.eq_ignore_ascii_case("append") {
+        return Ok((size, None));
+    }
+    let spec = header.strip_prefix("bytes=").ok_or_else(|| {
+        AppError::bad_request("X-Update-Range must be 'append' or 'bytes=<start>-<end>'")
+    })?;
+    let (start_str, end_str) = spec
+        .split_once('-')
+        .ok_or_else(|| AppError::bad_request("X-Update-Range must be 'bytes=<start>-<end>'"))?;
+    let start: u64 = start_str
+        .parse()
+        .map_err(|_| AppError::bad_request("X-Update-Range: invalid start offset"))?;
+    let end: u64 = end_str
+        .parse()
+        .map_err(|_| AppError::bad_request("X-Update-Range: invalid end offset"))?;
+    if start > end {
+        return Err(AppError::bad_request(
+            "X-Update-Range: start must be <= end",
+        ));
+    }
+    if end >= size {
+        return Err(AppError::new(
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            format!("X-Update-Range end {end} is out of bounds for a {size}-byte file"),
+            "RangeNotSatisfiable",
+        ));
+    }
+    Ok((start, Some(end)))
+}
+
+/// Strip the optional `W/` weak prefix and surrounding double-quotes
+/// from one ETag value in an `If-Match` / `If-None-Match` list. Returns
+/// `(is_weak, inner)`.
+fn parse_etag_value(raw: &str) -> (bool, &str) {
+    let trimmed = raw.trim();
+    if let Some(rest) = trimmed.strip_prefix("W/") {
+        (true, rest.trim().trim_matches('"'))
+    } else {
+        (false, trimmed.trim_matches('"'))
+    }
+}
+
+/// RFC 7232 §3.2 — `If-None-Match` fails when:
+///   - the header value is `*` and a current representation exists, OR
+///   - any listed ETag matches the current representation (weak comparison
+///     — weak validators in the request are equivalent to strong for the
+///     match itself, only If-Match is required to be strong).
+///
+/// `pub(crate)` so both the plain and NextCloud-surface WebDAV handlers
+/// share one RFC 7232-conformant implementation instead of each
+/// reimplementing ETag comparison (multi-value lists, `W/` weak prefix).
+pub(crate) fn if_none_match_precondition_fails(header: &str, current_etag: Option<&str>) -> bool {
+    let v = header.trim();
+    if v == "*" {
+        return current_etag.is_some();
+    }
+    let Some(current) = current_etag else {
+        return false;
+    };
+    v.split(',').any(|tag| {
+        let (_, parsed) = parse_etag_value(tag);
+        !parsed.is_empty() && parsed == current
+    })
+}
+
+/// RFC 7232 §3.1 — `If-Match` fails when:
+///   - the resource doesn't currently exist (no strong validator to match), OR
+///   - the header isn't `*` and no listed ETag strong-matches the current one
+///     (weak validators in the request never satisfy a strong-match).
+pub(crate) fn if_match_precondition_fails(header: &str, current_etag: Option<&str>) -> bool {
+    let v = header.trim();
+    let Some(current) = current_etag else {
+        return true;
+    };
+    if v == "*" {
+        return false;
+    }
+    !v.split(',').any(|tag| {
+        let (is_weak, parsed) = parse_etag_value(tag);
+        !is_weak && !parsed.is_empty() && parsed == current
+    })
+}
+
+/// Build the untouched prefix/suffix byte-range streams either side of a
+/// PATCH edit, paired with their known lengths (`upload_ingest::RangeSegment`)
+/// ready to hand to `ingest_range_patch_to_cas`.
+///
+/// `pub(crate)` so both the plain and NextCloud-surface PATCH handlers share
+/// one implementation instead of each re-deriving the same offsets — this was
+/// byte-identical duplicated code before the DRY pass that added this fn.
+pub(crate) async fn splice_patch_streams(
+    file_retrieval: &FileRetrievalService,
+    file_id: &str,
+    caller_id: Uuid,
+    start: u64,
+    end: Option<u64>,
+    file_size: u64,
+) -> Result<(RangeSegment, RangeSegment), AppError> {
+    let prefix_stream: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> =
+        if start == 0 {
+            Box::pin(stream::empty())
+        } else {
+            Box::into_pin(
+                file_retrieval
+                    .get_file_range_stream_with_perms(file_id, caller_id, 0, Some(start))
+                    .await
+                    .map_err(AppError::from)?,
+            )
+        };
+    let suffix_len = match end {
+        Some(end) if end + 1 < file_size => file_size - (end + 1),
+        _ => 0,
+    };
+    let suffix_stream: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> = match end
+    {
+        Some(end) if end + 1 < file_size => Box::into_pin(
+            file_retrieval
+                .get_file_range_stream_with_perms(file_id, caller_id, end + 1, None)
+                .await
+                .map_err(AppError::from)?,
+        ),
+        _ => Box::pin(stream::empty()),
+    };
+    Ok(((prefix_stream, start), (suffix_stream, suffix_len)))
+}
+
+/// Quota-check + compare-and-swap write for a PATCH edit already spliced and
+/// ingested into the chunk store (`ingested`). On quota rejection the blob
+/// reference just taken by ingest is released and `QuotaExceeded` (507) is
+/// returned; on success this is the CAS write keyed on `expected_hash` (the
+/// file's pre-splice content hash) that closes the race between two
+/// concurrent PATCHes to disjoint ranges of the same file (see
+/// `FileBlobWritePort::swap_blob_hash`).
+///
+/// `pub(crate)` — shared by the plain and NextCloud-surface PATCH handlers;
+/// `log_prefix` lets each surface keep its own log-line tag (`"WEBDAV PATCH"`
+/// vs `"NC WEBDAV PATCH"`) for grep-ability.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn cas_write_patch(
+    state: &AppState,
+    upload_service: &FileUploadService,
+    path: &str,
+    drive_id: Uuid,
+    ingested: &IngestedBlob,
+    caller_id: Uuid,
+    expected_hash: &str,
+    log_prefix: &str,
+) -> Result<FileDto, AppError> {
+    if let Some(storage_svc) = state.storage_usage_service.as_ref()
+        && let Err(err) = storage_svc
+            .check_storage_quota(caller_id, ingested.size)
+            .await
+    {
+        discard_ingested(&state.core.dedup_service, ingested).await;
+        tracing::warn!(
+            "⛔ {} REJECTED (quota): user={}, file={}, size={}",
+            log_prefix,
+            caller_id,
+            path,
+            ingested.size
+        );
+        return Err(AppError::new(
+            StatusCode::INSUFFICIENT_STORAGE,
+            err.message,
+            "QuotaExceeded",
+        ));
+    }
+
+    let content_type = ingested.content_type.clone();
+    upload_service
+        .update_file_streaming_with_perms(
+            path,
+            drive_id,
+            ingested.stored(),
+            &content_type,
+            None,
+            caller_id,
+            Some(expected_hash),
+        )
+        .await
+        .map_err(AppError::from)
+}
+
+/**
+ * Handles PATCH requests (RFC 5789) for partial byte-range content updates.
+ *
+ * RFC 4918 §9.7.1 forbids partial content updates on PUT (see the explicit
+ * `Content-Range` rejection in [`handle_put`]); PATCH is the mechanism this
+ * server offers instead, via the `X-Update-Range` header (see
+ * [`parse_update_range`]).
+ *
+ * The new content is assembled by splicing the request body between the
+ * file's untouched prefix/suffix byte ranges and re-ingesting the result as
+ * one continuous stream through the same content-addressable pipeline PUT
+ * uses ([`upload_ingest::ingest_range_patch_to_cas`]) — unedited chunks on
+ * either side of the edit typically dedup for free.
+ *
+ * @param state The application state containing service dependencies
+ * @param req   The HTTP request containing the partial content and
+ *              `X-Update-Range` header
+ * @param path  The requested resource path
+ * @return HTTP response: 204 with `Content-Range`/`ETag` on success
+ */
+async fn handle_patch(
+    state: Arc<AppState>,
+    req: Request<Body>,
+    path: String,
+) -> Result<Response<Body>, AppError> {
+    use crate::interfaces::upload_ingest;
+
+    let user = extract_user(&req)?;
+    let file_upload_service = &state.applications.file_upload_service;
+    let file_retrieval_service = &state.applications.file_retrieval_service;
+
+    if path.is_empty() || path == "/" {
+        return Err(AppError::bad_request("Cannot PATCH the root folder"));
+    }
+
+    // RFC 5789 doesn't define Content-Range semantics; this server uses a
+    // dedicated `X-Update-Range` header instead (see `parse_update_range`)
+    // to avoid ambiguity with HTTP Range-Request semantics.
+    if req.headers().contains_key(header::CONTENT_RANGE) {
+        return Err(AppError::bad_request(
+            "PATCH must not use Content-Range; use the X-Update-Range header instead",
+        ));
+    }
+
+    let update_range_header = req
+        .headers()
+        .get("X-Update-Range")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .ok_or_else(|| AppError::bad_request("PATCH requires an X-Update-Range header"))?;
+
+    // Extract all headers before consuming `req` into the body stream.
+    let if_header_owned = req
+        .headers()
+        .get("If")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let if_none_match = req
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string());
+    let if_match = req
+        .headers()
+        .get(header::IF_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string());
+    let content_length = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+    let content_type = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let max_upload = state.core.config.storage.direct_put_max_bytes;
+
+    let scope = resolve_webdav_scope_or_405(&state, user.id, &path).await?;
+    let drive_id = scope.drive_id;
+    let path = scope.db_path;
+
+    // ── Existence check ───────────────────────────────────────────────
+    // Unlike PUT, PATCH requires an existing file — a partial update of
+    // nothing isn't meaningful. Resolver is drive-scoped, not
+    // owner-scoped (see `handle_put`'s identical comment), so the
+    // explicit `authz.require(Read, …)` below is the defence-in-depth
+    // existence-proof before any field of `file` is trusted.
+    let resolver = state.path_resolver.as_ref().ok_or_else(|| {
+        AppError::method_not_allowed("PATCH requires WebDAV path resolver support")
+    })?;
+    let file = match resolver.resolve_path_in_drive(&path, drive_id).await {
+        Ok(ResolvedResource::File(f)) => f,
+        Ok(ResolvedResource::Folder(_)) => {
+            return Err(AppError::conflict("Cannot PATCH a directory"));
+        }
+        Err(_) => return Err(AppError::not_found(format!("File not found: {}", path))),
+    };
+    let file_uuid = Uuid::parse_str(&file.id)
+        .map_err(|_| AppError::not_found(format!("File not found: {}", path)))?;
+    state
+        .authorization
+        .require(
+            Subject::User(user.id),
+            Permission::Read,
+            Resource::File(file_uuid),
+        )
+        .await?;
+
+    // ── Active-lock guard + RFC 4918 §10.4 If: evaluation ─────────────
+    if let Some(resp) = enforce_native_lock(
+        &state.webdav_lock_store,
+        if_header_owned.as_deref(),
+        &path,
+        Some(&file.etag),
+    ) {
+        return Ok(resp);
+    }
+
+    // ── RFC 7232 conditional preconditions ────────────────────────────
+    let current_etag = Some(file.etag.as_str());
+    if let Some(ref value) = if_none_match
+        && if_none_match_precondition_fails(value, current_etag)
+    {
+        return Err(AppError::precondition_failed(
+            "If-None-Match — resource already exists with that ETag",
+        ));
+    }
+    if let Some(ref value) = if_match
+        && if_match_precondition_fails(value, current_etag)
+    {
+        return Err(AppError::precondition_failed("If-Match — ETag mismatch"));
+    }
+
+    // ── Range parsing + validation ─────────────────────────────────────
+    let (start, end) = parse_update_range(&update_range_header, file.size)?;
+    if let (Some(end), Some(len)) = (end, content_length) {
+        let expected = end - start + 1;
+        if len != expected {
+            return Err(AppError::bad_request(format!(
+                "Content-Length {len} does not match X-Update-Range span {expected}"
+            )));
+        }
+    }
+
+    // ── Splice prefix/suffix around the patched span ───────────────────
+    let (prefix_segment, suffix_segment) = splice_patch_streams(
+        file_retrieval_service,
+        &file.id,
+        user.id,
+        start,
+        end,
+        file.size,
+    )
+    .await?;
+    let filename = crate::common::mime_detect::filename_from_path(&path).to_string();
+    let ingested = upload_ingest::ingest_range_patch_to_cas(
+        prefix_segment,
+        req.into_body(),
+        suffix_segment,
+        &state.core.dedup_service,
+        &filename,
+        &content_type,
+        upload_ingest::PatchIngestBudget {
+            max_bytes: max_upload,
+            expected_body_len: end.map(|end| end - start + 1),
+        },
+    )
+    .await?;
+
+    // ── Quota enforcement + atomic store, compare-and-swap on the
+    // pre-splice content hash ─────────────────────────────────────────
+    // `file.content_hash` was snapshotted before the (potentially slow)
+    // splice + CAS-ingest above. Passing it as `expected_hash` makes the
+    // write itself a compare-and-swap: the repository checks and applies
+    // under the same row lock, so nothing else can write to this file
+    // between the check and the write. This is what actually closes the
+    // race two concurrent PATCHes to disjoint ranges could otherwise hit
+    // — each individually passing its own If-Match check against the
+    // same stale snapshot, then blindly overwriting each other.
+    let new_size = ingested.size;
+    let file_dto = cas_write_patch(
+        &state,
+        file_upload_service,
+        &path,
+        drive_id,
+        &ingested,
+        user.id,
+        &file.content_hash,
+        "WEBDAV PATCH",
+    )
+    .await?;
+
+    // Everything from `start` to the new EOF reflects the patch
+    // (the untouched suffix, if any, may have shifted when the
+    // body's length differs from the replaced span).
+    let range_end = new_size.saturating_sub(1);
+    Ok(Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .header(header::ETAG, format!("\"{}\"", file_dto.etag))
+        .header(
+            header::CONTENT_RANGE,
+            format!("bytes {}-{}/{}", start, range_end, new_size),
+        )
+        .body(Body::empty())
+        .unwrap())
 }
 
 /**
@@ -1240,11 +2409,25 @@ async fn handle_mkcol(
     let user = extract_user(&req)?;
     let folder_service = &state.applications.folder_service;
 
-    if path.is_empty() || path == "/" {
-        return Err(AppError::conflict("Root folder already exists"));
-    }
+    // Bare `/webdav/` handling: routed through `resolve_webdav_scope_or_405`
+    // below. In the empty-drive-path config that resolves to the
+    // drive-listing pseudo-root (405 method-not-allowed); in the
+    // default `@drive` config it resolves to the default drive's root
+    // folder (which already exists — the existence probe at
+    // `exists_in_drive` further down returns 405 per RFC 4918 §9.3.1).
+    // Both configs end at 405 without a special-case.
 
-    // Read request body - must be empty for MKCOL (RFC 4918 §9.3)
+    // Extract content-type before consuming the body.
+    let req_content_type = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // RFC 4918 §9.3.1: MKCOL body MUST be empty. A non-empty body with a
+    // recognised XML content-type is 400 Bad Request (malformed MKCOL body);
+    // a non-empty body with an unrecognised content-type is 415 Unsupported
+    // Media Type. We read up to MAX_MKCOL_BODY bytes to distinguish the two.
     let body_bytes = {
         let body = req.into_body();
         body::to_bytes(body, MAX_MKCOL_BODY)
@@ -1253,50 +2436,131 @@ async fn handle_mkcol(
     };
 
     if !body_bytes.is_empty() {
+        // A body whose content-type looks like XML → 400 (client sent a MKCOL
+        // extended request we don't support); anything else → 415.
+        let ct = req_content_type.as_deref().unwrap_or("");
+        if ct.contains("xml") {
+            return Err(AppError::bad_request(
+                "MKCOL with XML body is not supported",
+            ));
+        }
         return Err(AppError::unsupported_media_type(
             "MKCOL request body must be empty",
         ));
     }
 
-    // Path is already translated by dispatch (e.g. "My Folder - jared/03/01").
-    // Walk each segment: the first is the home folder (already exists),
-    // subsequent segments are created as needed with proper parent_id.
-    // `drive_id` scopes each per-segment path probe to the caller's default
-    // drive (post-D0 invariant: `storage.folders.path` repeats across drives).
-    let drive_id = resolve_drive_id_for_native_webdav(&state, user.id).await?;
+    // RFC 4918 §9.3.1: MKCOL on an existing URL MUST return 405.
+    // RFC 4918 §9.3.1: MKCOL without an existing parent MUST return 409.
+    // This handler only creates a single collection (the last path segment).
+    // It does NOT auto-create intermediate ancestors ("mkdir -p" semantics
+    // violate the RFC and were causing the test failures).
+    let scope = resolve_webdav_scope_or_405(&state, user.id, &path).await?;
+    let drive_id = scope.drive_id;
+    let path = scope.db_path;
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    let mut parent_id: Option<String> = None;
-    let mut accumulated_path = String::new();
 
-    for segment in &segments {
-        if !accumulated_path.is_empty() {
-            accumulated_path.push('/');
-        }
-        accumulated_path.push_str(segment);
-
-        match folder_service
-            .get_folder_by_path(&accumulated_path, drive_id)
-            .await
-        {
-            Ok(existing) => {
-                parent_id = Some(existing.id);
-            }
-            Err(_) => {
-                let create_dto = crate::application::dtos::folder_dto::CreateFolderDto {
-                    name: segment.to_string(),
-                    parent_id: parent_id.clone(),
-                };
-                // Propagate DomainError -> AppError so NotFound/Conflict map to
-                // their proper HTTP status codes (was: blanket 500 swallowed
-                // ownership-rejection NotFound from verify_owner).
-                let created = folder_service
-                    .create_folder_with_perms(create_dto, user.id)
-                    .await
-                    .map_err(AppError::from)?;
-                parent_id = Some(created.id);
-            }
-        }
+    if segments.is_empty() {
+        return Err(AppError::conflict("Root folder already exists"));
     }
+
+    // Check whether the target itself already exists (file or folder → 405).
+    // `exists_in_drive` is an existence-only probe (returns a bool), so no
+    // per-resource authz is applicable here — the create call below is
+    // authorised via `Permission::Create` on the parent.
+    if let Some(resolver) = &state.path_resolver {
+        if resolver
+            .exists_in_drive(&path, drive_id)
+            .await
+            .unwrap_or(false)
+        {
+            return Err(AppError::new(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "Collection already exists",
+                "AlreadyExists",
+            ));
+        }
+    } else if folder_service
+        .get_folder_by_path(&path, drive_id)
+        .await
+        .is_ok()
+    {
+        return Err(AppError::new(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "Collection already exists",
+            "AlreadyExists",
+        ));
+    }
+
+    // Resolve the parent path. RFC 4918 §9.3.1: if the parent does not
+    // exist, return 409 Conflict. If the parent exists but is a file, also
+    // return 409 (cannot create a collection inside a file).
+    let new_segment = *segments.last().unwrap();
+    let parent_segments = &segments[..segments.len() - 1];
+
+    let parent_id = if parent_segments.is_empty() {
+        // Top-level creation — no parent required; the root folder acts as parent.
+        None
+    } else {
+        let parent_path = parent_segments.join("/");
+        // Parent must be a folder, not a file. Post-D7 the resolver is
+        // drive-scoped so we explicitly `authz.require(Read, Folder)` on the
+        // returned parent — the actual create then runs under
+        // `Permission::Create` on the same folder inside `create_folder_with_perms`.
+        if let Some(resolver) = &state.path_resolver {
+            match resolver.resolve_path_in_drive(&parent_path, drive_id).await {
+                Ok(ResolvedResource::Folder(f)) => {
+                    let folder_uuid = Uuid::parse_str(&f.id).map_err(|_| {
+                        AppError::conflict(format!("Parent folder not found: {}", parent_path))
+                    })?;
+                    state
+                        .authorization
+                        .require(
+                            Subject::User(user.id),
+                            Permission::Read,
+                            Resource::Folder(folder_uuid),
+                        )
+                        .await
+                        .map_err(|_| {
+                            AppError::conflict(format!("Parent folder not found: {}", parent_path))
+                        })?;
+                    Some(f.id)
+                }
+                Ok(ResolvedResource::File(_)) => {
+                    return Err(AppError::conflict(
+                        "Parent path is a file, not a collection",
+                    ));
+                }
+                Err(_) => {
+                    return Err(AppError::conflict(format!(
+                        "Parent folder not found: {}",
+                        parent_path
+                    )));
+                }
+            }
+        } else {
+            match folder_service
+                .get_folder_by_path(&parent_path, drive_id)
+                .await
+            {
+                Ok(f) => Some(f.id),
+                Err(_) => {
+                    return Err(AppError::conflict(format!(
+                        "Parent folder not found: {}",
+                        parent_path
+                    )));
+                }
+            }
+        }
+    };
+
+    let create_dto = crate::application::dtos::folder_dto::CreateFolderDto {
+        name: new_segment.to_string(),
+        parent_id,
+    };
+    folder_service
+        .create_folder_with_perms(create_dto, user.id)
+        .await
+        .map_err(AppError::from)?;
 
     Ok(Response::builder()
         .status(StatusCode::CREATED)
@@ -1321,15 +2585,34 @@ async fn handle_delete(
 ) -> Result<Response<Body>, AppError> {
     let user = extract_user(&req)?;
 
+    // Refuse DELETE on the pseudo-root before any scope work — bare
+    // `/webdav/` (empty-config drive listing OR classic-config default
+    // drive root) can't be deleted from the WebDAV surface.
+    if path.is_empty() || path == "/" {
+        return Err(AppError::forbidden("Cannot delete root folder"));
+    }
+
+    // Scope resolution BEFORE the lock guard so `enforce_native_lock`
+    // keys on the same DB path that `handle_lock` used when it
+    // registered the lock. Doing it in the reverse order (as before
+    // the drive-scope refactor) silently defeated every LOCK because
+    // the lock-store key mismatch made every DELETE look unlocked.
+    let scope = resolve_webdav_scope_or_405(&state, user.id, &path).await?;
+    let drive_id = scope.drive_id;
+    let path = scope.db_path;
+
     // Active-lock guard (RFC 4918 §9.10.4).
     let if_header_owned = req
         .headers()
         .get("If")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
-    if let Some(resp) =
-        enforce_native_lock(&state.webdav_lock_store, if_header_owned.as_deref(), &path)
-    {
+    if let Some(resp) = enforce_native_lock(
+        &state.webdav_lock_store,
+        if_header_owned.as_deref(),
+        &path,
+        None,
+    ) {
         return Ok(resp);
     }
 
@@ -1338,31 +2621,42 @@ async fn handle_delete(
     let file_management_service = &state.applications.file_management_service;
     let folder_service = &state.applications.folder_service;
 
-    // Check if path is empty (root folder)
-    if path.is_empty() || path == "/" {
-        return Err(AppError::forbidden("Cannot delete root folder"));
-    }
-
     // Resolve via optimized resolver, falling back to the legacy
     // double-query lookup (the one GET uses). Necessary because the
     // optimized resolver and the read repositories disagree on path
     // shape for some files; see `resolve_or_legacy` docs.
     let _ = file_retrieval_service; // present for legacy fallback if needed elsewhere
-    match resolve_or_legacy(&state, &path, user.id).await {
+    // AuthZ audit #2 (2026-07-12): route service errors through
+    // `AppError::from` so authz denials from `_with_perms` surface as
+    // 404 (the anti-enum shape). The prior `map_err(|e| internal_error…)`
+    // collapsed every error — including the `NotFound` that
+    // `authz.require` returns on denial — into HTTP 500, giving a
+    // reliable "exists-but-denied" vs "missing" oracle to a probing
+    // caller. Also preserves `QuotaExceeded → 507`,
+    // `AlreadyExists → 409`, `InvalidInput → 400` shapes surfacing
+    // through the standard error mapping.
+    match resolve_or_legacy(&state, &path, drive_id).await {
         Some(ResolvedResource::Folder(folder)) => {
             folder_service
                 .delete_folder_with_perms(&folder.id, user.id)
                 .await
-                .map_err(|e| AppError::internal_error(format!("Failed to delete folder: {}", e)))?;
+                .map_err(AppError::from)?;
         }
         Some(ResolvedResource::File(file)) => {
             file_management_service
                 .delete_file_with_perms(&file.id, user.id)
                 .await
-                .map_err(|e| AppError::internal_error(format!("Failed to delete file: {}", e)))?;
+                .map_err(AppError::from)?;
         }
         None => return Err(AppError::not_found(format!("Resource not found: {}", path))),
     }
+
+    // Dead-property rows attached to the deleted file/folder are reaped
+    // automatically by `storage.webdav_dead_properties.{folder,file}_id`
+    // ON DELETE CASCADE (migration 20260830000001). Same guarantee
+    // applies to every other delete code path — REST `DELETE
+    // /api/files/{id}`, bulk delete, trash empty, folder cascade —
+    // without any service-layer call. No explicit cleanup needed here.
 
     Ok(Response::builder()
         .status(StatusCode::NO_CONTENT)
@@ -1396,16 +2690,6 @@ async fn handle_move(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    // Active-lock guard on the SOURCE (RFC 4918 §9.10.4): the move
-    // removes the source resource, which counts as modifying it.
-    if let Some(resp) = enforce_native_lock(
-        &state.webdav_lock_store,
-        if_header_owned.as_deref(),
-        &source_path,
-    ) {
-        return Ok(resp);
-    }
-
     // Get destination from Destination header
     let destination = req
         .headers()
@@ -1434,16 +2718,40 @@ async fn handle_move(
     // SECURITY: reject path-traversal in destination
     reject_path_traversal(&destination_path)?;
 
-    // Normalize destination through the SAME path-prefixing that
-    // `resolve_webdav_path` applied to `source_path` during dispatch.
-    // Without this, comparing source_parent_path (already prefixed with
-    // the user's home folder name) against dest_parent_path (raw from
-    // the URL, no prefix) always reports "different parent" — even for a
-    // pure rename at the same level — and breaks the move/rename branch
-    // selection below.
-    let destination_path = resolve_webdav_path(&state, user.id, &destination_path)
-        .await
-        .unwrap_or(destination_path);
+    // Resolve BOTH source and destination scope. Cross-drive MOVE is
+    // permitted: the underlying service methods
+    // (`move_folder_with_perms` / `move_file_with_perms`) support it
+    // natively — they enforce the D5 `forbid_cross_drive_move` policy
+    // per drive and emit a D6 `resource.moved_between_drives` audit
+    // line when the move crosses a boundary. Downstream probes that
+    // walk `storage.{folders,files}.path` need the RIGHT drive scope
+    // for each side; we thread `src_drive_id` for source probes and
+    // `dst_drive_id` for destination probes.
+    let src_scope = resolve_webdav_scope_or_405(&state, user.id, &source_path).await?;
+    let dst_scope = resolve_webdav_scope_or_405(&state, user.id, &destination_path).await?;
+    let src_drive_id = src_scope.drive_id;
+    let dst_drive_id = dst_scope.drive_id;
+    let source_path = src_scope.db_path;
+    let path = source_path.clone();
+    let destination_path = dst_scope.db_path;
+
+    // RFC 4918 §9.9.3: MOVE to self MUST return 403 Forbidden.
+    if destination_path == path {
+        return Err(AppError::forbidden("Cannot MOVE a resource to itself"));
+    }
+
+    // Active-lock guard on the SOURCE (RFC 4918 §9.10.4): the move
+    // removes the source resource, which counts as modifying it. The
+    // guard runs AFTER scope resolution so its lookup keys on the DB
+    // path — same key `handle_lock` used when it registered the lock.
+    if let Some(resp) = enforce_native_lock(
+        &state.webdav_lock_store,
+        if_header_owned.as_deref(),
+        &source_path,
+        None,
+    ) {
+        return Ok(resp);
+    }
 
     // Destination lock guard: MOVE also creates/replaces a resource at
     // the destination. If that path is locked, the same If: header must
@@ -1452,50 +2760,65 @@ async fn handle_move(
         &state.webdav_lock_store,
         if_header_owned.as_deref(),
         &destination_path,
+        None,
     ) {
         return Ok(resp);
     }
 
-    // Get services from state
     let file_retrieval_service = &state.applications.file_retrieval_service;
     let file_management_service = &state.applications.file_management_service;
     let folder_service = &state.applications.folder_service;
 
-    // `drive_id` scopes every path-based lookup below to the caller's
-    // default drive (post-D0 invariant: `storage.{files,folders}.path`
-    // repeats across drives).
-    let drive_id = resolve_drive_id_for_native_webdav(&state, user.id).await?;
-
-    // Check if destination already exists (for Overwrite header compliance)
-    if !overwrite {
-        let dest_exists = if let Some(resolver) = &state.path_resolver {
-            resolver
-                .exists_for_user(&destination_path, user.id)
-                .await
-                .unwrap_or(false)
-        } else {
-            folder_service
-                .get_folder_by_path(&destination_path, drive_id)
+    // Probe destination existence for Overwrite semantics and 201 vs 204.
+    let dest_existed = if let Some(resolver) = &state.path_resolver {
+        resolver
+            .exists_in_drive(&destination_path, dst_drive_id)
+            .await
+            .unwrap_or(false)
+    } else {
+        folder_service
+            .get_folder_by_path(&destination_path, dst_drive_id)
+            .await
+            .is_ok()
+            || file_retrieval_service
+                .get_file_by_path(&destination_path, dst_drive_id)
                 .await
                 .is_ok()
-                || file_retrieval_service
-                    .get_file_by_path(&destination_path, drive_id)
-                    .await
-                    .is_ok()
-        };
-        if dest_exists {
+    };
+
+    if dest_existed {
+        if !overwrite {
             return Err(AppError::precondition_failed(
                 "Destination already exists and Overwrite is F",
             ));
         }
+        // RFC 4918 §9.9.3: when Overwrite: T, perform a DELETE on the
+        // destination before moving. Without this the rename/move fails
+        // on a unique-index conflict (same name in same parent).
+        // AuthZ audit #2 (2026-07-12): `_with_perms` returns `DomainError`;
+        // route through `AppError::from` so authz denials surface as 404 (the
+        // anti-enum shape) instead of a `map_err → internal_error` 500 that
+        // gives a probing caller an "exists-but-denied" oracle. Also preserves
+        // `QuotaExceeded → 507`, `AlreadyExists → 409`, `InvalidInput → 400`.
+        match resolve_or_legacy(&state, &destination_path, dst_drive_id).await {
+            Some(ResolvedResource::Folder(f)) => {
+                folder_service
+                    .delete_folder_with_perms(&f.id, user.id)
+                    .await
+                    .map_err(AppError::from)?;
+            }
+            Some(ResolvedResource::File(f)) => {
+                file_management_service
+                    .delete_file_with_perms(&f.id, user.id)
+                    .await
+                    .map_err(AppError::from)?;
+            }
+            None => {}
+        }
     }
 
-    // Resolve source via optimized resolver with legacy fallback (see
-    // `resolve_or_legacy` for the rationale). Single match collapses the
-    // two near-identical branches that the resolver-only + legacy-only
-    // versions used to keep.
-    let _ = file_retrieval_service; // referenced via resolve_or_legacy
-    let resolved = resolve_or_legacy(&state, &source_path, user.id)
+    let _ = file_retrieval_service;
+    let resolved = resolve_or_legacy(&state, &source_path, src_drive_id)
         .await
         .ok_or_else(|| AppError::not_found(format!("Resource not found: {}", source_path)))?;
 
@@ -1514,22 +2837,42 @@ async fn handle_move(
 
     match resolved {
         ResolvedResource::Folder(folder) => {
-            let move_dto = crate::application::dtos::folder_dto::MoveFolderDto {
-                parent_id: if dest_parent_path.is_empty() {
-                    None
-                } else if let Ok(parent) = folder_service
-                    .get_folder_by_path(dest_parent_path, drive_id)
+            // RFC 4918 §9.9.5: missing destination parent → 409 Conflict.
+            let target_parent_id = if dest_parent_path.is_empty() {
+                None
+            } else {
+                match folder_service
+                    .get_folder_by_path(dest_parent_path, dst_drive_id)
                     .await
                 {
-                    assert_owner(
-                        parent.owner_id.as_deref(),
-                        &user.id.to_string(),
-                        dest_parent_path,
-                    )?;
-                    Some(parent.id)
-                } else {
-                    None
-                },
+                    Ok(parent) => {
+                        let parent_uuid = Uuid::parse_str(&parent.id).map_err(|_| {
+                            AppError::conflict(format!(
+                                "Destination parent not found: {}",
+                                dest_parent_path
+                            ))
+                        })?;
+                        state
+                            .authorization
+                            .require(
+                                Subject::User(user.id),
+                                Permission::Create,
+                                Resource::Folder(parent_uuid),
+                            )
+                            .await?;
+                        Some(parent.id)
+                    }
+                    Err(_) => {
+                        return Err(AppError::conflict(format!(
+                            "Destination parent not found: {}",
+                            dest_parent_path
+                        )));
+                    }
+                }
+            };
+
+            let move_dto = crate::application::dtos::folder_dto::MoveFolderDto {
+                parent_id: target_parent_id,
             };
 
             folder_service
@@ -1548,30 +2891,40 @@ async fn handle_move(
             }
         }
         ResolvedResource::File(file) => {
-            if source_parent_path != dest_parent_path {
-                // Resolve the destination's parent PATH into a folder ID
-                // before handing it to move_file_with_perms (which takes
-                // an Option<folder_id String>, not a path). Previously
-                // the path was passed straight through and the move
-                // would silently fail because no row matches a folder
-                // whose id literally equals the path text.
+            // A cross-drive move always changes the parent folder id even
+            // if the RELATIVE path within each drive looks the same, so
+            // we key the "same-parent rename" fast-path off drive id
+            // agreement as well.
+            let is_same_parent =
+                src_drive_id == dst_drive_id && source_parent_path == dest_parent_path;
+            if !is_same_parent {
+                // RFC 4918 §9.9.5: missing destination parent → 409 Conflict.
                 let target_parent_id = if dest_parent_path.is_empty() {
                     None
                 } else {
                     let parent = folder_service
-                        .get_folder_by_path(dest_parent_path, drive_id)
+                        .get_folder_by_path(dest_parent_path, dst_drive_id)
                         .await
                         .map_err(|_| {
-                            AppError::not_found(format!(
+                            AppError::conflict(format!(
                                 "Destination parent not found: {}",
                                 dest_parent_path
                             ))
                         })?;
-                    assert_owner(
-                        parent.owner_id.as_deref(),
-                        &user.id.to_string(),
-                        dest_parent_path,
-                    )?;
+                    let parent_uuid = Uuid::parse_str(&parent.id).map_err(|_| {
+                        AppError::conflict(format!(
+                            "Destination parent not found: {}",
+                            dest_parent_path
+                        ))
+                    })?;
+                    state
+                        .authorization
+                        .require(
+                            Subject::User(user.id),
+                            Permission::Create,
+                            Resource::Folder(parent_uuid),
+                        )
+                        .await?;
                     Some(parent.id)
                 };
                 file_management_service
@@ -1588,8 +2941,22 @@ async fn handle_move(
         }
     }
 
+    // Dead properties follow the resource automatically across MOVE
+    // and RENAME: the rows in `storage.webdav_dead_properties` key on
+    // the underlying folder/file id, which is stable across both
+    // operations (BEFORE trigger rewrites path on the row, AFTER
+    // cascade rewrites descendants' path/lpath — but no id ever
+    // changes). RFC 4918 §9.9 "MOVE preserves properties" satisfied
+    // by the database invariant, no store call needed.
+
+    // RFC 4918 §9.9.5: 201 Created when destination is new, 204 when overwritten.
+    let status = if dest_existed {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::CREATED
+    };
     Ok(Response::builder()
-        .status(StatusCode::CREATED)
+        .status(status)
         .body(Body::empty())
         .unwrap())
 }
@@ -1650,18 +3017,32 @@ async fn handle_copy(
     // SECURITY: reject path-traversal in destination
     reject_path_traversal(&destination_path)?;
 
-    // Normalize through the same path-prefixing the dispatcher applied
-    // to source_path. See the long comment in handle_move for why this
-    // matters — same root-cause class of asymmetric-path bugs.
-    let destination_path = resolve_webdav_path(&state, user.id, &destination_path)
-        .await
-        .unwrap_or(destination_path);
+    // Resolve BOTH source and destination scope. Cross-drive COPY is
+    // permitted: `copy_file_with_perms` / `copy_folder_tree_with_perms`
+    // take a target folder id and don't care which drive it lives in;
+    // the D5 `forbid_cross_drive_move` policy applies to MOVE only,
+    // never to COPY (copying is non-destructive on the source side).
+    // Downstream probes need the right drive per side, so we thread
+    // `src_drive_id` for source probes and `dst_drive_id` for
+    // destination probes.
+    let src_scope = resolve_webdav_scope_or_405(&state, user.id, &source_path).await?;
+    let dst_scope = resolve_webdav_scope_or_405(&state, user.id, &destination_path).await?;
+    let src_drive_id = src_scope.drive_id;
+    let dst_drive_id = dst_scope.drive_id;
+    let source_path = src_scope.db_path;
+    let destination_path = dst_scope.db_path;
+
+    // RFC 4918 §9.8.5: COPY to self MUST return 403 Forbidden.
+    if destination_path == source_path {
+        return Err(AppError::forbidden("Cannot COPY a resource to itself"));
+    }
 
     // Active-lock guard on the destination (RFC 4918 §9.10.4).
     if let Some(resp) = enforce_native_lock(
         &state.webdav_lock_store,
         if_header_owned.as_deref(),
         &destination_path,
+        None,
     ) {
         return Ok(resp);
     }
@@ -1676,41 +3057,62 @@ async fn handle_copy(
     // Get services from state
     let file_retrieval_service = &state.applications.file_retrieval_service;
     let folder_service = &state.applications.folder_service;
+    let file_management_service = &state.applications.file_management_service;
 
-    // `drive_id` scopes every path-based lookup below to the caller's
-    // default drive (post-D0 invariant: `storage.{files,folders}.path`
-    // repeats across drives).
-    let drive_id = resolve_drive_id_for_native_webdav(&state, user.id).await?;
+    // Scope already resolved above; keep `path` alias for downstream code
+    // that still reads `path` under its original name.
+    let _path = source_path.clone();
 
-    // Check if destination already exists (for Overwrite header compliance)
-    if !overwrite {
-        let dest_exists = if let Some(resolver) = &state.path_resolver {
-            resolver
-                .exists_for_user(&destination_path, user.id)
-                .await
-                .unwrap_or(false)
-        } else {
-            folder_service
-                .get_folder_by_path(&destination_path, drive_id)
+    // Probe destination existence for Overwrite semantics and 201 vs 204.
+    let dest_existed = if let Some(resolver) = &state.path_resolver {
+        resolver
+            .exists_in_drive(&destination_path, dst_drive_id)
+            .await
+            .unwrap_or(false)
+    } else {
+        folder_service
+            .get_folder_by_path(&destination_path, dst_drive_id)
+            .await
+            .is_ok()
+            || file_retrieval_service
+                .get_file_by_path(&destination_path, dst_drive_id)
                 .await
                 .is_ok()
-                || file_retrieval_service
-                    .get_file_by_path(&destination_path, drive_id)
-                    .await
-                    .is_ok()
-        };
-        if dest_exists {
+    };
+
+    if dest_existed {
+        if !overwrite {
             return Err(AppError::precondition_failed(
                 "Destination already exists and Overwrite is F",
             ));
         }
+        // RFC 4918 §9.8.4: when Overwrite: T, the server MUST perform a
+        // DELETE on the destination before the copy. Without this the copy
+        // service returns a unique-index conflict (500).
+        // AuthZ audit #2 (2026-07-12): `_with_perms` returns `DomainError`;
+        // route through `AppError::from` so authz denials surface as 404 (the
+        // anti-enum shape) instead of a `map_err → internal_error` 500 that
+        // gives a probing caller an "exists-but-denied" oracle. Also preserves
+        // `QuotaExceeded → 507`, `AlreadyExists → 409`, `InvalidInput → 400`.
+        match resolve_or_legacy(&state, &destination_path, dst_drive_id).await {
+            Some(ResolvedResource::Folder(f)) => {
+                folder_service
+                    .delete_folder_with_perms(&f.id, user.id)
+                    .await
+                    .map_err(AppError::from)?;
+            }
+            Some(ResolvedResource::File(f)) => {
+                file_management_service
+                    .delete_file_with_perms(&f.id, user.id)
+                    .await
+                    .map_err(AppError::from)?;
+            }
+            None => {}
+        }
     }
 
-    // Resolve source via optimized resolver with legacy fallback; collapses
-    // the two near-identical branches the resolver-only + legacy-only
-    // versions used to keep.
-    let _ = file_retrieval_service; // referenced via resolve_or_legacy
-    let resolved = resolve_or_legacy(&state, &source_path, user.id)
+    let _ = file_retrieval_service;
+    let resolved = resolve_or_legacy(&state, &source_path, src_drive_id)
         .await
         .ok_or_else(|| AppError::not_found(format!("Resource not found: {}", source_path)))?;
 
@@ -1723,27 +3125,50 @@ async fn handle_copy(
         .map(|i| &destination_path[..i])
         .unwrap_or("");
 
+    // RFC 4918 §9.8.5: if the destination parent does not exist, return 409.
     let target_parent_id = if dest_parent_path.is_empty() {
         None
-    } else if let Ok(parent) = folder_service
-        .get_folder_by_path(dest_parent_path, drive_id)
-        .await
-    {
-        assert_owner(
-            parent.owner_id.as_deref(),
-            &user.id.to_string(),
-            dest_parent_path,
-        )?;
-        Some(parent.id)
     } else {
-        None
+        match folder_service
+            .get_folder_by_path(dest_parent_path, dst_drive_id)
+            .await
+        {
+            Ok(parent) => {
+                let parent_uuid = Uuid::parse_str(&parent.id).map_err(|_| {
+                    AppError::conflict(format!(
+                        "Destination parent not found: {}",
+                        dest_parent_path
+                    ))
+                })?;
+                state
+                    .authorization
+                    .require(
+                        Subject::User(user.id),
+                        Permission::Create,
+                        Resource::Folder(parent_uuid),
+                    )
+                    .await?;
+                Some(parent.id)
+            }
+            Err(_) => {
+                return Err(AppError::conflict(format!(
+                    "Destination parent not found: {}",
+                    dest_parent_path
+                )));
+            }
+        }
     };
 
+    // AuthZ audit #2 (2026-07-12): route service errors through
+    // `AppError::from` so authz denials from `_with_perms` surface as 404
+    // (the anti-enum shape) instead of a `map_err → internal_error` 500
+    // that gives a probing caller an "exists-but-denied" oracle. Also
+    // preserves `QuotaExceeded → 507`, `AlreadyExists → 409`,
+    // `InvalidInput → 400` shapes.
     match resolved {
         ResolvedResource::Folder(folder) => {
             let recursive = depth != "0";
             if recursive {
-                let file_management_service = &state.applications.file_management_service;
                 file_management_service
                     .copy_folder_tree_with_perms(
                         &folder.id,
@@ -1752,9 +3177,7 @@ async fn handle_copy(
                         Some(dest_name.to_string()),
                     )
                     .await
-                    .map_err(|e| {
-                        AppError::internal_error(format!("Failed to copy folder tree: {}", e))
-                    })?;
+                    .map_err(AppError::from)?;
             } else {
                 let create_dto = crate::application::dtos::folder_dto::CreateFolderDto {
                     name: dest_name.to_string(),
@@ -1763,34 +3186,26 @@ async fn handle_copy(
                 folder_service
                     .create_folder_with_perms(create_dto, user.id)
                     .await
-                    .map_err(|e| {
-                        AppError::internal_error(format!(
-                            "Failed to create destination folder: {}",
-                            e
-                        ))
-                    })?;
+                    .map_err(AppError::from)?;
             }
         }
         ResolvedResource::File(file) => {
-            // M8b fix: copy_file_with_perms now accepts an optional new
-            // filename — without it, a copy to the same folder with a
-            // different name collided with the source on the
-            // (folder, name, user) unique index. Pass dest_name when it
-            // differs from the source so the INSERT lands with the
-            // intended name in a single round-trip; pass None for the
-            // "same name in a different folder" case to keep the existing
-            // semantics.
-            let file_management_service = &state.applications.file_management_service;
             let copy_name = (file.name != dest_name).then(|| dest_name.to_string());
             file_management_service
                 .copy_file_with_perms(&file.id, user.id, target_parent_id, copy_name)
                 .await
-                .map_err(|e| AppError::internal_error(format!("Failed to copy file: {}", e)))?;
+                .map_err(AppError::from)?;
         }
     }
 
+    // RFC 4918 §9.8.5: 201 Created when destination is new, 204 when overwritten.
+    let status = if dest_existed {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::CREATED
+    };
     Ok(Response::builder()
-        .status(StatusCode::NO_CONTENT)
+        .status(status)
         .body(Body::empty())
         .unwrap())
 }
@@ -1814,24 +3229,100 @@ async fn handle_lock(
 ) -> Result<Response<Body>, AppError> {
     let user = extract_user(&req)?;
 
-    // Determine collection-vs-file for href shape. Root + known
-    // folders → collection; everything else (existing files,
-    // lock-null on a non-existent path) → file. RFC 4918 §9.10.1
-    // allows LOCK on a non-existent resource (the "lock-null
-    // resource" pattern used by Office save flows) — that arm
-    // falls through to the file href shape, matching the
-    // request-line shape clients send.
-    let is_collection = if path.is_empty() || path == "/" {
-        true
+    // Scope resolution BEFORE the collection probe so `path` becomes
+    // the drive-scoped DB path everywhere downstream — critically the
+    // `lock_store.acquire(&path, …)` call must use the SAME key that
+    // `enforce_native_lock` will look up from the write verbs
+    // (PUT/DELETE/MOVE/COPY/PROPPATCH), all of which pass the DB path.
+    // Locking the URL path here and looking up the DB path in PUT
+    // would silently defeat the lock — that's the regression this
+    // shape prevents.
+    let (drive_id, path) = if path.is_empty() || path == "/" {
+        (Uuid::nil(), path)
     } else {
-        let drive_id = resolve_drive_id_for_native_webdav(&state, user.id).await?;
-        state
-            .applications
-            .folder_service
-            .get_folder_by_path(&path, drive_id)
-            .await
-            .is_ok()
+        let scope = resolve_webdav_scope_or_405(&state, user.id, &path).await?;
+        (scope.drive_id, scope.db_path)
     };
+
+    // Determine collection-vs-file for href shape AND resolve the
+    // target for AuthZ. Root + known folders → collection; existing
+    // files → file; missing path → lock-null (RFC 4918 §7.3 /
+    // §9.10.1, used by Office save flows). AuthZ per case:
+    //   * Existing folder / file → `Update` on the resource.
+    //   * Lock-null (target doesn't exist yet) → `Create` on the
+    //     parent folder (the lock reserves the URL for a future PUT
+    //     that would need `Create` anyway; deny here so a Viewer
+    //     can't create a lock-null placeholder on someone else's
+    //     namespace).
+    // Denial routes through `NotFound` (anti-enum), matching the
+    // rest of the WebDAV surface.
+    let (is_collection, lockable_resource) = if path.is_empty() {
+        (true, None)
+    } else if let Ok(folder) = state
+        .applications
+        .folder_service
+        .get_folder_by_path(&path, drive_id)
+        .await
+    {
+        let uuid = Uuid::parse_str(&folder.id)
+            .map_err(|e| AppError::internal_error(format!("Folder id is not a UUID: {e}")))?;
+        state
+            .authorization
+            .require(
+                Subject::User(user.id),
+                Permission::Update,
+                Resource::Folder(uuid),
+            )
+            .await?;
+        (true, Some(Resource::Folder(uuid)))
+    } else if let Ok(file) = state
+        .applications
+        .file_retrieval_service
+        .get_file_by_path(&path, drive_id)
+        .await
+    {
+        let uuid = Uuid::parse_str(&file.id)
+            .map_err(|e| AppError::internal_error(format!("File id is not a UUID: {e}")))?;
+        state
+            .authorization
+            .require(
+                Subject::User(user.id),
+                Permission::Update,
+                Resource::File(uuid),
+            )
+            .await?;
+        (false, Some(Resource::File(uuid)))
+    } else {
+        // Lock-null: authorise on the parent folder. The last `/` in
+        // `path` splits parent from name; empty parent means the drive
+        // root (which itself was already resolved above — the caller
+        // must have Read on it to have gotten this far via
+        // `resolve_webdav_scope`).
+        let parent_path = path.rfind('/').map(|i| &path[..i]).unwrap_or("");
+        if !parent_path.is_empty() {
+            let parent = state
+                .applications
+                .folder_service
+                .get_folder_by_path(parent_path, drive_id)
+                .await
+                .map_err(|_| AppError::conflict("Parent folder not found for lock-null"))?;
+            let parent_uuid = Uuid::parse_str(&parent.id).map_err(|e| {
+                AppError::internal_error(format!("Parent folder id is not a UUID: {e}"))
+            })?;
+            state
+                .authorization
+                .require(
+                    Subject::User(user.id),
+                    Permission::Create,
+                    Resource::Folder(parent_uuid),
+                )
+                .await?;
+        }
+        // No resource to authorise directly — the lock reserves the URL,
+        // downstream PUT will re-authorise via its own Create/Update.
+        (false, None)
+    };
+    let _ = lockable_resource;
 
     // Get the headers that we need
     let depth = req
@@ -1914,13 +3405,17 @@ async fn handle_lock(
             type_,
         };
 
-        // Try to acquire the lock (conflict detection via moka store)
-        let entry = lock_store.acquire(&path, lock_info).map_err(|existing| {
-            AppError::locked(format!(
-                "Resource already locked by token {}",
-                existing.info.token
-            ))
-        })?;
+        // Try to acquire the lock (conflict detection via moka store).
+        // `caller_user_id` is stamped on the entry so `handle_unlock`
+        // can enforce RFC 4918 §9.11's owner-only rule.
+        let entry = lock_store
+            .acquire(&path, lock_info, Some(user.id))
+            .map_err(|existing| {
+                AppError::locked(format!(
+                    "Resource already locked by token {}",
+                    existing.info.token
+                ))
+            })?;
 
         // Generate response — collection vs file href chosen above.
         let href = if is_collection {
@@ -1959,9 +3454,9 @@ async fn handle_lock(
 async fn handle_unlock(
     state: Arc<AppState>,
     req: Request<Body>,
-    _path: String,
+    path: String,
 ) -> Result<Response<Body>, AppError> {
-    let _user = extract_user(&req)?;
+    let user = extract_user(&req)?;
 
     // Get lock token from Lock-Token header
     let lock_token = req
@@ -1976,6 +3471,65 @@ async fn handle_unlock(
         .trim_start_matches('<')
         .trim_end_matches('>')
         .to_string();
+
+    // RFC 4918 §9.11 owner-only check. `LockEntry.caller_user_id`
+    // was stamped by `handle_lock` at acquire time. When the lock
+    // exists AND we know the acquirer, only that user can UNLOCK.
+    // Denial routes through the standard authz `NotFound` anti-enum
+    // — a caller who neither holds the lock nor has any perm on the
+    // resource shouldn't learn whether the lock exists.
+    //
+    // Approximations preserved:
+    //   * Lock entries seeded by tests (`caller_user_id = None`) fall
+    //     through to the Update-based check below — they were never
+    //     bound to a real user.
+    //   * If the token isn't in the store at all (expired, never
+    //     existed) we skip the owner check and let the `release`
+    //     call below return the RFC-standard 409.
+    let lock_entry = state.webdav_lock_store.get_by_token(&token);
+    if let Some(entry) = &lock_entry
+        && let Some(owner_id) = entry.caller_user_id
+        && owner_id != user.id
+    {
+        tracing::info!(
+            target: "audit",
+            event = "webdav.unlock_denied",
+            reason = "not_lock_owner",
+            caller_id = %user.id,
+            lock_owner_id = %owner_id,
+            token = %token,
+            "👮🏻‍♂️ UNLOCK refused: caller does not own the lock",
+        );
+        return Err(AppError::not_found(format!(
+            "Lock token not found or already expired: {}",
+            token
+        )));
+    }
+
+    // Defence-in-depth for the test-seeded / legacy `caller_user_id
+    // = None` case: require `Update` on the target resource so a
+    // Read-only grantee still can't unlock. Uses the URL path (the
+    // lock's target) to resolve the resource. Missing target → skip
+    // (lock-null unlock is legitimate).
+    if let Some(entry) = &lock_entry
+        && entry.caller_user_id.is_none()
+        && !path.is_empty()
+        && path != "/"
+    {
+        let scope = resolve_webdav_scope_or_405(&state, user.id, &path).await?;
+        let drive_id = scope.drive_id;
+        let db_path = scope.db_path;
+        if let Some(resource) = match resolve_or_legacy(&state, &db_path, drive_id).await {
+            Some(ResolvedResource::Folder(f)) => Uuid::parse_str(&f.id).ok().map(Resource::Folder),
+            Some(ResolvedResource::File(f)) => Uuid::parse_str(&f.id).ok().map(Resource::File),
+            None => None,
+        } {
+            state
+                .authorization
+                .require(Subject::User(user.id), Permission::Update, resource)
+                .await?;
+        }
+    }
 
     // Remove the lock from the store
     if !state.webdav_lock_store.release(&token) {
@@ -1995,6 +3549,194 @@ async fn handle_unlock(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── RFC 4918 §10.4 If: header parser + evaluator ────────────────
+
+    #[test]
+    fn parse_if_simple_state_token() {
+        let lists = parse_if_header("(<opaquelocktoken:xyz>)");
+        assert_eq!(
+            lists,
+            vec![vec![IfCondition::StateToken {
+                negated: false,
+                token: "opaquelocktoken:xyz".to_string(),
+            }]]
+        );
+    }
+
+    #[test]
+    fn parse_if_no_tag_list_two_lists() {
+        let lists = parse_if_header("(<T1>) (Not <DAV:no-lock>)");
+        assert_eq!(lists.len(), 2);
+        assert_eq!(
+            lists[0],
+            vec![IfCondition::StateToken {
+                negated: false,
+                token: "T1".to_string(),
+            }]
+        );
+        assert_eq!(
+            lists[1],
+            vec![IfCondition::StateToken {
+                negated: true,
+                token: "DAV:no-lock".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_if_state_token_and_etag() {
+        let lists = parse_if_header("(<T1> [\"abc123\"])");
+        assert_eq!(
+            lists[0],
+            vec![
+                IfCondition::StateToken {
+                    negated: false,
+                    token: "T1".to_string(),
+                },
+                IfCondition::EntityTag {
+                    negated: false,
+                    etag: "abc123".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_if_tagged_list_resource_ignored() {
+        // Tagged-list — the Resource prefix `<http://…/foo>` scopes the
+        // following Lists; our parser accepts but doesn't honour scoping.
+        let lists = parse_if_header("<http://example.com/foo> (<T1>)");
+        assert_eq!(lists.len(), 1);
+        assert_eq!(
+            lists[0],
+            vec![IfCondition::StateToken {
+                negated: false,
+                token: "T1".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_if_complex_two_lists_token_and_etag() {
+        // The litmus fail_complex_cond_put shape.
+        let lists =
+            parse_if_header("(<opaquelocktoken:xyz> [\"etag1\"]) (Not <DAV:no-lock> [\"etag2\"])");
+        assert_eq!(lists.len(), 2);
+        assert_eq!(lists[0].len(), 2);
+        assert_eq!(lists[1].len(), 2);
+        assert_eq!(
+            lists[1][0],
+            IfCondition::StateToken {
+                negated: true,
+                token: "DAV:no-lock".to_string(),
+            }
+        );
+    }
+
+    // Litmus `cond_put`: locked resource, `(<token> [etag])`, matches
+    // both → header true, submitted the lock → proceed.
+    #[test]
+    fn evaluate_cond_put_success() {
+        let lists = parse_if_header("(<opaquelocktoken:xyz> [\"abc\"])");
+        let (matches, submitted) =
+            evaluate_if_header(&lists, Some("opaquelocktoken:xyz"), Some("abc"));
+        assert!(matches);
+        assert!(submitted);
+    }
+
+    // Litmus `fail_cond_put`: locked resource, bogus token, valid etag
+    // → List has token=FALSE AND etag=TRUE → FALSE. No matching token
+    // submitted → 423 (caller returns Locked).
+    #[test]
+    fn evaluate_fail_cond_put_bogus_token_valid_etag() {
+        let lists = parse_if_header("(<DAV:no-lock> [\"abc\"])");
+        let (matches, submitted) =
+            evaluate_if_header(&lists, Some("opaquelocktoken:xyz"), Some("abc"));
+        assert!(!matches);
+        assert!(!submitted);
+    }
+
+    // Litmus `fail_cond_put_unlocked`: unlocked resource, bogus token
+    // → List fails. No lock to submit → 412.
+    #[test]
+    fn evaluate_fail_cond_put_unlocked() {
+        let lists = parse_if_header("(<DAV:no-lock>)");
+        let (matches, submitted) = evaluate_if_header(&lists, None, None);
+        assert!(!matches);
+        assert!(!submitted);
+    }
+
+    // Litmus `cond_put_with_not`: locked, `(<token>) (Not <DAV:no-lock>)`
+    // → List 1 true (token match). Header true. Submitted → proceed.
+    #[test]
+    fn evaluate_cond_put_with_not() {
+        let lists = parse_if_header("(<opaquelocktoken:xyz>) (Not <DAV:no-lock>)");
+        let (matches, submitted) = evaluate_if_header(&lists, Some("opaquelocktoken:xyz"), None);
+        assert!(matches);
+        assert!(submitted);
+    }
+
+    // Litmus `cond_put_corrupt_token`: locked, `(<corrupt>) (Not <DAV:no-lock>)`
+    // → List 2 (Not <DAV:no-lock>) is TRUE, header matches. But no
+    // active-lock token submitted → 423 per §10.4.9.
+    #[test]
+    fn evaluate_cond_put_corrupt_token() {
+        let lists = parse_if_header("(<opaquelocktoken:corrupt>) (Not <DAV:no-lock>)");
+        let (matches, submitted) = evaluate_if_header(&lists, Some("opaquelocktoken:xyz"), None);
+        assert!(matches);
+        assert!(!submitted);
+    }
+
+    // Litmus `complex_cond_put`: locked, `(<token> [etag]) (Not <no-lock> [etag])`
+    // with the CORRECT etag → List 1 true. Header true. Submitted → proceed.
+    #[test]
+    fn evaluate_complex_cond_put_success() {
+        let lists =
+            parse_if_header("(<opaquelocktoken:xyz> [\"abc\"]) (Not <DAV:no-lock> [\"abc\"])");
+        let (matches, submitted) =
+            evaluate_if_header(&lists, Some("opaquelocktoken:xyz"), Some("abc"));
+        assert!(matches);
+        assert!(submitted);
+    }
+
+    // Litmus `fail_complex_cond_put`: locked, `(<token> [corrupt]) (Not <no-lock> [corrupt])`
+    // → both Lists AND to false (etag mismatch). Header FALSE. Token
+    // WAS submitted (in List 1) → 412 not 423.
+    #[test]
+    fn evaluate_fail_complex_cond_put() {
+        let lists = parse_if_header(
+            "(<opaquelocktoken:xyz> [\"corrupt\"]) (Not <DAV:no-lock> [\"corrupt\"])",
+        );
+        let (matches, submitted) =
+            evaluate_if_header(&lists, Some("opaquelocktoken:xyz"), Some("abc"));
+        assert!(!matches);
+        assert!(
+            submitted,
+            "the valid token IS submitted, even though etag conditions fail"
+        );
+    }
+
+    #[test]
+    fn evaluate_etag_with_quotes_matches_raw() {
+        // The stored etag is raw (unquoted). The If: header quotes it.
+        // trim_matches should normalise both sides.
+        let lists = parse_if_header("([\"abc123-1234\"])");
+        let (matches, _) = evaluate_if_header(&lists, None, Some("abc123-1234"));
+        assert!(matches);
+    }
+
+    #[test]
+    fn parse_if_empty_returns_no_lists() {
+        assert_eq!(parse_if_header("").len(), 0);
+    }
+
+    #[test]
+    fn evaluate_empty_lists_is_true() {
+        let (matches, submitted) = evaluate_if_header(&Vec::new(), None, None);
+        assert!(matches);
+        assert!(!submitted);
+    }
 
     #[test]
     fn test_webdav_href_no_trailing_slash() {
@@ -2035,5 +3777,98 @@ mod tests {
             webdav_collection_href("My Photos/2024"),
             "/webdav/My%20Photos/2024/"
         );
+    }
+
+    // ── RFC 5789 PATCH: `X-Update-Range` parsing ────────────────────
+
+    #[test]
+    fn parse_update_range_append() {
+        assert_eq!(parse_update_range("append", 100).unwrap(), (100, None));
+        assert_eq!(parse_update_range("APPEND", 0).unwrap(), (0, None));
+    }
+
+    #[test]
+    fn parse_update_range_explicit_span() {
+        assert_eq!(parse_update_range("bytes=5-9", 100).unwrap(), (5, Some(9)));
+        // Single-byte span at offset 0.
+        assert_eq!(parse_update_range("bytes=0-0", 1).unwrap(), (0, Some(0)));
+    }
+
+    #[test]
+    fn parse_update_range_rejects_missing_prefix() {
+        assert!(parse_update_range("5-9", 100).is_err());
+    }
+
+    #[test]
+    fn parse_update_range_rejects_malformed_bounds() {
+        assert!(parse_update_range("bytes=abc-9", 100).is_err());
+        assert!(parse_update_range("bytes=5-abc", 100).is_err());
+        assert!(parse_update_range("bytes=9", 100).is_err());
+    }
+
+    #[test]
+    fn parse_update_range_rejects_start_after_end() {
+        assert!(parse_update_range("bytes=9-5", 100).is_err());
+    }
+
+    #[test]
+    fn parse_update_range_rejects_end_at_or_past_size() {
+        // `end` must be strictly within the current file — growing the
+        // file via a byte-range PATCH isn't supported (use `append`).
+        let err = parse_update_range("bytes=5-9", 9).unwrap_err();
+        assert_eq!(err.status_code, StatusCode::RANGE_NOT_SATISFIABLE);
+        assert!(parse_update_range("bytes=0-0", 0).is_err());
+    }
+
+    // ── RFC 7232 If-Match / If-None-Match — multi-value lists ───────
+    //
+    // Regression coverage for `handle_put`'s hand-rolled precondition
+    // check, which only ever compared the header as a single tag and
+    // never split on commas — a client sending the standard
+    // comma-separated multi-value form would silently mismatch even
+    // when one of the listed ETags matched. Both handlers now share
+    // `if_none_match_precondition_fails`/`if_match_precondition_fails`,
+    // which already handled this correctly for `handle_patch`.
+
+    #[test]
+    fn if_none_match_multi_value_list_matches_second_tag() {
+        assert!(if_none_match_precondition_fails(
+            r#""aaa", "bbb", "ccc""#,
+            Some("bbb")
+        ));
+    }
+
+    #[test]
+    fn if_none_match_multi_value_list_no_match_passes() {
+        assert!(!if_none_match_precondition_fails(
+            r#""aaa", "bbb", "ccc""#,
+            Some("zzz")
+        ));
+    }
+
+    #[test]
+    fn if_match_multi_value_list_matches_last_tag() {
+        assert!(!if_match_precondition_fails(
+            r#""aaa", "bbb", "ccc""#,
+            Some("ccc")
+        ));
+    }
+
+    #[test]
+    fn if_match_multi_value_list_no_match_fails() {
+        assert!(if_match_precondition_fails(
+            r#""aaa", "bbb", "ccc""#,
+            Some("zzz")
+        ));
+    }
+
+    #[test]
+    fn if_match_weak_tag_in_list_never_satisfies() {
+        // If-Match requires a strong comparison — a weak validator in the
+        // list must not satisfy it even if the underlying tag matches.
+        assert!(if_match_precondition_fails(
+            r#"W/"aaa", "bbb""#,
+            Some("aaa")
+        ));
     }
 }

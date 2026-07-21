@@ -512,6 +512,26 @@ jsonpath "$[*].id"          contains {{team_drive_id}}
 
 
 # ─────────────────────────────────────────────────────────────
+# Step 21b — Upload gate by role (post-Drive AuthZ audit Round 2).
+#            Bob is Editor on team_drive; `POST /api/files/upload`
+#            targeting team_root_folder_id should succeed. This is
+#            the REST-side counterpart of the WebDAV/NC PUT chain
+#            hardened by `update_file_streaming_with_perms`. If
+#            this fails, the whole role-bundle → Permission::Create
+#            wiring is broken.
+# ─────────────────────────────────────────────────────────────
+POST {{base_url}}/api/files/upload
+Authorization: Bearer {{bob_token}}
+[MultipartFormData]
+folder_id: {{team_root_folder_id}}
+file: file,fixtures/hello.txt; text/plain
+
+HTTP 201
+[Captures]
+bob_editor_upload_id: jsonpath "$.id"
+
+
+# ─────────────────────────────────────────────────────────────
 # Step 22 — Higher role wins: Bob now ALSO gets a Viewer direct
 #           grant (would lower his bundle). The collapsed caller_role
 #           must remain Editor (the stronger of his two grants).
@@ -535,6 +555,51 @@ Authorization: Bearer {{bob_token}}
 HTTP 200
 [Asserts]
 jsonpath "$[*].id" contains {{team_drive_id}}
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 22b — Viewer CANNOT upload into a shared drive.
+#            Post-Drive AuthZ audit Round 2: the create branch of
+#            `update_file_streaming_with_perms` requires
+#            `Permission::Create` on the parent folder — bundled
+#            with `owner`/`editor`/`contributor` role_grants only,
+#            NOT with `viewer`. `POST /api/files/upload` shares the
+#            same `save_file_with_blob` gate. Bob has Read on the
+#            drive (viewer role cascades) → graduated denial returns
+#            403 (see [[project_authz_require_graduated_denial]]).
+#            Also verify the batch / overwrite paths refuse — the
+#            whole chain from drive-membership to file write is
+#            exercised here.
+# ─────────────────────────────────────────────────────────────
+
+# 22b.i — Fresh file: 403.
+POST {{base_url}}/api/files/upload
+Authorization: Bearer {{bob_token}}
+[MultipartFormData]
+folder_id: {{team_root_folder_id}}
+file: file,fixtures/hello.txt; text/plain
+
+HTTP 403
+
+
+# 22b.ii — Overwrite attempt on the Editor-era upload: still 403.
+#          `save_file_with_blob` catches the duplicate name at the
+#          `Create`-permission check before the upsert races (which
+#          would otherwise 409).
+POST {{base_url}}/api/files/upload
+Authorization: Bearer {{bob_token}}
+[MultipartFormData]
+folder_id: {{team_root_folder_id}}
+file: file,fixtures/hello.txt; text/plain
+
+HTTP 403
+
+
+# 22b.iii — Alice's Editor-era file is untouched.
+GET {{base_url}}/api/files/{{bob_editor_upload_id}}
+Authorization: Bearer {{alice_token}}
+
+HTTP 200
 
 
 # =============================================================
@@ -634,8 +699,8 @@ jsonpath "$.role" == "viewer"
 
 # ─────────────────────────────────────────────────────────────
 # Step 25 — Viewer CANNOT edit drive members.
-#           Bob is Viewer. Every member-mutation verb → 404
-#           (anti-enum: same shape as if the drive didn't exist).
+#           Bob is Viewer (has Read on the drive) → graduated denial
+#           returns 403 on every member-mutation verb.
 # ─────────────────────────────────────────────────────────────
 POST {{base_url}}/api/drives/{{team_drive_id}}/members
 Authorization: Bearer {{bob_token}}
@@ -645,7 +710,7 @@ Content-Type: application/json
   "role": "editor"
 }
 
-HTTP 404
+HTTP 403
 
 
 PATCH {{base_url}}/api/drives/{{team_drive_id}}/members/user/{{carol_user_id}}
@@ -653,13 +718,13 @@ Authorization: Bearer {{bob_token}}
 Content-Type: application/json
 { "role": "viewer" }
 
-HTTP 404
+HTTP 403
 
 
 DELETE {{base_url}}/api/drives/{{team_drive_id}}/members/user/{{carol_user_id}}
 Authorization: Bearer {{bob_token}}
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
@@ -675,7 +740,7 @@ Content-Type: application/json
 HTTP 200
 
 
-# 26a — Editor POST /api/drives/{id}/members → 404.
+# 26a — Editor POST /api/drives/{id}/members → 403 (Editor has Read).
 POST {{base_url}}/api/drives/{{team_drive_id}}/members
 Authorization: Bearer {{bob_token}}
 Content-Type: application/json
@@ -684,39 +749,39 @@ Content-Type: application/json
   "role": "viewer"
 }
 
-HTTP 404
+HTTP 403
 
 
-# 26b — Editor PATCH a member → 404.
+# 26b — Editor PATCH a member → 403.
 PATCH {{base_url}}/api/drives/{{team_drive_id}}/members/user/{{carol_user_id}}
 Authorization: Bearer {{bob_token}}
 Content-Type: application/json
 { "role": "viewer" }
 
-HTTP 404
+HTTP 403
 
 
-# 26c — Editor DELETE a member → 404.
+# 26c — Editor DELETE a member → 403.
 DELETE {{base_url}}/api/drives/{{team_drive_id}}/members/user/{{carol_user_id}}
 Authorization: Bearer {{bob_token}}
 
-HTTP 404
+HTTP 403
 
 
-# 26d — Editor renames the drive (root folder) → 404.
+# 26d — Editor renames the drive (root folder) → 403.
 #       Folder rename normally requires `Permission::Update` (which
 #       Editor has on every folder in the drive via the engine's drive
 #       precheck). The folder service promotes the requirement to
 #       `Permission::Manage` when the target folder has `parent_id IS
 #       NULL` — i.e. it's a drive root — so the drive-rename surface is
 #       Owner-only per drive.md §6, without changing the public folder
-#       endpoint shape. Anti-enum: refusal returns 404 (not 403).
+#       endpoint shape. Editor has Read → graduated denial → 403.
 PUT {{base_url}}/api/folders/{{team_root_folder_id}}/rename
 Authorization: Bearer {{bob_token}}
 Content-Type: application/json
 { "name": "team-drive-editor-renamed" }
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
@@ -734,6 +799,8 @@ Content-Type: application/json
 }
 
 HTTP 201
+[Captures]
+editor_created_folder_id: jsonpath "$.id"
 [Asserts]
 jsonpath "$.name" == "editor-created-folder"
 
@@ -813,3 +880,81 @@ GET {{base_url}}/api/drives/{{team_drive_id}}/members
 Authorization: Bearer {{dave_token}}
 
 HTTP 404
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 30 — Drive delete (D3b).
+#           - Non-Owner → 403 (Bob is Viewer post-Step 28, has Read).
+#           - Owner on non-empty drive → 409 (the editor-created-folder
+#             from Step 27 is still live).
+#           - Owner after the folder is trashed → 204.
+#           Personal-drive refusal (default_for_user IS NOT NULL) is
+#           covered separately — `mbr_dave` keeps his default drive,
+#           we exercise its 405 below.
+# ─────────────────────────────────────────────────────────────
+
+# 30a — Viewer (Bob) cannot delete the drive → 403 (has Read).
+DELETE {{base_url}}/api/drives/{{team_drive_id}}
+Authorization: Bearer {{bob_token}}
+
+HTTP 403
+
+
+# 30b — Owner (Alice) on a non-empty drive → 409 with the canonical
+#       "drive_not_empty" reason in the audit log.
+DELETE {{base_url}}/api/drives/{{team_drive_id}}
+Authorization: Bearer {{alice_token}}
+
+HTTP 409
+
+
+# 30c — Clear the lingering content (the Editor-created folder from
+#       Step 27 and the Editor-era file from Step 21b). Delete via
+#       the regular endpoints so rows land in trash, not the live
+#       tree; `is_empty` excludes trashed rows so a populated trash
+#       bin is allowed.
+DELETE {{base_url}}/api/folders/{{editor_created_folder_id}}
+Authorization: Bearer {{alice_token}}
+
+HTTP 204
+
+
+DELETE {{base_url}}/api/files/{{bob_editor_upload_id}}
+Authorization: Bearer {{alice_token}}
+
+HTTP 204
+
+
+# 30d — Owner on an empty drive → 204.
+DELETE {{base_url}}/api/drives/{{team_drive_id}}
+Authorization: Bearer {{alice_token}}
+
+HTTP 204
+
+
+# 30e — Drive is gone; subsequent reads return 404.
+GET {{base_url}}/api/drives/{{team_drive_id}}/members
+Authorization: Bearer {{alice_token}}
+
+HTTP 404
+
+
+# 30f — Default Personal drive — Dave's home — cannot be deleted.
+#       Look up the drive id via the picker listing. Dave is a fresh
+#       user and only has his default personal drive, so `$[0].id`
+#       is unambiguous. (Avoiding the `[?(...)]` filter — Hurl
+#       collapses single-match results to a scalar, which breaks
+#       `nth` / list-style assertions; see memory.)
+GET {{base_url}}/api/drives
+Authorization: Bearer {{dave_token}}
+
+HTTP 200
+[Captures]
+dave_default_drive_id: jsonpath "$[0].id"
+[Asserts]
+jsonpath "$[0].default_for_user" == "{{dave_user_id}}"
+
+DELETE {{base_url}}/api/drives/{{dave_default_drive_id}}
+Authorization: Bearer {{dave_token}}
+
+HTTP 405

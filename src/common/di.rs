@@ -1,9 +1,13 @@
 use sqlx::PgPool;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::application::ports::blob_storage_ports::BlobStorageBackend;
+use crate::application::ports::storage_ports::StorageUsagePort;
 use crate::common::config::StorageBackendType;
+use crate::domain::entities::drive::DriveKind;
+use crate::domain::repositories::drive_repository::DriveRepository;
 use crate::infrastructure::db::DbPools;
 
 use crate::application::services::admin_settings_service::AdminSettingsService;
@@ -50,13 +54,13 @@ use crate::application::ports::video_frame_ports::VideoFramePort;
 use crate::application::services::app_password_service::AppPasswordService;
 use crate::application::services::blob_lifecycle_service::BlobLifecycleService;
 use crate::application::services::calendar_service::CalendarService;
+use crate::application::services::contact_service::ContactService;
 use crate::application::services::device_auth_service::DeviceAuthService;
 use crate::application::services::file_lifecycle_service::FileLifecycleService;
 use crate::application::services::music_service::MusicService;
 use crate::application::services::storage_usage_service::StorageUsageService;
 use crate::application::services::wopi_lock_service::WopiLockService;
 use crate::application::services::wopi_token_service::WopiTokenService;
-use crate::infrastructure::adapters::contact_storage_adapter::ContactStorageAdapter;
 use crate::infrastructure::repositories::AppPasswordPgRepository;
 use crate::infrastructure::repositories::DeviceCodePgRepository;
 use crate::infrastructure::repositories::pg::{
@@ -519,46 +523,83 @@ impl AppServiceFactory {
             Arc<dyn crate::application::ports::plugin_ports::PluginDispatchPort>,
         >,
         mount_router: Arc<crate::application::services::external_mount_router::MountRouter>,
+        resource_access_hook: Option<
+            Arc<dyn crate::application::ports::resource_access_hook::ResourceAccessHook>,
+        >,
     ) -> ApplicationServices {
         // Main services
-        let folder_service = Arc::new(FolderService::new(
-            repos.folder_repository.clone(),
-            authz.clone(),
-            mount_router.clone(),
-        ));
+        let folder_service = Arc::new(
+            FolderService::new(
+                repos.folder_repository.clone(),
+                authz.clone(),
+                // Same dispatcher TrashService uses, so the cascade hook in
+                // `delete_folder_with_perms` fans out to the same handlers
+                // (thumbnails, metadata, …) as a single-file delete.
+                core.file_lifecycle.clone(),
+                mount_router.clone(),
+            )
+            // D5 cross-drive move gate reads policies via the same
+            // drive repo every other policy uses. Wired here so
+            // `move_folder_with_perms` can enforce
+            // `forbid_cross_drive_move` without a separate construction path.
+            .with_drive_repo(drive_repo.clone())
+            // Destination-drive quota pre-check on cross-drive folder
+            // MOVE. Reuses the `check_drive_quota` the upload path
+            // already runs. Without this, a Move that would push the
+            // destination past its cap succeeds silently.
+            .with_storage_usage(storage_usage.clone()),
+        );
 
         // Built before the upload/management services so the plugin lifecycle
         // bridge (which looks file metadata up by id) can be wired into the
         // dispatcher they receive. It depends only on repos + core, never on
         // the upload service, so the reorder is safe.
-        let file_retrieval_service = Arc::new(
-            FileRetrievalService::new_with_cache(
+        let file_retrieval_service = {
+            let mut svc = FileRetrievalService::new_with_cache(
                 repos.file_read_repository.clone(),
                 core.file_content_cache.clone(),
                 core.image_transcode_service.clone(),
                 authz.clone(),
             )
-            .with_mount_router(mount_router.clone()),
-        );
+            .with_mount_router(mount_router.clone());
+            if let Some(hook) = resource_access_hook.clone() {
+                svc = svc.with_resource_access_hook(hook);
+            }
+            Arc::new(svc)
+        };
 
         // Effective lifecycle dispatcher: the core hooks (thumbnails, metadata)
         // plus, when the plugins feature is enabled, the WASM plugin bridge.
         let file_lifecycle =
             self.effective_file_lifecycle(core, &file_retrieval_service, plugin_dispatch);
 
-        let file_upload_service = Arc::new(
-            FileUploadService::new_with_read(
+        let file_upload_service = Arc::new({
+            let mut svc = FileUploadService::new_with_read(
                 repos.file_write_repository.clone(),
                 repos.file_read_repository.clone(),
             )
             .with_content_cache(core.file_content_cache.clone())
             .with_file_lifecycle_hook(file_lifecycle.clone())
+            // `with_storage_usage_service` wires the post-write delta
+            // hook (`maybe_update_storage_usage`). Without this the
+            // hook is dead code — both per-user and per-drive
+            // `used_bytes` deltas would silently no-op and the
+            // counters drift until the next reconciliation sweep
+            // (default 10 min). `with_instant_upload` below stashes
+            // the same service under a different field used only by
+            // the dedup-instant-upload check, so they're not
+            // interchangeable.
+            .with_storage_usage_service(storage_usage.clone())
             .with_instant_upload(
                 authz.clone(),
                 core.dedup_service.clone(),
                 storage_usage.clone(),
-            ),
-        );
+            );
+            if let Some(hook) = resource_access_hook.clone() {
+                svc = svc.with_resource_access_hook(hook);
+            }
+            svc
+        });
 
         // Delta-upload protocol — chunk negotiation over the same dedup
         // store. Bounded by the same whole-file ceiling as byte uploads.
@@ -575,8 +616,8 @@ impl AppServiceFactory {
         );
 
         // FileManagementService — ref_count handled by PG trigger, no dedup port needed
-        let file_management_service = Arc::new(
-            FileManagementService::with_trash(
+        let file_management_service = Arc::new({
+            let mut svc = FileManagementService::with_trash(
                 repos.file_write_repository.clone(),
                 trash_service.clone(),
                 Some(repos.file_read_repository.clone()),
@@ -585,8 +626,20 @@ impl AppServiceFactory {
                 authz.clone(),
             )
             .with_file_lifecycle_hook(file_lifecycle.clone())
-            .with_mount_router(mount_router.clone()),
-        );
+            .with_mount_router(mount_router.clone())
+            // D5 cross-drive move gate reads policies via the same
+            // drive repo every other policy uses. Wired here so
+            // `move_file_with_perms` can enforce `forbid_cross_drive_move`
+            // without a separate construction path.
+            .with_drive_repo(drive_repo.clone())
+            // Destination-drive quota pre-check on cross-drive file
+            // MOVE. Same rationale as the folder side above.
+            .with_storage_usage(storage_usage.clone());
+            if let Some(hook) = resource_access_hook.clone() {
+                svc = svc.with_resource_access_hook(hook);
+            }
+            svc
+        });
 
         // Streams uploads to external mount providers (bypasses the CAS).
         let external_upload_service = Arc::new(
@@ -614,8 +667,12 @@ impl AppServiceFactory {
             content_index_port,
             Some(authz.clone()),
             Some(drive_repo.clone()),
-            300,  // Cache TTL in seconds (5 minutes)
-            1000, // Maximum cache entries
+            300, // Cache TTL in seconds (5 minutes)
+            // Byte budget for cached result pages (weigher-bounded, 32 MiB
+            // default; env OXICLOUD_SEARCH_CACHE_MAX_BYTES). Replaces the old
+            // entry-count capacity, which let 500-row pages keyed by
+            // user×query×offset×limit pin hundreds of MB for the TTL.
+            self.config.search_cache.max_bytes,
         )));
 
         tracing::info!("Application services initialized");
@@ -795,10 +852,8 @@ impl AppServiceFactory {
         let service = Arc::new(
             TrashService::new(
                 trash_repo.clone(),
-                repos.file_read_repository.clone(),
                 repos.file_write_repository.clone(),
                 repos.folder_repository.clone(),
-                self.config.storage.trash_retention_days,
                 core.dedup_service.clone(),
                 Some(core.file_content_cache.clone()),
                 authz.clone(),
@@ -828,6 +883,7 @@ impl AppServiceFactory {
         repos: &RepositoryServices,
         db_pool: &Arc<PgPool>,
         authorization: &Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine>,
+        drive_repo: &Arc<crate::infrastructure::repositories::pg::DrivePgRepository>,
     ) -> Option<Arc<ShareService>> {
         if !self.config.features.enable_file_sharing {
             tracing::info!("File sharing service is disabled in configuration");
@@ -850,6 +906,7 @@ impl AppServiceFactory {
             share_repository,
             repos.file_read_repository.clone(),
             repos.folder_repository.clone(),
+            drive_repo.clone(),
             password_hasher,
             authorization.clone(),
         ));
@@ -858,30 +915,49 @@ impl AppServiceFactory {
         Some(service)
     }
 
-    /// Creates the favorites service (requires database)
-    pub fn create_favorites_service(&self, db_pool: &Arc<PgPool>) -> Arc<FavoritesService> {
+    /// Creates the favorites service (requires database + authz engine
+    /// for the Read gate on `add_to_favorites` — see the post-Drive
+    /// AuthZ audit).
+    pub fn create_favorites_service(
+        &self,
+        db_pool: &Arc<PgPool>,
+        authorization: &Arc<PgAclEngine>,
+    ) -> Arc<FavoritesService> {
         let repo = Arc::new(
             crate::infrastructure::repositories::pg::FavoritesPgRepository::new(db_pool.clone()),
         );
-        let service = Arc::new(FavoritesService::new(repo));
+        let service = Arc::new(FavoritesService::new(repo, authorization.clone()));
         tracing::info!("Favorites service initialized");
         service
     }
 
-    /// Creates the recent items service (requires database)
-    pub fn create_recent_service(&self, db_pool: &Arc<PgPool>) -> Arc<RecentService> {
+    /// Creates the recent items service (requires database + authz
+    /// engine for the Read gate on `record_item_access` — see the
+    /// post-Drive AuthZ audit).
+    pub fn create_recent_service(
+        &self,
+        db_pool: &Arc<PgPool>,
+        authorization: &Arc<PgAclEngine>,
+    ) -> Arc<RecentService> {
         let repo = Arc::new(
             crate::infrastructure::repositories::pg::RecentItemsPgRepository::new(db_pool.clone()),
         );
         let service = Arc::new(RecentService::new(
-            repo, 50, // Maximum recent items per user
+            repo,
+            authorization.clone(),
+            50, // Maximum recent items per user
         ));
         tracing::info!("Recent items service initialized");
         service
     }
 
     /// Creates the Places (photo map) service. Reuses the existing file-read
-    /// repository — the data is the caller's own geotagged photos.
+    /// repository — the data is the caller's Photos-scope geotagged photos
+    /// (§15: default personal drive + drives with
+    /// `include_in_photo_index = true` AND caller has Read).
+    /// Group-membership expansion is inline in the SQL via
+    /// `storage.caller_group_ids`, so the service needs no AuthZ engine
+    /// handle.
     pub fn create_places_service(
         &self,
         file_read: &Arc<FileBlobReadRepository>,
@@ -992,14 +1068,26 @@ impl AppServiceFactory {
         _repos: &RepositoryServices,
         db_pool: &Arc<PgPool>,
         maintenance_pool: &Arc<PgPool>,
+        drive_repo: Arc<crate::infrastructure::repositories::pg::DrivePgRepository>,
     ) -> Arc<StorageUsageService> {
         let user_repository = Arc::new(
             crate::infrastructure::repositories::pg::UserPgRepository::new(db_pool.clone()),
         );
+        // The `drive_repo` passed in is the SAME instance held on
+        // `AppState`, so its `readable_cache` / `default_drive_cache`
+        // are the caches the request path reads from. A separately
+        // constructed `DrivePgRepository` would have its OWN caches
+        // and invalidation would be a no-op observed by nobody —
+        // this is the trap that regressed the used_bytes freshness
+        // after perf commit `12dc648c`.
         let service = Arc::new(
             crate::application::services::storage_usage_service::StorageUsageService::new(
                 maintenance_pool.clone(),
                 user_repository,
+            )
+            .with_drive_repo(
+                drive_repo
+                    as Arc<dyn crate::domain::repositories::drive_repository::DriveRepository>,
             ),
         );
         // Keep cached storage usage fresh off the request path: GET /api/auth/me
@@ -1135,6 +1223,10 @@ impl AppServiceFactory {
         // because services hold an Arc<PgAclEngine> for ReBAC checks.
         // SubjectGroupPgRepository is constructed here too so the engine can
         // expand a user's transitive group set on cache misses.
+        //
+        // Moved above the eager recent-service build so `create_recent_service`
+        // can receive an `Arc<PgAclEngine>` — the Read gate on
+        // `record_item_access` (post-Drive AuthZ audit fix) needs it.
         let subject_group_repo = Arc::new(
             crate::infrastructure::repositories::pg::SubjectGroupPgRepository::new(pool.clone()),
         );
@@ -1144,6 +1236,29 @@ impl AppServiceFactory {
             repos.file_read_repository.clone(),
             subject_group_repo.clone(),
         );
+
+        // Recent service + recording hook are built up-front so the
+        // hook can be threaded into `create_application_services` below.
+        // The file services hold the hook directly so every authorised
+        // `_with_perms` read/write fires into `auth.user_recent_files`
+        // without per-handler wiring.
+        //
+        // The back-edge `recent_service_eager.set_resource_access_hook`
+        // closes the loop so the clear/remove handlers can drop the
+        // hook's in-memory throttle entries — without it a freshly
+        // cleared Recent list refuses to re-record the same file for a
+        // full TTL window, surfacing as "I cleared, opened the file,
+        // and Recent is still empty" (caught by tests/api/recent.hurl
+        // step 8).
+        let recent_service_eager = self.create_recent_service(&pool, &authorization);
+        let resource_access_hook: Arc<
+            dyn crate::application::ports::resource_access_hook::ResourceAccessHook,
+        > = Arc::new(
+            crate::infrastructure::services::recent_recording_hook::RecentRecordingHook::new(
+                recent_service_eager.clone(),
+            ),
+        );
+        recent_service_eager.set_resource_access_hook(resource_access_hook.clone());
 
         // Drive repository — needed both by the lifecycle hook (when auth
         // is enabled) and by `GET /api/drives` on the final `AppState`,
@@ -1159,7 +1274,8 @@ impl AppServiceFactory {
         // 3c. Storage usage / quota service (needed by the instant-upload
         // path inside the application services, and re-exposed on AppState
         // for the handler-side quota checks of the byte-upload paths).
-        let storage_usage = self.create_storage_usage_service(&repos, &pool, &maintenance_pool);
+        let storage_usage =
+            self.create_storage_usage_service(&repos, &pool, &maintenance_pool, drive_repo.clone());
 
         // 3d. Content index (embedded Tantivy) — opened before application
         // services so SearchService can hold the query port; the feeding
@@ -1205,10 +1321,11 @@ impl AppServiceFactory {
             content_index.as_ref().map(|(idx, _)| idx.clone()),
             plugin_dispatch.clone(),
             mount_router.clone(),
+            Some(resource_access_hook.clone()),
         );
 
         // 5. Share service
-        let share_service = self.create_share_service(&repos, &pool, &authorization);
+        let share_service = self.create_share_service(&repos, &pool, &authorization, &drive_repo);
         apps.share_service = share_service.clone();
 
         let share_browse_service = share_service.as_ref().map(|s| {
@@ -1226,6 +1343,9 @@ impl AppServiceFactory {
         let places_service: Option<Arc<PlacesService>>;
         let people_service: Option<Arc<PeopleService>>;
         let storage_usage_service: Option<Arc<StorageUsageService>>;
+        let grant_cleanup_service: Option<
+            Arc<crate::infrastructure::services::grant_cleanup_service::GrantCleanupService>,
+        >;
         let mut auth_services: Option<crate::common::di::AuthServices> = None;
         let mut nextcloud_services: Option<NextcloudServices> = None;
         // Lifted out of the database-services block so PR 9's invite
@@ -1239,13 +1359,15 @@ impl AppServiceFactory {
         > = None;
 
         {
-            let favs = self.create_favorites_service(&pool);
+            let favs = self.create_favorites_service(&pool, &authorization);
             favorites_service = Some(favs.clone());
             apps.favorites_service = Some(favs);
 
-            let recent = self.create_recent_service(&pool);
-            recent_service = Some(recent.clone());
-            apps.recent_service = Some(recent);
+            // Already built up-front so the file services could hold the
+            // RecentRecordingHook — reuse the same Arc here so AppState and
+            // the recording hook share one service instance.
+            recent_service = Some(recent_service_eager.clone());
+            apps.recent_service = Some(recent_service_eager.clone());
 
             places_service = if core.config.features.enable_places {
                 Some(self.create_places_service(&repos.file_read_repository))
@@ -1266,6 +1388,25 @@ impl AppServiceFactory {
             self.start_db_pool_monitor(&pool);
 
             self.start_content_index_job(&maintenance_pool, &core, content_index);
+
+            grant_cleanup_service = if core.config.features.grant_cleanup.enabled {
+                let svc = Arc::new(
+                    crate::infrastructure::services::grant_cleanup_service::GrantCleanupService::new(
+                        authorization.clone(),
+                        core.config.features.grant_cleanup.grace_days,
+                        core.config.features.grant_cleanup.interval_hours,
+                    ),
+                );
+                // First tick fires immediately inside start_cleanup_job —
+                // matches the trash/storage-usage daemon shape.
+                svc.clone().start_cleanup_job().await;
+                Some(svc)
+            } else {
+                tracing::info!(
+                    "Grant-cleanup daemon disabled by OXICLOUD_GRANT_CLEANUP_ENABLED=false"
+                );
+                None
+            };
 
             // User-lifecycle dispatcher. Hook order is registration order;
             // document dependencies inline if/when any arise. Today:
@@ -1310,6 +1451,50 @@ impl AppServiceFactory {
                     pool.clone(),
                 ),
             );
+
+            // CalDAV / CardDAV storage — constructed here (rather than in
+            // block #10 below) so the two default-provisioning lifecycle
+            // hooks can be wired into `user_lifecycle_builder` with the
+            // rest of the chain. The Arcs are cloned into both the hooks
+            // and, later, into their respective services — cheap and
+            // matches the pattern used for `drive_repo` above.
+            let calendar_repo_for_hook: Arc<
+                crate::infrastructure::repositories::pg::CalendarPgRepository,
+            > = Arc::new(
+                crate::infrastructure::repositories::pg::CalendarPgRepository::new(pool.clone()),
+            );
+            let event_repo_for_hook: Arc<
+                crate::infrastructure::repositories::pg::CalendarEventPgRepository,
+            > = Arc::new(
+                crate::infrastructure::repositories::pg::CalendarEventPgRepository::new(
+                    pool.clone(),
+                ),
+            );
+            let calendar_storage_for_hook = Arc::new(
+                crate::infrastructure::adapters::calendar_storage_adapter::CalendarStorageAdapter::new(
+                    calendar_repo_for_hook.clone(),
+                    event_repo_for_hook.clone(),
+                )
+            );
+            let address_book_repo_for_hook: Arc<AddressBookPgRepository> = Arc::new(
+                crate::infrastructure::repositories::pg::AddressBookPgRepository::new(pool.clone()),
+            );
+            let contact_repo_for_hook: Arc<ContactPgRepository> = Arc::new(
+                crate::infrastructure::repositories::pg::ContactPgRepository::new(pool.clone()),
+            );
+            let group_repo_for_hook: Arc<ContactGroupPgRepository> = Arc::new(
+                crate::infrastructure::repositories::pg::ContactGroupPgRepository::new(
+                    pool.clone(),
+                ),
+            );
+            let contact_storage_for_hook = Arc::new(
+                crate::infrastructure::adapters::contact_storage_adapter::ContactStorageAdapter::new(
+                    address_book_repo_for_hook.clone(),
+                    contact_repo_for_hook.clone(),
+                    group_repo_for_hook.clone(),
+                ),
+            );
+
             let mut user_lifecycle_builder =
                 crate::application::services::user_lifecycle_service::UserLifecycleService::new()
                     .with_hook(Arc::new(
@@ -1318,6 +1503,19 @@ impl AppServiceFactory {
                     .with_hook(Arc::new(
                         crate::application::services::folder_service::PersonalDriveLifecycleHook::new(
                             drive_repo.clone(),
+                            authorization.clone(),
+                        ),
+                    ))
+                    .with_hook(Arc::new(
+                        crate::application::services::calendar_service::DefaultCalendarLifecycleHook::new(
+                            calendar_storage_for_hook.clone(),
+                            authorization.clone(),
+                        ),
+                    ))
+                    .with_hook(Arc::new(
+                        crate::application::services::contact_service::DefaultAddressBookLifecycleHook::new(
+                            address_book_repo_for_hook.clone(),
+                            contact_storage_for_hook.clone(),
                             authorization.clone(),
                         ),
                     ))
@@ -1492,8 +1690,8 @@ impl AppServiceFactory {
             places_service,
             people_service,
             storage_usage_service,
+            grant_cleanup_service,
             calendar_service: None,
-            contact_service: None,
             calendar_use_case: None,
             addressbook_use_case: None,
             contact_use_case: None,
@@ -1506,6 +1704,8 @@ impl AppServiceFactory {
             path_resolver: None,
             webdav_lock_store:
                 crate::infrastructure::services::webdav_lock_service::create_webdav_lock_store(),
+            webdav_dead_props:
+                crate::infrastructure::services::webdav_dead_property_store::create_dead_property_store(pool.clone()),
             authorization: authorization.clone(),
             drive_repo: drive_repo.clone(),
             drive_management_service: Arc::new(
@@ -1513,6 +1713,11 @@ impl AppServiceFactory {
                     drive_repo.clone(),
                     authorization.clone(),
                     subject_group_repo.clone(),
+                    Arc::new(
+                        crate::infrastructure::repositories::pg::UserPgRepository::new(
+                            pool.clone(),
+                        ),
+                    ),
                 ),
             ),
             subject_group_service: Some(Arc::new(
@@ -1525,6 +1730,7 @@ impl AppServiceFactory {
                         ),
                     ),
                     authorization.clone(),
+                    drive_repo.clone(),
                 ),
             )),
             email_sender: None,                   // populated below
@@ -1737,7 +1943,13 @@ impl AppServiceFactory {
             tracing::info!("PathResolver service initialized");
         }
 
-        // 10. Wire CalDAV/CardDAV services
+        // 10. Wire CalDAV/CardDAV services. Note: the `*_for_hook`
+        //     adapters constructed inside the enable-auth block above
+        //     are out of scope here (that block ends before AppState
+        //     assembly). Re-constructing local adapters over the same
+        //     `pool` is cheap — the pool itself is shared via Arc, and
+        //     adapters are stateless delegators. Both instances end up
+        //     talking to the same rows.
         {
             // CalDAV
             let calendar_repo: Arc<CalendarPgRepository> = Arc::new(
@@ -1757,6 +1969,7 @@ impl AppServiceFactory {
             let calendar_service = Arc::new(
                 crate::application::services::calendar_service::CalendarService::new(
                     calendar_storage,
+                    authorization.clone(),
                 ),
             );
             app_state.calendar_use_case = Some(calendar_service as Arc<CalendarService>);
@@ -1778,10 +1991,12 @@ impl AppServiceFactory {
                     address_book_repo,
                     contact_repo,
                     group_repo,
-                )
+                ),
             );
-            app_state.addressbook_use_case = Some(contact_storage.clone());
-            app_state.contact_use_case = Some(contact_storage);
+            let contact_service =
+                Arc::new(ContactService::new(contact_storage, authorization.clone()));
+            app_state.addressbook_use_case = Some(contact_service.clone());
+            app_state.contact_use_case = Some(contact_service);
 
             tracing::info!("CalDAV and CardDAV services initialized with PostgreSQL repositories");
         }
@@ -1801,7 +2016,7 @@ impl AppServiceFactory {
                     audio_metadata_repo,
                 ),
             );
-            let music_svc = Arc::new(MusicService::new(music_storage));
+            let music_svc = Arc::new(MusicService::new(music_storage, authorization.clone()));
             app_state.music_service = Some(music_svc);
             tracing::info!("Music service initialized");
         }
@@ -1959,11 +2174,18 @@ pub struct AppState {
     pub places_service: Option<Arc<PlacesService>>,
     pub people_service: Option<Arc<PeopleService>>,
     pub storage_usage_service: Option<Arc<StorageUsageService>>,
+    /// Handle to the background daemon that purges expired
+    /// `storage.role_grants` rows. `None` when the daemon is disabled
+    /// via `OXICLOUD_GRANT_CLEANUP_ENABLED=false`. The admin
+    /// `POST /api/admin/internal/trigger-grant-cleanup` handler uses
+    /// this to invoke the purge on demand (test-only).
+    pub grant_cleanup_service: Option<
+        Arc<crate::infrastructure::services::grant_cleanup_service::GrantCleanupService>,
+    >,
     pub calendar_service: Option<Arc<CalendarService>>,
-    pub contact_service: Option<Arc<ContactStorageAdapter>>,
     pub calendar_use_case: Option<Arc<CalendarService>>,
-    pub addressbook_use_case: Option<Arc<ContactStorageAdapter>>,
-    pub contact_use_case: Option<Arc<ContactStorageAdapter>>,
+    pub addressbook_use_case: Option<Arc<ContactService>>,
+    pub contact_use_case: Option<Arc<ContactService>>,
     pub music_service: Option<Arc<MusicService>>,
     pub wopi_token_service:
         Option<Arc<crate::application::services::wopi_token_service::WopiTokenService>>,
@@ -1979,6 +2201,8 @@ pub struct AppState {
         Option<Arc<crate::infrastructure::services::path_resolver_service::PathResolverService>>,
     pub webdav_lock_store:
         Arc<crate::infrastructure::services::webdav_lock_service::WebDavLockStore>,
+    pub webdav_dead_props:
+        Arc<crate::infrastructure::services::webdav_dead_property_store::DeadPropertyStore>,
     /// ReBAC authorization engine — all service-layer permission checks go
     /// through this. Concrete type today is `PgAclEngine`; the
     /// `AuthorizationEngine` trait describes the contract. When alternate
@@ -2062,6 +2286,51 @@ pub struct AppState {
 }
 
 // All AppState construction is done via struct literal in build_app_state().
+
+impl AppState {
+    /// Drive-aware RFC 4331 quota resolution — shared by the native and
+    /// NextCloud-compatible WebDAV PROPFIND handlers so both surfaces
+    /// report the same numbers for the same drive.
+    ///
+    /// - `drive_id == Uuid::nil()`: synthetic drive-listing pseudo-root —
+    ///   no single drive, so the account envelope is the only defensible
+    ///   answer.
+    /// - Personal drives carry no quota of their own (`Drive::quota_bytes`
+    ///   is NULL post-migration) — the account envelope in `auth.users`
+    ///   caps them.
+    /// - Shared drives carry their own finite quota on `storage.drives` —
+    ///   report that, not the owner's unrelated personal envelope.
+    ///
+    /// `available` is `None` for unlimited accounts/drives (quota <= 0 or
+    /// unset) — RFC 4331 §3 lets a server omit `quota-available-bytes`
+    /// rather than disclose a made-up value. Any lookup failure (quota
+    /// subsystem disabled, drive gone) is treated the same way: quota is
+    /// silently omitted rather than failing the whole PROPFIND.
+    pub async fn resolve_webdav_quota(
+        &self,
+        user_id: Uuid,
+        drive_id: Uuid,
+    ) -> Option<(i64, Option<i64>)> {
+        let storage_svc = self.storage_usage_service.as_ref()?;
+
+        if drive_id.is_nil() {
+            let (used, quota) = storage_svc.get_user_storage_info(user_id).await.ok()?;
+            return Some((used, (quota > 0).then(|| (quota - used).max(0))));
+        }
+
+        let drive = self.drive_repo.get_by_id(drive_id).await.ok()?.drive;
+        match drive.kind {
+            DriveKind::Personal => {
+                let (used, quota) = storage_svc.get_user_storage_info(user_id).await.ok()?;
+                Some((used, (quota > 0).then(|| (quota - used).max(0))))
+            }
+            DriveKind::Shared => {
+                let used = drive.used_bytes;
+                Some((used, drive.quota_bytes.map(|q| (q - used).max(0))))
+            }
+        }
+    }
+}
 
 /// Builds the authorization engine. Today this only constructs `PgAclEngine`;
 /// the `OXICLOUD_AUTHZ_ENGINE` env var is reserved for future alternate

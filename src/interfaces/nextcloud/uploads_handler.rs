@@ -4,14 +4,99 @@ use axum::{
     response::Response,
 };
 use std::sync::Arc;
+use uuid::Uuid;
 
-use crate::application::ports::file_ports::{FileRetrievalUseCase, FileUploadUseCase};
+use crate::application::ports::file_ports::FileUploadUseCase;
 use crate::common::di::AppState;
 use crate::common::mime_detect::filename_from_path;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::upload_ingest::{
     discard_ingested, ingest_stream_to_cas, stream_body_to_path, stream_from_files,
 };
+
+/// Per-chunk quota gate (D4 / project_drive_quota_timing).
+///
+/// Pre-D4 the NC chunked path never declared a total size up front, so
+/// quota only fired at the final MOVE — meaning a client could waste GB
+/// of upload bandwidth before learning it was over. The drive is known
+/// from the session's chroot and the user is on the session, so we can
+/// gate at every wire moment now:
+///
+///   - MKCOL: refuse if either the drive or the user envelope is
+///     already at quota (call with `additional = 0`).
+///   - PUT  : refuse if `used + already_uploaded_for_session +
+///     content-length` would breach either cap.
+///     `already_uploaded_for_session` is the sum of chunk sizes the
+///     session already holds on disk.
+///   - MOVE : defence in depth via `file_upload_service`'s own gates.
+///
+/// Both checks run because the two caps cover different cases:
+/// `check_drive_quota` is the per-drive `drives.quota_bytes` cap
+/// (shared drives carry a value; personal drives are `NULL` and
+/// short-circuit to OK). `check_storage_quota` is the user envelope
+/// `users.storage_quota_bytes` that caps the SUM across the caller's
+/// personal drives (shared-drive uploads short-circuit because the
+/// envelope only sums personal drives — see
+/// `project_user_envelope_quota_model`). Mirrors what every other
+/// upload entry point (multipart, native chunked, delta, instant)
+/// already does.
+async fn refuse_if_over_quota(
+    state: &AppState,
+    user_id: Uuid,
+    drive_id: Uuid,
+    additional: u64,
+) -> Result<(), AppError> {
+    let Some(svc) = state.storage_usage_service.as_ref() else {
+        // Quota tracking disabled in this config; MOVE-time gate
+        // remains authoritative.
+        return Ok(());
+    };
+    // Fused single round-trip (user envelope + drive cap) — this gate runs
+    // on EVERY chunk PUT, and the serial pair cost two point reads per
+    // chunk (benches/ROUND12.md §6). Verdict precedence unchanged.
+    svc.check_upload_quotas(user_id, drive_id, additional)
+        .await
+        .map_err(AppError::from)
+}
+
+/// Sum of bytes already accepted into a chunked-upload session.
+///
+/// Reads the session directory once via `list_chunks` and totals every
+/// chunk's on-disk size. O(N) stat calls per check, but N is the chunk
+/// count (NC clients use 10 MB chunks by default — a 10 GB upload sits
+/// around 1000 entries; PUT throughput dominates the cost). A
+/// per-session counter file would amortise it to O(1) but adds a
+/// separate write-and-sync path with its own crash semantics — defer
+/// until profiling actually demands it.
+async fn session_bytes_so_far(
+    nc: &crate::common::di::NextcloudServices,
+    username: &str,
+    upload_id: &str,
+) -> Result<u64, AppError> {
+    // Warm path: O(1) in-RAM counter maintained by the PUT handler and
+    // the service (seeded on MKCOL, dropped on cleanup/overwrite). The
+    // directory walk below only runs cold (restart / eviction) — the old
+    // shape ran it on EVERY chunk PUT: O(k) stats for chunk k, O(N²/2)
+    // over the upload (benches/NC-CHUNK-GATE.md).
+    if let Some(bytes) = nc.chunked_uploads.cached_session_bytes(username, upload_id) {
+        return Ok(bytes);
+    }
+    let listing = nc
+        .chunked_uploads
+        .list_chunks(username, upload_id)
+        .await
+        .map_err(|e| AppError::internal_error(format!("Failed to list chunks: {}", e)))?;
+    let Some(listing) = listing else {
+        // Missing session — handler maps this elsewhere; treat as zero
+        // here so the gate doesn't fire spuriously on the very first
+        // chunk after MKCOL (race-tolerant).
+        return Ok(0);
+    };
+    let total = listing.chunks.iter().map(|c| c.size).sum();
+    nc.chunked_uploads
+        .set_session_bytes(username, upload_id, total);
+    Ok(total)
+}
 
 /// Dispatch Nextcloud chunked upload WebDAV requests.
 ///
@@ -24,7 +109,7 @@ use crate::interfaces::upload_ingest::{
 pub async fn handle_nc_uploads(
     state: Arc<AppState>,
     req: Request<Body>,
-    session: crate::interfaces::nextcloud::session::NcSession,
+    session: crate::interfaces::nextcloud::session::SharedNcSession,
     upload_id: String,
     rest: String, // chunk name or ".file" or empty
 ) -> Result<Response<Body>, AppError> {
@@ -75,50 +160,81 @@ async fn handle_propfind_session(
         .map_err(|e| AppError::internal_error(format!("Failed to list chunks: {}", e)))?
         .ok_or_else(|| AppError::not_found("Upload session not found"))?;
 
-    let session_href = format!("/remote.php/dav/uploads/{}/{}/", user.username, upload_id);
-    let session_last_modified =
-        chrono::DateTime::<chrono::Utc>::from_timestamp(listing.session_mtime as i64, 0)
-            .unwrap_or_else(chrono::Utc::now)
-            .to_rfc2822();
+    // Href MUST use `session.raw_username` (composite `admin~<uuid>` on
+    // non-home drives), NOT `user.username` (bare `admin`). The
+    // `NcSession` extractor cross-checks the URL `{user}` segment
+    // against `raw_username` and 403s on mismatch — a composite-cred
+    // client that PROPFINDs, then MOVEs a chunk href back to us, would
+    // otherwise 403 at the extractor before any handler runs. Same
+    // fix shape as `trashbin_handler::handle_propfind` and
+    // `handle_assemble`'s destination-URL parsing. Storage-side keying
+    // stays on `user.username` — upload sessions are per-user, not
+    // per-drive.
+    // `write!` formats every element straight into a pre-sized `body`; the
+    // old `push_str(&format!(…))` chain allocated a throwaway String per
+    // element per chunk plus growth reallocations from `String::new()`, and
+    // ran the chrono format interpreter per chunk (benches/ROUND11.md §4:
+    // 2.3-2.6x, allocs 2582 → 772 on a 256-chunk session).
+    use std::fmt::Write as _;
 
-    let mut body = String::new();
+    /// `<d:getlastmodified>` via the stack renderer; chrono fallback for
+    /// out-of-range timestamps (same shape as `nextcloud/webdav_handler`).
+    /// RFC 2822 output contains no XML-special characters by construction.
+    fn write_lastmodified(body: &mut String, secs: i64) {
+        let mut buf = [0u8; 31];
+        match crate::common::fmt::rfc2822_utc(&mut buf, secs) {
+            Some(s) => {
+                let _ = write!(body, "<d:getlastmodified>{}</d:getlastmodified>", s);
+            }
+            None => {
+                let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
+                    .unwrap_or_else(chrono::Utc::now)
+                    .to_rfc2822();
+                let _ = write!(
+                    body,
+                    "<d:getlastmodified>{}</d:getlastmodified>",
+                    xml_escape(&dt)
+                );
+            }
+        }
+    }
+
+    let mut body = String::with_capacity(256 + listing.chunks.len() * 256);
     body.push_str(r#"<?xml version="1.0" encoding="utf-8"?>"#);
     body.push_str(r#"<d:multistatus xmlns:d="DAV:">"#);
 
     // Session collection itself.
     body.push_str("<d:response>");
-    body.push_str(&format!("<d:href>{}</d:href>", xml_escape(&session_href)));
+    let _ = write!(
+        body,
+        "<d:href>/remote.php/dav/uploads/{}/{}/</d:href>",
+        xml_escape(&session.raw_username),
+        xml_escape(upload_id)
+    );
     body.push_str("<d:propstat><d:prop>");
     body.push_str("<d:resourcetype><d:collection/></d:resourcetype>");
-    body.push_str(&format!(
-        "<d:getlastmodified>{}</d:getlastmodified>",
-        xml_escape(&session_last_modified)
-    ));
+    write_lastmodified(&mut body, listing.session_mtime as i64);
     body.push_str("</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>");
     body.push_str("</d:response>");
 
     // One entry per chunk file.
     for chunk in &listing.chunks {
-        let chunk_href = format!(
-            "/remote.php/dav/uploads/{}/{}/{}",
-            user.username, upload_id, chunk.name
-        );
-        let chunk_modified = chrono::DateTime::<chrono::Utc>::from_timestamp(chunk.mtime as i64, 0)
-            .unwrap_or_else(chrono::Utc::now)
-            .to_rfc2822();
-
         body.push_str("<d:response>");
-        body.push_str(&format!("<d:href>{}</d:href>", xml_escape(&chunk_href)));
+        let _ = write!(
+            body,
+            "<d:href>/remote.php/dav/uploads/{}/{}/{}</d:href>",
+            xml_escape(&session.raw_username),
+            xml_escape(upload_id),
+            xml_escape(&chunk.name)
+        );
         body.push_str("<d:propstat><d:prop>");
         body.push_str("<d:resourcetype/>");
-        body.push_str(&format!(
+        let _ = write!(
+            body,
             "<d:getcontentlength>{}</d:getcontentlength>",
             chunk.size
-        ));
-        body.push_str(&format!(
-            "<d:getlastmodified>{}</d:getlastmodified>",
-            xml_escape(&chunk_modified)
-        ));
+        );
+        write_lastmodified(&mut body, chunk.mtime as i64);
         body.push_str("</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>");
         body.push_str("</d:response>");
     }
@@ -145,6 +261,13 @@ fn xml_escape(s: &str) -> String {
 }
 
 /// MKCOL — create upload session directory.
+///
+/// Quota gate (D4): refuse 507 if the bound drive is already at quota,
+/// before allocating the session directory. The chunked path doesn't
+/// declare a total size up front — `additional = 0` so the gate only
+/// fires when the drive is already exactly full (or beyond, after a
+/// burst of concurrent writes). Subsequent PUTs run the proper
+/// "used + session_so_far + chunk" projection.
 async fn handle_mkcol(
     state: Arc<AppState>,
     session: &crate::interfaces::nextcloud::session::NcSession,
@@ -155,6 +278,9 @@ async fn handle_mkcol(
         .nextcloud
         .as_ref()
         .ok_or_else(|| AppError::internal_error("Nextcloud services unavailable"))?;
+
+    let chroot = session.require_chroot()?;
+    refuse_if_over_quota(&state, user.id, chroot.drive_id, 0).await?;
 
     nc.chunked_uploads
         .create_session(&user.username, upload_id)
@@ -194,6 +320,22 @@ async fn handle_put_chunk(
         return Err(AppError::bad_request("Missing chunk name"));
     }
 
+    // Per-chunk quota gate (D4): refuse 507 BEFORE accepting body
+    // bytes when `drive.used_bytes + session_so_far + chunk_size`
+    // would cross the drive cap. Closes the wasted-bandwidth wart
+    // where over-quota clients only learned at MOVE.
+    //
+    // Without a Content-Length we can't project ahead — fall back to
+    // the assemble-time check. NC desktop / Android / iOS clients
+    // always send CL on PUT chunks (they read the chunk file into a
+    // length-known body), so this branch is rare in practice.
+    let chroot = session.require_chroot()?;
+    if let Some(chunk_size) = content_length_from(&req) {
+        let so_far = session_bytes_so_far(nc, &user.username, upload_id).await?;
+        let projected = so_far.saturating_add(chunk_size);
+        refuse_if_over_quota(&state, user.id, chroot.drive_id, projected).await?;
+    }
+
     let chunk_path = nc
         .chunked_uploads
         .safe_chunk_path(&user.username, upload_id, chunk_name)
@@ -204,7 +346,18 @@ async fn handle_put_chunk(
     // NC desktop client validates the assembled-file ETag against the
     // server-side `oc:checksums` after MOVE. So we skip per-chunk
     // hashing here (peak heap stays at ~one HTTP frame).
-    stream_body_to_path(req.into_body(), &chunk_path, max_chunk, None).await?;
+    //
+    // Retry detection (a re-PUT makes the running session counter stale)
+    // rides on the open itself now — `created_fresh` from the `create_new`
+    // probe replaces the extra per-chunk `stat` this path used to issue.
+    let streamed = stream_body_to_path(req.into_body(), &chunk_path, max_chunk, None).await?;
+    if !streamed.created_fresh {
+        nc.chunked_uploads
+            .forget_session_bytes(&user.username, upload_id);
+    } else {
+        nc.chunked_uploads
+            .bump_session_bytes(&user.username, upload_id, streamed.bytes_written);
+    }
 
     Ok(Response::builder()
         .status(StatusCode::CREATED)
@@ -241,7 +394,18 @@ async fn handle_assemble(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<i64>().ok());
 
-    let dest_subpath = extract_files_subpath(&destination, &user.username)
+    // Strip the destination URL prefix using the SESSION's raw username
+    // (`admin~<drive-uuid>` on non-home drives), NOT `user.username`
+    // (bare `admin`). NC clients send `Destination: /remote.php/dav/files/
+    // {raw_username}/…` — the URL user-segment mirrors the credential
+    // they authenticated with. Passing bare `admin` here strips only
+    // `admin/` from a `admin~<uuid>/…` destination, leaving the tilde
+    // marker glued to the leading path segment; the write then targets
+    // `<drive-root>/~<uuid>/…` and fails with a parent-folder lookup
+    // error. Matches `webdav_handler::handle_move`'s call to
+    // `extract_nc_subpath_from_dest(&destination, url_user)` where
+    // `url_user = &session.raw_username` (webdav_handler.rs:1177).
+    let dest_subpath = extract_files_subpath(&destination, &session.raw_username)
         .ok_or_else(|| AppError::bad_request("Invalid Destination URL"))?;
 
     // Stream the chunk parts, in order, straight into the CDC chunk store —
@@ -256,8 +420,6 @@ async fn handle_assemble(
         .map_err(|e| AppError::internal_error(format!("Failed to list chunks: {}", e)))?;
 
     let upload_service = &state.applications.file_upload_service;
-    let file_service = &state.applications.file_retrieval_service;
-    let folder_service = &state.applications.folder_service;
 
     // Path-based lookups below scope by `drive_id`. The NC session's
     // chroot is always populated for path-scoped handlers (see
@@ -266,12 +428,14 @@ async fn handle_assemble(
     let chroot = session.require_chroot()?;
     let drive_id = chroot.drive_id;
 
-    // TODO(D1): read the caller's default-drive root folder name from
-    // `drives.root_folder_id` instead of hardcoding "Personal". The
-    // constant is correct for every default personal drive provisioned
-    // by the D0 lifecycle hook, but secondary drives (M2 backfill from
-    // SQL-created sibling root folders) keep their original name.
-    let internal_path = format!("Personal/{}", dest_subpath.trim_matches('/'));
+    // Route through `nc_to_internal_path(chroot, …)` so the write
+    // lands under the caller's actual default-drive root (not the
+    // literal "Personal" folder). Post-D3 chroot resolution puts the
+    // correct FolderDto — including the drive's real root name — on
+    // the NcSession; secondary drives with SQL-provisioned sibling
+    // root names now work.
+    let internal_path =
+        crate::interfaces::nextcloud::webdav_handler::nc_to_internal_path(chroot, &dest_subpath)?;
 
     let filename = filename_from_path(&dest_subpath).to_string();
     let ingested = ingest_stream_to_cas(
@@ -285,63 +449,46 @@ async fn handle_assemble(
     .await?;
     let content_type = ingested.content_type.clone();
 
-    // Check if file exists (update vs create).
-    let existing = file_service
-        .get_file_by_path(&internal_path, drive_id)
-        .await;
-
-    let etag: Option<String> = if existing.is_ok() {
-        let dto = upload_service
-            .update_file_streaming(
-                &internal_path,
-                drive_id,
-                ingested.stored(),
-                &content_type,
-                oc_mtime,
-                user.id,
-            )
-            .await
-            .map_err(|e| AppError::internal_error(format!("Failed to update file: {}", e)))?;
-
-        Some(dto.etag)
-    } else {
-        // New-file branch: resolve the parent folder by path and register
-        // the file row against the already-ingested blob.
-        let (parent_sub, filename) = match dest_subpath.rsplit_once('/') {
-            Some((p, n)) => (p, n),
-            None => ("", dest_subpath.as_str()),
-        };
-        let parent_internal = format!("Personal/{}", parent_sub.trim_matches('/'));
-        let parent_internal = parent_internal.trim_end_matches('/');
-
-        use crate::application::ports::folder_ports::FolderUseCase;
-        let parent_folder = match folder_service
-            .get_folder_by_path(parent_internal, drive_id)
-            .await
-        {
-            Ok(folder) => folder,
-            Err(e) => {
-                discard_ingested(&state.core.dedup_service, &ingested).await;
-                return Err(AppError::internal_error(format!(
-                    "Parent folder lookup failed: {}",
-                    e
-                )));
-            }
-        };
-
-        let dto = upload_service
-            .upload_file_streaming(
-                filename.to_string(),
-                Some(parent_folder.id),
-                content_type.to_string(),
-                ingested.stored(),
-                user.id,
-            )
-            .await
-            .map_err(|e| AppError::internal_error(format!("Failed to create file: {}", e)))?;
-
-        Some(dto.etag)
+    // AuthZ audit #12 (2026-07-12): the previous shape branched on
+    // file existence — `update_file_streaming_with_perms` on the
+    // overwrite path (correct), plain `upload_file_streaming` on
+    // the create path (NO `authz.require`). Viewer/Commenter on a
+    // shared drive could MKCOL → PUT chunks → MOVE and land a
+    // brand-new file, skipping the `Create`-on-parent-folder gate.
+    //
+    // `update_file_streaming_with_perms` handles both branches
+    // atomically: `Update` on the existing file OR `Create` on the
+    // parent folder / drive root (per the service's own internal
+    // fork). Funneling everything through the one method also
+    // deletes the duplicated parent-folder lookup that used to
+    // live here.
+    //
+    // AuthZ audit #2 (2026-07-12): route DomainError through
+    // `AppError::from` so authz denials keep the graduated 403/404
+    // shape instead of collapsing into 500.
+    //
+    // No client-supplied ETag to enforce here (NC chunked MOVE has no
+    // If-Match semantics) — `expected_hash: None`, same as every other
+    // plain-write callsite; only PATCH's CAS passes `Some(&hash)`.
+    let dto = match upload_service
+        .update_file_streaming_with_perms(
+            &internal_path,
+            drive_id,
+            ingested.stored(),
+            &content_type,
+            oc_mtime,
+            user.id,
+            None,
+        )
+        .await
+    {
+        Ok(dto) => dto,
+        Err(e) => {
+            discard_ingested(&state.core.dedup_service, &ingested).await;
+            return Err(AppError::from(e));
+        }
     };
+    let etag: Option<String> = Some(dto.etag);
 
     // Cleanup session.
     let _ = nc.chunked_uploads.cleanup(&user.username, upload_id).await;
@@ -382,6 +529,17 @@ async fn handle_abort(
         .status(StatusCode::NO_CONTENT)
         .body(Body::empty())
         .unwrap())
+}
+
+/// Read `Content-Length` off a request as a `u64`. Returns `None` if
+/// the header is absent or malformed — the PUT-chunk quota gate
+/// (`handle_put_chunk`) treats that as "skip the early gate, the
+/// stream cap + MOVE-time check will still catch over-quota writes".
+fn content_length_from(req: &Request<Body>) -> Option<u64> {
+    req.headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
 }
 
 /// Extract the file subpath from a Destination header pointing to the files DAV namespace.

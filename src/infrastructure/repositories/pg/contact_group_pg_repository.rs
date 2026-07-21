@@ -1,5 +1,4 @@
 use chrono::Utc;
-use serde_json::Value as JsonValue;
 use sqlx::{PgPool, Row, types::Uuid};
 use std::sync::Arc;
 
@@ -177,16 +176,30 @@ impl ContactGroupRepository for ContactGroupPgRepository {
         Ok(())
     }
 
+    async fn count_contacts_in_group(&self, group_id: &Uuid) -> ContactRepositoryResult<i64> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM carddav.group_memberships WHERE group_id = $1")
+            .bind(group_id)
+            .fetch_one(self.pool.as_ref())
+            .await
+            .map_err(|e| {
+                DomainError::new(
+                    ErrorKind::InternalError,
+                    "ContactGroup",
+                    format!("Failed to count contacts in group: {}", e),
+                )
+            })
+    }
+
     async fn get_contacts_in_group(
         &self,
         group_id: &Uuid,
     ) -> ContactRepositoryResult<Vec<Contact>> {
         let rows = sqlx::query(
             r#"
-            SELECT 
+            SELECT
                 c.id, c.address_book_id, c.uid, c.full_name, c.first_name, c.last_name, c.nickname,
                 c.email, c.phone, c.address, c.organization, c.title, c.notes, c.photo_url,
-                c.birthday, c.anniversary, c.vcard, c.etag, c.created_at, c.updated_at
+                c.birthday, c.anniversary, c.etag, c.created_at, c.updated_at
             FROM carddav.contacts c
             INNER JOIN carddav.group_memberships gm ON c.id = gm.contact_id
             WHERE gm.group_id = $1
@@ -204,20 +217,23 @@ impl ContactGroupRepository for ContactGroupPgRepository {
             )
         })?;
 
-        let mut contacts = Vec::new();
+        let mut contacts = Vec::with_capacity(rows.len());
         for row in &rows {
-            let email_json: JsonValue = row.get("email");
-            let phone_json: JsonValue = row.get("phone");
-            let address_json: JsonValue = row.get("address");
-
-            let emails = serde_json::from_value::<Vec<EmailPersistenceDto>>(email_json)
-                .map(emails_from_persistence)
+            // Typed `Json<T>` decode (one `from_slice` pass) instead of the
+            // `Value` DOM + `from_value` re-walk — the contact_pg_repository
+            // §J1 fix applied to this inlined sibling. Byte-identical result,
+            // 3 fewer throwaway DOMs per contact. (benches/ROUND23.md §J1)
+            let emails = row
+                .try_get::<sqlx::types::Json<Vec<EmailPersistenceDto>>, _>("email")
+                .map(|j| emails_from_persistence(j.0))
                 .unwrap_or_default();
-            let phones = serde_json::from_value::<Vec<PhonePersistenceDto>>(phone_json)
-                .map(phones_from_persistence)
+            let phones = row
+                .try_get::<sqlx::types::Json<Vec<PhonePersistenceDto>>, _>("phone")
+                .map(|j| phones_from_persistence(j.0))
                 .unwrap_or_default();
-            let addresses = serde_json::from_value::<Vec<AddressPersistenceDto>>(address_json)
-                .map(addresses_from_persistence)
+            let addresses = row
+                .try_get::<sqlx::types::Json<Vec<AddressPersistenceDto>>, _>("address")
+                .map(|j| addresses_from_persistence(j.0))
                 .unwrap_or_default();
 
             contacts.push(Contact::from_raw(
@@ -237,7 +253,13 @@ impl ContactGroupRepository for ContactGroupPgRepository {
                 row.get::<Option<String>, _>("photo_url"),
                 row.get("birthday"),
                 row.get("anniversary"),
-                row.get("vcard"),
+                // vcard column intentionally NOT selected — the sole live caller
+                // (`list_contacts_in_group`) maps to `ContactDto`, which has no
+                // vcard field, so fetching the multi-KB serialized vCard (with an
+                // embedded base64 PHOTO) only to drop it wastes bandwidth + a
+                // per-row String. Mirrors `row_to_contact_lite` (benches/ROUND29.md
+                // §F / ROUND25 §Q2, applied to the LIVE group method this time).
+                String::new(),
                 row.get("etag"),
                 row.get("created_at"),
                 row.get("updated_at"),

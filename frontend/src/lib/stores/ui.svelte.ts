@@ -6,10 +6,19 @@
  */
 export type ToastKind = 'info' | 'success' | 'error' | 'warning';
 
+export interface ToastAction {
+	/** Button label — should be short (≤ 20 chars). */
+	label: string;
+	/** Invoked when the button is clicked; the toast auto-dismisses after. */
+	onClick: () => void;
+}
+
 export interface Toast {
 	id: number;
 	message: string;
 	kind: ToastKind;
+	/** Optional inline action (e.g. "Go to Files" on a wrong-drop-zone toast). */
+	action?: ToastAction;
 }
 
 export interface Notification {
@@ -74,10 +83,21 @@ class UiStore {
 	/**
 	 * Raise a toast and record a notification. `at` is stamped from the clock at
 	 * call time; pass `record: false` for purely transient messages.
+	 *
+	 * The optional `opts.action` renders an inline button in the toast (e.g.
+	 * "Go to Files" on a wrong-drop-zone warning); the callback fires on
+	 * click and the toast auto-dismisses right after so a caller doesn't have
+	 * to manage the id.
 	 */
-	notify(message: string, kind: ToastKind = 'info', timeoutMs = 4000, record = true): number {
+	notify(
+		message: string,
+		kind: ToastKind = 'info',
+		timeoutMs = 4000,
+		record = true,
+		opts: { action?: ToastAction } = {}
+	): number {
 		const id = ++this.#seq;
-		this.toasts = [...this.toasts, { id, message, kind }];
+		this.toasts = [...this.toasts, { id, message, kind, action: opts.action }];
 		if (record) {
 			this.notifications = [
 				{ id, message, kind, at: Date.now(), read: false },

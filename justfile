@@ -142,13 +142,17 @@ db-down:
 # point the UI/UX workflow uses; delegates to `front-design`.
 frontend-check: front-design
 
-# end-to-end Playwright tests
-front-test:
-    cd tests/e2e && npm test
-
-# update images snapshots
-front-test-update-snapshot:
-    cd tests/e2e && npm test -- --update-snapshots=all
+# End-to-end Playwright — SvelteKit SPA suite (tests/e2e/spa/).
+# Default target for all e2e work since the frontend migration.
+# Depends on `fe-build-e2e`: the runner serves `./static-dist/`, so
+# the built assets have to be current with `COVERAGE=1 VITE_E2E=1`
+# instrumentation or the SPA-side data-testids won't exist. Server
+# stdout/stderr is captured at `tests/e2e/server-startup.log`;
+# `tail -F` it in another terminal to see the cold-start progress
+# (webServer boot can take minutes on a cold cargo cache and the
+# `list` reporter prints nothing until the first test runs).
+front-test: fe-build-e2e
+    cd tests/e2e && npm run test:coverage
 
 # Records against a throwaway container stack (its own Postgres + the OxiCloud
 # SPA). Each starting point is a file in tests/e2e/scenarios/codegen/ that sets
@@ -169,10 +173,85 @@ front-design:
     node scripts/check-brand-drift.mjs
 
 
-# Hurl API functional tests (starts postgres + server, tears down after)
+# Hurl-driven functional tests (starts postgres + server, tears down after).
+#
+# Four runners — each isolated, brings up its own sidecars + server config:
+#   * tests/api/run.sh              — REST API surface, default server.env
+#   * tests/webdav/run.sh           — native WebDAV + NextCloud DAV, default server.env
+#   * tests/webdav-drive-root/run.sh — WebDAV `OXICLOUD_WEBDAV_DRIVE_PATH=""`
+#                                     variant (drive listing served at
+#                                     `/webdav/` instead of `/webdav/@drive/`).
+#                                     Server launched with
+#                                     --config server-webdav-drive-root.env
+#                                     so the default runners stay on the
+#                                     `"@drive"` config.
+#   * tests/oidc/run.sh             — OIDC SSO end-to-end against a fake IdP
+#                                     (tests/oidc/fake_idp, a Node
+#                                     panva/oidc-provider wrapper); server
+#                                     launched with
+#                                     --config server-with-oidc.env so the
+#                                     api and webdav suites stay on the
+#                                     OIDC-off config.
+#   * tests/oidc/run-manual-sso-only.sh — NOT part of this chain (see
+#                                     `oidc-manual-sso-only` below): a
+#                                http://localhost:8090/files/1bf4713c-891e-46fb-acf0-b10231fe32c8     human-run check that OIDC-as-only-
+#                                     login-method actually redirects a
+#                                     real browser, which the curl-driven
+#                                     suite above can't observe.
+#
+# Same chain runs in CI under the `api-test` job in
+# .github/workflows/ci.yml; keep the order in sync so a local pass means
+# CI passes.
 api-test:
-    bash tests/api/run.sh
-    bash tests/webdav/run.sh
+    #!/usr/bin/env bash
+    set -x
+    set -euo pipefail
+    ./tests/api/run.sh
+    ./tests/webdav/run.sh
+    ./tests/webdav-drive-root/run.sh
+    ./tests/oidc/run.sh
+    if which litmus >/dev/null 2>/dev/null
+    then
+        ./tests/webdav/run-litmus.sh
+    else
+        echo "XXX litmus webdav not found, ignore test"
+    fi
+
+# CalDAV client-driven conformance suite.
+#
+# Drives OxiCloud through the maintained `python-caldav` client library
+# — the same VObject/RFC 5545 stack Thunderbird / DAVx⁵ / Gnome Calendar
+# use. Complements Hurl coverage (which exercises raw HTTP) by proving
+# a real client can round-trip recurring events, per-instance overrides
+# (RFC 5545 §3.8.4.4), and all-day masters (the shape #528 was filed
+# against).
+#
+# Not chained into `api-test` because it needs python3; run explicitly.
+# The orchestrator spawns its own postgres + server on port 8091 so it
+# can run in parallel with api-test/webdav.
+#
+# Runs `cargo build` first so the orchestrator always sees a fresh
+# binary. run-pycaldav.sh itself doesn't rebuild — it uses whatever
+# binary is on disk (CI pattern: pre-built release artifact). Doing
+# the build here in the recipe means local iterative dev never runs
+# pytest against a stale binary from an earlier `cargo check`, while
+# CI still gets to skip the recompile.
+test-caldav:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "XXX python3 not found — skipping CalDAV client-driven tests"
+        exit 0
+    fi
+    cargo build
+    ./tests/caldav/run-pycaldav.sh
+
+# Manual, human-run: launches OxiCloud with OIDC as the ONLY login method
+# (fake IdP on :1081, server on :8090) and waits for you to eyeball the
+# /login auto-redirect in a real browser. Not part of `just api-test` —
+# there's no automated assertion here, it's a visual check. Ctrl-C to stop.
+#oidc-manual-sso-only:
+#    bash tests/oidc/run-manual-sso-only.sh
 
 # ---------------------------------------------------------------------------
 # SvelteKit frontend (frontend/) — the only frontend. These `fe-*` recipes
@@ -191,10 +270,20 @@ fe-dev:
 fe-build:
     cd frontend && npm run build
 
-# build the SPA for e2e — keeps the `data-testid` tile hooks the release build
-# strips. Use before running the legacy webServer e2e flow against this binary.
+# Build the SPA with e2e instrumentation for the Playwright coverage
+# suite. Both env vars are load-bearing:
+#   * VITE_E2E=1  — keeps the `data-testid` tile hooks the release
+#                   build strips, so `page.getByTestId(filename)` and
+#                   the drop-zone / preferences selectors work.
+#   * COVERAGE=1  — Istanbul-instruments the SPA so per-test
+#                   `window.__coverage__` lands in `.nyc_output/`
+#                   (see `playwright.coverage.config.ts`). Missing
+#                   this makes the runner start but the coverage
+#                   report empty.
+# Called automatically by `front-test`; run manually if you're
+# invoking Playwright directly.
 fe-build-e2e:
-    cd frontend && VITE_E2E=1 npm run build
+    cd frontend && COVERAGE=1 VITE_E2E=1 npm run build
 
 # svelte-check + eslint + stylelint + prettier
 fe-check:

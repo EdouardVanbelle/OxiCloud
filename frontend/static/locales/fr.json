@@ -58,6 +58,8 @@
   "photos": {
     "empty_state": "Pas encore de photos",
     "empty_hint": "Téléchargez des images ou des vidéos pour les voir ici",
+    "empty_hidden": "{{n}} photo(s) masquée(s) par votre préférence",
+    "empty_hidden_hint": "Désactivez \"Masquer les fichiers\" dans votre profil pour les voir.",
     "items_selected": "sélectionnés",
     "view_daily": "Jour",
     "view_monthly": "Mois",
@@ -232,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "Notifier par e-mail",
     "revoke": "Remove",
-    "role_label": "Rôle"
+    "role_label": "Rôle",
+    "col_shared_by": "Partagé par",
+    "col_shared": "Partagé"
   },
   "share_dialogTitle": "Lien de partage",
   "share_linkLabel": "Lien partagé :",
@@ -335,6 +339,7 @@
     "modified": "Modifié",
     "no_files": "Aucun fichier dans ce dossier",
     "empty_hint": "Téléversez des fichiers ou créez des dossiers pour commencer",
+    "drop_to_upload": "Déposez les fichiers ici pour les téléverser",
     "loading": "Chargement des fichiers…",
     "view_grid": "Vue en grille",
     "view_list": "Vue en liste",
@@ -365,7 +370,21 @@
     "folder": "Dossier",
     "new_folder": "Nouveau dossier",
     "share": "Partager",
-    "view": "Afficher"
+    "view": "Afficher",
+    "empty_hidden_title": "{{n}} élément(s) masqué(s) dans ce dossier",
+    "empty_hidden_hint": "Les fichiers dont le nom commence par '.' sont masqués. Modifiez le réglage pour les afficher.",
+    "show_hidden": "Afficher les fichiers masqués",
+    "upload_dotfile_hidden": "{{n}} fichier(s) téléversé(s) mais masqué(s) par votre préférence.",
+    "rename_dotfile_hidden": "Renommé en \"{{name}}\" — désormais masqué par votre préférence.",
+    "new_folder_dotfile_hidden": "Dossier \"{{name}}\" créé — masqué par votre préférence.",
+    "dotfiles_hidden_toast": "Fichiers masqués",
+    "dotfiles_shown_toast": "Fichiers affichés",
+    "col_modified": "Modifié",
+    "col_added": "Ajouté",
+    "col_created_by": "Créé par",
+    "col_opened": "Ouvert",
+    "col_path": "Emplacement",
+    "new_elements": "Nouveaux éléments"
   },
   "dialogs": {
     "rename_folder": "Renommer le dossier",
@@ -451,7 +470,8 @@
       "trashed_time": "Date de suppression"
     },
     "delete": "Supprimer définitivement",
-    "empty_action": "Vider la corbeille"
+    "empty_action": "Vider la corbeille",
+    "expires_at": "Expiration"
   },
   "daysRemaining": {
     "expired": "Expiré",
@@ -570,7 +590,10 @@
     "accessed": "Consulté",
     "empty_state": "Aucun fichier récent",
     "empty_hint": "Les fichiers que vous ouvrez apparaîtront ici",
-    "loadMore": "Charger plus"
+    "empty_hidden_state": "{{n}} élément(s) récent(s) masqué(s) par votre préférence",
+    "empty_hidden_hint": "Désactivez \"Masquer les fichiers\" dans votre profil pour les voir.",
+    "loadMore": "Charger plus",
+    "remove_item": "Retirer des récents"
   },
   "notifications": {
     "file_renamed": "Fichier renommé",
@@ -806,7 +829,70 @@
     "title": "Admin",
     "user": "Utilisateur",
     "username": "Nom d'utilisateur",
-    "users": "Utilisateurs"
+    "users": "Utilisateurs",
+    "drive_manage_policies": "Gérer les règles",
+    "drive_manage_policies_for": "Règles du Disque — {{name}}",
+    "drive_manage_policies_help": "Les règles sont réservées aux administrateurs : les propriétaires du Disque ne peuvent pas les modifier. Chaque interrupteur contrôle une restriction.",
+    "drive_policy": {
+      "forbid_sharing": "Interdire le partage par ressource",
+      "forbid_sharing_help": "Bloque les partages par fichier ou par dossier (couvre également les liens publics et le partage externe). L'adhésion au Disque reste possible.",
+      "forbid_public_links": "Interdire les liens publics",
+      "forbid_public_links_help": "Bloque la création de liens partagés anonymes sur les ressources du Disque.",
+      "forbid_external_sharing": "Interdire le partage externe",
+      "forbid_external_sharing_help": "Bloque les partages aux utilisateurs externes (invitations par e-mail et comptes externes existants).",
+      "forbid_cross_drive_move": "Interdire le déplacement entre Disques",
+      "forbid_cross_drive_move_help": "Bloque le déplacement de fichiers ou de dossiers vers un autre Disque. N'empêche pas le téléchargement puis le ré-envoi.",
+      "forbid_owner_role_change": "Verrouiller la liste des propriétaires",
+      "forbid_owner_role_change_help": "Seul l'administrateur peut ajouter, retirer ou rétrograder les propriétaires du Disque tant que cette règle est active.",
+      "include_in_photo_index": "Inclure dans Photos",
+      "include_in_photo_index_help": "Afficher les images et vidéos de ce Disque dans le fil Photos et sur la carte Lieux. Les Disques personnels par défaut sont inclus automatiquement ; activez cette option pour les Disques partagés qui contiennent réellement des photos (par ex. « Photos famille »).",
+      "include_in_music_index": "Inclure dans Musique",
+      "include_in_music_index_help": "Inclure les fichiers audio de ce Disque dans la bibliothèque Musique. Les Disques personnels par défaut sont inclus automatiquement ; activez cette option pour les Disques partagés qui contiennent réellement une collection musicale (par ex. « Musique famille », « Collaboration groupe »).",
+      "implied_by_forbid_sharing": "Déjà appliqué par « Interdire le partage par ressource ».",
+      "read_only": "Lecture seule (gel)",
+      "read_only_help": "Geler entièrement le Disque — toute modification est refusée (téléversements, éditions, suppressions, renommages, partages, changements d'appartenance). La lecture et le téléchargement continuent de fonctionner. Le nettoyage automatique de la corbeille est également mis en pause. À utiliser pour les archives, les mises sous scellé légal ou la clôture de comptes. Seul un administrateur peut lever le gel."
+    },
+    "drives": "Disques",
+    "drive_name": "Nom",
+    "drive_kind": "Type",
+    "drive_owners": "Propriétaires",
+    "drive_usage": "Utilisation",
+    "drive_created_at": "Créé le",
+    "drive_kind_shared": "Partagé",
+    "drive_kind_personal": "Personnel",
+    "drive_kind_default_suffix": "(par défaut)",
+    "drive_manage_owners": "Gérer les propriétaires",
+    "drive_manage_owners_for": "Gérer les propriétaires — {{name}}",
+    "drive_edit_quota": "Modifier le quota",
+    "drive_delete": "Supprimer le disque",
+    "drive_delete_confirm": "Supprimer le disque « {{name}} » ? Cette action est irréversible.",
+    "drive_deleted": "Disque supprimé.",
+    "drive_created": "Disque créé.",
+    "drive_add_owner": "Ajouter un propriétaire",
+    "drive_current_owners": "Propriétaires actuels",
+    "drive_no_owners": "Aucun propriétaire",
+    "drive_owner": "Propriétaire",
+    "drive_owner_hint": "Choisissez un utilisateur (unique propriétaire) ou un groupe (chaque membre devient propriétaire par expansion du sujet).",
+    "drive_owner_picked": "Propriétaire : {{name}}",
+    "drive_owner_placeholder": "Rechercher un utilisateur ou un groupe…",
+    "drive_owner_remove_confirm": "Retirer ce propriétaire du disque ?",
+    "drive_name_placeholder": "ex. Ingénierie",
+    "drive_error_name_required": "Le nom du disque est requis.",
+    "drive_error_owner_required": "Choisissez un utilisateur ou un groupe comme propriétaire du disque.",
+    "create_drive": "Créer un disque partagé",
+    "no_drives": "Aucun disque pour le moment.",
+    "external_user": "externe",
+    "external_user_hint": "Compte à accès par invitation (magic-link ou OCM). Ne peut pas être admin et n’a pas de quota de stockage.",
+    "no_storage_for_external": "Les comptes externes n’ont pas d’enveloppe de stockage.",
+    "promote_to_internal_title": "Promouvoir en utilisateur interne",
+    "confirm_promote_user": "Promouvoir {{name}} en utilisateur interne ? Cela provisionne un disque personnel et attribue une enveloppe de stockage normale. L’identité du compte est conservée ; la connexion par magic-link reste la voie d’accès tant qu’aucun mot de passe n’est défini.",
+    "delete_user_title": "Supprimer l’utilisateur",
+    "delete_user_warning": "Vous êtes sur le point de supprimer définitivement « {{name}} ». Cette action supprime le compte, révoque toutes les sessions et efface le disque personnel. Elle est irréversible.",
+    "delete_user_confirm_hint": "Pour confirmer, saisissez l’e-mail du compte ci-dessous : {{email}}",
+    "deleting": "Suppression…",
+    "auth": "Authentification",
+    "quota": "Utilisation du stockage",
+    "last_login": "Dernière connexion"
   },
   "profile": {
     "page_title": "Profil",
@@ -859,6 +945,7 @@
     "family_name": "Nom",
     "notify_on_share": "M'avertir par e-mail quand quelqu'un partage avec moi",
     "notify_on_share_hint": "Lorsque décoché, les partages apparaissent toujours dans votre compte — vous ne recevrez simplement pas d'e-mail à leur sujet.",
+    "hide_dotfiles": "Masquer les fichiers dont le nom commence par un point (.env, .git, …)",
     "save_profile": "Enregistrer",
     "profile_saved": "Profil mis à jour",
     "profile_no_changes": "Aucun changement à enregistrer.",
@@ -979,7 +1066,17 @@
     "notifyRateLimited": "Trop de notifications pour ce destinataire — réessayez plus tard.",
     "removeAccess": "Retirer l'accès",
     "resendInvitation": "Renvoyer l'e-mail d'invitation",
-    "publicLinks": "Public links"
+    "publicLinks": "Public links",
+    "filter": {
+      "button": "Types",
+      "title": "Filtrer par type",
+      "files": "Fichiers",
+      "folders": "Dossiers",
+      "drives": "Lecteurs",
+      "emptyTitle": "Aucun partage ne correspond au filtre actuel",
+      "emptyHint": "Ajustez le filtre de type ou réinitialisez-le à sa valeur par défaut (Fichiers + Dossiers).",
+      "reset": "Réinitialiser le filtre"
+    }
   },
   "sort": {
     "asc": "croissant",
@@ -1078,7 +1175,9 @@
     "rename": "Renommer",
     "save": "Enregistrer",
     "search": "Rechercher",
-    "yes": "Oui"
+    "yes": "Oui",
+    "saving": "Enregistrement…",
+    "deleting": "Suppression…"
   },
   "device": {
     "continue": "Continuer",
@@ -1108,5 +1207,79 @@
   "view": {
     "grid": "Vue en grille",
     "list": "Vue en liste"
+  },
+  "preferences": {
+    "save_failed": "Impossible d'enregistrer votre préférence. Veuillez réessayer."
+  },
+  "upgrade": {
+    "title": "Passer à un compte complet",
+    "lede": "Obtenez votre propre espace de stockage et commencez à téléverser des fichiers. Vos partages existants restent intacts.",
+    "busy": "Mise à niveau…",
+    "submit": "Mettre à niveau mon compte",
+    "cancel": "Pas maintenant — retour aux partages reçus",
+    "success": "Votre compte a été mis à niveau. Redirection vers vos fichiers…",
+    "error": "La mise à niveau a échoué.",
+    "password_required": "Un mot de passe est requis — cette instance ne propose pas la connexion par lien e-mail.",
+    "password_too_short": "Le mot de passe doit contenir au moins 8 caractères.",
+    "oidc_user": "Les comptes SSO/OIDC sont gérés par votre fournisseur d'identité. La mise à niveau n'est pas disponible.",
+    "domain_not_allowed": "Cette instance n'accepte pas de nouveaux comptes depuis votre domaine e-mail. Contactez l'administrateur pour l'activer.",
+    "banner_aria": "Invitation à mettre à niveau",
+    "banner_title": "Obtenez votre propre espace",
+    "banner_body": "Vous utilisez un compte invité. Passez à un compte complet pour obtenir un disque personnel et téléverser des fichiers.",
+    "banner_cta": "Mettre à niveau"
+  },
+  "drive": {
+    "read_only_banner": {
+      "title": "Ce disque est en lecture seule",
+      "title_named": "Le disque « {{name}} » est en lecture seule",
+      "body": "Les téléversements, éditions, suppressions, renommages, partages et changements d'appartenance sont refusés. La lecture et le téléchargement continuent de fonctionner. Contactez un administrateur pour lever le gel du disque.",
+      "aria": "Ce disque est en lecture seule"
+    },
+    "back_to_files": "Retour aux fichiers",
+    "danger_zone": "Zone dangereuse",
+    "delete": "Supprimer le disque",
+    "delete_confirm": "Supprimer le disque « {{name}} » ? Cette action est irréversible — le disque doit être vide, sinon le serveur refusera.",
+    "delete_hint": "La suppression d’un disque est définitive. Le disque doit être vide (aucun fichier ni dossier actif) avant la suppression.",
+    "deleted": "Disque supprimé.",
+    "field": {
+      "created": "Créé le",
+      "default": "Par défaut",
+      "default_yes": "C’est votre disque principal",
+      "id": "Identifiant",
+      "kind": "Type",
+      "updated": "Dernière mise à jour"
+    },
+    "info": "Informations du disque",
+    "kind_personal": "Disque personnel",
+    "kind_shared": "Disque partagé",
+    "manage_members": "Gérer les membres",
+    "members": "Membres",
+    "members_empty": "Aucun membre.",
+    "not_found_body": "Ce disque n’existe pas ou vous n’y avez pas accès.",
+    "not_found_title": "Disque introuvable",
+    "policies": "Règles",
+    "policies_help": "Règles définies par un administrateur d’OxiCloud pour ce disque. Seuls les administrateurs peuvent les modifier ; vous voyez l’état actuel.",
+    "quota": "Quota",
+    "rename": "Renommer le disque",
+    "role": {
+      "commenter": "Commentateur",
+      "contributor": "Contributeur",
+      "editor": "Éditeur",
+      "owner": "Propriétaire",
+      "viewer": "Lecteur"
+    },
+    "storage": "Stockage",
+    "usage": "Utilisation",
+    "used": "Utilisé",
+    "members_personal_immutable": "Les disques personnels ont une appartenance figée à un unique propriétaire."
+  },
+  "group": {
+    "members_empty": "Aucun membre",
+    "member_count": "{{n}} membres"
+  },
+  "resource_list": {
+    "location": "Emplacement",
+    "wrong_drop_zone_msg": "Les envois ne fonctionnent que dans Fichiers — ouvrez la section Fichiers et déposez-y vos éléments.",
+    "wrong_drop_zone_action": "Aller aux Fichiers"
   }
 }

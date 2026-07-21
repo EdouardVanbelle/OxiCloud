@@ -2,9 +2,7 @@ use std::cmp::Reverse;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::application::dtos::display_helpers::{
-    category_for, icon_class_for, icon_special_class_for,
-};
+use crate::application::dtos::display_helpers::intern_display;
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
 use crate::application::dtos::search_dto::{
@@ -15,6 +13,7 @@ use crate::application::ports::content_index_ports::{ContentHitDto, ContentIndex
 use crate::application::ports::inbound::SearchUseCase;
 use crate::application::ports::storage_ports::FileReadPort;
 use crate::common::errors::Result;
+use crate::common::text::ascii_ci_contains;
 use crate::domain::entities::folder::Folder;
 use crate::domain::repositories::folder_repository::FolderRepository;
 use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
@@ -67,7 +66,78 @@ pub struct SearchService {
     /// Lock-free concurrent cache with automatic TTL and LRU eviction (moka).
     /// Values are `Arc<SearchResultsDto>` so cache insert/hit is a single
     /// atomic ref-count increment (~1 ns) instead of cloning thousands of Strings.
+    ///
+    /// **Byte-bounded**, not entry-bounded: entries are weighed by
+    /// [`search_results_entry_weight`] and `max_capacity` is a byte budget.
+    /// Keys span user × query × offset × limit, and each page holds up to 500
+    /// enriched rows (~500–900 B of owned Strings each) — an entry-count bound
+    /// let hundreds of MB of result pages accumulate invisibly.
     search_cache: moka::future::Cache<u64, Arc<SearchResultsDto>>,
+}
+
+// ─── Search-results cache (byte-bounded) ─────────────────────────────────
+
+/// Approximate heap bytes retained by one cached search page.
+///
+/// With a `weigher` installed, moka's `max_capacity` is the sum of entry
+/// *weights*, so this converts the cache bound from "number of entries" to
+/// real bytes: the length of every owned `String` in each file/folder row,
+/// plus a fixed per-row and per-entry overhead for struct fields, the 24-B
+/// `String` headers, `Vec` slots and allocator slop. Same pattern as the
+/// file-content cache and the dedup manifest cache.
+///
+/// `pub` so `examples/bench_search_cache_mem.rs` can recompute retained
+/// bytes with the exact production formula.
+pub fn search_results_entry_weight(_key: &u64, value: &Arc<SearchResultsDto>) -> u32 {
+    /// Fixed per-row overhead: struct scalars + one 24-B header per `String`
+    /// field (12 on a file row, 4 on a folder row) + `Vec` slot + allocator
+    /// slop. Deliberately a round upper-ish estimate — under-weighing is the
+    /// failure mode that re-opens the memory hole.
+    const ROW_OVERHEAD: usize = 200;
+    /// Fixed per-entry overhead: `Arc` + `SearchResultsDto` scalars + `Vec`
+    /// headers + moka's own bookkeeping per entry.
+    const ENTRY_OVERHEAD: usize = 256;
+
+    fn opt_len(s: &Option<String>) -> usize {
+        s.as_deref().map_or(0, str::len)
+    }
+
+    let mut bytes = ENTRY_OVERHEAD + value.sort_by.len();
+    for f in &value.files {
+        bytes += ROW_OVERHEAD
+            + f.id.len()
+            + f.name.len()
+            + f.path.len()
+            + f.mime_type.len()
+            + opt_len(&f.folder_id)
+            + f.size_formatted.len()
+            + f.icon_class.len()
+            + f.icon_special_class.len()
+            + f.category.len()
+            + f.blob_hash.len()
+            + opt_len(&f.snippet)
+            + opt_len(&f.match_source);
+    }
+    for d in &value.folders {
+        bytes += ROW_OVERHEAD + d.id.len() + d.name.len() + d.path.len() + opt_len(&d.parent_id);
+    }
+    bytes.min(u32::MAX as usize) as u32
+}
+
+/// Build the search-results cache exactly as production wires it: a byte
+/// budget enforced through [`search_results_entry_weight`], plus TTL.
+///
+/// Shared with `examples/bench_search_cache_mem.rs` so the benchmark
+/// measures the identical cache configuration that serves requests.
+pub fn build_search_results_cache(
+    cache_ttl_secs: u64,
+    max_bytes: u64,
+) -> moka::future::Cache<u64, Arc<SearchResultsDto>> {
+    moka::future::Cache::builder()
+        .max_capacity(max_bytes)
+        .weigher(search_results_entry_weight)
+        .time_to_live(Duration::from_secs(cache_ttl_secs))
+        .build()
 }
 
 // ─── Utility functions (pure, no self — computed on the server) ─────────
@@ -77,19 +147,40 @@ pub struct SearchService {
 ///
 /// `query_lower` **must** already be lowercased by the caller so that the
 /// allocation happens once per search, not once per result.
+///
+/// The overwhelmingly common all-ASCII filename takes an allocation-free
+/// ASCII case-fold fast path — `name.to_lowercase()` (full Unicode) is pure
+/// waste there, and it ran once *per result row* (and per keystroke on the
+/// suggest path). Non-ASCII names fall back to the exact Unicode-lowercase
+/// comparison, so behavior is unchanged (for ASCII, lowercasing preserves
+/// length, so the `contains` length ratio is identical). See benches/ROUND14.md §A2.
 fn compute_relevance(name: &str, query_lower: &str) -> u32 {
-    let name_lower = name.to_lowercase();
-
-    if name_lower == query_lower {
-        100
-    } else if name_lower.starts_with(query_lower) {
-        80
-    } else if name_lower.contains(query_lower) {
-        // Bonus for shorter names (more specific match)
-        let ratio = query_lower.len() as f64 / name_lower.len() as f64;
-        50 + (ratio * 20.0) as u32
+    if name.is_ascii() {
+        let (nb, qb) = (name.as_bytes(), query_lower.as_bytes());
+        if nb.eq_ignore_ascii_case(qb) {
+            100
+        } else if nb.len() >= qb.len() && nb[..qb.len()].eq_ignore_ascii_case(qb) {
+            80
+        } else if ascii_ci_contains(nb, qb) {
+            // Bonus for shorter names (more specific match). ASCII lowercase
+            // preserves length, so `name.len()` == the old `name_lower.len()`.
+            let ratio = query_lower.len() as f64 / name.len() as f64;
+            50 + (ratio * 20.0) as u32
+        } else {
+            0
+        }
     } else {
-        0
+        let name_lower = name.to_lowercase();
+        if name_lower == query_lower {
+            100
+        } else if name_lower.starts_with(query_lower) {
+            80
+        } else if name_lower.contains(query_lower) {
+            let ratio = query_lower.len() as f64 / name_lower.len() as f64;
+            50 + (ratio * 20.0) as u32
+        } else {
+            0
+        }
     }
 }
 
@@ -138,28 +229,15 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// Get Font Awesome icon class for a file based on extension and MIME type.
-/// Delegates to the centralised `display_helpers` so every API surface is
-/// consistent.
-fn get_icon_class(name: &str, mime: &str) -> String {
-    icon_class_for(name, mime).to_string()
-}
-
-/// Get CSS special class for icon styling.
-fn get_icon_special_class(name: &str, mime: &str) -> String {
-    icon_special_class_for(name, mime).to_string()
-}
-
-/// Get category label from centralised helpers.
-fn get_category(name: &str, mime: &str) -> String {
-    category_for(name, mime).to_string()
-}
-
 // ─── SearchService implementation ───────────────────────────────────────
 
 impl SearchService {
     /**
      * Creates a new instance of the search service.
+     *
+     * `max_cache_bytes` is the byte budget for the results cache (weigher-
+     * bounded, see [`search_results_entry_weight`]) — it replaced the old
+     * entry-count capacity, which was blind to how big each cached page is.
      */
     pub fn new(
         file_repository: Arc<FileBlobReadRepository>,
@@ -168,12 +246,9 @@ impl SearchService {
         authorization: Option<Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine>>,
         drive_repo: Option<Arc<dyn crate::domain::repositories::drive_repository::DriveRepository>>,
         cache_ttl: u64,
-        max_cache_size: usize,
+        max_cache_bytes: u64,
     ) -> Self {
-        let search_cache = moka::future::Cache::builder()
-            .max_capacity(max_cache_size as u64)
-            .time_to_live(Duration::from_secs(cache_ttl))
-            .build();
+        let search_cache = build_search_results_cache(cache_ttl, max_cache_bytes);
 
         Self {
             file_repository,
@@ -195,8 +270,14 @@ impl SearchService {
 
     /// Enrich a FileDto → SearchFileResultDto with server-computed metadata.
     ///
+    /// Consumes the DTO: every `String` moves and the interned display
+    /// fields (`mime_type`/`icon_class`/`icon_special_class`/`category`,
+    /// already computed once in `FileDto::from`) transfer as refcount
+    /// bumps — the old borrow-based version cloned all of them AND re-ran
+    /// the three display classifiers per result row.
+    ///
     /// `query_lower` must already be lowercased (empty string when no query).
-    fn enrich_file(file: &FileDto, query_lower: &str) -> SearchFileResultDto {
+    fn enrich_file(file: FileDto, query_lower: &str) -> SearchFileResultDto {
         let relevance = if query_lower.is_empty() {
             50
         } else {
@@ -204,23 +285,23 @@ impl SearchService {
         };
 
         SearchFileResultDto {
-            id: file.id.clone(),
-            name: file.name.clone(),
-            path: file.path.clone(),
+            id: file.id,
+            name: file.name,
+            path: file.path,
             size: file.size,
-            mime_type: file.mime_type.to_string(),
-            folder_id: file.folder_id.clone(),
+            mime_type: file.mime_type,
+            folder_id: file.folder_id,
             created_at: file.created_at,
             modified_at: file.modified_at,
             relevance_score: relevance,
             size_formatted: format_bytes(file.size),
-            icon_class: get_icon_class(&file.name, &file.mime_type),
-            icon_special_class: get_icon_special_class(&file.name, &file.mime_type),
-            category: get_category(&file.name, &file.mime_type),
+            icon_class: file.icon_class,
+            icon_special_class: file.icon_special_class,
+            category: file.category,
             // Carry the content hash through so REPORT/SEARCH
             // responses on the NC surface can emit the same ETag
             // (`File::compute_etag`) as PROPFIND/GET would.
-            blob_hash: file.content_hash.clone(),
+            blob_hash: file.content_hash,
             snippet: None,
             match_source: (!query_lower.is_empty() && relevance > 0).then(|| "name".to_string()),
         }
@@ -228,8 +309,10 @@ impl SearchService {
 
     /// Enrich a FolderDto → SearchFolderResultDto with server-computed metadata.
     ///
+    /// Consumes the DTO so the owned strings move instead of cloning.
+    ///
     /// `query_lower` must already be lowercased (empty string when no query).
-    fn enrich_folder(folder: &FolderDto, query_lower: &str) -> SearchFolderResultDto {
+    fn enrich_folder(folder: FolderDto, query_lower: &str) -> SearchFolderResultDto {
         let relevance = if query_lower.is_empty() {
             50
         } else {
@@ -237,10 +320,11 @@ impl SearchService {
         };
 
         SearchFolderResultDto {
-            id: folder.id.clone(),
-            name: folder.name.clone(),
-            path: folder.path.clone(),
-            parent_id: folder.parent_id.clone(),
+            id: folder.id,
+            name: folder.name,
+            path: folder.path,
+            parent_id: folder.parent_id,
+            drive_id: folder.drive_id,
             created_at: folder.created_at,
             modified_at: folder.modified_at,
             is_root: folder.is_root,
@@ -259,7 +343,7 @@ impl SearchService {
         user_id: Uuid,
     ) -> Vec<ContentHitDto> {
         use crate::application::ports::authorization_ports::AuthorizationEngine;
-        use crate::domain::services::authorization::{Permission, Resource, Subject};
+        use crate::domain::services::authorization::Subject;
 
         let Some(index) = &self.content_index else {
             return Vec::new();
@@ -282,21 +366,11 @@ impl SearchService {
             return Vec::new();
         };
 
-        // Resolve the caller's accessible drive set via the engine
-        // (handles group-mediated drive grants) + the repo lookup.
-        let caller = Subject::User(user_id);
-        let (subject_types, subject_ids) = match authz.expand_subject_for_listing(caller).await {
-            Ok(pair) => pair,
-            Err(e) => {
-                tracing::warn!("Content-index: subject expansion failed — degrading to empty: {e}");
-                return Vec::new();
-            }
-        };
-        let accessible_drives: Vec<Uuid> = match drive_repo
-            .list_for_subjects(&subject_types, &subject_ids)
-            .await
-        {
-            Ok(drives) => drives.into_iter().map(|d| d.drive.id).collect(),
+        // Resolve the caller's accessible drive set. Group-mediated
+        // grants are honoured inline by `storage.caller_group_ids` on
+        // the SQL side, so no Rust-side subject expansion here.
+        let accessible_drives: Vec<Uuid> = match drive_repo.list_readable_by(user_id).await {
+            Ok(drives) => drives.iter().map(|d| d.drive.id).collect(),
             Err(e) => {
                 tracing::warn!("Content-index: drive lookup failed — degrading to empty: {e}");
                 return Vec::new();
@@ -325,32 +399,43 @@ impl SearchService {
         //     drive the caller doesn't otherwise have. The Tantivy
         //     filter is drive-only; this re-check restores per-file
         //     resolution.
-        // Failures degrade conservatively (drop the hit, log it) —
-        // never leak.
-        let mut verified = Vec::with_capacity(hits.len());
+        // Failures degrade conservatively (drop the hit / the page,
+        // log it) — never leak. Batched: one drive-resolution query for
+        // the whole page instead of up to CONTENT_HITS_LIMIT sequential
+        // point SELECTs (benches/SEARCH-REBAC.md).
+        // Parse each hit id ONCE and carry the pair through the verify loop
+        // — the old shape re-parsed every `file_id` a second time below
+        // (benches/ROUND11.md §12: 1.6x on a 100-hit page).
+        let mut pairs = Vec::with_capacity(hits.len());
         for hit in hits {
-            let file_uuid = match Uuid::parse_str(&hit.file_id) {
-                Ok(u) => u,
+            match Uuid::parse_str(&hit.file_id) {
+                Ok(u) => pairs.push((hit, u)),
                 Err(_) => {
                     tracing::warn!("Content-index hit had non-UUID file_id: {}", hit.file_id);
-                    continue;
                 }
-            };
-            match authz
-                .check(caller, Permission::Read, Resource::File(file_uuid))
-                .await
-            {
-                Ok(true) => verified.push(hit),
-                Ok(false) => {
-                    tracing::debug!(
-                        target: "oxicloud::search",
-                        file_id = %file_uuid,
-                        "dropping content-index hit: ReBAC denies Read after Tantivy filter",
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!("ReBAC re-check failed for {file_uuid}: {e}");
-                }
+            }
+        }
+        let hit_ids: Vec<Uuid> = pairs.iter().map(|(_, u)| *u).collect();
+        let allowed = match authz
+            .check_files_read_batch(Subject::User(user_id), &hit_ids)
+            .await
+        {
+            Ok(set) => set,
+            Err(e) => {
+                tracing::warn!("ReBAC re-check failed for content hits: {e}");
+                return Vec::new();
+            }
+        };
+        let mut verified = Vec::with_capacity(pairs.len());
+        for (hit, file_uuid) in pairs {
+            if allowed.contains(&file_uuid) {
+                verified.push(hit);
+            } else {
+                tracing::debug!(
+                    target: "oxicloud::search",
+                    file_id = %file_uuid,
+                    "dropping content-index hit: ReBAC denies Read after Tantivy filter",
+                );
             }
         }
         verified
@@ -408,9 +493,10 @@ impl SearchService {
             let Some(hit) = by_id.get(dto.id.as_str()) else {
                 continue;
             };
-            let mut enriched = Self::enrich_file(&dto, "");
-            enriched.relevance_score = content_relevance(hit.score, max_score);
-            enriched.snippet = hit.snippet.clone();
+            let (score, snippet) = (hit.score, hit.snippet.clone());
+            let mut enriched = Self::enrich_file(dto, "");
+            enriched.relevance_score = content_relevance(score, max_score);
+            enriched.snippet = snippet;
             enriched.match_source = Some("content".to_string());
             enriched_files.push(enriched);
             added += 1;
@@ -424,20 +510,28 @@ impl SearchService {
     /// Quick suggestions search — returns up to `limit` name suggestions
     /// matching the query. Pushes filtering, relevance sort and LIMIT to SQL
     /// so only a handful of rows cross the DB→app boundary.
-    pub async fn suggest(
+    ///
+    /// `caller_id` scopes the underlying repo queries to drives the caller
+    /// can Read. Without it (the pre-fix shape) any authenticated user —
+    /// including external magic-link recipients — could autocomplete both
+    /// names and full paths across every tenant on the instance (AuthZ
+    /// audit finding #1, 2026-07-12). Named `_with_perms` per the
+    /// AGENTS.md AuthZ convention.
+    pub async fn suggest_with_perms(
         &self,
         query: &str,
         folder_id: Option<&str>,
         limit: usize,
+        caller_id: Uuid,
     ) -> Result<SearchSuggestionsDto> {
         let start = Instant::now();
 
         // Ask SQL for at most `limit` best-matching files and folders
         let (files, folders) = tokio::join!(
             self.file_repository
-                .suggest_files_by_name(folder_id, query, limit),
+                .suggest_files_by_name(folder_id, query, limit, caller_id),
             self.folder_repository
-                .suggest_folders_by_name(folder_id, query, limit),
+                .suggest_folders_by_name(folder_id, query, limit, caller_id),
         );
         let files = files?;
         let folders = folders?;
@@ -448,30 +542,36 @@ impl SearchService {
         // Pre-compute once — avoids N heap allocations inside the loops.
         let query_lower = query.to_lowercase();
 
-        for file in &files {
-            let file_dto = FileDto::from(file.clone());
+        // Consume the entities: the old loop deep-cloned every File into
+        // the DTO conversion and then cloned name/id/path AGAIN into the
+        // suggestion — 3 field clones + a full entity clone per row on
+        // an every-keystroke path.
+        for file in files {
+            let file_dto = FileDto::from(file);
             let score = compute_relevance(&file_dto.name, &query_lower);
             suggestions.push(SearchSuggestionItem {
-                name: file_dto.name.clone(),
+                name: file_dto.name,
                 item_type: "file".to_string(),
-                id: file_dto.id.clone(),
-                path: file_dto.path.clone(),
-                icon_class: get_icon_class(&file_dto.name, &file_dto.mime_type),
-                icon_special_class: get_icon_special_class(&file_dto.name, &file_dto.mime_type),
+                id: file_dto.id,
+                path: file_dto.path,
+                // Interned in `FileDto::from` — reuse instead of re-running
+                // the display classifiers per keystroke suggestion.
+                icon_class: file_dto.icon_class,
+                icon_special_class: file_dto.icon_special_class,
                 relevance_score: score,
             });
         }
 
-        for folder in &folders {
-            let folder_dto = FolderDto::from(folder.clone());
+        for folder in folders {
+            let folder_dto = FolderDto::from(folder);
             let score = compute_relevance(&folder_dto.name, &query_lower);
             suggestions.push(SearchSuggestionItem {
-                name: folder_dto.name.clone(),
+                name: folder_dto.name,
                 item_type: "folder".to_string(),
-                id: folder_dto.id.clone(),
-                path: folder_dto.path.clone(),
-                icon_class: "fas fa-folder".to_string(),
-                icon_special_class: "folder-icon".to_string(),
+                id: folder_dto.id,
+                path: folder_dto.path,
+                icon_class: intern_display("fas fa-folder"),
+                icon_special_class: intern_display("folder-icon"),
                 relevance_score: score,
             });
         }
@@ -485,6 +585,22 @@ impl SearchService {
             suggestions,
             query_time_ms: elapsed,
         })
+    }
+}
+
+// ─── Bench-only public wrappers (feature = "bench") ──────────────────────
+
+#[cfg(feature = "bench")]
+impl SearchService {
+    /// Public wrapper over the private `enrich_file` so
+    /// `examples/bench_search_enrich.rs` can measure it.
+    pub fn enrich_file_for_bench(file: FileDto, query_lower: &str) -> SearchFileResultDto {
+        Self::enrich_file(file, query_lower)
+    }
+
+    /// Public wrapper over the private `enrich_folder` for the same bench.
+    pub fn enrich_folder_for_bench(folder: FolderDto, query_lower: &str) -> SearchFolderResultDto {
+        Self::enrich_folder(folder, query_lower)
     }
 }
 
@@ -512,8 +628,13 @@ impl SearchUseCase for SearchService {
         criteria: SearchCriteriaDto,
         user_id: Uuid,
     ) -> Result<Arc<SearchResultsDto>> {
-        let user_id_str = user_id.to_string();
-        let cache_key = Self::create_cache_key(&criteria, &user_id_str);
+        // Stack-encode the UUID (36 ASCII bytes) instead of `to_string()` — the
+        // hasher sees the identical byte sequence, so the u64 key is unchanged,
+        // but the per-request heap `String` is gone (the fn doc even claims
+        // "zero-allocation hashing"). See benches/ROUND19.md §M5.
+        let mut user_id_buf = [0u8; uuid::fmt::Hyphenated::LENGTH];
+        let user_id_str = user_id.hyphenated().encode_lower(&mut user_id_buf);
+        let cache_key = Self::create_cache_key(&criteria, user_id_str);
 
         // Single-flight: collapse N identical concurrent searches into ONE
         // execution. `try_get_with` serves the cached result on a hit and, on a
@@ -527,44 +648,42 @@ impl SearchUseCase for SearchService {
                 // Pre-compute once — avoids N heap allocations inside enrich_file/enrich_folder.
                 let query_lower = query.to_lowercase();
 
-                // Content-index candidates (first page only). Feature-off or an
-                // index failure yields an empty set — the search stays name-only.
-                let content_hits = self.lookup_content_hits(&criteria, user_id).await;
-
                 // For non-recursive searches, use efficient database-level pagination
                 // This avoids loading all files into memory
                 if !criteria.recursive {
-                    // Use database-level pagination
-                    let (files, total_file_count) = self
-                        .file_repository
-                        .search_files_paginated(criteria.folder_id.as_deref(), &criteria, user_id)
-                        .await?;
-
-                    // Convert to DTOs and enrich with metadata
-                    let file_dtos: Vec<FileDto> = files.into_iter().map(FileDto::from).collect();
-                    let mut enriched_files: Vec<SearchFileResultDto> = file_dtos
-                        .iter()
-                        .map(|f| Self::enrich_file(f, &query_lower))
-                        .collect();
-
-                    // Get folders for this folder (non-recursive, filtered in SQL)
-                    let folders = self
-                        .folder_repository
-                        .search_folders(
+                    // The content-index lookup (drive resolve + Tantivy +
+                    // ReBAC batch), the file page and the folder query are
+                    // mutually independent — overlap them so the search pays
+                    // ~max() instead of the serial sum (`suggest_with_perms`
+                    // already used this shape; ROUND10 brought it here).
+                    let (content_hits, files_page, folders_res) = tokio::join!(
+                        self.lookup_content_hits(&criteria, user_id),
+                        self.file_repository.search_files_paginated(
+                            criteria.folder_id.as_deref(),
+                            &criteria,
+                            user_id,
+                        ),
+                        self.folder_repository.search_folders(
                             criteria.folder_id.as_deref(),
                             criteria.name_contains.as_deref(),
                             user_id,
                             false,
-                        )
-                        .await?;
+                        ),
+                    );
+                    let (files, total_file_count) = files_page?;
+                    let folders = folders_res?;
 
-                    let filtered_folders: Vec<FolderDto> =
-                        folders.into_iter().map(FolderDto::from).collect();
+                    // Convert to DTOs and enrich with metadata — one fused
+                    // pass, no intermediate Vec<FileDto> materialization.
+                    let mut enriched_files: Vec<SearchFileResultDto> = files
+                        .into_iter()
+                        .map(|f| Self::enrich_file(FileDto::from(f), &query_lower))
+                        .collect();
 
                     // For folders, apply sorting and pagination in memory (usually fewer folders)
-                    let mut enriched_folders: Vec<SearchFolderResultDto> = filtered_folders
-                        .iter()
-                        .map(|f| Self::enrich_folder(f, &query_lower))
+                    let mut enriched_folders: Vec<SearchFolderResultDto> = folders
+                        .into_iter()
+                        .map(|f| Self::enrich_folder(FolderDto::from(f), &query_lower))
                         .collect();
 
                     // Sort folders (cached_key avoids O(N log N) temporary String allocations)
@@ -601,13 +720,24 @@ impl SearchUseCase for SearchService {
 
                     let folder_start = start_idx.min(folder_count);
                     let folder_end = end_idx.min(folder_count);
-                    let paginated_folders = enriched_folders[folder_start..folder_end].to_vec();
+                    // Move the page out of the owned vecs instead of
+                    // deep-cloning the slice — the source is dropped right
+                    // after (benches/ROUND11.md §11: −300 allocs per page).
+                    let paginated_folders: Vec<_> = enriched_folders
+                        .into_iter()
+                        .skip(folder_start)
+                        .take(folder_end - folder_start)
+                        .collect();
 
                     let file_start = start_idx.saturating_sub(folder_count);
                     let file_end = end_idx
                         .saturating_sub(folder_count)
                         .min(enriched_files.len());
-                    let paginated_files = enriched_files[file_start..file_end].to_vec();
+                    let paginated_files: Vec<_> = enriched_files
+                        .into_iter()
+                        .skip(file_start)
+                        .take(file_end - file_start)
+                        .collect();
 
                     let elapsed_ms = start.elapsed().as_millis() as u64;
 
@@ -627,35 +757,36 @@ impl SearchUseCase for SearchService {
                 // ── Recursive search via ltree (single SQL query per entity type) ──
                 // Uses PostgreSQL ltree GiST index to find all files and folders
                 // in the subtree in O(1) queries, replacing the O(N) spawn-per-folder
-                // approach that could saturate the connection pool.
-                let (found_files, total_file_count) = self
-                    .file_repository
-                    .search_files_in_subtree(criteria.folder_id.as_deref(), &criteria, user_id)
-                    .await?;
-
-                // Get folders (SQL-filtered, user-scoped, recursive when applicable)
-                let found_folders: Vec<Folder> = self
-                    .folder_repository
-                    .search_folders(
+                // approach that could saturate the connection pool. The content
+                // lookup, subtree file query and folder query overlap (`join!`),
+                // same as the non-recursive branch.
+                let (content_hits, files_page, folders_res) = tokio::join!(
+                    self.lookup_content_hits(&criteria, user_id),
+                    self.file_repository.search_files_in_subtree(
+                        criteria.folder_id.as_deref(),
+                        &criteria,
+                        user_id,
+                    ),
+                    self.folder_repository.search_folders(
                         criteria.folder_id.as_deref(),
                         criteria.name_contains.as_deref(),
                         user_id,
                         true,
-                    )
-                    .await?;
+                    ),
+                );
+                let (found_files, total_file_count) = files_page?;
+                let found_folders: Vec<Folder> = folders_res?;
 
                 // ── Convert to DTOs and enrich with server-computed metadata ──
-                let file_dtos: Vec<FileDto> = found_files.into_iter().map(FileDto::from).collect();
-                let mut enriched_files: Vec<SearchFileResultDto> = file_dtos
-                    .iter()
-                    .map(|f| Self::enrich_file(f, &query_lower))
+                // Fused single pass: no intermediate DTO Vec materialization.
+                let mut enriched_files: Vec<SearchFileResultDto> = found_files
+                    .into_iter()
+                    .map(|f| Self::enrich_file(FileDto::from(f), &query_lower))
                     .collect();
 
-                let folder_dtos: Vec<FolderDto> =
-                    found_folders.into_iter().map(FolderDto::from).collect();
-                let mut enriched_folders: Vec<SearchFolderResultDto> = folder_dtos
-                    .iter()
-                    .map(|f| Self::enrich_folder(f, &query_lower))
+                let mut enriched_folders: Vec<SearchFolderResultDto> = found_folders
+                    .into_iter()
+                    .map(|f| Self::enrich_folder(FolderDto::from(f), &query_lower))
                     .collect();
 
                 // ── Sort folders (cached_key avoids O(N log N) temporary String allocations) ──
@@ -691,13 +822,24 @@ impl SearchUseCase for SearchService {
 
                 let folder_start = start_idx.min(folder_count);
                 let folder_end = end_idx.min(folder_count);
-                let paginated_folders = enriched_folders[folder_start..folder_end].to_vec();
+                // Move the page out instead of deep-cloning the slice — the
+                // recursive branch's vecs can hold the whole subtree match
+                // set, all dropped right after (benches/ROUND11.md §11).
+                let paginated_folders: Vec<_> = enriched_folders
+                    .into_iter()
+                    .skip(folder_start)
+                    .take(folder_end - folder_start)
+                    .collect();
 
                 let file_start = start_idx.saturating_sub(folder_count);
                 let file_end = end_idx
                     .saturating_sub(folder_count)
                     .min(enriched_files.len());
-                let paginated_files = enriched_files[file_start..file_end].to_vec();
+                let paginated_files: Vec<_> = enriched_files
+                    .into_iter()
+                    .skip(file_start)
+                    .take(file_end - file_start)
+                    .collect();
 
                 let elapsed_ms = start.elapsed().as_millis() as u64;
 
@@ -723,14 +865,20 @@ impl SearchUseCase for SearchService {
             })
     }
 
-    /// Returns quick suggestions for autocomplete.
+    /// Returns quick suggestions for autocomplete. Delegates to the
+    /// inherent `suggest_with_perms` — the trait method is preserved as
+    /// the polymorphic entry point (e.g. for `StubSearchUseCase` in
+    /// tests); production callers can equivalently call the inherent
+    /// method directly.
     async fn suggest(
         &self,
         query: &str,
         folder_id: Option<&str>,
         limit: usize,
+        caller_id: Uuid,
     ) -> Result<SearchSuggestionsDto> {
-        self.suggest(query, folder_id, limit).await
+        self.suggest_with_perms(query, folder_id, limit, caller_id)
+            .await
     }
 
     /// Clears the search results cache.
@@ -762,6 +910,7 @@ impl SearchService {
                 _query: &str,
                 _folder_id: Option<&str>,
                 _limit: usize,
+                _caller_id: Uuid,
             ) -> Result<SearchSuggestionsDto> {
                 Ok(SearchSuggestionsDto {
                     suggestions: Vec::new(),
@@ -799,19 +948,101 @@ mod tests {
             name: name.to_string(),
             path: format!("/{name}"),
             size,
-            mime_type: "text/plain".to_string(),
+            mime_type: "text/plain".into(),
             folder_id: None,
             created_at: 0,
             modified_at,
             relevance_score: relevance,
             size_formatted: String::new(),
-            icon_class: String::new(),
-            icon_special_class: String::new(),
-            category: String::new(),
+            icon_class: "".into(),
+            icon_special_class: "".into(),
+            category: "".into(),
             blob_hash: String::new(),
             snippet: None,
             match_source: None,
         }
+    }
+
+    #[test]
+    fn entry_weight_counts_every_owned_string_plus_overheads() {
+        // Empty page: entry overhead + sort_by ("relevance" = 9 bytes).
+        let empty = Arc::new(SearchResultsDto::empty());
+        let base = search_results_entry_weight(&0, &empty) as usize;
+        assert_eq!(base, 256 + 9);
+
+        // One file row: base + row overhead + its owned string bytes
+        // (id 7 + name 7 + path 8 + mime 10; the rest are empty/None).
+        let one_file = Arc::new(SearchResultsDto::new(
+            vec![dto("abc.txt", 50, 10, 1)],
+            Vec::new(),
+            100,
+            0,
+            Some(1),
+            0,
+            "relevance".to_string(),
+        ));
+        let w = search_results_entry_weight(&0, &one_file) as usize;
+        assert_eq!(w, base + 200 + 7 + 7 + 8 + 10);
+
+        // Folder rows weigh too (id 2 + name 4 + path 5 + parent 6 = 17).
+        let one_folder = Arc::new(SearchResultsDto::new(
+            Vec::new(),
+            vec![SearchFolderResultDto {
+                id: "f1".to_string(),
+                name: "docs".to_string(),
+                path: "/docs".to_string(),
+                parent_id: Some("parent".to_string()),
+                drive_id: Uuid::nil(),
+                created_at: 0,
+                modified_at: 0,
+                is_root: false,
+                relevance_score: 50,
+            }],
+            100,
+            0,
+            Some(1),
+            0,
+            "relevance".to_string(),
+        ));
+        let w = search_results_entry_weight(&0, &one_folder) as usize;
+        assert_eq!(w, base + 200 + 2 + 4 + 5 + 6);
+    }
+
+    #[tokio::test]
+    async fn cache_evicts_down_to_the_byte_budget() {
+        // Budget fits ~2 of these entries; inserting 20 must never let the
+        // weighted size settle above the budget.
+        let entry = |i: usize| {
+            Arc::new(SearchResultsDto::new(
+                (0..50)
+                    .map(|r| dto(&format!("file_{i}_{r}_{}", "x".repeat(100)), 50, 1, 1))
+                    .collect(),
+                Vec::new(),
+                50,
+                0,
+                Some(50),
+                0,
+                "relevance".to_string(),
+            ))
+        };
+        let per_entry = search_results_entry_weight(&0, &entry(0)) as u64;
+        let budget = per_entry * 2 + per_entry / 2;
+
+        let cache = build_search_results_cache(300, budget);
+        for i in 0..20u64 {
+            cache.insert(i, entry(i as usize)).await;
+        }
+        cache.run_pending_tasks().await;
+
+        let retained: u64 = cache
+            .iter()
+            .map(|(k, v)| search_results_entry_weight(&k, &v) as u64)
+            .sum();
+        assert!(
+            retained <= budget,
+            "retained {retained} B exceeds budget {budget} B"
+        );
+        assert!(cache.entry_count() <= 2);
     }
 
     #[test]

@@ -52,6 +52,14 @@ pub async fn create_auth_services(
     // direct FolderService dependency for that path.
     auth_app_service = auth_app_service.with_user_lifecycle(user_lifecycle);
 
+    // Wire the auth-method allowlist + email-verification requirement so
+    // login / magic-link / register handlers consult a single snapshot
+    // rather than reaching into the app config on every call.
+    auth_app_service = auth_app_service.with_auth_policy(
+        config.auth.allowed_auth_methods.clone(),
+        config.auth.require_verified_email,
+    );
+
     // Wire the magic-link token repo. Enables `GET /magic/v1/{token}`
     // and the future `POST /api/auth/magic-link/send` endpoint to mint
     // and consume tokens. The repo is unconditional (it's just SQL on

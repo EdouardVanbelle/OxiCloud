@@ -111,6 +111,10 @@ pub trait UserRepository: Send + Sync + 'static {
     /// Lists users by role (admin or user)
     async fn list_users_by_role(&self, role: &str) -> UserRepositoryResult<Vec<User>>;
 
+    /// Counts users with a given role via a scalar `COUNT(*)` — no row
+    /// hydration (benches/ROUND29.md §G).
+    async fn count_users_by_role(&self, role: &str) -> UserRepositoryResult<i64>;
+
     /// Deletes a user
     async fn delete_user(&self, user_id: Uuid) -> UserRepositoryResult<()>;
 

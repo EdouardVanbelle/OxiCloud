@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::application::dtos::cursor::{CursorListResponse, CursorQuery, PageCursor};
+use crate::application::dtos::display_helpers::intern_display;
 use crate::application::dtos::grant_dto::{ResourceContentDto, ResourceTypeDto};
 use crate::domain::entities::folder::Folder;
 use crate::domain::services::authorization::ResourceKind;
@@ -47,10 +48,6 @@ pub struct FolderDto {
 
     /// Parent folder ID
     pub parent_id: Option<String>,
-
-    /// Owner user ID (scopes visibility per user)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub owner_id: Option<String>,
 
     /// Drive that owns this folder. The scope axis for path-based
     /// lookups across REST / WebDAV / NextCloud / CalDAV / CardDAV.
@@ -103,25 +100,33 @@ pub struct FolderDto {
 
 impl From<Folder> for FolderDto {
     fn from(folder: Folder) -> Self {
-        let is_root = folder.parent_id().is_none();
-        let etag = folder.etag().to_string();
+        // Consume the entity by moving all fields — zero heap allocations
+        // for id, name, path, parent_id (previously 3-4× .to_string()).
+        let parts = folder.into_parts();
+
+        let is_root = parts.parent_id.is_none();
+        // Single-allocation ETag straight from the owned parts. The old
+        // shape (`folder.etag().to_string()`) built the String and then
+        // cloned it — a pure double-alloc.
+        let etag = Folder::compute_etag(&parts.id, parts.tree_modified_at);
 
         Self {
-            id: folder.id().to_string(),
-            name: folder.name().to_string(),
-            path: folder.path_string().to_string(),
-            parent_id: folder.parent_id().map(String::from),
-            owner_id: folder.owner_id().map(|u| u.to_string()),
-            drive_id: folder.drive_id(),
-            created_at: folder.created_at(),
-            modified_at: folder.modified_at(),
+            id: parts.id,
+            name: parts.name,
+            path: parts.storage_path.into_joined(),
+            parent_id: parts.parent_id,
+            drive_id: parts.drive_id,
+            created_at: parts.created_at,
+            modified_at: parts.modified_at,
             is_root,
-            icon_class: Arc::from("fas fa-folder"),
-            icon_special_class: Arc::from("folder-icon"),
-            category: Arc::from("Folder"),
+            // Constant display fields: refcount bump on interned statics
+            // instead of 3 fresh Arc allocations per row.
+            icon_class: intern_display("fas fa-folder"),
+            icon_special_class: intern_display("folder-icon"),
+            category: intern_display("Folder"),
             etag,
-            created_by: folder.created_by(),
-            updated_by: folder.updated_by(),
+            created_by: parts.created_by,
+            updated_by: parts.updated_by,
         }
     }
 }
@@ -147,9 +152,8 @@ impl FolderDto {
     ///
     /// Used when a folder is returned to a share recipient: `path` reveals the
     /// full folder hierarchy above the shared folder which the recipient may
-    /// not have access to.  `parent_id` and `owner_id` are intentionally kept
-    /// — the former is needed for sub-folder navigation (covered by the
-    /// cascade grant), and the latter is harmless metadata.
+    /// not have access to.  `parent_id` is intentionally kept — it's needed
+    /// for sub-folder navigation (covered by the cascade grant).
     #[must_use]
     pub fn without_hierarchy_info(self) -> Self {
         Self {
@@ -165,14 +169,13 @@ impl FolderDto {
             name: "stub-folder".to_string(),
             path: "/stub/path".to_string(),
             parent_id: None,
-            owner_id: None,
             drive_id: Uuid::nil(),
             created_at: 0,
             modified_at: 0,
             is_root: true,
-            icon_class: Arc::from("fas fa-folder"),
-            icon_special_class: Arc::from("folder-icon"),
-            category: Arc::from("Folder"),
+            icon_class: intern_display("fas fa-folder"),
+            icon_special_class: intern_display("folder-icon"),
+            category: intern_display("Folder"),
             etag: String::new(),
             created_by: None,
             updated_by: None,
@@ -205,12 +208,24 @@ pub struct FolderResourceRow {
     pub size: i64,
     pub created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
-    pub owner_id: Uuid,
+    /// Drive that owns this row. Same column as
+    /// `storage.folders.drive_id` / `storage.files.drive_id`. Surfaced
+    /// on the listing so a UI can tell when a child lives in a
+    /// different drive than its parent (post-D6 cross-drive moves +
+    /// copies make this reachable).
+    pub drive_id: Uuid,
     /// Raw BLAKE3 content hash. `Some(_)` for file rows, `None` for
     /// folder rows. Populates `FileDto::content_hash` + `FileDto::etag`
     /// on the REST `/api/folders/{id}/resources` listing so API
     /// consumers can issue conditional requests against listed files.
     pub blob_hash: Option<String>,
+    /// §14 provenance — who created the row. `None` when the creator was
+    /// deleted (FK `ON DELETE SET NULL`). Populates
+    /// `FileDto::created_by` / `FolderDto::created_by` on the listing so
+    /// the UI can render the owner column without a follow-up query.
+    pub created_by: Option<Uuid>,
+    /// §14 provenance — who last touched the row.
+    pub updated_by: Option<Uuid>,
     // Pre-computed sort fields — returned by the SQL for cursor construction.
     /// `LOWER(name)` used by `name`/`type` sorts.
     pub sort_str: String,

@@ -4,12 +4,11 @@ use axum::{
     http::{Response, StatusCode, header},
     response::IntoResponse,
 };
-use std::collections::HashMap;
 use std::sync::Arc;
-use tokio_util::io::ReaderStream;
 
 use crate::application::dtos::display_helpers::{
-    category_for, format_file_size, icon_class_for, icon_special_class_for,
+    category_for, classify_display, format_file_size, icon_class_for, icon_special_class_for,
+    intern_display, intern_mime,
 };
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::{
@@ -112,9 +111,12 @@ impl FolderHandler {
         Self::list_folders_scoped(service, None, &auth_user).await
     }
 
-    /// Internal helper: lists folders scoped to the authenticated user.
-    /// Uses `list_folders_for_owner` — the DB query filters by `user_id`,
-    /// so no data from other users ever leaves the database.
+    /// Internal helper: lists folders the authenticated caller can Read.
+    /// Post-PR-B, `list_root_folders_for_caller` scopes via
+    /// drive-membership grants (`role_grants` + group cascade via
+    /// `storage.caller_group_ids`) instead of the legacy `folders.user_id`
+    /// filter, so folders in shared drives the caller belongs to
+    /// surface here too.
     async fn list_folders_scoped(
         service: AppState,
         parent_id: Option<&str>,
@@ -230,7 +232,6 @@ impl FolderHandler {
         State(state): State<Arc<GlobalAppState>>,
         auth_user: AuthUser,
         Path(id): Path<String>,
-        Query(_params): Query<HashMap<String, String>>,
     ) -> impl IntoResponse {
         tracing::info!("Downloading folder as ZIP: {}", id);
 
@@ -257,53 +258,28 @@ impl FolderHandler {
                     }
                 };
 
-                // Create the ZIP archive (written to a temp file, O(1) RAM)
-                match zip_service.create_folder_zip(&id, &folder.name).await {
-                    Ok(temp_file) => {
-                        // Get the file size for Content-Length
-                        let file_size = match temp_file.as_file().metadata() {
-                            Ok(m) => m.len(),
-                            Err(e) => {
-                                tracing::error!("Error reading temp file metadata: {}", e);
-                                return (
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    Json(serde_json::json!({
-                                        "error": "Error creating ZIP file"
-                                    })),
-                                )
-                                    .into_response();
-                            }
-                        };
-
-                        tracing::info!("ZIP file created successfully, size: {} bytes", file_size);
-
-                        // Split the NamedTempFile into the already-open std File
-                        // and the TempPath (auto-deletes on drop).  This reuses
-                        // the existing fd instead of opening a second one.
-                        let (std_file, temp_path) = temp_file.into_parts();
-                        let tokio_file = tokio::fs::File::from_std(std_file);
-
-                        // Stream the file to the client in chunks
-                        let stream = ReaderStream::new(tokio_file);
+                // Stream the archive as it is built — the first byte reaches
+                // the client after the first entry, not after the whole ZIP
+                // exists on disk (benches/ZIP-STREAM.md). No Content-Length:
+                // the final size isn't known up front (chunked encoding).
+                match zip_service
+                    .create_folder_zip_stream(&id, &folder.name)
+                    .await
+                {
+                    Ok(stream) => {
                         let body = axum::body::Body::from_stream(stream);
 
                         // Setup headers for download
                         let filename = format!("{}.zip", folder.name);
                         let content_disposition = format!("attachment; filename=\"{}\"", filename);
 
-                        let mut response = Response::builder()
+                        Response::builder()
                             .status(StatusCode::OK)
                             .header(header::CONTENT_TYPE, "application/zip")
                             .header(header::CONTENT_DISPOSITION, content_disposition)
-                            .header(header::CONTENT_LENGTH, file_size)
                             .body(body)
-                            .unwrap();
-
-                        // Keep TempPath alive in the response extensions so the
-                        // file is only deleted AFTER the body stream finishes.
-                        response.extensions_mut().insert(Arc::new(temp_path));
-
-                        response.into_response()
+                            .unwrap()
+                            .into_response()
                     }
                     Err(err) => {
                         tracing::error!("Error creating ZIP file: {}", err);
@@ -466,9 +442,12 @@ pub async fn download_folder_zip(
     state: State<Arc<GlobalAppState>>,
     auth_user: AuthUser,
     path: Path<String>,
-    query: Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    FolderHandler::download_folder_zip_impl(state, auth_user, path, query).await
+    // No `Query` extractor: the handler reads only the path `id`. axum ignores
+    // any query string when no extractor is present, so the response is
+    // byte-identical while a per-request HashMap + owned key/value Strings are
+    // no longer parsed and dropped (benches/ROUND25.md §M3).
+    FolderHandler::download_folder_zip_impl(state, auth_user, path).await
 }
 
 // ── GET /api/folders/{id}/resources ─────────────────────────────────────────
@@ -542,23 +521,20 @@ pub async fn list_folder_resources(
                         let dto = FolderDto {
                             etag: resource_id.clone(),
                             id: resource_id,
-                            name: row.name.clone(),
+                            // Folders use fixed icon classes (below), so `name`
+                            // is never borrowed again — move it instead of cloning.
+                            name: row.name,
                             path: String::new(), // cleared — share recipients must not see hierarchy
                             parent_id: row.parent_id.map(|u| u.to_string()),
-                            owner_id: Some(row.owner_id.to_string()),
-                            // Resources listing — drive_id is informational
-                            // here; not selected by the underlying query.
-                            // Path-based lookups never enter this code path.
-                            drive_id: uuid::Uuid::nil(),
+                            drive_id: row.drive_id,
                             created_at: row.created_at.timestamp() as u64,
                             modified_at: row.modified_at.timestamp() as u64,
                             is_root: false,
-                            icon_class: Arc::from("fas fa-folder"),
-                            icon_special_class: Arc::from("folder-icon"),
-                            category: Arc::from("Folder"),
-                            // §14 provenance not selected by the resources query.
-                            created_by: None,
-                            updated_by: None,
+                            icon_class: intern_display("fas fa-folder"),
+                            icon_special_class: intern_display("folder-icon"),
+                            category: intern_display("Folder"),
+                            created_by: row.created_by,
+                            updated_by: row.updated_by,
                         };
                         FolderResourceItemDto {
                             resource_type: ResourceTypeDto::Folder,
@@ -578,32 +554,38 @@ pub async fn list_folder_resources(
                         // listing's `etag` byte-equals what a
                         // conditional request would compare against.
                         let modified_at_u = row.modified_at.timestamp() as u64;
-                        let content_hash = row.blob_hash.clone().unwrap_or_default();
+                        let content_hash = row.blob_hash.unwrap_or_default();
                         let etag = if content_hash.is_empty() {
                             String::new()
                         } else {
                             File::compute_etag(&content_hash, modified_at_u)
                         };
+                        // Compute the name-derived icon/category classes first
+                        // (they borrow `&row.name`), so `name` can be moved into
+                        // the DTO below instead of cloned — one fewer String
+                        // alloc per file row (benches/ROUND7.md).
+                        let classes = classify_display(&row.name, mime);
+                        let icon_class = intern_display(classes.icon_class);
+                        let icon_special_class = intern_display(classes.icon_special_class);
+                        let category = intern_display(classes.category);
                         let dto = FileDto {
                             id: row.id.to_string(),
-                            name: row.name.clone(),
+                            name: row.name,
                             path: String::new(),
                             size: size_bytes,
-                            mime_type: Arc::from(mime),
+                            mime_type: intern_mime(mime),
                             folder_id: row.parent_id.map(|u| u.to_string()),
                             created_at: row.created_at.timestamp() as u64,
                             modified_at: row.modified_at.timestamp() as u64,
-                            icon_class: Arc::from(icon_class_for(&row.name, mime)),
-                            icon_special_class: Arc::from(icon_special_class_for(&row.name, mime)),
-                            category: Arc::from(category_for(&row.name, mime)),
+                            icon_class,
+                            icon_special_class,
+                            category,
                             size_formatted: format_file_size(size_bytes),
-                            owner_id: Some(row.owner_id.to_string()),
                             sort_date: None,
                             content_hash,
                             etag,
-                            // §14 provenance not selected by the resources query.
-                            created_by: None,
-                            updated_by: None,
+                            created_by: row.created_by,
+                            updated_by: row.updated_by,
                         };
                         FolderResourceItemDto {
                             resource_type: ResourceTypeDto::File,
@@ -613,11 +595,15 @@ pub async fn list_folder_resources(
                 })
                 .collect();
 
-            (
-                StatusCode::OK,
-                Json(FolderResourcesDto::with_cursor(items, next_cursor)),
-            )
-                .into_response()
+            {
+                // Pre-sized serialization (benches/ROUND12.md §M1).
+                let body = FolderResourcesDto::with_cursor(items, next_cursor);
+                crate::interfaces::api::sized_json::sized_json(
+                    128 + body.items.len()
+                        * crate::interfaces::api::sized_json::EST_WRAPPED_ROW_BYTES,
+                    &body,
+                )
+            }
         }
         Err(e) => AppError::from(e).into_response(),
     }
@@ -669,7 +655,6 @@ fn mount_entry_to_item(
             name: entry.name.clone(),
             path: String::new(),
             parent_id: Some(parent_id.to_owned()),
-            owner_id: Some(cfg.owner_id.to_string()),
             drive_id: cfg.drive_id,
             created_at: entry.created_at,
             modified_at: entry.modified_at,
@@ -677,8 +662,8 @@ fn mount_entry_to_item(
             icon_class: Arc::from("fas fa-folder"),
             icon_special_class: Arc::from("folder-icon"),
             category: Arc::from("Folder"),
-            created_by: None,
-            updated_by: None,
+            created_by: Some(cfg.owner_id),
+            updated_by: Some(cfg.owner_id),
         };
         FolderResourceItemDto {
             resource_type: ResourceTypeDto::Folder,
@@ -701,12 +686,11 @@ fn mount_entry_to_item(
             icon_special_class: Arc::from(icon_special_class_for(&entry.name, &mime)),
             category: Arc::from(category_for(&entry.name, &mime)),
             size_formatted: format_file_size(entry.size),
-            owner_id: Some(cfg.owner_id.to_string()),
             sort_date: None,
             content_hash: String::new(),
             etag: virtual_file_etag(entry.size, entry.modified_at),
-            created_by: None,
-            updated_by: None,
+            created_by: Some(cfg.owner_id),
+            updated_by: Some(cfg.owner_id),
         };
         FolderResourceItemDto {
             resource_type: ResourceTypeDto::File,

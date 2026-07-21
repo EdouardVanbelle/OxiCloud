@@ -25,6 +25,14 @@ pub trait ContactRepository: Send + Sync + 'static {
         address_book_id: &Uuid,
         uids: &[String],
     ) -> ContactRepositoryResult<Vec<Contact>>;
+    /// Cursor stream over every contact of the book in the listing
+    /// order (`full_name, first_name, last_name`) — ONE scan+sort on
+    /// the server; the streaming CardDAV emitters page over it.
+    fn stream_contacts_by_book(
+        &self,
+        address_book_id: Uuid,
+    ) -> futures::stream::BoxStream<'static, ContactRepositoryResult<Contact>>;
+
     async fn get_contacts_by_address_book(
         &self,
         address_book_id: &Uuid,
@@ -68,6 +76,10 @@ pub trait ContactGroupRepository: Send + Sync + 'static {
     ) -> ContactRepositoryResult<()>;
     async fn get_contacts_in_group(&self, group_id: &Uuid)
     -> ContactRepositoryResult<Vec<Contact>>;
+    /// Membership count only — for group summaries that don't need the
+    /// contacts hydrated (each row carries the full vCard TEXT plus three
+    /// JSONB arrays; counting must not pay for any of that).
+    async fn count_contacts_in_group(&self, group_id: &Uuid) -> ContactRepositoryResult<i64>;
     async fn get_groups_for_contact(
         &self,
         contact_id: &Uuid,

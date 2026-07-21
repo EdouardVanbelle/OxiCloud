@@ -3,17 +3,25 @@
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 
-	import { listDriveMembers } from '$lib/api/endpoints/drives';
+	import { goto } from '$app/navigation';
+
+	import { deleteDrive, listDriveMembers } from '$lib/api/endpoints/drives';
 	import { renameFolder } from '$lib/api/endpoints/folders';
 	import { errorToast } from '$lib/utils/errors';
-	import type { Drive, DriveMember, DriveRole } from '$lib/api/types';
+	import { ui } from '$lib/stores/ui.svelte';
+	import type { Drive, DriveMember, DriveRole, DrivePoliciesPartial } from '$lib/api/types';
+	import PolicyList from '$lib/components/PolicyList.svelte';
+	import ReadOnlyBanner from '$lib/components/ReadOnlyBanner.svelte';
 	import ShareDialog from '$lib/components/ShareDialog.svelte';
 	import UserVignette from '$lib/components/UserVignette.svelte';
+	import GroupVignette from '$lib/components/GroupVignette.svelte';
+	import { ensureResolvers } from '$lib/api/endpoints/recipients';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t } from '$lib/i18n/index.svelte';
 	import { drives as drivesStore, driveIcon } from '$lib/stores/drives.svelte';
 	import { formatDate } from '$lib/utils/display';
 	import { formatBytes } from '$lib/utils/format';
+	import { readAllPolicies } from '$lib/utils/drivePolicies';
 
 	const uuid = $derived(page.params.uuid ?? '');
 	const drive = $derived<Drive | null>(drivesStore.findById(uuid));
@@ -33,6 +41,41 @@
 	// folder which only the Owner bundle carries. Personal-drive Owners
 	// are the user themselves (seeded by the lifecycle hook).
 	const canRename = $derived(drive?.caller_role === 'owner');
+
+	// Delete is allowed for Owners — backend additionally refuses the
+	// default Personal drive (405) and non-empty drives (409). We hide
+	// the button on the default-personal drive so the affordance only
+	// appears when it can actually succeed.
+	const canDelete = $derived(drive?.caller_role === 'owner' && !drive?.default_for_user);
+
+	let deleting = $state(false);
+
+	async function confirmAndDelete() {
+		if (!drive) return;
+		const confirmText = t(
+			'drive.delete_confirm',
+			{ name: drive.name },
+			'Delete drive "{{name}}"? This cannot be undone — the drive ' +
+				'must be empty first or the server will refuse.'
+		);
+		if (typeof window === 'undefined' || !window.confirm(confirmText)) return;
+		deleting = true;
+		try {
+			await deleteDrive(drive.id);
+			await drivesStore.refresh();
+			ui.notify(t('drive.deleted', 'Drive deleted.'), 'success');
+			// Send the user back to /files. The picker's reload above
+			// already removed the now-deleted drive from the sidebar.
+			await goto(resolve('/files'));
+		} catch (e) {
+			// 409 (non-empty) and 405 (default personal) come back as
+			// thrown errors with the server's detail in the message —
+			// surface as a toast rather than a silent failure.
+			errorToast(e);
+		} finally {
+			deleting = false;
+		}
+	}
 
 	// Inline rename state. `renameDraft` shadows `drive.name` while the
 	// input is open; we don't write back to the store until the server
@@ -67,8 +110,7 @@
 			// parent_id IS NULL, so a non-Owner caller would 404 here
 			// (but the UI also hid this button for non-Owners).
 			await renameFolder(drive.root_folder_id, next);
-			drivesStore.invalidate();
-			await drivesStore.load();
+			await drivesStore.refresh();
 			renaming = false;
 		} catch (e) {
 			errorToast(e);
@@ -140,40 +182,22 @@
 		return Math.min(100, (drive.used_bytes / drive.quota_bytes) * 100);
 	});
 
-	const policyEntries = $derived.by(() => {
-		if (!drive) return [];
-		return Object.entries(drive.policies).map(([key, value]) => ({ key, value }));
-	});
-
-	function policyLabel(key: string): string {
-		// Known policy keys get a friendlier translated label; unknown keys
-		// surface verbatim so operators still see them (forward-compat).
-		switch (key) {
-			case 'forbid_public_links':
-				return t('drive.policy.forbid_public_links', 'Forbid public links');
-			case 'forbid_external_sharing':
-				return t('drive.policy.forbid_external_sharing', 'Forbid external sharing');
-			case 'forbid_sharing':
-				return t('drive.policy.forbid_sharing', 'Forbid sharing');
-			case 'forbid_cross_drive_move':
-				return t('drive.policy.forbid_cross_drive_move', 'Forbid cross-drive move');
-			case 'include_in_photo_index':
-				return t('drive.policy.include_in_photo_index', 'Include in photo index');
-			case 'forbid_music_index':
-				return t('drive.policy.forbid_music_index', 'Forbid music index');
-			default:
-				return key;
-		}
-	}
-
-	function policyValueDisplay(value: unknown): string {
-		if (value === true) return t('drive.policy.on', 'On');
-		if (value === false) return t('drive.policy.off', 'Off');
-		return String(value);
-	}
+	// Drive policies are OxiCloud-admin-only for mutation (§8), but
+	// visible read-only here so members understand what rules apply to
+	// the drive they're on. The admin's "Manage policies" modal on
+	// `/admin` is the only editor. `readAllPolicies` normalises the raw
+	// JSONB bag into a `Required<DrivePoliciesPartial>` — unknown keys
+	// (or missing ones) resolve to `false`.
+	const drivePoliciesView = $derived<Required<DrivePoliciesPartial>>(
+		readAllPolicies((drive?.policies ?? {}) as Record<string, unknown>)
+	);
 
 	onMount(() => {
 		void drivesStore.load();
+		// Preload the recipient caches (users + groups) so the members
+		// list can render group names + user labels synchronously. Both
+		// caches are module-level and shared across surfaces.
+		void ensureResolvers();
 	});
 
 	// SvelteKit reuses this component when navigating between
@@ -257,6 +281,10 @@
 				{/if}
 			{/if}
 		</div>
+
+		{#if drivePoliciesView.read_only}
+			<ReadOnlyBanner />
+		{/if}
 
 		<div class="card">
 			<h2><Icon name="info-circle" /> {t('drive.info', 'Drive info')}</h2>
@@ -346,10 +374,7 @@
 							{#if m.subject.type === 'user'}
 								<UserVignette userId={m.subject.id} />
 							{:else if m.subject.type === 'group'}
-								<span class="members__group">
-									<Icon name="users" />
-									<span class="mono">{m.subject.id}</span>
-								</span>
+								<GroupVignette groupId={m.subject.id} />
 							{:else}
 								<span class="members__token">
 									<Icon name="link" />
@@ -366,7 +391,7 @@
 				{#if !canManageMembers && drive.kind === 'personal'}
 					<p class="muted members__personal-note">
 						{t(
-							'drive.members.personal_immutable',
+							'drive.members_personal_immutable',
 							'Personal drives have a fixed single-owner membership.'
 						)}
 					</p>
@@ -374,15 +399,49 @@
 			{/if}
 		</div>
 
-		{#if policyEntries.length > 0}
-			<div class="card">
+		<!-- Policies card — read-only summary of the current drive rules.
+		     Content is dense (seven toggle rows), so the whole card folds
+		     into a native `<details>` disclosure. Closed by default; the
+		     admin-only mutation surface still lives on `/admin`. -->
+		<details class="card policies-card">
+			<summary class="policies-card__summary">
 				<h2><Icon name="shield-alt" /> {t('drive.policies', 'Policies')}</h2>
-				<dl class="info-grid">
-					{#each policyEntries as p (p.key)}
-						<dt>{policyLabel(p.key)}</dt>
-						<dd>{policyValueDisplay(p.value)}</dd>
-					{/each}
-				</dl>
+				<span class="policies-card__caret" aria-hidden="true">
+					<Icon name="chevron-down" />
+				</span>
+			</summary>
+			<p class="muted">
+				{t(
+					'drive.policies_help',
+					"Rules an OxiCloud admin has set for this drive. Only admins can change them; you're seeing the current state."
+				)}
+			</p>
+			<PolicyList values={drivePoliciesView} readonly testIdPrefix="drive-policy" />
+		</details>
+
+		{#if canDelete}
+			<!-- Danger zone: drive delete (D3b). Only rendered for Owners on
+			     non-default drives. Backend enforces the empty-drive rule —
+			     if the drive still has live content the request returns 409
+			     with a message that surfaces as a toast. -->
+			<div class="card danger-zone">
+				<h2><Icon name="exclamation-triangle" /> {t('drive.danger_zone', 'Danger zone')}</h2>
+				<p class="muted">
+					{t(
+						'drive.delete_hint',
+						'Deleting a drive removes it permanently. The drive must be empty (no live files or folders) before delete is allowed.'
+					)}
+				</p>
+				<button
+					type="button"
+					class="btn btn-danger"
+					data-testid="drive-delete-btn"
+					onclick={confirmAndDelete}
+					disabled={deleting}
+				>
+					<Icon name="trash-alt" />
+					{deleting ? t('common.deleting', 'Deleting…') : t('drive.delete', 'Delete drive')}
+				</button>
 			</div>
 		{/if}
 	{/if}
@@ -434,6 +493,49 @@
 		margin: 0 0 1rem;
 		font-size: 1.05rem;
 		color: var(--color-text-heading);
+	}
+
+	/* Policies card is a `<details>` disclosure — the summary bar carries
+	   the h2 title on the left and a chevron on the right that rotates
+	   when the section opens. Native `<details>` handles the interaction
+	   (click / keyboard / accessible affordance) — no Svelte state
+	   needed. */
+	.policies-card__summary {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 1rem;
+		cursor: pointer;
+		list-style: none;
+	}
+
+	.policies-card__summary::-webkit-details-marker {
+		/* Chrome/Safari: hide the default triangle so our chevron is the
+		   only disclosure affordance. Firefox uses `list-style: none`
+		   above. */
+		display: none;
+	}
+
+	.policies-card__summary h2 {
+		margin: 0;
+	}
+
+	.policies-card__caret {
+		color: var(--color-text-muted);
+		transition: transform 150ms ease;
+	}
+
+	details[open] > .policies-card__summary .policies-card__caret {
+		transform: rotate(180deg);
+	}
+
+	/* When closed the summary is the entire card content, so we drop the
+	   card's default bottom padding. When open the help paragraph +
+	   policy list need breathing room from the summary — restore the
+	   spacing by nudging the first child. */
+	details.policies-card > .muted {
+		margin-top: 1rem;
+		margin-bottom: 0.75rem;
 	}
 
 	.info-grid {
@@ -527,6 +629,39 @@
 		border-radius: var(--radius-md);
 		background: var(--color-bg-input);
 		color: var(--color-text);
+	}
+
+	/* Danger zone card hosts the delete-drive button at the bottom of
+	   the page. Border tint makes the destructive context unmissable
+	   without hijacking the whole layout — same convention as
+	   admin/users delete affordances. */
+	.danger-zone {
+		border-color: var(--color-error-text);
+	}
+
+	.danger-zone h2 {
+		color: var(--color-error-text);
+	}
+
+	.btn-danger {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.5rem 0.875rem;
+		border: 1px solid var(--color-error-text);
+		border-radius: var(--radius-md);
+		background: var(--color-error-text);
+		color: var(--color-text-light);
+		cursor: pointer;
+	}
+
+	.btn-danger:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.icon-btn--danger {
+		color: var(--color-error-text);
 	}
 
 	/* Compact icon button used in the title row + nowhere else here.

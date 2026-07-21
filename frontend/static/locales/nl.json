@@ -58,6 +58,8 @@
   "photos": {
     "empty_state": "Nog geen foto's",
     "empty_hint": "Upload afbeeldingen of video's om ze hier te zien",
+    "empty_hidden": "{{n}} foto('s) verborgen door je voorkeur",
+    "empty_hidden_hint": "Schakel \"Verborgen bestanden verbergen\" uit in je profiel om ze te zien.",
     "items_selected": "geselecteerd",
     "view_daily": "Dag",
     "view_monthly": "Maand",
@@ -232,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "Per e-mail notificeren",
     "revoke": "Remove",
-    "role_label": "Rol"
+    "role_label": "Rol",
+    "col_shared_by": "Gedeeld door",
+    "col_shared": "Gedeeld"
   },
   "share_dialogTitle": "Deellink",
   "share_linkLabel": "Deellink:",
@@ -335,6 +339,7 @@
     "modified": "Gewijzigd",
     "no_files": "Geen bestanden in deze map",
     "empty_hint": "Upload bestanden of maak mappen aan om te beginnen",
+    "drop_to_upload": "Sleep bestanden hier om te uploaden",
     "loading": "Bestanden laden…",
     "view_grid": "Rasterweergave",
     "view_list": "Lijstweergave",
@@ -365,7 +370,21 @@
     "folder": "Map",
     "new_folder": "Nieuwe map",
     "share": "Delen",
-    "view": "Bekijken"
+    "view": "Bekijken",
+    "empty_hidden_title": "{{n}} verborgen item(s) in deze map",
+    "empty_hidden_hint": "Bestanden waarvan de naam met '.' begint, zijn verborgen. Wijzig de instelling om ze te zien.",
+    "show_hidden": "Verborgen bestanden weergeven",
+    "upload_dotfile_hidden": "{{n}} bestand(en) geüpload maar verborgen door je voorkeur.",
+    "rename_dotfile_hidden": "Hernoemd naar \"{{name}}\" — nu verborgen door je voorkeur.",
+    "new_folder_dotfile_hidden": "Map \"{{name}}\" aangemaakt — verborgen door je voorkeur.",
+    "dotfiles_hidden_toast": "Verborgen bestanden verborgen",
+    "dotfiles_shown_toast": "Verborgen bestanden weergegeven",
+    "col_modified": "Gewijzigd",
+    "col_added": "Toegevoegd",
+    "col_created_by": "Gemaakt door",
+    "col_opened": "Geopend",
+    "col_path": "Locatie",
+    "new_elements": "Nieuwe items"
   },
   "dialogs": {
     "rename_folder": "Map hernoemen",
@@ -451,7 +470,8 @@
       "trashed_time": "Verwijderd op"
     },
     "delete": "Permanent verwijderen",
-    "empty_action": "Prullenbak legen"
+    "empty_action": "Prullenbak legen",
+    "expires_at": "Verloopt op"
   },
   "daysRemaining": {
     "expired": "Verlopen",
@@ -570,7 +590,10 @@
     "accessed": "Geopend",
     "empty_state": "Geen recente bestanden",
     "empty_hint": "Bestanden die je opent verschijnen hier",
-    "loadMore": "Meer laden"
+    "empty_hidden_state": "{{n}} recent(e) item(s) verborgen door je voorkeur",
+    "empty_hidden_hint": "Schakel \"Verborgen bestanden verbergen\" uit in je profiel om ze te zien.",
+    "loadMore": "Meer laden",
+    "remove_item": "Uit recent verwijderen"
   },
   "notifications": {
     "file_renamed": "Bestand hernoemd",
@@ -806,7 +829,70 @@
     "title": "Beheerder",
     "user": "Gebruiker",
     "username": "Gebruikersnaam",
-    "users": "Gebruikers"
+    "users": "Gebruikers",
+    "drive_manage_policies": "Beleid beheren",
+    "drive_manage_policies_for": "Beleid — {{name}}",
+    "drive_manage_policies_help": "Beleid is alleen voor beheerders — Schijf-eigenaren kunnen het niet wijzigen. Elke schakelaar beheert één handhavingsregel.",
+    "drive_policy": {
+      "forbid_sharing": "Per-resource delen verbieden",
+      "forbid_sharing_help": "Blokkeert delen per bestand / map (omvat ook openbare links en extern delen). Schijf-lidmaatschap blijft werken.",
+      "forbid_public_links": "Openbare links verbieden",
+      "forbid_public_links_help": "Blokkeert anonieme deellinks op bronnen in deze Schijf.",
+      "forbid_external_sharing": "Extern delen verbieden",
+      "forbid_external_sharing_help": "Blokkeert verleningen aan externe gebruikers (e-mailuitnodigingen en bestaande externe accounts).",
+      "forbid_cross_drive_move": "Verplaatsen tussen Schijfs verbieden",
+      "forbid_cross_drive_move_help": "Blokkeert het verplaatsen van bestanden of mappen naar een andere Schijf. Voorkomt geen downloaden + opnieuw uploaden.",
+      "forbid_owner_role_change": "Eigenaarsoverzicht vergrendelen",
+      "forbid_owner_role_change_help": "Alleen de beheerder kan Schijf-eigenaren toevoegen, verwijderen of degraderen zolang dit aanstaat.",
+      "include_in_photo_index": "Opnemen in Foto's",
+      "include_in_photo_index_help": "Toon afbeeldings- en videobestanden uit deze Schijf in de Foto's-tijdlijn en op de Plaatsen-kaart. Standaard persoonlijke Schijfs zijn automatisch opgenomen; schakel dit in voor gedeelde Schijfs die daadwerkelijk foto's bevatten (bv. «Gezinsfoto's»).",
+      "include_in_music_index": "Opnemen in Muziek",
+      "include_in_music_index_help": "Neem audiobestanden uit deze Schijf op in de Muziekbibliotheek. Standaard persoonlijke Schijfs zijn automatisch opgenomen; schakel dit in voor gedeelde Schijfs die daadwerkelijk een muziekcollectie bevatten (bv. «Gezinsmuziek», «Bandsamenwerking»).",
+      "implied_by_forbid_sharing": "Al afgedwongen door «Per-resource delen verbieden».",
+      "read_only": "Alleen-lezen (bevriezen)",
+      "read_only_help": "Bevries de Schijf volledig — elke wijziging wordt geweigerd (uploads, bewerkingen, verwijderingen, hernoemingen, delen, lidmaatschapswijzigingen). Lezen en downloaden blijven werken. Ook de automatische prullenbakopruiming pauzeert. Voor archieven, juridische bewaarplicht of accountsluitingen. Alleen een beheerder kan ontdooien."
+    },
+    "drives": "Schijven",
+    "drive_name": "Naam",
+    "drive_kind": "Type",
+    "drive_owners": "Eigenaren",
+    "drive_usage": "Gebruik",
+    "drive_created_at": "Aangemaakt",
+    "drive_kind_shared": "Gedeeld",
+    "drive_kind_personal": "Persoonlijk",
+    "drive_kind_default_suffix": "(standaard)",
+    "drive_manage_owners": "Eigenaren beheren",
+    "drive_manage_owners_for": "Eigenaren beheren — {{name}}",
+    "drive_edit_quota": "Quota bewerken",
+    "drive_delete": "Schijf verwijderen",
+    "drive_delete_confirm": "Schijf \"{{name}}\" verwijderen? Dit kan niet ongedaan worden gemaakt.",
+    "drive_deleted": "Schijf verwijderd.",
+    "drive_created": "Schijf aangemaakt.",
+    "drive_add_owner": "Eigenaar toevoegen",
+    "drive_current_owners": "Huidige eigenaren",
+    "drive_no_owners": "Geen eigenaren",
+    "drive_owner": "Eigenaar",
+    "drive_owner_hint": "Kies een gebruiker (enige eigenaar) of een groep (elk lid wordt eigenaar via subject-expansie).",
+    "drive_owner_picked": "Eigenaar: {{name}}",
+    "drive_owner_placeholder": "Zoek een gebruiker of groep…",
+    "drive_owner_remove_confirm": "Deze eigenaar van de schijf verwijderen?",
+    "drive_name_placeholder": "bijv. Engineering",
+    "drive_error_name_required": "Schijfnaam is vereist.",
+    "drive_error_owner_required": "Kies een gebruiker of groep als eigenaar van de schijf.",
+    "create_drive": "Gedeelde schijf aanmaken",
+    "no_drives": "Nog geen schijven.",
+    "external_user": "extern",
+    "external_user_hint": "Alleen-uitnodiging account (magic-link of OCM). Kan geen beheerder zijn en heeft geen opslagenveloppe.",
+    "no_storage_for_external": "Externe accounts hebben geen opslagenveloppe.",
+    "promote_to_internal_title": "Promoveren tot interne gebruiker",
+    "confirm_promote_user": "{{name}} promoveren tot interne gebruiker? Dit provisioneert een persoonlijke schijf en kent een normale opslagenveloppe toe. De identiteit blijft behouden; magic-link login blijft de toegangsweg zolang er geen wachtwoord is ingesteld.",
+    "delete_user_title": "Gebruiker verwijderen",
+    "delete_user_warning": "Je staat op het punt \"{{name}}\" definitief te verwijderen. Het account wordt verwijderd, alle sessies ingetrokken en de persoonlijke schijf gewist. Dit kan niet ongedaan worden gemaakt.",
+    "delete_user_confirm_hint": "Typ ter bevestiging het e-mailadres van het account hieronder: {{email}}",
+    "deleting": "Verwijderen…",
+    "auth": "Authenticatie",
+    "quota": "Opslaggebruik",
+    "last_login": "Laatste aanmelding"
   },
   "profile": {
     "page_title": "Profiel",
@@ -859,6 +945,7 @@
     "family_name": "Achternaam",
     "notify_on_share": "Stuur me een e-mail wanneer iemand iets met mij deelt",
     "notify_on_share_hint": "Wanneer uitgevinkt, verschijnen gedeelde items nog steeds in je account — je krijgt er alleen geen e-mail over.",
+    "hide_dotfiles": "Verberg bestanden waarvan de naam begint met een punt (.env, .git, …)",
     "save_profile": "Wijzigingen opslaan",
     "profile_saved": "Profiel bijgewerkt",
     "profile_no_changes": "Geen wijzigingen om op te slaan.",
@@ -979,7 +1066,17 @@
     "notifyRateLimited": "Te veel notificaties voor deze ontvanger — probeer het later opnieuw.",
     "removeAccess": "Toegang verwijderen",
     "resendInvitation": "Uitnodigingsmail opnieuw verzenden",
-    "publicLinks": "Public links"
+    "publicLinks": "Public links",
+    "filter": {
+      "button": "Soorten",
+      "title": "Filteren op soort",
+      "files": "Bestanden",
+      "folders": "Mappen",
+      "drives": "Schijven",
+      "emptyTitle": "Geen gedeelde items komen overeen met het huidige filter",
+      "emptyHint": "Pas het soortfilter aan of stel het opnieuw in op de standaard (Bestanden + Mappen).",
+      "reset": "Filter opnieuw instellen"
+    }
   },
   "sort": {
     "asc": "ascending",
@@ -1078,7 +1175,9 @@
     "rename": "Hernoemen",
     "save": "Opslaan",
     "search": "Zoeken",
-    "yes": "Ja"
+    "yes": "Ja",
+    "saving": "Opslaan…",
+    "deleting": "Verwijderen…"
   },
   "device": {
     "continue": "Doorgaan",
@@ -1108,5 +1207,79 @@
   "view": {
     "grid": "Rasterweergave",
     "list": "Lijstweergave"
+  },
+  "preferences": {
+    "save_failed": "Kon je voorkeur niet opslaan. Probeer het opnieuw."
+  },
+  "upgrade": {
+    "title": "Upgraden naar een volledig account",
+    "lede": "Krijg je eigen opslag en begin met het uploaden van bestanden. Je bestaande gedeelde items blijven onaangeroerd.",
+    "busy": "Upgraden…",
+    "submit": "Mijn account upgraden",
+    "cancel": "Niet nu — terug naar met mij gedeeld",
+    "success": "Je account is geüpgraded. Doorsturen naar je bestanden…",
+    "error": "Upgraden mislukt.",
+    "password_required": "Wachtwoord is verplicht — deze installatie biedt geen inloggen via e-maillink.",
+    "password_too_short": "Wachtwoord moet minimaal 8 tekens lang zijn.",
+    "oidc_user": "SSO/OIDC-accounts worden beheerd door je identiteitsprovider. Upgraden is niet beschikbaar.",
+    "domain_not_allowed": "Deze installatie accepteert geen nieuwe accounts vanuit jouw e-maildomein. Neem contact op met de beheerder om het in te schakelen.",
+    "banner_aria": "Upgrademelding",
+    "banner_title": "Krijg je eigen opslag",
+    "banner_body": "Je gebruikt een gastaccount. Upgrade om een persoonlijke schijf te krijgen en bestanden te uploaden.",
+    "banner_cta": "Upgraden"
+  },
+  "drive": {
+    "read_only_banner": {
+      "title": "Deze schijf is alleen-lezen",
+      "title_named": "Schijf \"{{name}}\" is alleen-lezen",
+      "body": "Uploads, bewerkingen, verwijderingen, hernoemingen, delen en lidmaatschapswijzigingen worden geweigerd. Lezen en downloaden blijven werken. Neem contact op met een beheerder om de schijf te ontdooien.",
+      "aria": "Deze schijf is alleen-lezen"
+    },
+    "back_to_files": "Terug naar Bestanden",
+    "danger_zone": "Gevarenzone",
+    "delete": "Schijf verwijderen",
+    "delete_confirm": "Schijf \"{{name}}\" verwijderen? Dit kan niet ongedaan worden gemaakt — de schijf moet leeg zijn, anders weigert de server.",
+    "delete_hint": "Een schijf verwijderen is definitief. De schijf moet leeg zijn (geen actieve bestanden of mappen) voordat verwijderen is toegestaan.",
+    "deleted": "Schijf verwijderd.",
+    "field": {
+      "created": "Aangemaakt",
+      "default": "Standaard",
+      "default_yes": "Dit is je hoofdschijf",
+      "id": "Identificatie",
+      "kind": "Type",
+      "updated": "Laatst bijgewerkt"
+    },
+    "info": "Schijfinfo",
+    "kind_personal": "Persoonlijke schijf",
+    "kind_shared": "Gedeelde schijf",
+    "manage_members": "Leden beheren",
+    "members": "Leden",
+    "members_empty": "Geen leden.",
+    "not_found_body": "Deze schijf bestaat niet of je hebt er geen toegang toe.",
+    "not_found_title": "Schijf niet gevonden",
+    "policies": "Regels",
+    "policies_help": "Regels die een OxiCloud-beheerder voor deze schijf heeft ingesteld. Alleen beheerders kunnen ze wijzigen; je ziet de huidige status.",
+    "quota": "Quota",
+    "rename": "Schijf hernoemen",
+    "role": {
+      "commenter": "Reageerder",
+      "contributor": "Bijdrager",
+      "editor": "Bewerker",
+      "owner": "Eigenaar",
+      "viewer": "Kijker"
+    },
+    "storage": "Opslag",
+    "usage": "Gebruik",
+    "used": "Gebruikt",
+    "members_personal_immutable": "Persoonlijke schijven hebben een vaste eigenaarsstructuur met één eigenaar."
+  },
+  "group": {
+    "members_empty": "Geen leden",
+    "member_count": "{{n}} leden"
+  },
+  "resource_list": {
+    "location": "Locatie",
+    "wrong_drop_zone_msg": "Uploaden werkt alleen in Bestanden — open het onderdeel Bestanden en zet ze daar neer.",
+    "wrong_drop_zone_action": "Naar Bestanden"
   }
 }

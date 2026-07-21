@@ -24,7 +24,6 @@ use oxicloud::access_log;
 use oxicloud::interfaces::middleware::trace_span::{ClientIpMakeSpan, UuidRequestId};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::{PropagateRequestIdLayer, SetRequestIdLayer};
-use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -174,7 +173,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Explicit file → hard error on a missing/unreadable path.
             // Silent fallback would defeat the purpose of pinning the
             // config source.
-            if let Err(e) = dotenvy::from_filename(path) {
+            //
+            // `from_filename_override` (not `from_filename`) so the
+            // config file wins over the shell's process env. Without
+            // this, an operator's leftover `export OXICLOUD_*` from a
+            // dev session leaks into a `--config` invocation and
+            // silently corrupts test/CI runs — a rejected shell var
+            // stays in effect despite the "explicit config" contract.
+            // For the default (no `--config`) path we KEEP the
+            // non-overriding `dotenvy::dotenv()` — that path is dev
+            // convenience where a live shell export is the expected
+            // ad-hoc override.
+            if let Err(e) = dotenvy::from_filename_override(path) {
                 eprintln!("failed to load --config {path}: {e}");
                 std::process::exit(2);
             }
@@ -284,6 +294,33 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load configuration from environment variables
     let config = common::config::AppConfig::from_env();
+
+    // SECURITY: fail-closed on incoherent auth-method configuration. A
+    // magic-link-only policy without a working SMTP sender locks every
+    // user out — nothing can mint tokens, so nobody can log in. Refuse
+    // to start rather than boot into a bricked auth surface.
+    //
+    // The SMTP-mock (`OXICLOUD_SMTP_MOCK=true` in `tests/common/server.env`)
+    // sets `OXICLOUD_SMTP_HOST=localhost`, so `is_enabled()` returns
+    // true and the Hurl test harness satisfies this gate without a real
+    // mail server.
+    if config
+        .auth
+        .allowed_auth_methods
+        .contains(&common::config::AuthMethod::MagicLink)
+        && !config
+            .auth
+            .allowed_auth_methods
+            .contains(&common::config::AuthMethod::Password)
+        && !config.smtp.is_enabled()
+    {
+        panic!(
+            "FATAL: OXICLOUD_AUTH_METHODS enables `magic_link` as the ONLY \
+             self-service auth method, but no SMTP transport is configured. \
+             Set OXICLOUD_SMTP_HOST (and matching OXICLOUD_SMTP_* settings) \
+             or add `password` to OXICLOUD_AUTH_METHODS. Refusing to start."
+        );
+    }
 
     // Surface the upload-size limits at startup. Operators (and the
     // CI runner) need to see what's actually in effect — a silent
@@ -842,7 +879,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             // ── file-body downloads carry Content-Disposition (see above) ──
             .and(NotForDownloads);
 
-        app = app.layer(CompressionLayer::new().compress_when(predicate));
+        // Explicit quality: the layer's default maps to Brotli QUALITY 11
+        // (async-compression Level::Default → BrotliEncoderParams::default(),
+        // brotli-8.0.2 encode.rs:323) — a deploy-grade setting that cost
+        // ~90 ms of CPU per 64 KiB JSON response. Level 4 emits ~15 % more
+        // bytes at ~1 % of the CPU (0.9 ms) — measured in
+        // benches/STATIC-PRECOMPRESSED.md. Applies to gzip too (level 4,
+        // the classic dynamic-content setting).
+        app = app.layer(
+            CompressionLayer::new()
+                .quality(tower_http::CompressionLevel::Precise(4))
+                .compress_when(predicate),
+        );
     }
 
     // ── Security headers ─────────────────────────────────────────────────
@@ -869,17 +917,75 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     //   • form-action 'https:': the WOPI office editor is launched by POSTing a
     //     token form to a cross-origin, admin-configured Collabora/OnlyOffice
     //     host. Mirrors the SPA meta policy in frontend/svelte.config.js.
+    // The four static security headers ride in the same response pass —
+    // they used to be four separate `SetResponseHeaderLayer`s stacked on
+    // top of this middleware (5 tower layers per response). Folding them
+    // here measured 1.43x per request / −26 allocs with a byte-identical
+    // header set, including on 304s (benches/ROUND12.md §M3). They are
+    // inserted BEFORE the 304 early-return below because the standalone
+    // layers stamped 304s too.
     async fn content_security_policy(
         req: axum::extract::Request,
         next: axum::middleware::Next,
     ) -> axum::response::Response {
         let mut res = next.run(req).await;
+        {
+            let h = res.headers_mut();
+            h.insert(
+                HeaderName::from_static("x-content-type-options"),
+                HeaderValue::from_static("nosniff"),
+            );
+            h.insert(
+                HeaderName::from_static("x-frame-options"),
+                HeaderValue::from_static("DENY"),
+            );
+            h.insert(
+                HeaderName::from_static("referrer-policy"),
+                HeaderValue::from_static("strict-origin-when-cross-origin"),
+            );
+            h.insert(
+                HeaderName::from_static("permissions-policy"),
+                HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+            );
+        }
+        // A 304 Not Modified carries no entity headers (no Content-Type) since
+        // there's no body — `is_html` would read `None` and misclassify it as
+        // "not html", attaching the strict headerless CSP below. Browsers merge
+        // a 304's headers into the cached document's effective response, so
+        // that stray header would then stack with (and defeat) the SPA's own
+        // hash-based `<meta>` CSP on every revalidated repeat visit — this was
+        // a real bug (see git blame): a browser tab reopened at `/login` after
+        // the first, freshly-fetched visit got permanently stuck behind the
+        // boot spinner because its now-conditionally-cached `200` picked up an
+        // extra hash-less `script-src 'self'` header from the 304 that
+        // revalidated it, blocking the app's own inline hydration script.
+        // Nothing to add on a 304 regardless — its headers must only carry
+        // caching metadata, never a fresh policy decision.
+        if res.status() == axum::http::StatusCode::NOT_MODIFIED {
+            return res;
+        }
         let is_html = res
             .headers()
             .get(axum::http::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| v.starts_with("text/html"));
-        if !is_html {
+        if is_html {
+            // `no-store` (not just `no-cache`) on the SPA shell: Chrome/Firefox/
+            // Safari all treat `no-store` as an explicit opt-out of the
+            // back-forward cache (bfcache), which is a full in-memory snapshot
+            // of the page that bypasses HTTP revalidation entirely — `no-cache`
+            // alone does NOT prevent it. Without this, a shell instance loaded
+            // before a deploy can be resurrected byte-for-byte (old inline
+            // hydration script + old CSP hash) after navigating away and back —
+            // e.g. the OIDC login round-trip's two full-page navigations — and
+            // the resurrected page's old CSP `<meta>` no longer matches assets
+            // referenced by the current build, leaving the app permanently
+            // stuck behind the boot spinner until a hard reload.
+            res.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store"),
+            );
+        } else {
             res.headers_mut().insert(
                 axum::http::header::CONTENT_SECURITY_POLICY,
                 HeaderValue::from_static(
@@ -901,24 +1007,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         res
     }
 
-    app = app
-        .layer(axum::middleware::from_fn(content_security_policy))
-        .layer(SetResponseHeaderLayer::overriding(
-            HeaderName::from_static("x-content-type-options"),
-            HeaderValue::from_static("nosniff"),
-        ))
-        .layer(SetResponseHeaderLayer::overriding(
-            HeaderName::from_static("x-frame-options"),
-            HeaderValue::from_static("DENY"),
-        ))
-        .layer(SetResponseHeaderLayer::overriding(
-            HeaderName::from_static("referrer-policy"),
-            HeaderValue::from_static("strict-origin-when-cross-origin"),
-        ))
-        .layer(SetResponseHeaderLayer::overriding(
-            HeaderName::from_static("permissions-policy"),
-            HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
-        ));
+    app = app.layer(axum::middleware::from_fn(content_security_policy));
 
     // Warn once at startup if auth cookies are not Secure.
     // HttpOnly + SameSite protection is nullified over plain HTTP because tokens

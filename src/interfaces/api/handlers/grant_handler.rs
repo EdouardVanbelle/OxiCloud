@@ -100,6 +100,92 @@ pub async fn create_grant(
         return AppError::from(e).into_response();
     }
 
+    // D5: load the resource's owning drive policies in one round-trip
+    // and gate `forbid_external_sharing` (early refusal for email
+    // subjects below + late refusal for resolved external users further
+    // down). `forbid_sharing` (the next D5 policy) will read the same
+    // fetched bag — see `docs/plan/drive.md` §8.
+    let drive_policies = match resource {
+        Resource::File(id) => state.drive_repo.get_policies_for_file(id).await,
+        Resource::Folder(id) => state.drive_repo.get_policies_for_folder(id).await,
+        Resource::Drive(id) => state
+            .drive_repo
+            .get_by_id(id)
+            .await
+            .map(|d| d.drive.typed_policies()),
+        // Calendars, address books and playlists live outside the
+        // drive hierarchy (top-level per user), so no drive-level
+        // policy gates apply. If per-resource policies ever ship for
+        // these kinds, they'll live on the resource itself, not on a
+        // drive; the default-empty bag is the right no-op here.
+        Resource::Calendar(_) | Resource::AddressBook(_) | Resource::Playlist(_) => {
+            Ok(crate::domain::entities::drive::DrivePolicies::default())
+        }
+    };
+    let drive_policies = match drive_policies {
+        Ok(p) => p,
+        Err(e) => {
+            return AppError::internal_error(format!("drive policy lookup: {e:?}")).into_response();
+        }
+    };
+
+    // D5 — `forbid_sharing`: refuses per-resource grants on
+    // File / Folder when the drive's policy is on. Drive-resource
+    // grants intentionally bypass this gate — they're drive
+    // membership, not per-resource sharing (§8 semantic carve-out).
+    if !matches!(resource, Resource::Drive(_))
+        && let Err(e) =
+            drive_policies.refuse_sharing(crate::domain::entities::drive::SharingGateContext {
+                caller_id,
+                resource_type: resource.type_str(),
+                resource_id: resource.id(),
+            })
+    {
+        return AppError::from(e).into_response();
+    }
+
+    // D5 — `forbid_public_links`: Token subjects on `POST /api/grants`
+    // create exactly the anonymous-link grant that this policy is meant
+    // to block — the canonical surface is `share_service::create_shared_link`
+    // but the same kind of grant can be minted here by passing
+    // `subject.type=token`. Use the same shared gate so the refusal
+    // shape stays in lockstep with the share-handler path.
+    if matches!(&dto.subject, SubjectInputDto::Token { .. })
+        && let Err(e) = drive_policies.refuse_public_links(
+            crate::domain::entities::drive::PublicLinkGateContext {
+                caller_id,
+                item_type: resource.type_str(),
+                item_id: resource.id(),
+            },
+        )
+    {
+        return AppError::from(e).into_response();
+    }
+
+    // D5 — `forbid_external_sharing` (early): when the caller is sharing
+    // by email, refuse BEFORE `resolve_or_create_recipient` runs so the
+    // policy never side-effects a fresh external-user row. Existing
+    // external users are caught by the late check below.
+    if drive_policies.forbid_external_sharing
+        && matches!(&dto.subject, SubjectInputDto::Email { .. })
+    {
+        tracing::info!(
+            target: "audit",
+            event = "grant.rejected",
+            reason = "forbid_external_sharing",
+            stage = "early_email",
+            caller_id = %caller_id,
+            resource_type = resource.type_str(),
+            resource_id = %resource.id(),
+            "👮🏻‍♂️ email-grant refused: drive policy forbid_external_sharing",
+        );
+        return AppError::from(DomainError::operation_not_supported(
+            "Grant",
+            "This drive does not allow external sharing.",
+        ))
+        .into_response();
+    }
+
     // Resolve the subject. For the email variant this lazily provisions
     // an external user (or reuses an existing match) and remembers the
     // resolved User so the invitation email can be sent after the grant
@@ -152,6 +238,53 @@ pub async fn create_grant(
             }
         }
     };
+
+    // D5 — `forbid_external_sharing` (late) for File/Folder ONLY:
+    // catches the case where the subject resolved to a pre-existing
+    // external user. The early check above only fires for email-input;
+    // this one closes the user-by-id loophole.
+    //
+    // Drive resources are deliberately skipped here — they route through
+    // `set_member_role` below, which runs the SAME gate
+    // (`DrivePolicies::refuse_external_sharing`) at the service layer.
+    // That one service-layer check also covers `POST /api/drives/{id}/members`
+    // and its PATCH sibling, where no grant_handler runs. Checking
+    // again here for Drive would duplicate the user-flags lookup.
+    //
+    // `invite_recipient` carries the User entity when we just came from
+    // the email path — read its `is_external` flag instead of a
+    // redundant lookup; otherwise probe via `get_user_flags`.
+    if drive_policies.forbid_external_sharing
+        && !matches!(resource, Resource::Drive(_))
+        && let Subject::User(uid) = subject
+    {
+        let is_external = if let Some(user) = invite_recipient.as_ref() {
+            user.is_external()
+        } else if let Some(auth_svc) = state.auth_service.as_ref() {
+            match auth_svc.auth_application_service.get_user_flags(uid).await {
+                Ok(flags) => flags.is_external,
+                Err(e) => {
+                    return AppError::internal_error(format!("user flags lookup: {e:?}"))
+                        .into_response();
+                }
+            }
+        } else {
+            false
+        };
+        if let Err(e) = drive_policies.refuse_external_sharing(
+            subject,
+            is_external,
+            crate::domain::entities::drive::ExternalSharingGateContext {
+                caller_id,
+                stage: "late_user",
+                drive_id: None,
+                resource_type: Some(resource.type_str()),
+                resource_id: Some(resource.id()),
+            },
+        ) {
+            return AppError::from(e).into_response();
+        }
+    }
 
     // Single role row in `storage.role_grants`. `ON CONFLICT UPDATE` in
     // the engine makes repeated POSTs with the same (subject, resource)

@@ -1,18 +1,37 @@
 <script lang="ts">
-	import { errorMessage } from '$lib/utils/errors';
+	import { errorMessage, errorToast } from '$lib/utils/errors';
+	import { SvelteMap } from 'svelte/reactivity';
+	import { primeContextPage } from '$lib/utils/listContext';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { onMount } from 'svelte';
-	import { dateBucket, resolveOwnerName, typeLabel } from '$lib/api/endpoints/favorites';
+	import {
+		addFavorite,
+		dateBucket,
+		resolveOwnerName,
+		typeLabel
+	} from '$lib/api/endpoints/favorites';
+	import { fileDownloadUrl } from '$lib/api/endpoints/files';
+	import { folderZipUrl } from '$lib/api/endpoints/folders';
 	import { fetchSharedWithMe, type IncomingGrantItem } from '$lib/api/endpoints/grants';
-	import type { FileItem } from '$lib/api/types';
+	import type { FileItem, FolderItem } from '$lib/api/types';
 	import { lazyComponent } from '$lib/composables/lazyComponent.svelte';
 	import { useOwnerCache } from '$lib/composables/useOwnerCache.svelte';
 	import ResourceList, {
+		isFile,
+		type ContextAction,
 		type GroupByDef,
-		type ResourceEntry
+		type ItemContext
 	} from '$lib/components/ResourceList.svelte';
 	import { t } from '$lib/i18n/index.svelte';
+	import { session } from '$lib/stores/session.svelte';
+
+	// External users landing here are the natural audience for the
+	// "upgrade to a full account" prompt — they don't own a drive of
+	// their own, this view IS their entry point. Internal users don't
+	// see the banner even when their /shared-with-me happens to be
+	// non-empty (they already have a drive; nothing to upgrade).
+	const showUpgradeBanner = $derived(session.isExternalUser);
 
 	let raw = $state<IncomingGrantItem[]>([]);
 	let cursor = $state<string | undefined>(undefined);
@@ -23,37 +42,22 @@
 
 	const sharers = useOwnerCache(resolveOwnerName);
 
-	const byId = $derived(new Map(raw.map((it) => [it.resource.id, it])));
+	// Drive resources also surface in `/api/grants/incoming/resources`
+	// since the role_grants rewrite, but they don't belong in the
+	// file/folder ResourceList — they're reached through the drive
+	// picker / breadcrumb. Filter them out so the row UI keeps its
+	// file|folder type contract.
+	const fileFolderGrants = $derived(raw.filter((it) => it.resource_type !== 'drive'));
 
-	const entries = $derived(
-		// Drive resources also surface in `/api/grants/incoming/resources`
-		// since the role_grants rewrite, but they don't belong in the
-		// file/folder ResourceList — they're reached through the drive
-		// picker / breadcrumb. Filter them out here so the row UI keeps
-		// its file|folder type contract.
-		raw
-			.filter((it) => it.resource_type !== 'drive')
-			.map((it): ResourceEntry => {
-				const isFile = it.resource_type === 'file';
-				return {
-					id: it.resource.id,
-					name: it.resource.name,
-					kind: it.resource_type as 'file' | 'folder',
-					iconClass: it.resource.icon_class,
-					// The sharer becomes the "owner" surface — ResourceList renders
-					// `<UserVignette userId>` (avatar / name / external badge),
-					// resolved lazily via `/api/users/{id}`. `path` keeps the
-					// resource's real location so the row still shows where it
-					// lives, not a translated string.
-					ownerId: it.granted_by ?? null,
-					ownerName: sharers.name(it.granted_by),
-					path: it.resource.path,
-					size: isFile ? (it.resource as FileItem).size : null,
-					date: it.granted_at,
-					category: isFile ? it.resource.category : 'Folder'
-				};
-			})
-	);
+	// `granted_at` → `ctx.date`; `granted_by` overrides the owner column
+	// so the sharer shows up in the vignette (rather than the resource's
+	// intrinsic `created_by`, which is a stranger for grantees).
+	const items = $derived(fileFolderGrants.map((it) => it.resource as FileItem | FolderItem));
+	// Persistent reactive map, primed per page in `load()` (benches/ROUND16.md §F2)
+	// instead of rebuilding a fresh Map that re-hashes the whole accumulated list
+	// on every infinite-scroll page. Drives are skipped (they never reach the
+	// row UI), so the map covers exactly the displayed `fileFolderGrants`.
+	const contextMap = new SvelteMap<string, ItemContext>();
 
 	// Server-supported sort_by values (see grant_handler.rs:615):
 	//   granted_at, granted_by, name, type
@@ -67,21 +71,21 @@
 			key: 'sharedBy',
 			label: t('groupby.sharedBy', 'Shared by'),
 			orderBy: 'granted_by',
-			bucketOf: (e) => e.ownerId ?? null,
+			bucketOf: (_item, ctx) => ctx?.ownerId ?? null,
 			labelOf: (id) => sharers.label(id)
 		},
 		{
 			key: 'type',
 			label: t('groupby.type', 'Type'),
 			orderBy: 'type',
-			bucketOf: (e) => e.category ?? 'other',
+			bucketOf: (item) => item.category ?? 'other',
 			labelOf: (k) => typeLabel(k)
 		},
 		{
 			key: 'sharedAt',
 			label: t('groupby.sharedAt', 'Shared date'),
 			orderBy: 'granted_at',
-			bucketOf: (e) => dateBucket(e.date)
+			bucketOf: (_item, ctx) => dateBucket(ctx?.date)
 		}
 	];
 
@@ -99,6 +103,11 @@
 				reverse: rev
 			});
 			raw = reset ? page.items : [...raw, ...page.items];
+			primeContextPage(contextMap, reset, page.items, (it) =>
+				it.resource_type === 'drive'
+					? null
+					: [it.resource.id, { date: it.granted_at, ownerId: it.granted_by ?? null }]
+			);
 			cursor = page.next_cursor;
 			// Warm the sharer-name cache so the "Shared by" group headers
 			// show real names instead of UUIDs.
@@ -120,31 +129,107 @@
 		if (viewerOpen) void fileViewer.load();
 	});
 
-	function open(entry: ResourceEntry) {
-		if (entry.kind === 'folder') {
-			goto(resolve(`/files/${entry.id}`));
+	function open(item: FileItem | FolderItem) {
+		if (!isFile(item)) {
+			goto(resolve(`/files/${item.id}`));
 			return;
 		}
-		const item = byId.get(entry.id);
-		if (item) {
-			viewerFile = item.resource as FileItem;
-			viewerOpen = true;
-		}
+		viewerFile = item;
+		viewerOpen = true;
 	}
+
+	/**
+	 * Kick off a download using an ephemeral `<a download>` so the file
+	 * saves to disk instead of navigating away. Files stream directly
+	 * from `/api/files/{id}/content`; folders come back as a server-
+	 * side zip via `/api/folders/{id}/zip`.
+	 */
+	function downloadItem(item: FileItem | FolderItem) {
+		const a = document.createElement('a');
+		a.href = isFile(item) ? fileDownloadUrl(item.id) : folderZipUrl(item.id);
+		a.download = isFile(item) ? item.name : `${item.name}.zip`;
+		document.body.appendChild(a);
+		a.click();
+		a.remove();
+	}
+
+	// Context menu ordering mirrors `/files` / `/favorites` / `/recent`:
+	//   Download / Download as ZIP  →  (later entries as we grow the menu)
+	//   Favorite  →  (destructive actions if / when introduced)
+	//
+	// Kind-gated download: files show "Download" (direct stream);
+	// folders show "Download as ZIP" (server-side archive). Two entries
+	// with `visible?` predicates rather than one label that changes,
+	// so the `.icon` reads correctly per kind too.
+	//
+	// The favorite entry stays "Add to favorites" only: un-favoriting
+	// from here would need per-row favorite-state tracking which this
+	// view doesn't carry — users toggle off from /favorites' own row
+	// menu. Backend swallows duplicate `addFavorite` calls idempotently.
+	const contextActions: ContextAction[] = [
+		{
+			key: 'download',
+			label: t('common.download', 'Download'),
+			icon: 'download',
+			visible: (item) => isFile(item),
+			run: downloadItem
+		},
+		{
+			key: 'download_zip',
+			label: t('files.download_zip', 'Download as ZIP'),
+			icon: 'download',
+			visible: (item) => !isFile(item),
+			run: downloadItem
+		},
+		{
+			key: 'favorite',
+			label: t('files.favorite', 'Add favorite'),
+			icon: 'star',
+			run: (item) => {
+				void addFavorite(isFile(item) ? 'file' : 'folder', item.id).catch(errorToast);
+			}
+		}
+	];
 
 	onMount(() => load(true));
 </script>
 
 <svelte:head><title>{t('nav.shared_with_me', 'Shared with me')} · OxiCloud</title></svelte:head>
 
+{#if showUpgradeBanner}
+	<div class="upgrade-banner" role="region" aria-label={t('upgrade.banner_aria', 'Upgrade prompt')}>
+		<div class="upgrade-banner__body">
+			<strong>{t('upgrade.banner_title', 'Get your own storage')}</strong>
+			<span
+				>{t(
+					'upgrade.banner_body',
+					"You're using a guest account. Upgrade to get a personal drive and start uploading files."
+				)}</span
+			>
+		</div>
+		<a
+			class="upgrade-banner__cta"
+			data-testid="shared-with-me-upgrade-btn"
+			href={resolve('/upgrade')}
+		>
+			{t('upgrade.banner_cta', 'Upgrade')}
+		</a>
+	</div>
+{/if}
+
 <ResourceList
 	title={t('nav.shared_with_me', 'Shared with me')}
-	items={entries}
+	{items}
+	{contextMap}
+	resolveOwnerName={(id) => sharers.name(id)}
+	{contextActions}
 	{loading}
 	{error}
 	emptyText={t('shared_with_me.empty', 'Nothing has been shared with you yet.')}
 	hasMore={!!cursor}
 	showOwner={true}
+	ownerLabel={t('share.col_shared_by', 'Shared by')}
+	dateLabel={t('share.col_shared', 'Shared')}
 	{groupBys}
 	bind:groupBy
 	bind:reversed
@@ -160,3 +245,58 @@
 	{@const FileViewer = fileViewer.component}
 	<FileViewer bind:open={viewerOpen} file={viewerFile} />
 {/if}
+
+<style>
+	.upgrade-banner {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-4);
+		padding: var(--space-3) var(--space-4);
+		margin-bottom: var(--space-4);
+		background: var(--color-surface-raised);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+	}
+
+	.upgrade-banner__body {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-1);
+		color: var(--color-text);
+	}
+
+	.upgrade-banner__body strong {
+		font-weight: var(--weight-semibold);
+	}
+
+	.upgrade-banner__body span {
+		color: var(--color-text-muted);
+		font-size: var(--text-sm);
+	}
+
+	.upgrade-banner__cta {
+		flex-shrink: 0;
+		padding: var(--space-2) var(--space-4);
+		background: var(--color-accent);
+		color: var(--color-accent-contrast);
+		text-decoration: none;
+		font-weight: var(--weight-medium);
+		border-radius: var(--radius-md);
+	}
+
+	.upgrade-banner__cta:hover {
+		filter: brightness(0.95);
+	}
+
+	@media (width <= 600px) {
+		.upgrade-banner {
+			flex-direction: column;
+			align-items: stretch;
+		}
+
+		.upgrade-banner__cta {
+			text-align: center;
+		}
+	}
+</style>

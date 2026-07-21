@@ -24,25 +24,27 @@ impl FavoritesPgRepository {
 
 impl FavoritesRepositoryPort for FavoritesPgRepository {
     async fn get_favorites(&self, user_id: Uuid) -> Result<Vec<FavoriteItemDto>> {
+        // `id`/`user_id`/`parent_id` decode as binary UUIDs (16 B on the wire,
+        // no server-side `::TEXT` cast) and render app-side — the ROUND6 §10
+        // pattern the two legacy listing methods here never picked up.
         let rows = sqlx::query(
             r#"
             SELECT
-                uf.id::TEXT                                     AS "id",
-                uf.user_id::TEXT                                AS "user_id",
+                uf.id                                           AS "id",
+                uf.user_id                                      AS "user_id",
                 uf.item_id                                      AS "item_id",
                 uf.item_type                                    AS "item_type",
                 uf.created_at                                   AS "created_at",
                 COALESCE(f.name, fld.name)                      AS "item_name",
                 f.size                                          AS "item_size",
                 f.mime_type                                     AS "item_mime_type",
-                COALESCE(f.folder_id::TEXT, fld.parent_id::TEXT) AS "parent_id",
+                COALESCE(f.folder_id, fld.parent_id)            AS "parent_id",
                 COALESCE(f.updated_at, fld.updated_at)          AS "modified_at",
                 CASE
                     WHEN uf.item_type = 'folder' THEN fld.path
                     WHEN uf.item_type = 'file'   THEN COALESCE(pfld.path || '/' || f.name, f.name)
                     ELSE NULL
-                END                                             AS "item_path",
-                COALESCE(f.user_id, fld.user_id)::TEXT         AS "owner_id"
+                END                                             AS "item_path"
             FROM auth.user_favorites uf
             LEFT JOIN storage.files   f   ON uf.item_type = 'file'
                                          AND f.id = uf.item_id::UUID
@@ -71,18 +73,21 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
             .iter()
             .map(|row| {
                 FavoriteItemDto {
-                    id: row.get("id"),
-                    user_id: row.get("user_id"),
+                    id: row.get::<i32, _>("id").to_string(),
+                    user_id: row.get::<Uuid, _>("user_id").to_string(),
                     item_id: row.get("item_id"),
                     item_type: row.get("item_type"),
                     created_at: row.get("created_at"),
                     item_name: row.try_get("item_name").ok(),
                     item_size: row.try_get("item_size").ok(),
                     item_mime_type: row.try_get("item_mime_type").ok(),
-                    parent_id: row.try_get("parent_id").ok(),
+                    parent_id: row
+                        .try_get::<Option<Uuid>, _>("parent_id")
+                        .ok()
+                        .flatten()
+                        .map(|u| u.to_string()),
                     modified_at: row.try_get("modified_at").ok(),
                     item_path: row.try_get("item_path").ok(),
-                    owner_id: row.try_get("owner_id").ok(),
                     // Temporary defaults; with_display_fields() computes the real values
                     icon_class: String::new(),
                     icon_special_class: String::new(),
@@ -261,8 +266,9 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
             return Ok(HashSet::new());
         }
 
-        // Collect just the IDs for the IN clause
-        let ids: Vec<String> = item_ids.iter().map(|(id, _)| id.to_string()).collect();
+        // Collect just the IDs for the IN clause — sqlx binds `&[&str]` as
+        // text[], so no per-id String is needed.
+        let ids: Vec<&str> = item_ids.iter().map(|(id, _)| *id).collect();
 
         let rows = sqlx::query(
             "SELECT item_id FROM auth.user_favorites WHERE user_id = $1 AND item_id = ANY($2)",
@@ -309,9 +315,19 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
         -1::bigint                       AS size,
         fld.created_at                   AS resource_created_at,
         fld.updated_at                   AS modified_at,
-        fld.user_id                      AS owner_id,
+        fld.drive_id                     AS drive_id,
         NULL::text                       AS blob_hash,
-        (fld.user_id = $1::uuid)         AS is_owner,
+        fld.created_by                   AS created_by,
+        fld.updated_by                   AS updated_by,
+        EXISTS (
+            SELECT 1 FROM storage.role_grants g
+             WHERE g.resource_type = 'drive'
+               AND g.resource_id   = fld.drive_id
+               AND g.role          = 'owner'
+               AND g.subject_type  = 'user'
+               AND g.subject_id    = $1::uuid
+               AND (g.expires_at IS NULL OR g.expires_at > NOW())
+        )                                AS is_owner,
         uf.created_at                    AS favorited_at,
         fld.path::text                   AS resource_path,
         LOWER(fld.name)                  AS sort_str,
@@ -332,9 +348,19 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
         f.size::bigint,
         f.created_at                     AS resource_created_at,
         f.updated_at                     AS modified_at,
-        f.user_id                        AS owner_id,
+        f.drive_id                       AS drive_id,
         f.blob_hash,
-        (f.user_id = $1::uuid)           AS is_owner,
+        f.created_by                     AS created_by,
+        f.updated_by                     AS updated_by,
+        EXISTS (
+            SELECT 1 FROM storage.role_grants g
+             WHERE g.resource_type = 'drive'
+               AND g.resource_id   = f.drive_id
+               AND g.role          = 'owner'
+               AND g.subject_type  = 'user'
+               AND g.subject_id    = $1::uuid
+               AND (g.expires_at IS NULL OR g.expires_at > NOW())
+        )                                AS is_owner,
         uf.created_at                    AS favorited_at,
         COALESCE(pfld.path::text || '/' || f.name, f.name) AS resource_path,
         LOWER(f.name)                    AS sort_str,
@@ -487,7 +513,8 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
         };
 
         let user_join = if need_user_join {
-            "LEFT JOIN auth.users u ON u.id = r.owner_id"
+            // Post-D7: `owner_id` retired; join by `created_by`.
+            "LEFT JOIN auth.users u ON u.id = r.created_by"
         } else {
             ""
         };
@@ -504,7 +531,8 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
 SELECT
     r.resource_type, r.resource_id, r.name, r.parent_id,
     r.mime_type, r.size, r.resource_created_at, r.modified_at,
-    r.owner_id, r.is_owner, r.favorited_at, r.resource_path,
+    r.drive_id, r.blob_hash, r.created_by, r.updated_by,
+    r.is_owner, r.favorited_at, r.resource_path,
     r.sort_str, r.type_order, r.folder_first{username_col}
 FROM resources r
 {user_join}
@@ -575,8 +603,10 @@ LIMIT $6"
                     size,
                     resource_created_at: row.get("resource_created_at"),
                     modified_at: row.get("modified_at"),
-                    owner_id: row.get("owner_id"),
+                    drive_id: row.get("drive_id"),
                     blob_hash: row.try_get("blob_hash").ok(),
+                    created_by: row.try_get("created_by").ok(),
+                    updated_by: row.try_get("updated_by").ok(),
                     is_owner: row.try_get("is_owner").unwrap_or(false),
                     favorited_at: row.get("favorited_at"),
                     path: row.try_get("resource_path").ok(),

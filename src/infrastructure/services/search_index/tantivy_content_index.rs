@@ -238,8 +238,10 @@ impl TantivyContentIndex {
     }
 
     /// Tokenize `raw` with the index analyzer (simple split + lowercase).
-    fn query_tokens(analyzer: &TextAnalyzer, raw: &str) -> Vec<String> {
-        let mut analyzer = analyzer.clone();
+    /// Takes the analyzer by value — the caller's per-search clone is the
+    /// only one needed; cloning the boxed tokenizer chain again here doubled
+    /// the per-query allocation for nothing.
+    fn query_tokens(mut analyzer: TextAnalyzer, raw: &str) -> Vec<String> {
         let mut tokens = Vec::new();
         let mut stream = analyzer.token_stream(raw);
         while stream.advance() && tokens.len() < MAX_QUERY_TOKENS {
@@ -337,7 +339,7 @@ impl TantivyContentIndex {
         raw_query: &str,
         limit: usize,
     ) -> Result<Vec<ContentHitDto>, DomainError> {
-        let tokens = Self::query_tokens(&analyzer, raw_query);
+        let tokens = Self::query_tokens(analyzer, raw_query);
         if tokens.is_empty() {
             return Ok(Vec::new());
         }
@@ -346,6 +348,14 @@ impl TantivyContentIndex {
         let top_docs = searcher
             .search(&query, &TopDocs::with_limit(limit.max(1)).order_by_score())
             .map_err(|e| DomainError::internal_error("ContentIndex", format!("search: {e}")))?;
+
+        // No hits → no documents to highlight. `SnippetGenerator::create`
+        // compiles the query against the index (term lookups + weight build);
+        // for a query that matched nothing that is pure waste on the search
+        // request path, and the per-hit loop below never runs. Return early.
+        if top_docs.is_empty() {
+            return Ok(Vec::new());
+        }
 
         // Snippets highlight CONTENT matches; an empty fragment means the hit
         // came from the name (or a fuzzy variant) — no snippet then.

@@ -1,5 +1,4 @@
 use chrono::Utc;
-use serde_json::Value as JsonValue;
 use sqlx::{PgPool, Row, types::Uuid};
 use std::sync::Arc;
 
@@ -21,20 +20,49 @@ impl ContactPgRepository {
         Self { pool }
     }
 
-    /// Maps a database row to a Contact domain entity
+    /// Maps a database row to a Contact domain entity (reads the `vcard` column).
     fn row_to_contact(row: &sqlx::postgres::PgRow) -> Result<Contact, DomainError> {
-        let email_json: JsonValue = row.get("email");
-        let phone_json: JsonValue = row.get("phone");
-        let address_json: JsonValue = row.get("address");
+        Self::row_to_contact_with_vcard(row, row.get("vcard"))
+    }
 
-        let emails = serde_json::from_value::<Vec<EmailPersistenceDto>>(email_json)
-            .map(emails_from_persistence)
+    /// Maps a row whose SELECT omitted the `vcard` column — used by the REST
+    /// listings (paginated / search / by-group) whose `ContactDto` drops vcard
+    /// anyway, so the multi-KB vCard TEXT (which can embed a base64 PHOTO) is
+    /// never SELECTed, shipped over the wire, or allocated (benches/ROUND25.md
+    /// §Q2). The domain `Contact` keeps an empty vcard; these paths never
+    /// re-emit it. Do NOT use for CardDAV sync / whole-book export, which need
+    /// the round-trip vCard.
+    fn row_to_contact_lite(row: &sqlx::postgres::PgRow) -> Result<Contact, DomainError> {
+        Self::row_to_contact_with_vcard(row, String::new())
+    }
+
+    /// Shared row → `Contact` mapper; `vcard` is supplied by the caller so the
+    /// TEXT column can be omitted from listings that don't consume it.
+    fn row_to_contact_with_vcard(
+        row: &sqlx::postgres::PgRow,
+        vcard: String,
+    ) -> Result<Contact, DomainError> {
+        // Decode each JSONB column straight into its typed Vec via
+        // `sqlx::types::Json<T>` (a single `serde_json::from_slice` pass over
+        // the raw JSONB bytes) instead of `row.get::<serde_json::Value>` +
+        // `serde_json::from_value`, which built a throwaway `Value` DOM per
+        // column and then walked it a SECOND time to produce the typed Vec —
+        // 3 discarded DOMs per contact row on every list / multiget / CardDAV
+        // sync. `try_get` preserves the exact malformed-shape fallback (the old
+        // `from_value(...).unwrap_or_default()`; a bare `row.get` would panic on
+        // a decode error); the columns are `JSONB NOT NULL DEFAULT '[]'`, so SQL
+        // NULL never occurs. (benches/ROUND23.md §J1)
+        let emails = row
+            .try_get::<sqlx::types::Json<Vec<EmailPersistenceDto>>, _>("email")
+            .map(|j| emails_from_persistence(j.0))
             .unwrap_or_default();
-        let phones = serde_json::from_value::<Vec<PhonePersistenceDto>>(phone_json)
-            .map(phones_from_persistence)
+        let phones = row
+            .try_get::<sqlx::types::Json<Vec<PhonePersistenceDto>>, _>("phone")
+            .map(|j| phones_from_persistence(j.0))
             .unwrap_or_default();
-        let addresses = serde_json::from_value::<Vec<AddressPersistenceDto>>(address_json)
-            .map(addresses_from_persistence)
+        let addresses = row
+            .try_get::<sqlx::types::Json<Vec<AddressPersistenceDto>>, _>("address")
+            .map(|j| addresses_from_persistence(j.0))
             .unwrap_or_default();
 
         Ok(Contact::from_raw(
@@ -54,7 +82,7 @@ impl ContactPgRepository {
             row.get::<Option<String>, _>("photo_url"),
             row.get("birthday"),
             row.get("anniversary"),
-            row.get("vcard"),
+            vcard,
             row.get("etag"),
             row.get("created_at"),
             row.get("updated_at"),
@@ -68,10 +96,6 @@ impl ContactRepository for ContactPgRepository {
         let email_dtos = emails_to_persistence(contact.email());
         let phone_dtos = phones_to_persistence(contact.phone());
         let address_dtos = addresses_to_persistence(contact.address());
-
-        let email_json = serde_json::to_value(&email_dtos).unwrap_or(JsonValue::Null);
-        let phone_json = serde_json::to_value(&phone_dtos).unwrap_or(JsonValue::Null);
-        let address_json = serde_json::to_value(&address_dtos).unwrap_or(JsonValue::Null);
 
         let row = sqlx::query(
             r#"
@@ -97,9 +121,9 @@ impl ContactRepository for ContactPgRepository {
         .bind(contact.first_name_owned())
         .bind(contact.last_name_owned())
         .bind(contact.nickname_owned())
-        .bind(email_json)
-        .bind(phone_json)
-        .bind(address_json)
+        .bind(sqlx::types::Json(&email_dtos))
+        .bind(sqlx::types::Json(&phone_dtos))
+        .bind(sqlx::types::Json(&address_dtos))
         .bind(contact.organization_owned())
         .bind(contact.title_owned())
         .bind(contact.notes_owned())
@@ -123,10 +147,6 @@ impl ContactRepository for ContactPgRepository {
         let email_dtos = emails_to_persistence(contact.email());
         let phone_dtos = phones_to_persistence(contact.phone());
         let address_dtos = addresses_to_persistence(contact.address());
-
-        let email_json = serde_json::to_value(&email_dtos).unwrap_or(JsonValue::Null);
-        let phone_json = serde_json::to_value(&phone_dtos).unwrap_or(JsonValue::Null);
-        let address_json = serde_json::to_value(&address_dtos).unwrap_or(JsonValue::Null);
 
         // Create a clone of the contact with the updated timestamp
         let mut updated_contact = contact.clone();
@@ -163,9 +183,9 @@ impl ContactRepository for ContactPgRepository {
         .bind(updated_contact.first_name_owned())
         .bind(updated_contact.last_name_owned())
         .bind(updated_contact.nickname_owned())
-        .bind(email_json)
-        .bind(phone_json)
-        .bind(address_json)
+        .bind(sqlx::types::Json(&email_dtos))
+        .bind(sqlx::types::Json(&phone_dtos))
+        .bind(sqlx::types::Json(&address_dtos))
         .bind(updated_contact.organization_owned())
         .bind(updated_contact.title_owned())
         .bind(updated_contact.notes_owned())
@@ -271,11 +291,50 @@ impl ContactRepository for ContactPgRepository {
             DomainError::database_error(format!("Failed to get contacts by uids: {}", e))
         })?;
 
-        let mut contacts = Vec::new();
+        let mut contacts = Vec::with_capacity(rows.len());
         for row in &rows {
             contacts.push(Self::row_to_contact(row)?);
         }
         Ok(contacts)
+    }
+
+    fn stream_contacts_by_book(
+        &self,
+        address_book_id: Uuid,
+    ) -> futures::stream::BoxStream<'static, ContactRepositoryResult<Contact>> {
+        // ONE ordered scan served through a PG cursor — the CardDAV
+        // multistatus emitters page over this stream so only a page of
+        // contacts is resident (same design as the CalDAV round-5
+        // cursor; contacts have no master/exception bundling, so pages
+        // can cut anywhere).
+        let pool = self.pool.clone();
+        let stream: futures::stream::BoxStream<'static, ContactRepositoryResult<Contact>> =
+            Box::pin(async_stream::try_stream! {
+                let mut conn = pool.acquire().await.map_err(|e| {
+                    DomainError::database_error(format!("Failed to acquire connection: {}", e))
+                })?;
+                let mut rows = sqlx::query(
+                    r#"
+                    SELECT
+                        id, address_book_id, uid, full_name, first_name, last_name, nickname,
+                        email, phone, address, organization, title, notes, photo_url,
+                        birthday, anniversary, vcard, etag, created_at, updated_at
+                    FROM carddav.contacts
+                    WHERE address_book_id = $1
+                    ORDER BY full_name, first_name, last_name
+                    "#,
+                )
+                .bind(address_book_id)
+                .fetch(&mut *conn);
+
+                use futures::TryStreamExt;
+                while let Some(row) = rows.try_next().await.map_err(|e| {
+                    DomainError::database_error(format!("Failed to stream contacts: {}", e))
+                })? {
+                    yield Self::row_to_contact(&row)?;
+                }
+            });
+        stream
     }
 
     async fn get_contacts_by_address_book(
@@ -300,7 +359,7 @@ impl ContactRepository for ContactPgRepository {
             DomainError::database_error(format!("Failed to get contacts by address book: {}", e))
         })?;
 
-        let mut contacts = Vec::new();
+        let mut contacts = Vec::with_capacity(rows.len());
         for row in &rows {
             contacts.push(Self::row_to_contact(row)?);
         }
@@ -318,7 +377,7 @@ impl ContactRepository for ContactPgRepository {
             SELECT
                 id, address_book_id, uid, full_name, first_name, last_name, nickname,
                 email, phone, address, organization, title, notes, photo_url,
-                birthday, anniversary, vcard, etag, created_at, updated_at
+                birthday, anniversary, etag, created_at, updated_at
             FROM carddav.contacts
             WHERE address_book_id = $1
             ORDER BY full_name, first_name, last_name
@@ -337,9 +396,9 @@ impl ContactRepository for ContactPgRepository {
             ))
         })?;
 
-        let mut contacts = Vec::new();
+        let mut contacts = Vec::with_capacity(rows.len());
         for row in &rows {
-            contacts.push(Self::row_to_contact(row)?);
+            contacts.push(Self::row_to_contact_lite(row)?);
         }
         Ok(contacts)
     }
@@ -365,7 +424,7 @@ impl ContactRepository for ContactPgRepository {
             DomainError::database_error(format!("Failed to get contacts by email: {}", e))
         })?;
 
-        let mut contacts = Vec::new();
+        let mut contacts = Vec::with_capacity(rows.len());
         for row in &rows {
             contacts.push(Self::row_to_contact(row)?);
         }
@@ -381,7 +440,7 @@ impl ContactRepository for ContactPgRepository {
             SELECT 
                 c.id, c.address_book_id, c.uid, c.full_name, c.first_name, c.last_name, c.nickname,
                 c.email, c.phone, c.address, c.organization, c.title, c.notes, c.photo_url,
-                c.birthday, c.anniversary, c.vcard, c.etag, c.created_at, c.updated_at
+                c.birthday, c.anniversary, c.etag, c.created_at, c.updated_at
             FROM carddav.contacts c
             INNER JOIN carddav.group_memberships m ON c.id = m.contact_id
             WHERE m.group_id = $1
@@ -395,9 +454,9 @@ impl ContactRepository for ContactPgRepository {
             DomainError::database_error(format!("Failed to get contacts by group: {}", e))
         })?;
 
-        let mut contacts = Vec::new();
+        let mut contacts = Vec::with_capacity(rows.len());
         for row in &rows {
-            contacts.push(Self::row_to_contact(row)?);
+            contacts.push(Self::row_to_contact_lite(row)?);
         }
         Ok(contacts)
     }
@@ -414,9 +473,9 @@ impl ContactRepository for ContactPgRepository {
             SELECT 
                 id, address_book_id, uid, full_name, first_name, last_name, nickname,
                 email, phone, address, organization, title, notes, photo_url,
-                birthday, anniversary, vcard, etag, created_at, updated_at
+                birthday, anniversary, etag, created_at, updated_at
             FROM carddav.contacts
-            WHERE address_book_id = $1 
+            WHERE address_book_id = $1
               AND (
                   full_name ILIKE $2 
                   OR first_name ILIKE $2
@@ -435,9 +494,9 @@ impl ContactRepository for ContactPgRepository {
         .await
         .map_err(|e| DomainError::database_error(format!("Failed to search contacts: {}", e)))?;
 
-        let mut contacts = Vec::new();
+        let mut contacts = Vec::with_capacity(rows.len());
         for row in &rows {
-            contacts.push(Self::row_to_contact(row)?);
+            contacts.push(Self::row_to_contact_lite(row)?);
         }
         Ok(contacts)
     }

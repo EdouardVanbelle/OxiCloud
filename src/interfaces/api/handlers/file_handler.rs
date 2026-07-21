@@ -13,7 +13,7 @@ use utoipa::ToSchema;
 
 use crate::application::ports::external_mount_ports::MountStat;
 use crate::application::ports::file_ports::{
-    FileManagementUseCase, FileRetrievalUseCase, FileUploadUseCase,
+    FileManagementUseCase, FileRetrievalUseCase, FileUploadUseCase, RangeContent,
 };
 use crate::application::ports::storage_ports::{FileReadPort, StorageUsagePort};
 use crate::application::ports::thumbnail_ports::ThumbnailPort;
@@ -301,8 +301,33 @@ impl FileHandler {
                 {
                     upload_ingest::discard_ingested(dedup, &ingested).await;
                     tracing::warn!(
-                        "⛔ UPLOAD REJECTED (quota): user={}, file={}, size={}",
+                        "⛔ UPLOAD REJECTED (user quota): user={}, file={}, size={}",
                         auth_user.username,
+                        filename,
+                        ingested.size
+                    );
+                    return Err(Self::quota_error_response(err));
+                }
+
+                // ── Per-drive quota enforcement (D4) ─────────────────
+                // Sibling to the per-user check above: same read-only
+                // SELECT shape, same discard-then-507 outcome. Skipped
+                // when there's no folder_id (root-level upload — no
+                // drive to charge; folder service refuses these
+                // independently). Unlimited-quota drives (`NULL`)
+                // short-circuit inside the service.
+                if let Some(storage_svc) = state.storage_usage_service.as_ref()
+                    && let Some(fid_str) = folder_id.as_deref()
+                    && let Ok(fid) = uuid::Uuid::parse_str(fid_str)
+                    && let Err(err) = storage_svc
+                        .check_drive_quota_by_folder(fid, ingested.size)
+                        .await
+                {
+                    upload_ingest::discard_ingested(dedup, &ingested).await;
+                    tracing::warn!(
+                        "⛔ UPLOAD REJECTED (drive quota): user={}, folder={}, file={}, size={}",
+                        auth_user.username,
+                        fid,
                         filename,
                         ingested.size
                     );
@@ -370,9 +395,9 @@ impl FileHandler {
     pub(super) async fn get_thumbnail_impl(
         State(state): State<GlobalState>,
         auth_user: AuthUser,
-        headers: HeaderMap,
+        headers: &HeaderMap,
         Path((id, size)): Path<(String, String)>,
-    ) -> impl IntoResponse {
+    ) -> impl IntoResponse + use<> {
         use crate::application::ports::thumbnail_ports::{ThumbnailFormat, ThumbnailSize};
 
         // check first that user can access this resource
@@ -413,7 +438,18 @@ impl FileHandler {
         // (file_id, size, format) triple.  If the browser already has it, return
         // 304 with zero I/O or DB work. Format is in the ETag so a client that
         // switched codecs doesn't get a stale 304.
-        let etag = format!("\"thumb-{}-{:?}-{:?}\"", id, thumb_size, format);
+        let etag = {
+            let (s, f) = (thumb_size.as_str(), format.as_str());
+            let mut e = String::with_capacity(9 + id.len() + s.len() + f.len());
+            e.push_str("\"thumb-");
+            e.push_str(&id);
+            e.push('-');
+            e.push_str(s);
+            e.push('-');
+            e.push_str(f);
+            e.push('"');
+            e
+        };
         if let Some(if_none_match) = headers.get(header::IF_NONE_MATCH)
             && let Ok(val) = if_none_match.to_str()
             && (val == etag || val == "*")
@@ -663,8 +699,8 @@ impl FileHandler {
         auth_user: AuthUser,
         Path(id): Path<String>,
         Query(params): Query<HashMap<String, String>>,
-        headers: HeaderMap,
-    ) -> impl IntoResponse {
+        headers: &HeaderMap,
+    ) -> impl IntoResponse + use<> {
         // External mount: download a file living on the provider's backend.
         // (A mount-root UUID is a folder and is not downloadable — it falls
         // through and 404s as a non-file.)
@@ -676,7 +712,7 @@ impl FileHandler {
                 &id,
                 auth_user.id,
                 &params,
-                &headers,
+                headers,
             )
             .await;
         }
@@ -719,7 +755,7 @@ impl FileHandler {
         let etag = format!("\"{}\"", file_dto.etag);
 
         // ── ETag (304 Not Modified) ──────────────────────────────────
-        if let Some(resp) = not_modified_response(&headers, &etag) {
+        if let Some(resp) = not_modified_response(headers, &etag) {
             return resp.into_response();
         }
 
@@ -737,11 +773,22 @@ impl FileHandler {
                     let disposition =
                         Self::content_disposition(&file_dto.name, &file_dto.mime_type, &params);
 
+                    // `file_dto` was already Read-authorized (and the access
+                    // recorded) by `get_file_with_perms` above — every seek in
+                    // a media/PDF scrub is a separate Range request, so
+                    // re-authorizing + re-notifying per seek doubled that work
+                    // for nothing. Use the non-perms range read, matching the
+                    // share-landing and WebDAV range paths which authorize once
+                    // then stream (benches/ROUND7.md).
                     match retrieval
-                        .get_file_range_stream_with_perms(&id, auth_user.id, start, Some(end + 1))
+                        .get_file_range_preloaded(&file_dto, start, Some(end + 1))
                         .await
                     {
-                        Ok(stream) => {
+                        Ok(content) => {
+                            let body = match content {
+                                RangeContent::Bytes(b) => Body::from(b),
+                                RangeContent::Stream(s) => Body::from_stream(Box::into_pin(s)),
+                            };
                             return Response::builder()
                                 .status(StatusCode::PARTIAL_CONTENT)
                                 .header(header::CONTENT_TYPE, &*file_dto.mime_type)
@@ -757,7 +804,7 @@ impl FileHandler {
                                     header::CACHE_CONTROL,
                                     "private, max-age=3600, must-revalidate",
                                 )
-                                .body(Body::from_stream(Box::into_pin(stream)))
+                                .body(body)
                                 .unwrap()
                                 .into_response();
                         }
@@ -790,9 +837,15 @@ impl FileHandler {
 
         // Use the ownership-scoped optimized download.
         // Ownership was already verified by get_file_owned above,
-        // so we can safely use the preloaded variant.
+        // so we can safely use the preloaded variant. Capture the two
+        // fields the stream arm needs (one Arc bump + a u64 copy) and MOVE
+        // the DTO in — the old `file_dto.clone()` deep-copied all 7 owned
+        // Strings on every download, purely to read mime/size afterwards
+        // (benches/ROUND11.md §1).
+        let dto_mime = file_dto.mime_type.clone();
+        let dto_size = file_dto.size;
         match retrieval
-            .get_file_optimized_preloaded(&id, file_dto.clone(), accept_webp, prefer_original)
+            .get_file_optimized_preloaded(&id, file_dto, accept_webp, prefer_original)
             .await
         {
             Ok((_file, content)) => match content {
@@ -802,9 +855,9 @@ impl FileHandler {
                     .into_response(),
                 OptimizedFileContent::Stream(pinned_stream) => Response::builder()
                     .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, &*file_dto.mime_type)
+                    .header(header::CONTENT_TYPE, &*dto_mime)
                     .header(header::CONTENT_DISPOSITION, &disposition)
-                    .header(header::CONTENT_LENGTH, file_dto.size)
+                    .header(header::CONTENT_LENGTH, dto_size)
                     .header(header::ETAG, &etag)
                     .header(
                         header::CACHE_CONTROL,
@@ -955,9 +1008,9 @@ impl FileHandler {
     pub(super) async fn list_files_query_impl(
         State(state): State<GlobalState>,
         auth_user: AuthUser,
-        headers: HeaderMap,
+        headers: &HeaderMap,
         Query(params): Query<HashMap<String, String>>,
-    ) -> impl IntoResponse {
+    ) -> impl IntoResponse + use<> {
         let folder_id = params.get("folder_id").map(|id| id.as_str());
         tracing::info!("API: Listing files with folder_id: {:?}", folder_id);
 
@@ -989,7 +1042,13 @@ impl FileHandler {
                 }
 
                 tracing::info!("Found {} files", files.len());
-                let mut resp = (StatusCode::OK, Json(files)).into_response();
+                // Pre-sized serialization — this listing is unbounded (no
+                // page cap), the axum Json 128-byte seed reallocs ~11 times
+                // on a big folder (benches/ROUND12.md §M1).
+                let mut resp = crate::interfaces::api::sized_json::sized_json(
+                    64 + files.len() * crate::interfaces::api::sized_json::EST_ROW_BYTES,
+                    &files,
+                );
                 resp.headers_mut()
                     .insert(header::ETAG, header::HeaderValue::from_str(&etag).unwrap());
                 resp
@@ -1272,18 +1331,39 @@ pub(super) fn build_content_disposition(name: &str, mime: &str, force_inline: bo
         .remove(b'`')
         .remove(b'|')
         .remove(b'~');
-    let encoded = utf8_percent_encode(name, RFC5987_SET).to_string();
+    // Fast path: a name whose every byte is an RFC 5987 attr-char needs neither
+    // percent-encoding nor ASCII-fallback filtering ('"' and '\\' are not
+    // attr-chars, so none is substituted), so `filename` and `filename*` are the
+    // name verbatim — one allocation (the header) instead of three.
+    let all_attr_char = name.bytes().all(|b| {
+        b.is_ascii_alphanumeric()
+            || matches!(
+                b,
+                b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+            )
+    });
+    if all_attr_char {
+        return format!("{disposition}; filename=\"{name}\"; filename*=UTF-8''{name}");
+    }
 
-    let ascii_safe: String = name
-        .chars()
-        .filter(|c| c.is_ascii_graphic() || *c == ' ')
-        .map(|c| match c {
+    // Slow path: assemble the header in one pre-sized buffer, writing the ASCII
+    // fallback and the percent-encoded form in place — no throwaway `ascii_safe`
+    // / `encoded` Strings. Sized for the worst case (every byte → %XX) so it
+    // never grows.
+    let mut out = String::with_capacity(disposition.len() + name.len() * 4 + 32);
+    out.push_str(disposition);
+    out.push_str("; filename=\"");
+    for c in name.chars().filter(|c| c.is_ascii_graphic() || *c == ' ') {
+        out.push(match c {
             '"' | '\\' => '_',
             _ => c,
-        })
-        .collect();
-
-    format!("{disposition}; filename=\"{ascii_safe}\"; filename*=UTF-8''{encoded}")
+        });
+    }
+    out.push_str("\"; filename*=UTF-8''");
+    for chunk in utf8_percent_encode(name, RFC5987_SET) {
+        out.push_str(chunk);
+    }
+    out
 }
 
 // ── Route handlers (free functions) ──────────────────────────────────────────
@@ -1315,10 +1395,14 @@ pub(super) fn build_content_disposition(name: &str, mime: &str, force_inline: bo
 pub async fn list_files_query(
     state: State<GlobalState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
     query: Query<HashMap<String, String>>,
+    req: axum::extract::Request,
 ) -> impl IntoResponse {
-    FileHandler::list_files_query_impl(state, auth_user, headers, query).await
+    // Read headers by borrow (`req.headers()`) instead of the `HeaderMap`
+    // extractor, which clones the whole request header table (~2 allocs) just to
+    // read one If-None-Match — the ROUND14 §A4 middleware pattern applied to the
+    // hot listing handler (benches/ROUND22.md §H1).
+    FileHandler::list_files_query_impl(state, auth_user, req.headers(), query).await
 }
 
 #[utoipa::path(
@@ -1397,9 +1481,12 @@ pub async fn download_file(
     auth_user: AuthUser,
     path: Path<String>,
     query: Query<HashMap<String, String>>,
-    headers: HeaderMap,
+    req: axum::extract::Request,
 ) -> impl IntoResponse {
-    FileHandler::download_file_impl(state, auth_user, path, query, headers).await
+    // Borrow the headers (`req.headers()`) instead of the `HeaderMap` extractor's
+    // full clone — every download AND every media Range seek hit this path
+    // (benches/ROUND22.md §H1).
+    FileHandler::download_file_impl(state, auth_user, path, query, req.headers()).await
 }
 
 #[utoipa::path(
@@ -1421,10 +1508,13 @@ pub async fn download_file(
 pub async fn get_thumbnail(
     state: State<GlobalState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
     path: Path<(String, String)>,
+    req: axum::extract::Request,
 ) -> impl IntoResponse {
-    FileHandler::get_thumbnail_impl(state, auth_user, headers, path).await
+    // Borrow the headers (`req.headers()`) instead of the `HeaderMap` extractor's
+    // full clone — thumbnails are the highest-frequency GET (one per grid tile),
+    // and this handler reads only Accept + If-None-Match (benches/ROUND22.md §H1).
+    FileHandler::get_thumbnail_impl(state, auth_user, req.headers(), path).await
 }
 
 #[utoipa::path(

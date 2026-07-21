@@ -143,13 +143,18 @@ else
 fi
 
 # ── Step 1: PUT dedup-test.jpg ───────────────────────────────
-# /webdav always returns 204 (update_file_streaming handles create+update)
+# Post commit 43cf4a2b, /webdav distinguishes create (201) from
+# overwrite (204) per RFC 7231 §4.3.4. The cleanup loop above
+# (regular-listing + trash purge) guarantees this is a fresh
+# resource, so we expect 201. Step 2 below tests the overwrite
+# case (expects 204) — the 201/204 split itself is the regression
+# guard.
 
 echo "  step 1: PUT $REMOTE..."
 STATUS=$(webdav_put "$REMOTE" "$FIXTURE_V1" "image/jpeg")
 echo "  step 1: WebDAV PUT → $STATUS"
-[[ "$STATUS" == "204" ]] || fail "WebDAV PUT expected 204, got $STATUS"
-pass "WebDAV PUT dedup-test.jpg → 204"
+[[ "$STATUS" == "201" ]] || fail "WebDAV PUT expected 201, got $STATUS"
+pass "WebDAV PUT dedup-test.jpg → 201"
 
 # ── find file_id from REST listing ───────────────────────────
 

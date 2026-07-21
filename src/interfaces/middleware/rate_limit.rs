@@ -55,18 +55,18 @@ impl RateLimiter {
     /// `Err(StatusCode::TOO_MANY_REQUESTS)`.
     #[allow(clippy::result_unit_err)]
     pub fn check_and_increment(&self, ip: &str) -> Result<u32, ()> {
-        let key = ip.to_string();
-        // moka's entry API lets us atomically read-modify-write.
-        // On first access the entry is inserted with count = 1 and the TTL
-        // starts. Subsequent accesses within the window increment the count.
-        let count = self.cache.entry(key).or_insert_with(|| 0).into_value() + 1;
+        // Lock-free read (borrows the key — no allocation), then one
+        // write-back. The previous shape allocated the key TWICE and paid
+        // a locking `entry()` op on top of the insert; moka's
+        // `and_upsert_with` alternative benchmarked slower still
+        // (benches/ROUND11.md §20). Read-then-write is not atomic, but it
+        // never was — under a concurrent burst both shapes can undercount
+        // the same way, which only makes the limiter marginally lenient,
+        // never wrongly strict.
+        let count = self.cache.get(ip).unwrap_or(0) + 1;
 
-        // Write back the incremented value.  Because `or_insert_with` returns
-        // the *existing* value when the key was already present, we must always
-        // re-insert so the counter actually advances. The TTL of the **first**
-        // insert still governs eviction because moka uses insert-time TTL.
-        // However, on re-insert moka resets the TTL, for rate limiting this
-        // is fine because it means the window "slides" forward on activity.
+        // On re-insert moka resets the TTL; for rate limiting this is fine
+        // because it means the window "slides" forward on activity.
         self.cache.insert(ip.to_string(), count);
 
         if count > self.max_requests {

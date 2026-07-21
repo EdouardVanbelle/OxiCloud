@@ -1,0 +1,221 @@
+/*
+ * askama-common.css — component styles for server-rendered askama pages.
+ *
+ * BUILD PIPELINE:
+ *   `vite.config.ts` prepends `base/variables.css` at build time (the
+ *   `emitAskamaCommon` plugin) and writes the result to
+ *   `static-dist/askama-common.css`. That output is the single non-hashed
+ *   URL every askama template references:
+ *
+ *     <link rel="stylesheet" href="/askama-common.css">
+ *
+ * SINGLE SOURCE OF TRUTH:
+ *   Design tokens (`--color-*`, `--space-*`, `--radius-*`, `--text-*`,
+ *   etc.) live in `base/variables.css`. This file only carries the
+ *   component-level rules for the class vocabulary the askama templates
+ *   actually use. Update tokens in ONE place; the build packages both.
+ *
+ * NO JAVASCRIPT:
+ *   Dark-mode detection uses `light-dark()` + the `color-scheme` on
+ *   :root (declared in `variables.css`). Askama pages are pre-auth flows
+ *   (login / magic-link error) — no per-user override needed. Browsers
+ *   older than Chrome 123 / Safari 17.5 / Firefox 120 fall back to the
+ *   light values; the pages are readable either way.
+ *
+ * CLASS VOCABULARY (mirrors `grep 'class=' templates/**\/*.html`):
+ *   .auth-container .auth-panel
+ *   .auth-logo .auth-logo-icon .auth-logo-text
+ *   .auth-title .auth-subtitle
+ *   .auth-form .auth-button
+ *   .auth-drive-option .auth-drive-name .auth-drive-badge
+ *   .magic-note
+ */
+
+/* ── Reset ─────────────────────────────────────────────────────── */
+
+html,
+body {
+	margin: 0;
+	padding: 0;
+	height: 100%;
+}
+
+body {
+	font-family: var(--font-sans);
+	font-size: var(--text-base);
+	line-height: var(--leading-normal);
+	background: var(--color-bg-page);
+	color: var(--color-text);
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+/* ── Layout shell ──────────────────────────────────────────────── */
+
+.auth-container {
+	min-height: 100dvh;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: var(--space-6);
+}
+
+.auth-panel {
+	width: min(400px, 100%);
+	background: var(--color-bg-surface);
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius-2xl);
+	box-shadow: var(--shadow-md);
+	padding: var(--space-8);
+}
+
+/* ── Logo strip ───────────────────────────────────────────────── */
+
+.auth-logo {
+	display: flex;
+	align-items: center;
+	gap: var(--space-3);
+	margin-bottom: var(--space-6);
+}
+
+.auth-logo-icon {
+	width: 40px;
+	height: 40px;
+	border-radius: var(--radius-lg);
+	background: var(--color-accent);
+	display: grid;
+	place-items: center;
+}
+
+.auth-logo-icon svg {
+	width: 26px;
+	height: 26px;
+}
+
+.auth-logo-text {
+	font-size: var(--text-lg);
+	font-weight: var(--weight-semibold);
+	color: var(--color-text-heading);
+}
+
+/* ── Title strip ──────────────────────────────────────────────── */
+
+.auth-title {
+	margin: 0 0 var(--space-2);
+	font-size: var(--text-xl);
+	font-weight: var(--weight-semibold);
+	color: var(--color-text-heading);
+	line-height: var(--leading-snug);
+}
+
+.auth-subtitle {
+	margin: 0 0 var(--space-5);
+	color: var(--color-text-secondary);
+	font-size: var(--text-sm);
+}
+
+.auth-subtitle a {
+	color: var(--color-accent);
+	text-decoration: none;
+}
+
+.auth-subtitle a:hover {
+	text-decoration: underline;
+}
+
+/* ── Form + button ────────────────────────────────────────────── */
+
+.auth-form {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+}
+
+.auth-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	margin-top: var(--space-3);
+	padding: var(--space-3) var(--space-4);
+	border: 0;
+	border-radius: var(--radius-lg);
+	background: var(--color-accent);
+	color: var(--color-on-accent);
+	font: inherit;
+	font-weight: var(--weight-semibold);
+	cursor: pointer;
+	transition: background 0.12s ease;
+}
+
+.auth-button:hover {
+	background: var(--color-accent-hover);
+}
+
+.auth-button:focus-visible {
+	outline: 2px solid var(--color-accent);
+	outline-offset: 2px;
+}
+
+/* ── Drive picker radios ──────────────────────────────────────── */
+
+.auth-drive-option {
+	display: flex;
+	align-items: center;
+	gap: var(--space-3);
+	padding: var(--space-3) var(--space-4);
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius-lg);
+	cursor: pointer;
+	transition:
+		border-color 0.12s ease,
+		background 0.12s ease;
+}
+
+.auth-drive-option:hover {
+	border-color: var(--color-border-medium);
+	background: var(--color-bg-hover);
+}
+
+.auth-drive-option:has(input:checked) {
+	border-color: var(--color-accent);
+	background: var(--color-accent-ring);
+}
+
+.auth-drive-option input[type='radio'] {
+	accent-color: var(--color-accent);
+	margin: 0;
+}
+
+.auth-drive-name {
+	flex: 1;
+	font-weight: var(--weight-medium);
+}
+
+.auth-drive-badge {
+	padding: 2px var(--space-2);
+	border-radius: 999px;
+	background: var(--color-accent);
+	color: var(--color-on-accent);
+	font-size: 0.6875rem;
+	font-weight: var(--weight-semibold);
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+}
+
+/* ── Magic-link note block ────────────────────────────────────── */
+
+.magic-note {
+	margin-top: var(--space-5);
+	padding: var(--space-3) var(--space-4);
+	border-radius: var(--radius-md);
+	background: var(--color-bg-input);
+	border: 1px solid var(--color-border);
+	color: var(--color-text-secondary);
+	font-size: var(--text-sm);
+}

@@ -203,7 +203,10 @@ impl WopiDiscoveryService {
 
                     for attr in e.attributes().flatten() {
                         let value = attr
-                            .decode_and_unescape_value(reader.decoder())
+                            .decoded_and_normalized_value(
+                                quick_xml::XmlVersion::Implicit1_0,
+                                reader.decoder(),
+                            )
                             .map(|value| value.into_owned())
                             .unwrap_or_else(|_| String::from_utf8_lossy(&attr.value).to_string());
 

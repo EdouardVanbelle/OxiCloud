@@ -146,6 +146,82 @@ pub fn client_ip<B>(req: &Request<B>, include_port: bool) -> String {
     client_ip_from_parts(req.headers(), peer, include_port)
 }
 
+/// A resolved client-IP source that borrows from the request instead of
+/// allocating a `String`. [`std::fmt::Display`] renders it directly into the
+/// caller's buffer (the tracing span's field storage), so the per-request
+/// span factory no longer materializes an intermediate `String` on every
+/// request (benches/ROUND13.md §H2). Bytes rendered are identical to
+/// [`client_ip`]/[`client_ip_from_parts`] for all four cases.
+pub enum ClientIpDisplay<'a> {
+    /// Proxy-forwarded client address (borrowed from `X-Forwarded-For` /
+    /// `X-Real-Ip`), already trimmed.
+    Forwarded(&'a str),
+    /// Direct TCP peer, rendered with the port.
+    PeerWithPort(SocketAddr),
+    /// Direct TCP peer, rendered as the bare IP.
+    PeerIp(IpAddr),
+    /// No connection info available.
+    Unknown,
+}
+
+impl std::fmt::Display for ClientIpDisplay<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClientIpDisplay::Forwarded(s) => f.write_str(s),
+            ClientIpDisplay::PeerWithPort(addr) => write!(f, "{addr}"),
+            ClientIpDisplay::PeerIp(ip) => write!(f, "{ip}"),
+            ClientIpDisplay::Unknown => f.write_str("unknown"),
+        }
+    }
+}
+
+/// Zero-allocation twin of [`client_ip_from_parts`]: resolves the client-IP
+/// source without producing an owned `String`. The returned value borrows
+/// `headers`, so it must be `Display`-rendered before `headers` is dropped
+/// (the span factory does this synchronously).
+pub fn client_ip_display_from_parts<'a>(
+    headers: &'a axum::http::HeaderMap,
+    peer: Option<SocketAddr>,
+    include_port: bool,
+) -> ClientIpDisplay<'a> {
+    if let Some(peer_addr) = peer {
+        if is_trusted_proxy(peer_addr.ip()) {
+            if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
+                && let Some(ip) = xff
+                    .split(',')
+                    .next()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            {
+                return ClientIpDisplay::Forwarded(ip);
+            }
+            if let Some(xri) = headers
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return ClientIpDisplay::Forwarded(xri);
+            }
+        }
+        return if include_port {
+            ClientIpDisplay::PeerWithPort(peer_addr)
+        } else {
+            ClientIpDisplay::PeerIp(peer_addr.ip())
+        };
+    }
+    ClientIpDisplay::Unknown
+}
+
+/// Zero-allocation twin of [`client_ip`] for the request-span factory.
+pub fn client_ip_display<B>(req: &Request<B>, include_port: bool) -> ClientIpDisplay<'_> {
+    let peer: Option<SocketAddr> = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0);
+    client_ip_display_from_parts(req.headers(), peer, include_port)
+}
+
 /// Same as [`client_ip`], but operates on already-extracted parts (headers
 /// plus an optional TCP peer).  Handlers that don't take a full `Request<B>`,
 /// e.g. those that consume the body via `Json<…>`, can still derive a stable

@@ -1,6 +1,8 @@
 use crate::domain::entities::user::User;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
+use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -61,30 +63,49 @@ pub struct UserDto {
     /// could never claim the share. Round-trips through `/api/auth/me`
     /// and `PATCH /api/auth/me/profile`.
     pub notify_on_share: bool,
+    /// Opaque UI preferences bag. Cross-device store for pure UI
+    /// toggles (hide dotfiles, view mode, sidebar collapse, …). The
+    /// server never inspects the contents — this DTO field just echoes
+    /// what was PATCHed via `PATCH /api/auth/me/profile`. Shape is a
+    /// JSON object; the frontend defines the keys it cares about (see
+    /// `frontend/src/lib/stores/preferences.svelte.ts`). Always present
+    /// on the wire; empty bag is `{}`, never `null`.
+    pub ui_preferences: serde_json::Value,
 }
 
 impl From<User> for UserDto {
     fn from(user: User) -> Self {
+        // `user` is owned and dropped here, so every owned field is MOVED out
+        // via `into_parts` rather than cloned through the borrowing accessors —
+        // the accessor form deep-cloned `image` (a data URI up to 512 KiB) and
+        // the whole `ui_preferences` JSON tree on every `/api/auth/me` and admin
+        // user listing (benches/ROUND20.md §A2). The two derived values read the
+        // entity before the move.
+        let role = format!("{}", user.role());
+        let can_edit_image = !user.is_oidc_user();
+        let p = user.into_parts();
         Self {
-            id: user.id().to_string(),
-            username: user.username().map(str::to_string),
-            email: user.email().to_string(),
-            role: format!("{}", user.role()),
-            storage_quota_bytes: user.storage_quota_bytes(),
-            storage_used_bytes: user.storage_used_bytes(),
-            created_at: user.created_at(),
-            updated_at: user.updated_at(),
-            last_login_at: user.last_login_at(),
-            active: user.is_active(),
-            auth_provider: user.oidc_provider().unwrap_or("local").to_string(),
-            image: user.image().map(|s| s.to_string()),
-            can_edit_image: !user.is_oidc_user(),
-            is_external: user.is_external(),
-            given_name: user.given_name().map(str::to_string),
-            family_name: user.family_name().map(str::to_string),
-            email_verified_at: user.email_verified_at(),
-            preferred_locale: user.preferred_locale().map(str::to_string),
-            notify_on_share: user.notify_on_share(),
+            id: p.id.to_string(),
+            username: p.username,
+            email: p.email,
+            role,
+            storage_quota_bytes: p.storage_quota_bytes,
+            storage_used_bytes: p.storage_used_bytes,
+            created_at: p.created_at,
+            updated_at: p.updated_at,
+            last_login_at: p.last_login_at,
+            active: p.active,
+            // Some(provider) moves the String; None still allocates "local".
+            auth_provider: p.oidc_provider.unwrap_or_else(|| "local".to_string()),
+            image: p.image,
+            can_edit_image,
+            is_external: p.is_external,
+            given_name: p.given_name,
+            family_name: p.family_name,
+            email_verified_at: p.email_verified_at,
+            preferred_locale: p.preferred_locale,
+            notify_on_share: p.notify_on_share,
+            ui_preferences: p.ui_preferences,
         }
     }
 }
@@ -185,6 +206,19 @@ pub struct UpdateProfileDto {
     /// always send.
     #[serde(default)]
     pub notify_on_share: Option<bool>,
+    /// Partial patch into the opaque UI preferences bag. **Must be a
+    /// JSON object.** Applied via a SHALLOW merge on the server:
+    /// keys present here overwrite existing top-level keys; keys not
+    /// present survive. A key value of `null` REMOVES that key from
+    /// the bag (implemented via `jsonb_strip_nulls` after the merge).
+    ///
+    /// Example: current bag `{"a":1,"b":2}`, patch `{"b":3,"c":4}`
+    /// → merged `{"a":1,"b":3,"c":4}`. Patch `{"a":null}` → `{"b":2}`.
+    ///
+    /// Absent → no change to the bag. This is a UI-only surface;
+    /// server never inspects the keys.
+    #[serde(default)]
+    pub ui_preferences: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -207,13 +241,39 @@ pub struct RefreshTokenDto {
     pub refresh_token: String,
 }
 
+/// Body for `POST /api/auth/upgrade-to-internal`. Converts an
+/// authenticated external user into an internal user with their own
+/// personal drive.
+///
+/// `password` is optional — semantics decided per deployment:
+///   * If `magic_link` is in `OXICLOUD_AUTH_METHODS` (and OIDC isn't
+///     enabled) → password can be omitted; user remains magic-link-only
+///     for login after upgrade.
+///   * Otherwise → password is required; refusal returns 400
+///     `error_type = "PasswordRequired"`. Without it the upgraded user
+///     would have no login path.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpgradeToInternalDto {
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
 /// Authenticated current user data (for use in application services)
+///
+/// Built once per authenticated request in the auth middlewares.
+/// `username`/`email` are `Arc<str>` (refcount-bump clones from the cached
+/// `TokenClaims` / Basic-auth cache — JSON shape unchanged) and `role` is an
+/// inline `SmolStr` ("admin"/"user" fit the 23-byte inline buffer, so the
+/// per-request live-role render allocates nothing).
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct CurrentUser {
     pub id: Uuid,
-    pub username: String,
-    pub email: String,
-    pub role: String,
+    #[schema(value_type = String)]
+    pub username: Arc<str>,
+    #[schema(value_type = String)]
+    pub email: Arc<str>,
+    #[schema(value_type = String)]
+    pub role: SmolStr,
 }
 
 // ============================================================================
@@ -264,13 +324,26 @@ pub struct OidcExchangeDto {
     pub code: String,
 }
 
-/// Information about available OIDC providers
+/// Information about available OIDC providers + self-service auth
+/// methods enabled on the deployment. Consumed by the login page to
+/// decide which forms/buttons to render.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct OidcProviderInfoDto {
     pub enabled: bool,
     pub provider_name: String,
     pub authorize_endpoint: String,
     pub password_login_enabled: bool,
+    /// True iff the server accepts magic-link login requests
+    /// (`OXICLOUD_AUTH_METHODS` includes `magic_link` AND SMTP is
+    /// configured). Frontend renders the magic-link form when true.
+    #[serde(default)]
+    pub magic_link_login_enabled: bool,
+    /// True iff `OXICLOUD_REQUIRE_VERIFIED_EMAIL` is set. Frontend uses
+    /// this hint to explain the `EmailNotVerified` login response and
+    /// to nudge new users toward the magic-link verification path
+    /// straight after signup.
+    #[serde(default)]
+    pub require_verified_email: bool,
 }
 
 /// Claims extracted from the validated OIDC ID token

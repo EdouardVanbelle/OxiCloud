@@ -12,6 +12,16 @@ export interface ProfilePatch {
 	family_name?: string;
 	preferred_locale?: string;
 	notify_on_share?: boolean;
+	/**
+	 * Partial patch into the opaque UI preferences bag. Server does a
+	 * SHALLOW merge — keys present here overwrite existing top-level
+	 * keys; absent keys survive. Set a key to `null` to remove it
+	 * (server runs `jsonb_strip_nulls` after the merge).
+	 *
+	 * Wire-side type is `Record<string, unknown>`; the typed view over
+	 * this bag lives in `lib/stores/preferences.svelte.ts`.
+	 */
+	ui_preferences?: Record<string, unknown>;
 }
 
 export async function updateProfile(patch: ProfilePatch): Promise<User> {

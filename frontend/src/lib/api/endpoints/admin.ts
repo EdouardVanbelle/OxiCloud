@@ -157,6 +157,79 @@ export async function removeDriveMemberAdmin(
 	}
 }
 
+/**
+ * `DELETE /api/admin/drives/{id}` — admin-only drive delete (D3b).
+ *
+ * Bypasses the per-drive `Manage` check (the admin guard at the route
+ * edge is the access control). The default-personal-drive guard and
+ * the "drive must be empty" check still fire server-side — admins
+ * can't accidentally wipe a populated drive or a user's home folder.
+ * Throws on non-2xx so the caller can branch on `405` (default
+ * personal) vs `409` (non-empty) when surfacing the failure.
+ */
+/**
+ * `PATCH /api/drives/{id}/quota` — admin-only shared-drive quota
+ * mutation (D4). `quotaBytes = null` or ≤ 0 → unlimited (the backend
+ * normalises 0/negative to NULL).
+ *
+ * **Refuses personal drives** with HTTP 400 — the effective cap
+ * comes from the owner user's `storage_quota_bytes` envelope, edit
+ * via `setUserQuota` (`PUT /api/admin/users/{id}/quota`) instead.
+ * Callers should gate the UI on `drive.kind === 'shared'` so users
+ * never see the refusal.
+ *
+ * **Soft-quota semantic on shrink**: a new cap below current
+ * `used_bytes` is accepted — the write-time gate then blocks new
+ * writes until the drive shrinks back under. No existing content
+ * is retroactively touched. Matches xfs/ext4 quota behaviour.
+ *
+ * Returns the persisted value (the backend's normalisation of the
+ * input) so the caller can update local state without re-fetching.
+ * Throws on non-2xx with the backend's error message when present.
+ */
+export async function updateDriveQuota(
+	driveId: string,
+	quotaBytes: number | null
+): Promise<number | null> {
+	const res = await apiFetch(`/api/drives/${encodeURIComponent(driveId)}/quota`, {
+		method: 'PATCH',
+		credentials: 'same-origin',
+		headers: { ...JSON_HEADERS, ...getCsrfHeaders() },
+		body: JSON.stringify({ quota_bytes: quotaBytes })
+	});
+	if (!res.ok) {
+		let detail = '';
+		try {
+			const parsed = (await res.json()) as { error?: string; message?: string };
+			detail = parsed.error ?? parsed.message ?? '';
+		} catch {
+			/* response body wasn't JSON */
+		}
+		throw new Error(detail || `update drive quota failed: ${res.status}`);
+	}
+	const body = (await res.json()) as { quota_bytes: number | null };
+	return body.quota_bytes;
+}
+
+export async function deleteDriveAdmin(driveId: string): Promise<void> {
+	const res = await apiFetch(`/api/admin/drives/${encodeURIComponent(driveId)}`, {
+		method: 'DELETE',
+		credentials: 'same-origin',
+		headers: getCsrfHeaders()
+	});
+	if (!res.ok) {
+		let detail = '';
+		try {
+			const parsed = (await res.json()) as { error?: string; message?: string };
+			detail = parsed.error ?? parsed.message ?? '';
+		} catch {
+			/* response body wasn't JSON */
+		}
+		// 405 / 409 carry actionable messages from the backend; bubble them.
+		throw new Error(detail || `delete drive failed: ${res.status}`);
+	}
+}
+
 // ── Users ───────────────────────────────────────────────────────────────
 
 export interface AdminUsersPage {
@@ -168,6 +241,48 @@ export function listUsers(limit: number, offset: number): Promise<AdminUsersPage
 	return apiJson<AdminUsersPage>(`/api/admin/users?limit=${limit}&offset=${offset}`, {
 		credentials: 'same-origin'
 	});
+}
+
+/**
+ * Admin-scoped single-user lookup — `GET /api/admin/users/{id}`.
+ * Returns the full `User` DTO including `storage_quota_bytes` +
+ * `storage_used_bytes` which the non-admin `/api/users/{id}`
+ * response omits for privacy.
+ *
+ * Result promises are cached per id at module scope so multiple
+ * callers for the same user (e.g. the admin drives table with N
+ * personal drives owned by the same person) share one fetch. A
+ * `null` result is cached too so a missing user isn't re-fetched
+ * on every render.
+ *
+ * The cache is process-lifetime; a page navigation away and back
+ * still sees the cached value. Callers that need to refresh (e.g.
+ * after `setUserQuota`) should call `invalidateAdminUserCache`.
+ */
+const adminUserCache = new Map<string, Promise<User | null>>();
+
+export function getUserAdmin(id: string): Promise<User | null> {
+	const hit = adminUserCache.get(id);
+	if (hit) return hit;
+	const pending = (async (): Promise<User | null> => {
+		try {
+			return await apiJson<User>(`/api/admin/users/${encodeURIComponent(id)}`, {
+				credentials: 'same-origin'
+			});
+		} catch {
+			return null;
+		}
+	})();
+	adminUserCache.set(id, pending);
+	return pending;
+}
+
+/** Drop cached admin lookups so mutations (quota change, role change,
+ *  delete) don't return stale data. Called with no arg = clear all,
+ *  or with a specific user id to drop just that entry. */
+export function invalidateAdminUserCache(userId?: string): void {
+	if (userId) adminUserCache.delete(userId);
+	else adminUserCache.clear();
 }
 
 export interface CreateUserInput {
@@ -201,6 +316,20 @@ export function resetUserPassword(userId: string, newPassword: string): Promise<
 
 export function deleteUser(userId: string): Promise<void> {
 	return mutate(`/api/admin/users/${userId}`, 'DELETE');
+}
+
+/**
+ * Promote a currently-external (grant-only) user to an internal
+ * account. The deployment must have magic-link login enabled — the
+ * admin doesn't set the target's password, so the promoted user
+ * needs some way to log in. Backend refuses with:
+ *   * 400 — magic-link disabled deployment-wide
+ *   * 403 — target is OIDC-linked
+ *   * 404 — user not found
+ *   * 409 — user is already internal
+ */
+export function promoteUserToInternal(userId: string): Promise<void> {
+	return mutate(`/api/admin/users/${userId}/promote-to-internal`, 'POST');
 }
 
 // ── Dashboard ───────────────────────────────────────────────────────────

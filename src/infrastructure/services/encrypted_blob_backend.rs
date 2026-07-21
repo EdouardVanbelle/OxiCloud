@@ -30,7 +30,7 @@
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
-use aes_gcm::aead::{Aead, AeadInPlace, KeyInit, OsRng};
+use aes_gcm::aead::{AeadInPlace, KeyInit, OsRng};
 use aes_gcm::{AeadCore, Aes256Gcm, Nonce};
 use bytes::Bytes;
 use std::sync::Arc;
@@ -44,6 +44,9 @@ use crate::domain::errors::DomainError;
 /// Nonce size for AES-256-GCM (96 bits = 12 bytes).
 const NONCE_SIZE: usize = 12;
 
+/// AES-256-GCM authentication tag length appended after the ciphertext.
+const TAG_SIZE: usize = 16;
+
 /// Payloads at or above this size run crypto on the blocking pool; below
 /// it the `spawn_blocking` round-trip costs more than the AES work itself.
 const CRYPTO_OFFLOAD_THRESHOLD: usize = 64 * 1024;
@@ -56,7 +59,10 @@ const PLAINTEXT_EMIT_SIZE: usize = 64 * 1024;
 /// `BlobStorageBackend` decorator that encrypts blobs at rest.
 pub struct EncryptedBlobBackend {
     inner: Arc<dyn BlobStorageBackend>,
-    cipher: Aes256Gcm,
+    /// `Arc` so the per-op `clone()` handed to `offload_crypto` closures is
+    /// an atomic bump instead of copying the ~240-byte expanded AES-256
+    /// round-key schedule on every chunk read/write.
+    cipher: Arc<Aes256Gcm>,
 }
 
 impl EncryptedBlobBackend {
@@ -64,7 +70,8 @@ impl EncryptedBlobBackend {
     ///
     /// `key` must be exactly 32 bytes (AES-256).
     pub fn new(inner: Arc<dyn BlobStorageBackend>, key: &[u8; 32]) -> Self {
-        let cipher = Aes256Gcm::new_from_slice(key).expect("AES-256 key must be 32 bytes");
+        let cipher =
+            Arc::new(Aes256Gcm::new_from_slice(key).expect("AES-256 key must be 32 bytes"));
         Self { inner, cipher }
     }
 
@@ -78,36 +85,60 @@ impl EncryptedBlobBackend {
 }
 
 /// Encrypt `data` into the on-disk layout: `[12-byte nonce][ciphertext + tag]`.
+///
+/// Single output buffer, mirroring the read side's in-place detached decrypt:
+/// the payload is copied exactly once and encrypted in place with the tag
+/// appended. The old shape let `cipher.encrypt` allocate a full ciphertext
+/// `Vec` and then copied it a second time behind the nonce — one extra
+/// allocation + a full-size memcpy on every encrypted chunk write
+/// (benches/ROUND11.md §15; output bytes identical for a given nonce).
 fn encrypt_bytes(cipher: &Aes256Gcm, data: &[u8]) -> Result<Bytes, DomainError> {
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-    let ciphertext = cipher
-        .encrypt(&nonce, data)
+    let mut out = Vec::with_capacity(NONCE_SIZE + data.len() + TAG_SIZE);
+    out.extend_from_slice(nonce.as_slice());
+    out.extend_from_slice(data);
+    let tag = cipher
+        .encrypt_in_place_detached(&nonce, b"", &mut out[NONCE_SIZE..])
         .map_err(|e| DomainError::internal_error("Encryption", format!("encrypt failed: {e}")))?;
-
-    let mut encrypted = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
-    encrypted.extend_from_slice(nonce.as_slice());
-    encrypted.extend_from_slice(&ciphertext);
-    Ok(Bytes::from(encrypted))
+    out.extend_from_slice(&tag);
+    Ok(Bytes::from(out))
 }
 
 /// Decrypt the on-disk layout `[nonce][ciphertext + tag]` **in place**.
 ///
-/// Consumes the encrypted buffer and reuses it for the plaintext, so peak
-/// RAM is one buffer — not ciphertext + plaintext side by side (which for
-/// legacy whole-file blobs would double a multi-hundred-MB allocation).
+/// Reuses the encrypted buffer for the plaintext, so peak RAM is one buffer —
+/// not ciphertext + plaintext side by side (which for legacy whole-file blobs
+/// would double a multi-hundred-MB allocation). The nonce and 16-byte GCM tag
+/// are lifted to the stack, the ciphertext body is decrypted in place via the
+/// detached API (mirroring the encrypt side's `encrypt_in_place_detached`), and
+/// the plaintext is returned as a zero-copy `Bytes::slice` past the nonce.
+///
+/// The prior shape did `encrypted.split_off(NONCE_SIZE)`, which allocated a
+/// fresh `Vec` and memcpy'd the entire ciphertext (up to a whole legacy blob)
+/// on every decrypted read — one full-payload allocation + copy the doc comment
+/// above claimed did not happen (benches/ROUND25.md §M1; ROUND11 §15 fixed only
+/// the encrypt side). Output plaintext is byte-identical.
 fn decrypt_bytes(cipher: &Aes256Gcm, mut encrypted: Vec<u8>) -> Result<Bytes, DomainError> {
-    if encrypted.len() < NONCE_SIZE {
+    let len = encrypted.len();
+    if len < NONCE_SIZE + TAG_SIZE {
         return Err(DomainError::internal_error(
             "Encryption",
-            "encrypted blob too short (missing nonce)",
+            "encrypted blob too short (missing nonce/tag)",
         ));
     }
-    let mut ciphertext = encrypted.split_off(NONCE_SIZE); // `encrypted` keeps the nonce
-    let nonce = Nonce::from_slice(&encrypted);
+    // Nonce (first 12 bytes) and GCM tag (last 16 bytes) copied to the stack so
+    // the middle can be borrowed mutably for in-place decryption.
+    let mut nonce_buf = [0u8; NONCE_SIZE];
+    nonce_buf.copy_from_slice(&encrypted[..NONCE_SIZE]);
+    let nonce = Nonce::from_slice(&nonce_buf);
+    let tag = aes_gcm::aead::Tag::<Aes256Gcm>::clone_from_slice(&encrypted[len - TAG_SIZE..]);
     cipher
-        .decrypt_in_place(nonce, b"", &mut ciphertext)
+        .decrypt_in_place_detached(nonce, b"", &mut encrypted[NONCE_SIZE..len - TAG_SIZE], &tag)
         .map_err(|e| DomainError::internal_error("Encryption", format!("decrypt failed: {e}")))?;
-    Ok(Bytes::from(ciphertext))
+    // Plaintext now lives at `encrypted[NONCE_SIZE..len - TAG_SIZE]`; drop the
+    // tag and hand out a refcounted view past the nonce — no copy, no new alloc.
+    encrypted.truncate(len - TAG_SIZE);
+    Ok(Bytes::from(encrypted).slice(NONCE_SIZE..))
 }
 
 /// Run a crypto closure inline for small payloads, on the blocking pool for
@@ -126,13 +157,18 @@ where
 }
 
 /// Turn a decrypted payload into a stream of bounded, zero-copy slices.
+///
+/// The emit-slice iterator is handed to `stream::iter` lazily — the closure
+/// owns `data` (a refcounted `Bytes`), so each `slice` is produced on demand
+/// as the consumer polls, rather than eagerly `collect`ing a `Vec` of
+/// ⌈len/64 KiB⌉ slice handles up front (benches/ROUND20.md §I4).
 fn plaintext_stream(data: Bytes) -> BlobStream {
     let len = data.len();
-    let slices: Vec<Result<Bytes, std::io::Error>> = (0..len)
-        .step_by(PLAINTEXT_EMIT_SIZE)
-        .map(|off| Ok(data.slice(off..len.min(off + PLAINTEXT_EMIT_SIZE))))
-        .collect();
-    Box::pin(futures::stream::iter(slices))
+    Box::pin(futures::stream::iter(
+        (0..len)
+            .step_by(PLAINTEXT_EMIT_SIZE)
+            .map(move |off| Ok(data.slice(off..len.min(off + PLAINTEXT_EMIT_SIZE)))),
+    ))
 }
 
 impl BlobStorageBackend for EncryptedBlobBackend {
@@ -318,6 +354,13 @@ impl BlobStorageBackend for EncryptedBlobBackend {
 }
 
 /// Collect a byte stream into a single `Vec<u8>`.
+///
+/// Modern blobs are CDC chunks (≤ `CDC_MAX_CHUNK` + nonce/tag overhead),
+/// delivered here as small reader frames — growing from `Vec::new()` paid
+/// ~log₂(n) reallocations + a wasted ~0.75×-size memcpy per read. Reserving
+/// one chunk's worth up front on the first frame makes the common case a
+/// single allocation; legacy whole-file blobs beyond that fall back to
+/// normal doubling (benches/ROUND11.md §16: 9 → 1 allocs on a 1 MiB blob).
 async fn collect_stream(stream: BlobStream) -> Result<Vec<u8>, DomainError> {
     use futures::StreamExt;
     let mut stream = stream;
@@ -325,6 +368,14 @@ async fn collect_stream(stream: BlobStream) -> Result<Vec<u8>, DomainError> {
     while let Some(chunk) = stream.next().await {
         let bytes = chunk
             .map_err(|e| DomainError::internal_error("Encryption", format!("stream read: {e}")))?;
+        if buf.capacity() == 0 {
+            buf.reserve(
+                (crate::infrastructure::services::dedup_service::CDC_MAX_CHUNK
+                    + NONCE_SIZE
+                    + TAG_SIZE)
+                    .max(bytes.len()),
+            );
+        }
         buf.extend_from_slice(&bytes);
     }
     Ok(buf)

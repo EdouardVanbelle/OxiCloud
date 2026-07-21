@@ -21,13 +21,11 @@
     margin-right: var(--space-3);
     height: 60px;
     transform: translateY(-8px);
-    transition:
-        opacity 0.2s,
-        max-height 0.25s,
-        transform 0.2s,
-        margin 0.2s,
-        padding 0.2s;
     pointer-events: auto;
+    /* Note: previous versions of this rule animated the bar's
+       appearance (opacity / max-height / transform / margin / padding
+       transitions on the class-add). Dropped intentionally — the bar
+       just appears/disappears with the selection state now. */
 }
 
 .batch-bar-close {

@@ -15,7 +15,7 @@ Every user row in `auth.users` carries one identity field, three independent cre
 | `password_hash` | `String NULL` | no | Argon2 hash if the user chose one. NULL = no password. No sentinel strings. |
 | `oidc_subject` | `String NULL` | no | IdP subject claim if the user linked an external identity. NULL = no OIDC. |
 | `is_external` | `bool` | yes (default false) | Provisioning origin marker. `true` = created via email-invitation. Affects home-folder provisioning and DAV access. |
-| `email_verified_at` | `Timestamp NULL` | no | PR 23 — when the user demonstrated control of their email. NULL = unverified. Stamped on first magic-link redemption OR OIDC JIT with verified claim. Idempotent: the first proof timestamp is preserved. No policy gates today; future PRs may gate features on this signal. |
+| `email_verified_at` | `Timestamp NULL` | no | When the user demonstrated control of their email. NULL = unverified. Stamped on first magic-link redemption OR OIDC JIT with verified claim OR admin-created / setup-admin accounts (admin fiat). Idempotent: the first proof timestamp is preserved. Gated by `OXICLOUD_REQUIRE_VERIFIED_EMAIL` — see below. |
 
 The **`@` ban on usernames** is what makes the username and email namespaces provably disjoint. The login dispatcher relies on this — input containing `@` is unambiguously an email lookup, input without is a username lookup. No fallback chain, single DB hit.
 
@@ -42,6 +42,23 @@ The `@` ban on usernames makes this unambiguous. A single DB lookup, no fallback
 
 The frontend's "Username or email" field submits whatever the user typed; the JSON field is still named `username` for backwards compatibility, with a docstring noting the dual semantics.
 
+The same dispatch applies to `POST /api/auth/magic-link/send` — its `email` field also accepts either an email or a username. When a username is supplied, the server resolves it to the account's registered email BEFORE rate-limiting so `alice` and `alice@example.com` share one budget (otherwise alternating shapes would double the effective per-target budget).
+
+## Deployment auth policy
+
+Two env vars control the self-service auth surface, orthogonal to OIDC:
+
+- `OXICLOUD_AUTH_METHODS` — allowlist of enabled methods (`password`, `magic_link`, or both). Default: both. Removing one produces distinct error_type codes so the SPA can render specific UX:
+  - Removing `password` → `POST /api/auth/login` → 403 `PasswordLoginDisabled`; password-based `register` → 403 `PasswordRegistrationDisabled`.
+  - Removing `magic_link` → `magic-link/send` → 403 `MagicLinkLoginDisabled`; login-purpose token redemption refuses.
+  - **Startup gate:** magic-link-only + no SMTP wired → server refuses to start (main.rs panics).
+- `OXICLOUD_AUTH_POLICIES` — additive policy switches. Today: `permit_magic_link_for_password_users`. Future variants (`Require...`, `Deny...`) reuse the same vector-shaped env var — no per-policy env-var proliferation.
+- `OXICLOUD_REQUIRE_VERIFIED_EMAIL` — when true, `POST /api/auth/login` returns 403 `EmailNotVerified` for accounts with `email_verified_at IS NULL`. Checked AFTER password validation (anti-enum — an attacker without the password can't probe verification state). **Admin accounts are exempt** from this gate to prevent a config flip from locking pre-existing admins out of their own instance.
+
+**Verification piggyback.** When the `EmailNotVerified` branch fires (password OK + email unverified), the login handler auto-sends a verification magic-link to the account via a distinct service method that bypasses the `has_password` eligibility gate — the password itself just proved identity, so mailbox-only trust isn't being extended beyond what the password already established. Response is 403 `EmailNotVerified` with "check your inbox"; re-submitting the same login re-triggers the send. This is why there is no unauthenticated "resend verification" endpoint — one would leak `has_password` state to unauthenticated callers.
+
+**OIDC-master rule.** When `OXICLOUD_OIDC_ENABLED=true`, magic-link login is hard-off regardless of `OXICLOUD_AUTH_METHODS`. Magic-link would bypass any 2FA / step-up the IdP enforces.
+
 ## Login paths
 
 | Path | How it works | When available |
@@ -56,7 +73,8 @@ The frontend's "Username or email" field submits whatever the user typed; the JS
 ```
 1. has_oidc()        → reject "oidc_user"   (unconditional)
 2. has_password()    → reject "has_password" by default
-                       allow when OXICLOUD_MAGIC_LINK_OPEN_TO_PASSWORD_USERS=true
+                       allow when OXICLOUD_AUTH_POLICIES contains
+                       `permit_magic_link_for_password_users`
 3. neither           → allow
 ```
 
@@ -133,7 +151,7 @@ In all four cases the real reason is recorded in the `audit` channel — operato
 
 | Concern | Current treatment |
 |---|---|
-| **Mailbox compromise = account compromise (lenient mode)** | When `OXICLOUD_MAGIC_LINK_OPEN_TO_PASSWORD_USERS=true`, a user's mailbox is as strong as their password — flip the password by mail. Operator opt-in only; off by default. Aligns with modern SaaS norms (Slack, Notion, Substack). |
+| **Mailbox compromise = account compromise (lenient mode)** | When `OXICLOUD_AUTH_POLICIES` contains `permit_magic_link_for_password_users`, a user's mailbox is as strong as their password — flip the password by mail. Operator opt-in only; off by default. Aligns with modern SaaS norms (Slack, Notion, Substack). |
 | **Mailbox compromise = account compromise (strict mode)** | Only applies to magic-link-eligible users (no other credential). Their mailbox **is** their credential by design. Password-secured accounts are unaffected. |
 | **No native MFA** | Today OIDC delegation is the only path to MFA — the IdP (Keycloak, Authentik, Okta) enforces TOTP/WebAuthn/etc., OxiCloud sees only the resulting ID token. This is why OIDC users are unconditionally excluded from magic-link. Native TOTP / WebAuthn enrolment is a future feature. |
 | **Magic-link as bearer token (login-via-email)** | Closed (PR 22). Login tokens carry a per-request challenge mirrored into the originating browser's `oxicloud_magic_request` cookie. Redemption from a different browser shows a confirmation page rather than auto-signing. Asymmetric TTL: login tokens expire in 10 min, invitations in 24 h. |
@@ -196,13 +214,13 @@ The auth model lands across PR 16-24, all forward-only and non-destructive.
 
 ## Future direction — per-user `login_strategy`
 
-The current model is implicit: a user's available login paths derive from which credential slots they have set. A future direction is to make this **explicit** with a per-user policy enum:
+The current model has moved from fully-implicit toward **instance-scoped explicit** via `OXICLOUD_AUTH_METHODS` and `OXICLOUD_AUTH_POLICIES` (see above). The next step is **per-user explicit** — a policy enum on the user row that overrides the deployment default:
 
 | Strategy | Login requires |
 |---|---|
 | `passwordless` | magic-link only (current external default) |
 | `password` | password only |
-| `password_or_magic_link` | either (today's lenient mode, account-scoped instead of instance-scoped) |
+| `password_or_magic_link` | either (today's `permit_magic_link_for_password_users` per-account) |
 | `password_and_magic_link` | both — true 2FA, mailbox-as-second-factor |
 | `oidc` | IdP redirect (existing) |
 | `password_and_totp` | once native TOTP enrolment ships |
@@ -210,16 +228,16 @@ The current model is implicit: a user's available login paths derive from which 
 
 `password_and_magic_link` is particularly interesting: it turns the parallel single-factor paths we have today into a real MFA primitive (something you know + access to a mailbox). No new auth code required — just a policy gate.
 
-This stays out of the current PR sequence; the data model already accommodates it (the eligibility predicate is the single migration point).
+The instance-scoped equivalents are already deployed via `OXICLOUD_AUTH_METHODS` / `OXICLOUD_AUTH_POLICIES`; per-user overrides would need a new column and an eligibility branch that reads it. Stays out of the current PR sequence.
 
 ## What is deliberately out of scope
 
 - **Native TOTP / WebAuthn enrolment.** The eligibility predicate has room for a `Reject("mfa_enrolled")` branch once native MFA lands. OIDC delegation is the only MFA path today.
-- **External-user → internal-user promotion.** When an external user later sets a credential, today `is_external` stays true (they remain second-class for home folders, DAV, etc.). A future PR promotes them properly.
+- **External-user → internal-user promotion — SHIPPED.** `POST /api/auth/upgrade-to-internal` flips `is_external` to false, optionally sets a password (optional iff the deployment offers magic-link login), and provisions a personal drive via `PersonalDriveLifecycleHook::on_upgraded_to_internal`. Refused with distinguished `error_type` codes: `AlreadyInternal`, `ManagedByIdP` (OIDC users), `PasswordRequired`, `RegistrationDomainNotAllowed` (domain outside the register allowlist — invitations must not become a bypass of the operator's self-registration policy). Self-service only; admin-side upgrade endpoint is a follow-up.
 - **Session-kind discriminator.** A magic-link session is indistinguishable from a password session today. Scoped sessions (Option-B style: "magic-link sessions only access granted resources") are deferred.
 - **Differentiated session TTL for externals.** Refresh-token expiry is uniform today. Future env: `OXICLOUD_EXTERNAL_REFRESH_TOKEN_EXPIRY_DAYS`.
 - **Open Cloud Mesh (OCM) federation.** A third source for external provisioning. The `ExternalIdentityLifecycleHook::on_user_created` design accommodates the `source` discriminator (`magic_link` / `oidc` / `ocm`).
-- **Email-verified policy gates.** PR 23 introduced the `email_verified_at` signal; gating features (uploads, shares, etc.) on it is future work — likely a single `OXICLOUD_REQUIRE_EMAIL_VERIFICATION=true` env var that adds middleware to the relevant routes.
+- **Email-verified login gate — SHIPPED.** `OXICLOUD_REQUIRE_VERIFIED_EMAIL=true` gates login on `email_verified_at IS NOT NULL` (admins exempt). Gating other features (uploads, shares, etc.) on the same signal is future work; the plumbing is in place.
 - **Username rename via the API.** PR 24 makes `username` claim-once-immutable on `/api/auth/me/profile`. A future admin endpoint at `PATCH /api/admin/users/{id}` can override for typo correction; that surface is admin-policy territory, not user-self-service.
 - **Anti-enumeration latency parity.** The success and collision branches of `register` already use similar code paths, but a sophisticated attacker could still time-distinguish. Deferred; rate-limiting bounds the damage.
 - **Per-user opt-out of magic-link.** The `OPEN_TO_PASSWORD_USERS` flag is instance-wide today. A future per-account toggle for high-privilege users (admins, etc.) would need a column + extra eligibility branch.

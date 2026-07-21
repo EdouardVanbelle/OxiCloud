@@ -3,8 +3,9 @@
 //! Bundles WHO the caller is, the raw wire username they presented,
 //! and (for path-scoped endpoints) WHERE they're confined to. Built
 //! by `basic_auth_middleware` and stashed in request extensions as
-//! `Arc<NcSession>`; handlers extract it via the [`FromRequestParts`]
-//! impl below — just declare `session: NcSession` in the signature.
+//! `Arc<NcSession>`; handlers extract it via [`SharedNcSession`]
+//! (derefs to `NcSession`) — declare `session: SharedNcSession` in
+//! the signature.
 //!
 //! ## Source of truth
 //!
@@ -46,9 +47,13 @@ use crate::interfaces::middleware::auth::CurrentUser;
 
 #[derive(Debug, Clone)]
 pub struct NcSession {
-    pub user: CurrentUser,
+    /// Shared with the `Arc<CurrentUser>` request extension — one identity
+    /// build per request instead of a clone per consumer.
+    pub user: Arc<CurrentUser>,
     pub raw_username: String,
-    pub chroot: Option<FolderDto>,
+    /// Shared with `NC_CHROOT_CACHE` (markerless branch) — a cache hit is
+    /// an `Arc` bump, not a `FolderDto` deep-clone.
+    pub chroot: Option<Arc<FolderDto>>,
 }
 
 impl NcSession {
@@ -56,7 +61,7 @@ impl NcSession {
     /// without one. Documents the invariant that every NC route
     /// today is path-scoped — if this fires, route wiring is wrong.
     pub fn require_chroot(&self) -> Result<&FolderDto, AppError> {
-        self.chroot.as_ref().ok_or_else(|| {
+        self.chroot.as_deref().ok_or_else(|| {
             AppError::internal_error(
                 "NcSession: path-scoped handler reached without a chroot — route wiring bug",
             )
@@ -82,7 +87,7 @@ impl NcSession {
 ///
 /// Returns `None` for anything that doesn't follow this shape (notably
 /// the OCS surfaces, where there is no `{user}` segment to compare).
-fn extract_url_user(path: &str) -> Option<String> {
+fn extract_url_user(path: &str) -> Option<std::borrow::Cow<'_, str>> {
     let mut segments = path.split('/');
     if !segments.next()?.is_empty() {
         return None;
@@ -98,13 +103,20 @@ fn extract_url_user(path: &str) -> Option<String> {
     if user_seg.is_empty() {
         return None;
     }
-    urlencoding::decode(user_seg).ok().map(|s| s.into_owned())
+    // Keep the `Cow` — a plain-ASCII username decodes to `Cow::Borrowed`, so the
+    // common path allocates nothing; only a percent-encoded username owns. The
+    // old `.into_owned()` forced a `String` on EVERY path-scoped NC DAV request
+    // (benches/ROUND19.md §M7). The caller compares by slice.
+    urlencoding::decode(user_seg).ok()
 }
 
-/// Axum extractor: pulls the `Arc<NcSession>` that
-/// `basic_auth_middleware` stashed in request extensions and clones
-/// it (cheap — one `Arc` increment, no field copy) into an owned
-/// `NcSession` for handler use.
+/// Axum extractor: the shared handle to the request's [`NcSession`].
+///
+/// Derefs to `NcSession`, so handler bodies read `session.user`,
+/// `session.require_chroot()`, … unchanged. Extraction is one `Arc`
+/// refcount increment — the previous extractor deep-cloned the whole
+/// session (`CurrentUser` + `raw_username` + chroot `FolderDto`, ~8-9
+/// `String` allocs) on every authenticated NC request.
 ///
 /// On path-scoped DAV routes (`/remote.php/dav/{files,uploads,
 /// trashbin}/{user}/…`), the URL `{user}` segment is cross-checked
@@ -113,22 +125,41 @@ fn extract_url_user(path: &str) -> Option<String> {
 /// (`get_folder_with_perms`) is what actually prevents cross-user
 /// access. It just surfaces malformed requests early (403) instead
 /// of silently letting them through.
-impl<S: Send + Sync> FromRequestParts<S> for NcSession {
+#[derive(Debug, Clone)]
+pub struct SharedNcSession(Arc<NcSession>);
+
+impl SharedNcSession {
+    /// Wrap an already-shared session (used by the bench harness; the
+    /// middleware inserts the `Arc` into request extensions directly).
+    pub fn from_arc(session: Arc<NcSession>) -> Self {
+        Self(session)
+    }
+}
+
+impl std::ops::Deref for SharedNcSession {
+    type Target = NcSession;
+
+    fn deref(&self) -> &NcSession {
+        &self.0
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for SharedNcSession {
     type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let session = parts
             .extensions
             .get::<Arc<NcSession>>()
-            .map(|arc| (**arc).clone())
+            .cloned()
             .ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
 
         if let Some(url_user) = extract_url_user(parts.uri.path())
-            && url_user != session.raw_username
+            && url_user.as_ref() != session.raw_username.as_str()
         {
             return Err(StatusCode::FORBIDDEN.into_response());
         }
 
-        Ok(session)
+        Ok(Self(session))
     }
 }

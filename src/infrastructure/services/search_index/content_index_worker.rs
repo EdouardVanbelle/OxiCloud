@@ -242,30 +242,43 @@ impl ContentIndexWorker {
 
         // Authoritative state re-read: a queued 'upsert' whose row vanished
         // or got trashed in the meantime becomes a delete.
-        let files: Vec<(Uuid, String, String, String, String, String, i64)> =
-            if upsert_candidates.is_empty() {
-                Vec::new()
-            } else {
-                sqlx::query_as(
-                    "SELECT fi.id, fi.user_id::text, fi.drive_id::text, fi.name,
-                            fi.blob_hash, fi.mime_type, fi.size
-                       FROM storage.files fi
-                      WHERE fi.id = ANY($1) AND NOT fi.is_trashed",
-                )
-                .bind(&upsert_candidates)
-                .fetch_all(self.maintenance_pool.as_ref())
-                .await?
-            };
+        //
+        // Post-D7: `fi.user_id` is dropped — no longer projected. The
+        // Tantivy `user_id` field survives as defence-in-depth but now
+        // always indexes `""`. Every query is Must-scoped by `drive_id`.
+        // (file_id, drive_id, name, blob_hash, mime, size).
+        type FileIndexRow = (Uuid, String, String, String, String, i64);
+        let files: Vec<FileIndexRow> = if upsert_candidates.is_empty() {
+            Vec::new()
+        } else {
+            sqlx::query_as(
+                "SELECT fi.id, fi.drive_id::text, fi.name,
+                        fi.blob_hash, fi.mime_type, fi.size
+                   FROM storage.files fi
+                  WHERE fi.id = ANY($1) AND NOT fi.is_trashed",
+            )
+            .bind(&upsert_candidates)
+            .fetch_all(self.maintenance_pool.as_ref())
+            .await?
+        };
         let found: HashSet<Uuid> = files.iter().map(|f| f.0).collect();
         deletes.extend(upsert_candidates.iter().filter(|id| !found.contains(id)));
+
+        // `supports` lowercases the MIME (and, on a generic MIME, the extension)
+        // — 1–2 allocations per call. Classify each file ONCE here and thread the
+        // flag through both the wanted-hashes filter and the per-file records
+        // loop below, where it used to be re-derived a second time per file.
+        let supported: Vec<bool> = files
+            .iter()
+            .map(|(_, _, name, _, mime, _)| text_extractor::supports(name, mime))
+            .collect();
 
         // Per-blob text: batch-read the extraction cache, extract misses.
         let wanted_hashes: Vec<String> = files
             .iter()
-            .filter(|(_, _, _, name, _, mime, size)| {
-                text_extractor::supports(name, mime) && *size as u64 <= self.max_extract_file_bytes
-            })
-            .map(|f| f.4.clone())
+            .zip(&supported)
+            .filter(|&(f, sup)| *sup && f.5 as u64 <= self.max_extract_file_bytes)
+            .map(|(f, _)| f.3.clone())
             .collect();
         let mut text_by_hash: HashMap<String, Option<String>> = HashMap::new();
         if !wanted_hashes.is_empty() {
@@ -282,8 +295,9 @@ impl ContentIndexWorker {
         }
 
         let mut records = Vec::with_capacity(files.len());
-        for (file_id, user_id, drive_id, name, blob_hash, mime, size) in files {
-            let supported = text_extractor::supports(&name, &mime);
+        for ((file_id, drive_id, name, blob_hash, mime, size), supported) in
+            files.into_iter().zip(supported)
+        {
             let content = if !supported {
                 None
             } else if let Some(cached) = text_by_hash.get(&blob_hash) {
@@ -301,7 +315,7 @@ impl ContentIndexWorker {
                 .map(|t| truncate_on_char(t, PREVIEW_BYTES));
             records.push(IndexDocRecord {
                 file_id: file_id.to_string(),
-                user_id,
+                user_id: String::new(),
                 drive_id,
                 name,
                 content,

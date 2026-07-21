@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { errorMessage, errorToast } from '$lib/utils/errors';
+	import { dateTimeFormatFor } from '$lib/utils/display';
 	import {
 		clearPluginLogs,
 		createUser,
@@ -16,9 +17,11 @@
 		installPlugin,
 		listPlugins,
 		listUsers,
+		getUserAdmin,
 		migrationAction,
 		reextractAudioMetadata,
 		reextractPhotoMetadata,
+		promoteUserToInternal,
 		resetUserPassword,
 		saveOidc,
 		savePluginRetention,
@@ -48,27 +51,38 @@
 		type PluginRetention,
 		type ReextractResult,
 		addDriveMemberAdmin,
+		deleteDriveAdmin,
 		listAllDrives,
 		listDriveMembersAdmin,
 		removeDriveMemberAdmin,
+		updateDriveQuota,
 		type SmtpInfo,
 		type SmtpTestResult,
 		type StorageSettings,
 		type StorageTestResult
 	} from '$lib/api/endpoints/admin';
-	import { createDrive } from '$lib/api/endpoints/drives';
+	import { createDrive, updateDrivePolicies } from '$lib/api/endpoints/drives';
 	import {
 		ensureResolvers,
 		resolveRecipient,
 		searchRecipients,
 		type Recipient
 	} from '$lib/api/endpoints/recipients';
-	import type { Drive, DriveMember, User } from '$lib/api/types';
+	import type {
+		Drive,
+		DriveMember,
+		DrivePolicies,
+		DrivePoliciesPartial,
+		User
+	} from '$lib/api/types';
 	import Icon from '$lib/icons/Icon.svelte';
 	import Modal from '$lib/components/Modal.svelte';
 	import OwnerAvatarStack from '$lib/components/OwnerAvatarStack.svelte';
+	import PolicyList from '$lib/components/PolicyList.svelte';
+	import QuotaEditor from '$lib/components/QuotaEditor.svelte';
 	import UserVignette from '$lib/components/UserVignette.svelte';
 	import { t } from '$lib/i18n/index.svelte';
+	import { readPolicyBool } from '$lib/utils/drivePolicies';
 	import { session } from '$lib/stores/session.svelte';
 	import { drives as drivesStore } from '$lib/stores/drives.svelte';
 	import { ui } from '$lib/stores/ui.svelte';
@@ -97,7 +111,10 @@
 		if (hours < 24) return t('admin.time_hour_ago', { n: hours }, '{{n}} h ago');
 		const days = Math.round(hours / 24);
 		if (days < 30) return t('admin.time_day_ago', { n: days }, '{{n}} d ago');
-		return new Date(dateStr).toLocaleDateString();
+		// `toLocaleDateString()` constructs a fresh Intl.DateTimeFormat per
+		// call; the no-options cached formatter is the exact equivalent
+		// (both default to numeric year/month/day in the default locale).
+		return dateTimeFormatFor(undefined).format(new Date(dateStr));
 	}
 
 	/** Quota unit options (bytes per unit) for the quota/create modals. */
@@ -117,6 +134,41 @@
 	function resolveConfirm(ok: boolean) {
 		confirmState?.resolve(ok);
 		confirmState = null;
+	}
+
+	/* ── User-delete confirm modal ──
+	   Destructive-action guard: the admin must re-type the target
+	   user's email address to enable the Delete button. Prevents
+	   fat-finger deletion — a single accidental click on the wrong
+	   row won't wipe an account. The admin still bears final
+	   responsibility; this is UX friction, not authorization. */
+	let deleteUserModal = $state<{ userId: string; username: string; email: string } | null>(null);
+	let deleteUserEmailInput = $state('');
+	let deleteUserBusy = $state(false);
+	const deleteUserEmailMatches = $derived(
+		deleteUserModal !== null &&
+			deleteUserEmailInput.trim().toLowerCase() === deleteUserModal.email.toLowerCase()
+	);
+	function openDeleteUser(u: User) {
+		deleteUserModal = {
+			userId: u.id,
+			username: u.username || u.email,
+			email: u.email
+		};
+		deleteUserEmailInput = '';
+	}
+	async function confirmDeleteUser() {
+		if (!deleteUserModal || !deleteUserEmailMatches) return;
+		deleteUserBusy = true;
+		try {
+			await deleteUser(deleteUserModal.userId);
+			deleteUserModal = null;
+			await loadUsers();
+		} catch (e) {
+			reportError(e);
+		} finally {
+			deleteUserBusy = false;
+		}
 	}
 
 	type Tab = 'dashboard' | 'users' | 'drives' | 'mounts' | 'plugins' | 'oidc' | 'storage' | 'smtp';
@@ -648,13 +700,16 @@
 		quotaUnit: (1024 ** 3) as number
 	});
 
-	// Quota edit modal
+	// User-envelope quota edit modal state. Draft (unlimited flag,
+	// value, unit) lives inside <QuotaEditor>; the parent only tracks
+	// the subject (which user) and the current bytes to seed with.
 	let quotaModal = $state<{
 		userId: string;
 		username: string;
-		value: number;
-		unit: number;
+		initialBytes: number;
 	} | null>(null);
+	let quotaModalBusy = $state(false);
+	let quotaModalError = $state<string | null>(null);
 
 	// Reset-password modal
 	let resetModal = $state<{ userId: string; username: string } | null>(null);
@@ -792,22 +847,30 @@
 	}
 
 	function openQuota(u: User) {
+		quotaModalError = null;
 		quotaModal = {
 			userId: u.id,
 			username: u.username || u.email,
-			value:
-				u.storage_quota_bytes > 0 ? Math.round((u.storage_quota_bytes / 1024 ** 3) * 10) / 10 : 0,
-			unit: 1024 ** 3
+			initialBytes: u.storage_quota_bytes
 		};
 	}
-	async function saveQuota() {
+	// `unlimited` maps to 0 on the wire — that's the backend
+	// convention for the user envelope (`quota <= 0` short-circuit
+	// in `eval_user_envelope`). Encoding the "unlimited" concept
+	// happens here, so the shared <QuotaEditor> doesn't have to
+	// know about endpoint-specific magic values.
+	async function saveQuota(result: { unlimited: boolean; bytes: number }) {
 		if (!quotaModal) return;
+		quotaModalBusy = true;
+		quotaModalError = null;
 		try {
-			await setUserQuota(quotaModal.userId, Math.round(quotaModal.value * quotaModal.unit));
+			await setUserQuota(quotaModal.userId, result.unlimited ? 0 : result.bytes);
 			quotaModal = null;
 			await loadUsers();
 		} catch (e) {
-			reportError(e);
+			quotaModalError = errorMessage(e);
+		} finally {
+			quotaModalBusy = false;
 		}
 	}
 
@@ -836,16 +899,29 @@
 		}
 	}
 
-	async function removeUser(u: User) {
+	function removeUser(u: User) {
 		if (isSelf(u)) return;
+		openDeleteUser(u);
+	}
+
+	// External → internal promotion. Confirms first because the mutation
+	// provisions a home drive + flips the is_external flag; irreversible
+	// via the admin UI (there's no demote endpoint on purpose). Backend
+	// refuses when magic-link login is disabled — surfaced as a toast.
+	async function promoteExternal(u: User) {
+		if (!u.is_external) return;
 		if (
 			!(await showConfirm(
-				t('admin.confirm_delete_user', { name: u.username || u.email }, 'Delete user {{name}}?')
+				t(
+					'admin.confirm_promote_user',
+					{ name: u.username || u.email },
+					'Promote {{name}} to an internal user? This provisions a home drive and gives the account a normal storage envelope. The account keeps its identity; magic-link login stays the way in unless a password is set later.'
+				)
 			))
 		)
 			return;
 		try {
-			await deleteUser(u.id);
+			await promoteUserToInternal(u.id);
 			await loadUsers();
 		} catch (e) {
 			reportError(e);
@@ -915,6 +991,17 @@
 	// "still loading" — the stack treats undefined as no-owners-yet.
 	let driveMembers = $state<Record<string, DriveMember[]>>({});
 
+	// Owner user record for each PERSONAL drive, keyed by drive id.
+	// Personal drives have exactly one user-subject owner and their
+	// `d.quota_bytes` is null — the effective quota comes from the
+	// owner user's `storage_quota_bytes` envelope (see memory
+	// `project_user_envelope_quota_model`). We resolve the owner
+	// once at load time via the admin-scoped `/api/admin/users/{id}`
+	// endpoint so the Name column can show the username instead of
+	// the drive UUID, and the Quota column can display the envelope
+	// cap. Shared drives are absent from this map.
+	let personalDriveOwners = $state<Record<string, User>>({});
+
 	async function loadDrivesTab() {
 		drivesError = null;
 		try {
@@ -943,13 +1030,36 @@
 			})
 		);
 		driveMembers = nextMembers;
+
+		// Resolve owner users for personal drives — used by the Name
+		// column (username instead of UUID) and the Quota column
+		// (envelope cap instead of "∞" for a NULL drive.quota_bytes).
+		// getUserAdmin caches per-id at module scope, so N personal
+		// drives owned by the same user share one fetch. Runs after
+		// `driveMembers` is populated because the owner subject id
+		// comes from the first user-typed member of the drive.
+		const nextOwners: Record<string, User> = {};
+		await Promise.all(
+			drivesList
+				.filter((d) => d.kind === 'personal')
+				.map(async (d) => {
+					const ownerMember = nextMembers[d.id]?.find((m) => m.subject.type === 'user');
+					if (!ownerMember) return;
+					const user = await getUserAdmin(ownerMember.subject.id);
+					if (user) nextOwners[d.id] = user;
+				})
+		);
+		personalDriveOwners = nextOwners;
 	}
 
 	function driveKindLabel(d: Drive): string {
 		if (d.kind === 'shared') return t('admin.drive_kind_shared', 'Shared');
-		return d.default_for_user
-			? t('admin.drive_kind_personal_default', 'Personal (default)')
-			: t('admin.drive_kind_personal', 'Personal');
+		return t('admin.drive_kind_personal', 'Personal');
+	}
+	// The "(default)" annotation renders on a separate line under the
+	// kind badge so the Kind column stays narrow (users' request).
+	function driveDefaultSuffix(d: Drive): string | null {
+		return d.default_for_user ? t('admin.drive_kind_default_suffix', '(default)') : null;
 	}
 
 	function openDriveCreate() {
@@ -1106,6 +1216,172 @@
 			: []
 	);
 
+	// ── Manage-policies modal (D5 admin-only mutation) ─────────────────────
+	// Policies were owner-mutable in the original D5 design; the carve-out
+	// to admin-only fixed the self-policing-soft-cap hole (an owner could
+	// disable forbid_external_sharing, share, re-enable — net zero
+	// enforcement). The owner UI no longer surfaces policies at all; this
+	// modal is the only editor. See `docs/plan/drive.md` §8.
+	let managePoliciesDrive = $state<Drive | null>(null);
+	let managePoliciesDraft = $state<Required<DrivePoliciesPartial>>({
+		forbid_sharing: false,
+		forbid_external_sharing: false,
+		forbid_public_links: false,
+		forbid_cross_drive_move: false,
+		forbid_owner_role_change: false,
+		// §15 opt-in scope flags. Default personal drives ship with `true`
+		// on the wire (materialised by the DB-side create path + backfill
+		// migration), so `readPolicyBool` will surface the correct current
+		// state on modal open.
+		include_in_photo_index: false,
+		include_in_music_index: false,
+		read_only: false
+	});
+	let managePoliciesError = $state<string | null>(null);
+	let managePoliciesBusy = $state(false);
+
+	function openManagePolicies(d: Drive) {
+		managePoliciesDrive = d;
+		managePoliciesError = null;
+		const p = (d.policies ?? {}) as Record<string, unknown>;
+		managePoliciesDraft = {
+			forbid_sharing: readPolicyBool(p, 'forbid_sharing'),
+			forbid_external_sharing: readPolicyBool(p, 'forbid_external_sharing'),
+			forbid_public_links: readPolicyBool(p, 'forbid_public_links'),
+			forbid_cross_drive_move: readPolicyBool(p, 'forbid_cross_drive_move'),
+			forbid_owner_role_change: readPolicyBool(p, 'forbid_owner_role_change'),
+			include_in_photo_index: readPolicyBool(p, 'include_in_photo_index'),
+			include_in_music_index: readPolicyBool(p, 'include_in_music_index'),
+			read_only: readPolicyBool(p, 'read_only')
+		};
+	}
+
+	function closeManagePolicies() {
+		managePoliciesDrive = null;
+		managePoliciesError = null;
+	}
+
+	async function saveManagePolicies() {
+		if (!managePoliciesDrive) return;
+		managePoliciesBusy = true;
+		managePoliciesError = null;
+		try {
+			const merged: DrivePolicies = await updateDrivePolicies(
+				managePoliciesDrive.id,
+				managePoliciesDraft
+			);
+			// Refresh the drive row's policies in place so the next time
+			// the admin opens this modal they see the persisted state.
+			const driveId = managePoliciesDrive.id;
+			drivesList = drivesList.map((d) =>
+				d.id === driveId ? { ...d, policies: { ...d.policies, ...merged } } : d
+			);
+			// The shared `drivesStore` (feeds `/config/drive/{uuid}`, the
+			// sidebar picker, the breadcrumb) caches `GET /api/drives` with
+			// `loaded=true` after the first fetch — without this refresh
+			// call the admin's policy change wouldn't propagate to those
+			// surfaces until a full page reload. Sibling `requestDeleteDrive`
+			// does the same after `deleteDriveAdmin`.
+			//
+			// Fire-and-forget: the modal closes immediately; the picker
+			// re-renders in place when the promise settles a few ms later.
+			void drivesStore.refresh();
+			closeManagePolicies();
+		} catch (e) {
+			managePoliciesError = errorMessage(e);
+		} finally {
+			managePoliciesBusy = false;
+		}
+	}
+
+	// ─────────────────────────────────────────────────────────────
+	// Shared-drive quota edit modal.
+	//
+	// Personal drives are refused server-side (400) because their
+	// effective cap is the owner user's `storage_quota_bytes`
+	// envelope (memory `project_user_envelope_quota_model`). The
+	// action button in the table doesn't render for personal drives,
+	// so this state only feeds shared-drive PATCH calls.
+	//
+	// The draft (value, unit, unlimited toggle) lives inside the
+	// shared <QuotaEditor>; the parent tracks only the subject and
+	// current bytes.
+	// ─────────────────────────────────────────────────────────────
+	let driveQuotaModal = $state<{
+		driveId: string;
+		driveName: string;
+		initialBytes: number | null;
+	} | null>(null);
+	let driveQuotaError = $state<string | null>(null);
+	let driveQuotaBusy = $state(false);
+
+	function openDriveQuota(d: Drive) {
+		driveQuotaError = null;
+		driveQuotaModal = {
+			driveId: d.id,
+			driveName: d.name,
+			// `quota_bytes` is `number | null | undefined` on the DTO
+			// (optional + nullable). Both undefined and null map to
+			// unlimited — collapse to null for the modal.
+			initialBytes: d.quota_bytes ?? null
+		};
+	}
+
+	// `unlimited` maps to `null` on the wire for the drive endpoint
+	// (backend `Option::None` = "no cap") — distinct from the user
+	// envelope, which uses `0`. Both encodings live in their
+	// respective save callbacks, keeping <QuotaEditor> endpoint-
+	// agnostic.
+	async function saveDriveQuota(result: { unlimited: boolean; bytes: number }) {
+		if (!driveQuotaModal) return;
+		driveQuotaBusy = true;
+		driveQuotaError = null;
+		try {
+			const quota_bytes = result.unlimited ? null : result.bytes;
+			const persisted = await updateDriveQuota(driveQuotaModal.driveId, quota_bytes);
+			const driveId = driveQuotaModal.driveId;
+			drivesList = drivesList.map((d) => (d.id === driveId ? { ...d, quota_bytes: persisted } : d));
+			// Sibling surfaces (sidebar picker, breadcrumb) read the
+			// cached `GET /api/drives`. Mirrors the policies-modal
+			// pattern above.
+			void drivesStore.refresh();
+			driveQuotaModal = null;
+		} catch (e) {
+			driveQuotaError = errorMessage(e);
+		} finally {
+			driveQuotaBusy = false;
+		}
+	}
+
+	// Policy definitions live in `$lib/utils/drivePolicies` so the same
+	// list drives the admin "Manage policies" modal AND the read-only
+	// summary on `/config/drive/{uuid}`. Adding a policy is one literal-
+	// array push there + one field in `DrivePolicies` in `types.ts`.
+
+	// Admin-driven delete-drive flow (D3b). Guarded by the confirm modal
+	// because the action is destructive and irreversible. The backend
+	// refuses the default Personal drive (405) and any non-empty drive
+	// (409); we surface those as toasts rather than silently swallow.
+	async function requestDeleteDrive(d: Drive) {
+		const msg = t(
+			'admin.drive_delete_confirm',
+			{ name: d.name },
+			'Delete drive "{{name}}"? This cannot be undone.'
+		);
+		if (!(await showConfirm(msg))) return;
+		try {
+			await deleteDriveAdmin(d.id);
+			// Refresh the listing + the sidebar picker. Both have a cached
+			// view of this drive; without the refresh the row lingers
+			// until the next full reload.
+			await loadDrivesTab();
+			await drivesStore.refresh();
+			ui.notify(t('admin.drive_deleted', 'Drive deleted.'), 'success');
+		} catch (e) {
+			reportError(e);
+		}
+	}
+
 	async function submitDriveCreate(e: SubmitEvent) {
 		e.preventDefault();
 		const name = driveForm.name.trim();
@@ -1133,10 +1409,10 @@
 			});
 			driveCreateOpen = false;
 			await loadDrivesTab();
-			// The global drives store backs the sidebar picker; drop its cache
+			// The global drives store backs the sidebar picker; re-fetch it
 			// so the new drive shows up for every consumer (picker, breadcrumb,
 			// session bootstrap) without a page reload.
-			drivesStore.invalidate();
+			await drivesStore.refresh();
 			ui.notify(t('admin.drive_created', 'Drive created.'), 'success');
 		} catch (err) {
 			driveCreateError = errorMessage(err);
@@ -2045,16 +2321,50 @@
 								</div>
 							</td>
 							<td>
-								<span class="badge badge--{u.role === 'admin' ? 'admin' : 'user'}">
-									{#if u.role === 'admin'}<Icon name="shield-alt" />{/if}
-									{u.role}
-								</span>
+								<!-- Two badges (role + optional external) live in this
+								     cell. `.role-badges` prevents them from splitting
+								     across lines when the column narrows: nowrap + a
+								     tiny gap keeps them shoulder-to-shoulder, and each
+								     badge is `white-space: nowrap` so the badge label
+								     itself never wraps mid-word either. -->
+								<div class="role-badges">
+									<span class="badge badge--{u.role === 'admin' ? 'admin' : 'user'}">
+										{#if u.role === 'admin'}<Icon name="shield-alt" />{/if}
+										{u.role}
+									</span>
+									{#if u.is_external}
+										<!-- Origin flag, orthogonal to `role`. Grant-only
+										     accounts (magic-link / OCM) can never be admin
+										     (DB CHECK `users_external_not_admin`) so the two
+										     badges never collide in practice — but the
+										     "External" badge stacks after the role badge so a
+										     future rules change wouldn't hide either signal. -->
+										<span
+											class="badge badge--external"
+											title={t(
+												'admin.external_user_hint',
+												'Grant-only account (magic-link or OCM). Cannot be admin and has no storage envelope.'
+											)}
+										>
+											<Icon name="building-circle-xmark" />
+											{t('admin.external_user', 'external')}
+										</span>
+									{/if}
+								</div>
 							</td>
-							<td>
+							<!-- Auth cell — capped width. The OIDC provider label is
+							     free-form ("keycloak", "google-workspace", …) and
+							     drives the column arbitrarily wide when localized
+							     column headers ("Authentication" → "Authentification"
+							     in fr) also demand room. `.auth-cell` truncates the
+							     badge label with an ellipsis so the column stays
+							     narrow; the full provider stays reachable via the
+							     tooltip on the badge. -->
+							<td class="auth-cell">
 								{#if isOidcUser(u)}
 									<span class="badge badge--oidc" title={u.auth_provider}>
 										<Icon name="key" />
-										{u.auth_provider}
+										<span class="badge__label">{u.auth_provider}</span>
 									</span>
 								{:else}
 									<span class="badge badge--local">{t('admin.local', 'local')}</span>
@@ -2066,78 +2376,131 @@
 								</span>
 							</td>
 							<td>
-								<div class="quota-cell">
-									<div class="quota-bar">
-										<div
-											class="quota-fill"
-											class:quota-fill--warn={pct > 70}
-											class:quota-fill--danger={pct > 90}
-											style:width="{Math.min(pct, 100)}%"
-										></div>
+								{#if u.is_external}
+									<!-- External accounts have no storage envelope by
+									     design (DB CHECK `users_external_no_storage`
+									     enforces storage_quota_bytes = 0). Rendering the
+									     usage bar with `0 / 0` reads as "over quota"
+									     visually and is misleading; show an em-dash
+									     instead. -->
+									<span
+										class="muted"
+										title={t(
+											'admin.no_storage_for_external',
+											'External accounts have no storage envelope.'
+										)}>—</span
+									>
+								{:else}
+									<div class="quota-cell">
+										<div class="quota-bar">
+											<div
+												class="quota-fill"
+												class:quota-fill--warn={pct > 70}
+												class:quota-fill--danger={pct > 90}
+												style:width="{Math.min(pct, 100)}%"
+											></div>
+										</div>
+										<span class="muted">
+											{formatBytes(u.storage_used_bytes)} / {u.storage_quota_bytes > 0
+												? formatBytes(u.storage_quota_bytes)
+												: '∞'}
+										</span>
 									</div>
-									<span class="muted">
-										{formatBytes(u.storage_used_bytes)} / {u.storage_quota_bytes > 0
-											? formatBytes(u.storage_quota_bytes)
-											: '∞'}
-									</span>
-								</div>
+								{/if}
 							</td>
 							<td class="muted">{timeAgo(u.last_login_at)}</td>
-							<td class="actions">
-								<button
-									class="icon-btn"
-									data-testid={`admin-user-quota-${u.id}`}
-									title={t('admin.edit_quota_title', 'Edit quota')}
-									aria-label={t('admin.edit_quota_title', 'Edit quota')}
-									onclick={() => openQuota(u)}
-								>
-									<Icon name="box" />
-								</button>
-								{#if !isOidcUser(u)}
+							<td>
+								<!-- Fixed 5-column grid keeps icons aligned across
+								     rows even when a row's user kind skips some
+								     actions (external users have no envelope so
+								     no quota edit, and no password so no reset;
+								     internals never get a promote). Inapplicable
+								     actions render as invisible placeholders. -->
+								<div class="actions actions--user">
+									<!-- Slot 1: quota (internal) OR promote (external). -->
+									{#if u.is_external}
+										<button
+											class="icon-btn icon-btn--success"
+											data-testid={`admin-user-promote-${u.id}`}
+											title={t('admin.promote_to_internal_title', 'Promote to internal user')}
+											aria-label={t('admin.promote_to_internal_title', 'Promote to internal user')}
+											onclick={() => promoteExternal(u)}
+										>
+											<Icon name="user-plus" />
+										</button>
+									{:else}
+										<button
+											class="icon-btn"
+											data-testid={`admin-user-quota-${u.id}`}
+											title={t('admin.edit_quota_title', 'Edit quota')}
+											aria-label={t('admin.edit_quota_title', 'Edit quota')}
+											onclick={() => openQuota(u)}
+										>
+											<Icon name="gauge-simple-high" />
+										</button>
+									{/if}
+									<!-- Slot 2: reset password (local internal only —
+									     OIDC and external accounts have no password
+									     to reset). Placeholder otherwise. -->
+									{#if !isOidcUser(u) && !u.is_external}
+										<button
+											class="icon-btn"
+											data-testid={`admin-user-reset-password-${u.id}`}
+											title={t('admin.reset_password_title', 'Reset password')}
+											aria-label={t('admin.reset_password_title', 'Reset password')}
+											onclick={() => openReset(u)}
+										>
+											<Icon name="key" />
+										</button>
+									{:else}
+										<span class="icon-btn icon-btn--placeholder" aria-hidden="true"></span>
+									{/if}
+									<!-- Slot 3: role toggle. Hidden for externals — an
+									     external user cannot be admin (backend guard in
+									     `change_user_role` + DB CHECK
+									     `users_external_not_admin`). Promotion to
+									     internal is offered separately in slot 1. -->
+									{#if !u.is_external}
+										<button
+											class="icon-btn"
+											data-testid={`admin-user-toggle-role-${u.id}`}
+											title={t('admin.toggle_role_title', 'Toggle admin role')}
+											aria-label={t('admin.toggle_role_title', 'Toggle admin role')}
+											disabled={isSelf(u)}
+											onclick={() => toggleRole(u)}
+										>
+											<Icon name={u.role === 'admin' ? 'user' : 'crown'} />
+										</button>
+									{:else}
+										<span class="icon-btn icon-btn--placeholder" aria-hidden="true"></span>
+									{/if}
+									<!-- Slot 4: activate/deactivate. -->
 									<button
-										class="icon-btn"
-										data-testid={`admin-user-reset-password-${u.id}`}
-										title={t('admin.reset_password_title', 'Reset password')}
-										aria-label={t('admin.reset_password_title', 'Reset password')}
-										onclick={() => openReset(u)}
+										class="icon-btn {u.active ? 'icon-btn--danger' : 'icon-btn--success'}"
+										data-testid={`admin-user-toggle-active-${u.id}`}
+										title={u.active
+											? t('admin.deactivate_title', 'Deactivate')
+											: t('admin.activate_title', 'Activate')}
+										aria-label={u.active
+											? t('admin.deactivate_title', 'Deactivate')
+											: t('admin.activate_title', 'Activate')}
+										disabled={isSelf(u) && u.active}
+										onclick={() => toggleActive(u)}
 									>
-										<Icon name="key" />
+										<Icon name={u.active ? 'ban' : 'check'} />
 									</button>
-								{/if}
-								<button
-									class="icon-btn"
-									data-testid={`admin-user-toggle-role-${u.id}`}
-									title={t('admin.toggle_role_title', 'Toggle admin role')}
-									aria-label={t('admin.toggle_role_title', 'Toggle admin role')}
-									disabled={isSelf(u)}
-									onclick={() => toggleRole(u)}
-								>
-									<Icon name={u.role === 'admin' ? 'user' : 'crown'} />
-								</button>
-								<button
-									class="icon-btn {u.active ? 'icon-btn--danger' : 'icon-btn--success'}"
-									data-testid={`admin-user-toggle-active-${u.id}`}
-									title={u.active
-										? t('admin.deactivate_title', 'Deactivate')
-										: t('admin.activate_title', 'Activate')}
-									aria-label={u.active
-										? t('admin.deactivate_title', 'Deactivate')
-										: t('admin.activate_title', 'Activate')}
-									disabled={isSelf(u) && u.active}
-									onclick={() => toggleActive(u)}
-								>
-									<Icon name={u.active ? 'ban' : 'check'} />
-								</button>
-								<button
-									class="icon-btn icon-btn--danger"
-									data-testid={`admin-user-delete-${u.id}`}
-									title={t('admin.delete_title', 'Delete user')}
-									aria-label={t('admin.delete_title', 'Delete user')}
-									disabled={isSelf(u)}
-									onclick={() => removeUser(u)}
-								>
-									<Icon name="trash-alt" />
-								</button>
+									<!-- Slot 5: delete. -->
+									<button
+										class="icon-btn icon-btn--danger"
+										data-testid={`admin-user-delete-${u.id}`}
+										title={t('admin.delete_title', 'Delete user')}
+										aria-label={t('admin.delete_title', 'Delete user')}
+										disabled={isSelf(u)}
+										onclick={() => removeUser(u)}
+									>
+										<Icon name="trash-alt" />
+									</button>
+								</div>
 							</td>
 						</tr>
 					{/each}
@@ -2269,21 +2632,49 @@
 				</thead>
 				<tbody>
 					{#each drivesList as d (d.id)}
+						{@const owner = d.kind === 'personal' ? personalDriveOwners[d.id] : undefined}
+						<!--
+						  Effective quota:
+						  - Shared drive: `d.quota_bytes` (null → unlimited, shown as ∞).
+						  - Personal drive: the owner user's `storage_quota_bytes`
+						    envelope caps the sum of used_bytes across their personal
+						    drives (per memory `project_user_envelope_quota_model`).
+						    `d.quota_bytes` is always null for personal drives so we
+						    fall back to the owner's cap; 0 also means "no limit"
+						    (backend convention — see `User.storage_quota_bytes` doc).
+						-->
+						{@const effectiveQuota =
+							d.kind === 'personal'
+								? owner && owner.storage_quota_bytes > 0
+									? owner.storage_quota_bytes
+									: null
+								: d.quota_bytes && d.quota_bytes > 0
+									? d.quota_bytes
+									: null}
 						{@const pct =
-							d.quota_bytes && d.quota_bytes > 0
-								? Math.min(100, (d.used_bytes / d.quota_bytes) * 100)
-								: null}
+							effectiveQuota !== null ? Math.min(100, (d.used_bytes / effectiveQuota) * 100) : null}
 						<tr>
 							<td>
 								<div class="user-cell">
 									<strong>{d.name}</strong>
-									<span class="muted"><code>{d.id}</code></span>
+									{#if d.kind === 'personal'}
+										{#if owner}
+											<span class="muted">{owner.username ?? owner.email}</span>
+										{:else}
+											<span class="muted">{t('common.loading', 'Loading…')}</span>
+										{/if}
+									{/if}
 								</div>
 							</td>
 							<td>
-								<span class="badge badge--{d.kind === 'shared' ? 'admin' : 'user'}">
-									{driveKindLabel(d)}
-								</span>
+								<div class="drive-kind-cell">
+									<span class="badge badge--{d.kind === 'shared' ? 'admin' : 'user'}">
+										{driveKindLabel(d)}
+									</span>
+									{#if driveDefaultSuffix(d)}
+										<span class="muted drive-kind-cell__suffix">{driveDefaultSuffix(d)}</span>
+									{/if}
+								</div>
 							</td>
 							<td>
 								{#if driveMembers[d.id]}
@@ -2305,8 +2696,8 @@
 										</div>
 									{/if}
 									<span class="muted">
-										{formatBytes(d.used_bytes)} / {d.quota_bytes && d.quota_bytes > 0
-											? formatBytes(d.quota_bytes)
+										{formatBytes(d.used_bytes)} / {effectiveQuota !== null
+											? formatBytes(effectiveQuota)
 											: '∞'}
 									</span>
 								</div>
@@ -2317,7 +2708,13 @@
 								     <td> stays a plain table cell so its baseline +
 								     bottom-border align with the rest of the row even on
 								     personal-drive rows where the wrapper is empty. -->
-								<div class="actions">
+								<div class="actions actions--drive">
+									<!-- Each action sits in a fixed grid column so icons
+									     line up across rows even when the row's drive
+									     kind doesn't support some of them (personal drives
+									     have no owner roster; default drives can't be
+									     deleted). Inapplicable actions render as invisible
+									     placeholders to reserve their column. -->
 									{#if d.kind === 'shared'}
 										<button
 											class="icon-btn"
@@ -2328,6 +2725,59 @@
 										>
 											<Icon name="users-cog" />
 										</button>
+									{:else}
+										<span class="icon-btn icon-btn--placeholder" aria-hidden="true"></span>
+									{/if}
+									<!-- D5 policy editor — admin-only mutation (the
+									     owner UI no longer surfaces policies at all).
+									     Available on every drive kind including personal,
+									     so the operator can lock a personal drive's
+									     external-sharing surface from outside. -->
+									<button
+										class="icon-btn"
+										data-testid={`admin-drive-manage-policies-${d.id}`}
+										title={t('admin.drive_manage_policies', 'Manage policies')}
+										aria-label={t('admin.drive_manage_policies', 'Manage policies')}
+										onclick={() => openManagePolicies(d)}
+									>
+										<Icon name="shield-alt" />
+									</button>
+									<!-- Shared-drive quota edit. Personal drives use the
+									     owner user's `storage_quota_bytes` envelope; the
+									     backend refuses PATCH /api/drives/{id}/quota on a
+									     personal drive with 400 (see the service-layer
+									     guard and Step 25 of drive_quota.hurl). Render an
+									     invisible placeholder on personal rows so the
+									     column stays aligned. -->
+									{#if d.kind === 'shared'}
+										<button
+											class="icon-btn"
+											data-testid={`admin-drive-edit-quota-${d.id}`}
+											title={t('admin.drive_edit_quota', 'Edit quota')}
+											aria-label={t('admin.drive_edit_quota', 'Edit quota')}
+											onclick={() => openDriveQuota(d)}
+										>
+											<Icon name="gauge-simple-high" />
+										</button>
+									{:else}
+										<span class="icon-btn icon-btn--placeholder" aria-hidden="true"></span>
+									{/if}
+									<!-- Default-personal drives can never be deleted
+									     (backend returns 405). Render an invisible
+									     placeholder so the row's columns still line up
+									     with the deletable rows above and below. -->
+									{#if !d.default_for_user}
+										<button
+											class="icon-btn icon-btn--danger"
+											data-testid={`admin-drive-delete-${d.id}`}
+											title={t('admin.drive_delete', 'Delete drive')}
+											aria-label={t('admin.drive_delete', 'Delete drive')}
+											onclick={() => requestDeleteDrive(d)}
+										>
+											<Icon name="trash-alt" />
+										</button>
+									{:else}
+										<span class="icon-btn icon-btn--placeholder" aria-hidden="true"></span>
 									{/if}
 								</div>
 							</td>
@@ -2739,58 +3189,90 @@
 	{/snippet}
 </Modal>
 
-<!-- Quota edit modal -->
+<!-- Manage-policies modal (D5 admin-only). Toggles for the five known
+     policy keys; unknown keys on the JSONB bag are preserved by the
+     backend merge but not surfaced here (forward-compat is at the
+     server). Save → PATCH /api/drives/{id}/policies. -->
 <Modal
-	open={quotaModal !== null}
-	title={t('admin.edit_quota_title', 'Edit quota')}
-	onclose={() => (quotaModal = null)}
+	open={managePoliciesDrive !== null}
+	title={managePoliciesDrive
+		? t(
+				'admin.drive_manage_policies_for',
+				{ name: managePoliciesDrive.name },
+				'Manage policies — {{name}}'
+			)
+		: t('admin.drive_manage_policies', 'Manage policies')}
+	onclose={closeManagePolicies}
 >
-	{#if quotaModal}
-		<form
-			id="quota-form"
-			class="form"
-			data-testid="admin-quota-form"
-			onsubmit={(e) => {
-				e.preventDefault();
-				void saveQuota();
-			}}
-		>
+	{#if managePoliciesDrive}
+		<div class="form">
 			<p class="muted">
-				{t('admin.quota_for', 'Quota for')} <strong>{quotaModal.username}</strong>
+				{t(
+					'admin.drive_manage_policies_help',
+					'Policies are admin-only — drive owners cannot mutate them. Each toggle controls one enforcement gate.'
+				)}
 			</p>
-			<label
-				><span>{t('admin.quota', 'Quota')}</span>
-				<div class="quota-input">
-					<input
-						type="number"
-						data-testid="admin-quota-value-input"
-						min="0"
-						step="0.1"
-						bind:value={quotaModal.value}
-					/>
-					<select bind:value={quotaModal.unit} data-testid="admin-quota-unit-select">
-						{#each QUOTA_UNITS as unit (unit.label)}<option value={unit.value}>{unit.label}</option
-							>{/each}
-					</select>
-				</div>
-				<span class="muted">{t('admin.quota_unlimited_hint', '0 = unlimited')}</span></label
-			>
-		</form>
+			<PolicyList
+				values={managePoliciesDraft}
+				busy={managePoliciesBusy}
+				testIdPrefix="admin-policy"
+				onchange={(key, next) => {
+					managePoliciesDraft[key] = next;
+				}}
+			/>
+			{#if managePoliciesError}
+				<p class="status--error">{managePoliciesError}</p>
+			{/if}
+		</div>
 	{/if}
 	{#snippet footer()}
-		<button class="btn" data-testid="admin-quota-cancel-btn" onclick={() => (quotaModal = null)}
-			>{t('common.cancel', 'Cancel')}</button
-		>
 		<button
-			class="btn btn--primary"
-			type="submit"
-			form="quota-form"
-			data-testid="admin-quota-save-btn"
+			class="btn"
+			data-testid="admin-manage-policies-cancel-btn"
+			onclick={closeManagePolicies}
+			disabled={managePoliciesBusy}
 		>
-			{t('common.save', 'Save')}
+			{t('common.cancel', 'Cancel')}
+		</button>
+		<button
+			class="btn btn-primary"
+			data-testid="admin-manage-policies-save-btn"
+			onclick={saveManagePolicies}
+			disabled={managePoliciesBusy}
+		>
+			{managePoliciesBusy ? t('common.saving', 'Saving…') : t('common.save', 'Save')}
 		</button>
 	{/snippet}
 </Modal>
+
+<!-- User-envelope quota edit — uses the shared <QuotaEditor>.
+     "Unlimited" checkbox maps to 0 on the wire; positive value * unit
+     is sent verbatim to `setUserQuota`. -->
+<QuotaEditor
+	open={quotaModal !== null}
+	title={t('admin.edit_quota_title', 'Edit quota')}
+	subjectName={quotaModal?.username ?? ''}
+	initialBytes={quotaModal?.initialBytes ?? 0}
+	busy={quotaModalBusy}
+	error={quotaModalError}
+	testIdPrefix="admin-user-quota"
+	onclose={() => (quotaModal = null)}
+	onsave={saveQuota}
+/>
+
+<!-- Shared-drive quota edit — same component, different endpoint.
+     "Unlimited" maps to `null` on the wire (see saveDriveQuota). -->
+<QuotaEditor
+	open={driveQuotaModal !== null}
+	title={t('admin.drive_edit_quota', 'Edit quota')}
+	subjectName={driveQuotaModal?.driveName ?? ''}
+	initialBytes={driveQuotaModal?.initialBytes ?? null}
+	busy={driveQuotaBusy}
+	error={driveQuotaError}
+	testIdPrefix="admin-drive-quota"
+	onclose={() => (driveQuotaModal = null)}
+	onsave={saveDriveQuota}
+/>
 
 <!-- Reset-password modal -->
 <Modal
@@ -2835,6 +3317,73 @@
 			disabled={resetting}
 		>
 			{resetting ? t('admin.resetting', 'Resetting…') : t('admin.reset_btn', 'Reset')}
+		</button>
+	{/snippet}
+</Modal>
+
+<!-- Delete-user confirmation modal — typed-email gate. The Delete
+     button stays disabled until the admin re-types the target's
+     email address, matching case-insensitively. Extra friction on a
+     destructive, irreversible action. -->
+<Modal
+	open={deleteUserModal !== null}
+	title={t('admin.delete_user_title', 'Delete user')}
+	onclose={() => (deleteUserModal = null)}
+>
+	{#if deleteUserModal}
+		<form
+			id="delete-user-form"
+			class="form"
+			data-testid="admin-delete-user-form"
+			onsubmit={(e) => {
+				e.preventDefault();
+				void confirmDeleteUser();
+			}}
+		>
+			<p>
+				{t(
+					'admin.delete_user_warning',
+					{ name: deleteUserModal.username },
+					'You are about to permanently delete "{{name}}". This will remove the account, revoke every session, and reap the personal drive. This cannot be undone.'
+				)}
+			</p>
+			<label>
+				<span>
+					{t(
+						'admin.delete_user_confirm_hint',
+						{ email: deleteUserModal.email },
+						'To confirm, type the account email below: {{email}}'
+					)}
+				</span>
+				<input
+					type="email"
+					data-testid="admin-delete-user-email-input"
+					autocomplete="off"
+					bind:value={deleteUserEmailInput}
+					placeholder={deleteUserModal.email}
+					disabled={deleteUserBusy}
+					required
+				/>
+			</label>
+		</form>
+	{/if}
+	{#snippet footer()}
+		<button
+			class="btn"
+			data-testid="admin-delete-user-cancel-btn"
+			onclick={() => (deleteUserModal = null)}
+			disabled={deleteUserBusy}
+		>
+			{t('common.cancel', 'Cancel')}
+		</button>
+		<button
+			class="btn btn--danger"
+			type="submit"
+			form="delete-user-form"
+			data-testid="admin-delete-user-confirm-btn"
+			disabled={!deleteUserEmailMatches || deleteUserBusy}
+		>
+			{deleteUserBusy ? t('admin.deleting', 'Deleting…') : t('admin.delete_title', 'Delete user')}
 		</button>
 	{/snippet}
 </Modal>
@@ -3240,6 +3789,50 @@
 		text-transform: uppercase;
 	}
 
+	/* External / grant-only account marker. Sibling of `.badge--user`
+	   in the same cell so the two stack horizontally; the accent
+	   colour reuses `--color-warning-*` because "external" is the
+	   same "attention needed" family as "you". */
+	.badge--external {
+		background: var(--color-warning-bg);
+		color: var(--color-warning-text);
+		text-transform: uppercase;
+	}
+
+	/* Wrapper for the (role + optional external) badge pair in the
+	   users table. Row-flex + nowrap keeps the two on a single line
+	   when the column narrows; the sibling badges themselves also
+	   set `white-space: nowrap` so the ".EXTERNAL" label never
+	   splits mid-word either. */
+	.role-badges {
+		display: flex;
+		flex-flow: row nowrap;
+		align-items: center;
+		gap: var(--space-1, 0.25rem);
+	}
+
+	.role-badges .badge {
+		white-space: nowrap;
+	}
+
+	/* Authentication column. The OIDC provider label is free-form
+	   and can widen the column arbitrarily on hosts that use long
+	   identifiers ("google-workspace-prod"). Cap the column width
+	   and ellipsis the label so the row layout stays balanced; the
+	   full provider is still reachable via the badge tooltip. */
+	.auth-cell {
+		max-width: 12ch;
+	}
+
+	.auth-cell .badge__label {
+		display: inline-block;
+		max-width: 8ch;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		vertical-align: bottom;
+	}
+
 	/* Enabled/disabled feature flag indicator on the dashboard cards. */
 	.ds-flag {
 		font-size: 1.125rem;
@@ -3596,6 +4189,26 @@
 		border-color: transparent;
 	}
 
+	/* Destructive-action button. Kept red once enabled so the visual
+	   weight of the action doesn't dilute when the typed-email gate
+	   unlocks it — dimming to opacity only when disabled, not
+	   swapping the palette. Used by the delete-user modal's Delete
+	   button. */
+	.btn--danger {
+		background: var(--color-error-text);
+		color: var(--color-text-light);
+		border-color: transparent;
+	}
+
+	.btn--danger:hover:not(:disabled) {
+		filter: brightness(0.92);
+	}
+
+	.btn--danger:disabled {
+		opacity: 0.55;
+		cursor: not-allowed;
+	}
+
 	.status {
 		color: var(--color-text-muted);
 		padding: 2rem 0;
@@ -3723,5 +4336,61 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+
+	/* Policy list styles moved to `PolicyList.svelte`. The modal now
+	   embeds `<PolicyList bind:values={managePoliciesDraft} … />` and the
+	   read-only summary on `/config/drive/{uuid}` reuses the same
+	   component. */
+
+	/* Drives table action cell — same shape as `.actions` plus a fixed
+	   3-column grid so the [users] [policies] [delete] icons line up
+	   vertically across rows regardless of which actions a given drive
+	   supports. Inapplicable actions render as invisible placeholders
+	   (see `.icon-btn--placeholder`). */
+	/* Users tab actions cell — five fixed slots so icons stay column-
+	   aligned across rows even when a row skips some actions (external
+	   users skip quota-edit + reset-password; internals never get the
+	   promote button). Prevents the last icon from wrapping to a new
+	   line when a placeholder + all five buttons would together push
+	   past the cell width. */
+	.actions--user {
+		display: grid;
+		grid-template-columns: repeat(5, auto);
+		justify-content: end;
+		align-items: center;
+		gap: var(--space-1, 0.25rem);
+	}
+
+	.actions--drive {
+		display: grid;
+		/* Four action slots per row: manage-owners, policies, edit-
+		   quota, delete. Fixed columns keep icons aligned across
+		   rows even when a row renders placeholders for
+		   inapplicable actions (e.g. personal drives have no
+		   owners roster). */
+		grid-template-columns: repeat(4, auto);
+		justify-content: end;
+		align-items: center;
+	}
+
+	.drive-kind-cell {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 0.15rem;
+	}
+
+	.drive-kind-cell__suffix {
+		font-size: 0.85em;
+	}
+
+	.icon-btn--placeholder {
+		/* Reserves the column width without rendering anything
+		   interactive. `visibility: hidden` keeps layout intact;
+		   pointer-events:none stops accidental focus from keyboard
+		   nav. */
+		visibility: hidden;
+		pointer-events: none;
 	}
 </style>

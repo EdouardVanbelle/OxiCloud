@@ -67,7 +67,7 @@
 <svelte:head><title>{view.title} · OxiCloud</title></svelte:head>
 
 <main class="nc-status">
-	<Icon name="ban" class="nc-status__icon nc-status__icon--err" />
+	<Icon name="exclamation-circle" class="nc-status__icon nc-status__icon--err" />
 	<h1>{view.title}</h1>
 	<p>{view.message}</p>
 	<button
@@ -80,7 +80,13 @@
 
 <style>
 	.nc-status {
-		min-height: 100vh;
+		/* `base/reset.css` sets `body { display: flex }`. Public
+		   `/nextcloud/*` routes render children directly (bypassing
+		   AppShell), so <main> is a flex item on the body's row axis
+		   and needs to claim the full slot for its own centering to
+		   land in the viewport middle. */
+		flex: 1;
+		min-height: 100dvh;
 		display: flex;
 		flex-direction: column;
 		align-items: center;
@@ -95,7 +101,12 @@
 	}
 
 	:global(.nc-status__icon--err) {
-		color: var(--color-danger-text);
+		/* `--color-danger-text` is white — it's the foreground for text
+		   sitting on a red button bg, not the standalone red glyph
+		   colour. `--color-error-text` is the light-dark(...) red pair
+		   designed for standalone use on the page background: darker
+		   red in light mode, softer coral in dark mode. */
+		color: var(--color-error-text);
 	}
 
 	.nc-status__action {

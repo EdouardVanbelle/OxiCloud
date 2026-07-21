@@ -1,14 +1,43 @@
 use axum::{
     extract::{Request, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use base64::Engine;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
+use crate::application::dtos::folder_dto::FolderDto;
 use crate::common::di::AppState;
 use crate::interfaces::middleware::auth::CurrentUser;
+
+/// Markerless-chroot cache: default-drive root folder id → `FolderDto`.
+///
+/// This middleware wraps EVERY protected NextCloud route (DAV files,
+/// per-chunk uploads, trashbin, previews, avatars, OCS polls). With the
+/// app-password verification already cached, the chroot resolution was the
+/// last per-request DB work: `find_default_for_user` (now cached in
+/// `DrivePgRepository`) plus this folder-by-PK fetch. A desktop sync run
+/// issues hundreds of these per minute for a value that changes only on a
+/// root-folder rename — the 30 s TTL bounds that staleness (mirrors
+/// `drive_role_cache` / the default-drive cache; measured in
+/// `benches/CHROOT-CACHE.md`).
+///
+/// Only the MARKERLESS branch is cached: it targets the caller's own
+/// default drive root, so no per-request authorization decision is being
+/// skipped. The drive-marker branch keeps its `get_folder_with_perms`
+/// check on every request.
+// `Arc<FolderDto>` values: a hit hands back a refcount bump instead of a
+// deep clone of the DTO's ~5 owned Strings (moka's `get` clones `V`), and
+// the same `Arc` then rides inside `NcSession` for the whole request.
+static NC_CHROOT_CACHE: LazyLock<moka::sync::Cache<uuid::Uuid, Arc<FolderDto>>> =
+    LazyLock::new(|| {
+        moka::sync::Cache::builder()
+            .max_capacity(100_000)
+            .time_to_live(Duration::from_secs(30))
+            .build()
+    });
 
 #[derive(Debug, thiserror::Error)]
 pub enum NextcloudAuthError {
@@ -41,13 +70,16 @@ impl IntoResponse for NextcloudAuthError {
 
 pub async fn basic_auth_middleware(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     mut request: Request,
     next: Next,
 ) -> Result<Response, NextcloudAuthError> {
     tracing::debug!("[NC] {} {}", request.method(), request.uri());
 
-    let auth_header = headers
+    // Borrow the Authorization header directly rather than cloning the whole
+    // HeaderMap per NC sync request; the borrow ends at `parse_basic_auth`
+    // below, before any request mutation (benches/ROUND14.md §A4).
+    let auth_header = request
+        .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| {
@@ -77,7 +109,12 @@ pub async fn basic_auth_middleware(
     // at the auth boundary rather than treating them as "missing
     // marker" — they are unambiguous typos that would otherwise
     // silently fall into a different code path.
-    let (username, drive_marker): (String, Option<String>) = match raw_username.split_once('~') {
+    // Borrow the prefix / marker out of the already-owned `raw_username`
+    // (`split_once` yields `&str` slices) instead of allocating a duplicate
+    // `String` per request — `username` is only ever passed by reference, and
+    // `raw_username` outlives every use before it moves into `NcSession`
+    // (benches/ROUND29.md §E).
+    let (username, drive_marker): (&str, Option<&str>) = match raw_username.split_once('~') {
         Some(("", _)) => {
             tracing::warn!(
                 "[NC] 401 malformed composite username (empty prefix): {}",
@@ -92,15 +129,15 @@ pub async fn basic_auth_middleware(
             );
             return Err(NextcloudAuthError::Unauthorized);
         }
-        Some((u, m)) => (u.to_string(), Some(m.to_string())),
-        None => (raw_username.clone(), None),
+        Some((u, m)) => (u, Some(m)),
+        None => (raw_username.as_str(), None),
     };
 
     // Check account lockout before attempting password verification (saves CPU).
     // The lockout is per (account, IP), see #323 for rationale.
     let client_ip = crate::interfaces::middleware::rate_limit::extract_client_ip(&request);
     if let Some(auth_svc) = state.auth_service.as_ref()
-        && let Err(secs) = auth_svc.login_lockout.check(&username, &client_ip)
+        && let Err(secs) = auth_svc.login_lockout.check(username, &client_ip)
     {
         tracing::warn!(
             username = %username,
@@ -118,13 +155,13 @@ pub async fn basic_auth_middleware(
 
     match nextcloud
         .app_passwords
-        .verify_basic_auth(&username, &password)
+        .verify_basic_auth(username, &password)
         .await
     {
         Ok((user_id, uname, email, role)) => {
             // Reset lockout counter on success
             if let Some(auth_svc) = state.auth_service.as_ref() {
-                auth_svc.login_lockout.record_success(&username, &client_ip);
+                auth_svc.login_lockout.record_success(username, &client_ip);
             }
             // External users must never authenticate against the NC
             // surface — that whole subtree (WebDAV files, uploads,
@@ -159,13 +196,19 @@ pub async fn basic_auth_middleware(
             // request would appear in the logs with `user_id=-`,
             // making it harder to correlate WebDAV / OCS activity to
             // a specific principal.
-            tracing::Span::current().record("user_id", user_id.to_string());
-            let current_user = CurrentUser {
+            // `field::display` renders lazily into the subscriber's buffer —
+            // no per-request `to_string` (mirrors the JWT path since ROUND5).
+            tracing::Span::current().record("user_id", tracing::field::display(user_id));
+            // One shared identity: the same `Arc` serves the
+            // `Arc<CurrentUser>` extension AND `NcSession.user` (the old
+            // code built the struct, cloned it for the extension, then
+            // moved the original — 2-3 String allocs per request).
+            let current_user = Arc::new(CurrentUser {
                 id: user_id,
                 username: uname,
                 email,
                 role,
-            };
+            });
 
             // ── Resolve chroot from the Basic Auth drive marker ─────
             // No marker → caller's default personal drive's root folder
@@ -184,19 +227,32 @@ pub async fn basic_auth_middleware(
             // is the right one: name-independent, secondary-drive-safe.
             use crate::application::ports::folder_ports::FolderUseCase;
             use crate::domain::repositories::drive_repository::DriveRepository;
-            let chroot = match drive_marker.as_deref() {
+            let chroot = match drive_marker {
                 None => {
                     match state
                         .drive_repo
                         .find_default_for_user(current_user.id)
                         .await
                     {
-                        Ok(drive_with_name) => state
-                            .applications
-                            .folder_service
-                            .get_folder(&drive_with_name.drive.root_folder_id.to_string())
-                            .await
-                            .ok(),
+                        Ok(drive_with_name) => {
+                            let root_id = drive_with_name.drive.root_folder_id;
+                            match NC_CHROOT_CACHE.get(&root_id) {
+                                Some(cached) => Some(cached),
+                                None => {
+                                    let fetched = state
+                                        .applications
+                                        .folder_service
+                                        .get_folder(&root_id.to_string())
+                                        .await
+                                        .ok()
+                                        .map(Arc::new);
+                                    if let Some(f) = &fetched {
+                                        NC_CHROOT_CACHE.insert(root_id, Arc::clone(f));
+                                    }
+                                    fetched
+                                }
+                            }
+                        }
                         Err(_) => None,
                     }
                 }
@@ -205,7 +261,8 @@ pub async fn basic_auth_middleware(
                     .folder_service
                     .get_folder_with_perms(folder_id, current_user.id)
                     .await
-                    .ok(),
+                    .ok()
+                    .map(Arc::new),
             };
             if chroot.is_none() {
                 tracing::warn!(
@@ -216,31 +273,26 @@ pub async fn basic_auth_middleware(
                 return Err(NextcloudAuthError::Unauthorized);
             }
 
-            request
-                .extensions_mut()
-                .insert(Arc::new(current_user.clone()));
+            // Record from the local before it moves into the session —
+            // the old code re-read the just-inserted extension and paid a
+            // `to_string` for the span value.
+            if let Some(c) = &chroot {
+                tracing::Span::current().record("chroot_id", tracing::field::display(&c.id));
+            }
+            request.extensions_mut().insert(Arc::clone(&current_user));
             request.extensions_mut().insert(Arc::new(
                 crate::interfaces::nextcloud::session::NcSession {
                     user: current_user,
-                    raw_username: raw_username.clone(),
+                    raw_username,
                     chroot,
                 },
             ));
-            tracing::Span::current().record(
-                "chroot_id",
-                request
-                    .extensions()
-                    .get::<Arc<crate::interfaces::nextcloud::session::NcSession>>()
-                    .and_then(|s| s.chroot.as_ref())
-                    .map(|c| c.id.to_string())
-                    .unwrap_or_default(),
-            );
             Ok(next.run(request).await)
         }
         Err(_) => {
             // Record failed attempt for lockout tracking
             if let Some(auth_svc) = state.auth_service.as_ref() {
-                auth_svc.login_lockout.record_failure(&username, &client_ip);
+                auth_svc.login_lockout.record_failure(username, &client_ip);
             }
             Err(NextcloudAuthError::Unauthorized)
         }

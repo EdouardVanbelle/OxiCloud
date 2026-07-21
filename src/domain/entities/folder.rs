@@ -1,11 +1,34 @@
 use uuid::Uuid;
 
 use crate::domain::services::path_service::{
-    StoragePath, normalize_storage_name, validate_storage_name,
+    StoragePath, normalize_storage_name_owned, validate_storage_name,
 };
 
 // Re-export entity errors from the centralized module
 pub use super::entity_errors::{FolderError, FolderResult};
+
+/// Owned parts of a [`Folder`] entity, produced by [`Folder::into_parts()`].
+///
+/// Consuming a `Folder` into `FolderParts` **moves** every field without
+/// cloning, eliminating the 3-4 heap allocations that previously occurred
+/// when converting `Folder → FolderDto` via `.to_string()` on each getter.
+/// Mirrors [`super::file::FileParts`].
+pub struct FolderParts {
+    pub id: String,
+    pub name: String,
+    pub storage_path: StoragePath,
+    pub parent_id: Option<String>,
+    /// Drive that owns this folder. See [`Folder::drive_id`].
+    pub drive_id: Uuid,
+    pub created_at: u64,
+    pub modified_at: u64,
+    /// Descendant-rollup timestamp. See [`Folder::tree_modified_at`].
+    pub tree_modified_at: u64,
+    /// §14 provenance: original creator. See [`Folder::created_by`].
+    pub created_by: Option<Uuid>,
+    /// §14 provenance: most recent mutator. See [`Folder::updated_by`].
+    pub updated_by: Option<Uuid>,
+}
 
 /// Represents a folder entity in the domain
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,18 +39,12 @@ pub struct Folder {
     /// Name of the folder
     name: String,
 
-    /// Path to the folder in the domain model
+    /// Path to the folder in the domain model. Owns the canonical joined
+    /// string; `path_string()` borrows it (ROUND11 §20).
     storage_path: StoragePath,
-
-    /// String representation of the path (for API compatibility)
-    path_string: String,
 
     /// Parent folder ID (None if it's a root folder)
     parent_id: Option<String>,
-
-    /// Owner user ID — scopes folder visibility per user.
-    /// `None` only for legacy/stub folders; real folders always have an owner.
-    owner_id: Option<Uuid>,
 
     /// Drive that owns this folder. Post-D0 every `storage.folders` row
     /// has `drive_id NOT NULL` (M3 migration). Path-based lookups scope
@@ -74,9 +91,7 @@ impl Default for Folder {
             id: "stub-id".to_string(),
             name: "stub-folder".to_string(),
             storage_path: StoragePath::from_string("/"),
-            path_string: "/".to_string(),
             parent_id: None,
-            owner_id: None,
             drive_id: Uuid::nil(),
             created_at: 0,
             modified_at: 0,
@@ -88,26 +103,20 @@ impl Default for Folder {
 }
 
 impl Folder {
-    /// Creates a new folder with validation
+    /// Creates a new folder with validation.
+    ///
+    /// In-memory constructor: callers that don't supply a `drive_id`
+    /// are by definition stub/legacy paths (tests, pre-D0 fixtures,
+    /// DTO round-trips). Real DB-backed folders flow through
+    /// [`Folder::with_timestamps_and_tree`] which propagates the
+    /// drive scope and §14 provenance from the row.
     pub fn new(
         id: String,
         name: String,
         storage_path: StoragePath,
         parent_id: Option<String>,
     ) -> FolderResult<Self> {
-        Self::new_with_owner(id, name, storage_path, parent_id, None)
-    }
-
-    /// Creates a new folder with validation and an explicit owner.
-    pub fn new_with_owner(
-        id: String,
-        name: String,
-        storage_path: StoragePath,
-        parent_id: Option<String>,
-        owner_id: Option<Uuid>,
-    ) -> FolderResult<Self> {
-        let name = normalize_storage_name(&name);
-        // Validate folder name
+        let name = normalize_storage_name_owned(name);
         if let Err(reason) = validate_storage_name(&name) {
             return Err(FolderError::InvalidFolderName(format!("{name}: {reason}")));
         }
@@ -117,26 +126,15 @@ impl Folder {
             .unwrap_or_default()
             .as_secs();
 
-        // Store the path string for serialization compatibility
-        let path_string = storage_path.to_string();
-
         Ok(Self {
             id,
             name,
             storage_path,
-            path_string,
             parent_id,
-            owner_id,
-            // In-memory constructor: callers that don't supply a
-            // drive_id are by definition stub/legacy paths (tests,
-            // pre-D0 fixtures, DTO round-trips). Real DB-backed
-            // folders flow through `with_timestamps_and_tree`.
             drive_id: Uuid::nil(),
             created_at: now,
             modified_at: now,
             tree_modified_at: now,
-            // Provenance is unknown for in-memory construction; the DB
-            // reconstruction path supplies real values.
             created_by: None,
             updated_by: None,
         })
@@ -160,34 +158,6 @@ impl Folder {
             name,
             storage_path,
             parent_id,
-            None,
-            Uuid::nil(),
-            created_at,
-            modified_at,
-            modified_at,
-        )
-    }
-
-    /// Creates a folder with specific timestamps and owner (legacy
-    /// constructor — `tree_modified_at` defaults to `modified_at`).
-    /// Prefer [`Folder::with_timestamps_and_tree`] for DB reconstruction
-    /// so the rollup ETag reflects descendant activity, not just this
-    /// row's own metadata.
-    pub fn with_timestamps_and_owner(
-        id: String,
-        name: String,
-        storage_path: StoragePath,
-        parent_id: Option<String>,
-        owner_id: Option<Uuid>,
-        created_at: u64,
-        modified_at: u64,
-    ) -> FolderResult<Self> {
-        Self::with_timestamps_and_tree(
-            id,
-            name,
-            storage_path,
-            parent_id,
-            owner_id,
             Uuid::nil(),
             created_at,
             modified_at,
@@ -209,7 +179,6 @@ impl Folder {
         name: String,
         storage_path: StoragePath,
         parent_id: Option<String>,
-        owner_id: Option<Uuid>,
         drive_id: Uuid,
         created_at: u64,
         modified_at: u64,
@@ -220,7 +189,6 @@ impl Folder {
             name,
             storage_path,
             parent_id,
-            owner_id,
             drive_id,
             created_at,
             modified_at,
@@ -239,7 +207,6 @@ impl Folder {
         name: String,
         storage_path: StoragePath,
         parent_id: Option<String>,
-        owner_id: Option<Uuid>,
         drive_id: Uuid,
         created_at: u64,
         modified_at: u64,
@@ -247,20 +214,16 @@ impl Folder {
         created_by: Option<Uuid>,
         updated_by: Option<Uuid>,
     ) -> FolderResult<Self> {
-        let name = normalize_storage_name(&name);
+        let name = normalize_storage_name_owned(name);
         if let Err(reason) = validate_storage_name(&name) {
             return Err(FolderError::InvalidFolderName(format!("{name}: {reason}")));
         }
-
-        let path_string = storage_path.to_string();
 
         Ok(Self {
             id,
             name,
             storage_path,
-            path_string,
             parent_id,
-            owner_id,
             drive_id,
             created_at,
             modified_at,
@@ -268,6 +231,68 @@ impl Folder {
             created_by,
             updated_by,
         })
+    }
+
+    /// PG-row constructor: the per-listing-row hot path.
+    ///
+    /// Takes the materialized `storage.folders.path` column by value and
+    /// splits it once via [`StoragePath::from_joined`] — when the stored
+    /// path is already canonical (every row the repository writes), the
+    /// input `String` is reused as `path_string` with zero copies,
+    /// replacing the old `from_string` split + `Display` re-join pair.
+    /// The owned `name` is NFC-normalized without the always-copy of the
+    /// borrowing variant (DB rows are NFC by invariant).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_materialized_row(
+        id: String,
+        name: String,
+        path: String,
+        parent_id: Option<String>,
+        drive_id: Uuid,
+        created_at: u64,
+        modified_at: u64,
+        tree_modified_at: u64,
+        created_by: Option<Uuid>,
+        updated_by: Option<Uuid>,
+    ) -> FolderResult<Self> {
+        let name = normalize_storage_name_owned(name);
+        if let Err(reason) = validate_storage_name(&name) {
+            return Err(FolderError::InvalidFolderName(format!("{name}: {reason}")));
+        }
+
+        let storage_path = StoragePath::from_joined(path);
+
+        Ok(Self {
+            id,
+            name,
+            storage_path,
+            parent_id,
+            drive_id,
+            created_at,
+            modified_at,
+            tree_modified_at,
+            created_by,
+            updated_by,
+        })
+    }
+
+    /// Consume the entity and return all fields by ownership.
+    ///
+    /// Use this when converting `Folder` into a DTO to avoid cloning
+    /// every `String` field (saves 3-4 heap allocations per folder).
+    pub fn into_parts(self) -> FolderParts {
+        FolderParts {
+            id: self.id,
+            name: self.name,
+            storage_path: self.storage_path,
+            parent_id: self.parent_id,
+            drive_id: self.drive_id,
+            created_at: self.created_at,
+            modified_at: self.modified_at,
+            tree_modified_at: self.tree_modified_at,
+            created_by: self.created_by,
+            updated_by: self.updated_by,
+        }
     }
 
     // Getters
@@ -284,7 +309,7 @@ impl Folder {
     }
 
     pub fn path_string(&self) -> &str {
-        &self.path_string
+        self.storage_path.as_str()
     }
 
     pub fn parent_id(&self) -> Option<&str> {
@@ -297,10 +322,6 @@ impl Folder {
 
     pub fn modified_at(&self) -> u64 {
         self.modified_at
-    }
-
-    pub fn owner_id(&self) -> Option<Uuid> {
-        self.owner_id
     }
 
     /// Drive that owns this folder. Path-based lookups scope by
@@ -381,8 +402,25 @@ impl Folder {
     ///   changed; the folder's own value stays untouched
     ///   (self-exclusion).
     pub fn compute_etag(id: &str, tree_modified_at: u64) -> String {
-        let prefix: String = id.chars().take(16).collect();
-        format!("{}-{}", prefix, tree_modified_at)
+        use std::fmt::Write as _;
+
+        // Byte index just past the 16th char (whole string when shorter).
+        // `id` is a UUID string (ASCII) in practice, so this is
+        // effectively `min(len, 16)`, but `char_indices` keeps the slice
+        // char-boundary-safe for exotic fixture values — byte-identical
+        // to the old `chars().take(16).collect::<String>()` without the
+        // intermediate allocation.
+        let end = match id.char_indices().nth(16) {
+            Some((i, _)) => i,
+            None => id.len(),
+        };
+
+        // Single allocation: prefix + '-' + up to 20 digits (u64::MAX).
+        let mut etag = String::with_capacity(end + 1 + 20);
+        etag.push_str(&id[..end]);
+        etag.push('-');
+        let _ = write!(etag, "{tree_modified_at}");
+        etag
     }
 
     /// Creates a new Folder instance from a DTO
@@ -395,8 +433,8 @@ impl Folder {
         created_at: u64,
         modified_at: u64,
     ) -> Self {
-        // Create storage_path from the string
-        let storage_path = StoragePath::from_string(&path);
+        // Adopt the DTO path (canonical inputs reused with zero copies).
+        let storage_path = StoragePath::from_joined(path);
 
         // Create directly without validation to avoid errors in DTO
         // conversions. Still NFC-normalize so DTO-reconstructed
@@ -405,14 +443,12 @@ impl Folder {
         // round-trips lose the real rollup signal, so callers that
         // need a freshly-rolled-up etag must reload from the
         // repository.
-        let name = normalize_storage_name(&name);
+        let name = normalize_storage_name_owned(name);
         Self {
             id,
             name,
             storage_path,
-            path_string: path,
             parent_id,
-            owner_id: None,
             // DTO round-trips lose drive_id (FolderDto carries it,
             // but the legacy `from_dto` signature predates this
             // change). Callers that need real scoping must reload
@@ -432,7 +468,7 @@ impl Folder {
 
     /// Creates a new version of the folder with updated name
     pub fn with_name(&self, new_name: String) -> FolderResult<Self> {
-        let new_name = normalize_storage_name(&new_name);
+        let new_name = normalize_storage_name_owned(new_name);
         if let Err(reason) = validate_storage_name(&new_name) {
             return Err(FolderError::InvalidFolderName(format!(
                 "{new_name}: {reason}"
@@ -446,9 +482,6 @@ impl Folder {
             None => StoragePath::from_string(&new_name),
         };
 
-        // Update string representation
-        let new_path_string = new_storage_path.to_string();
-
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -458,9 +491,7 @@ impl Folder {
             id: self.id.clone(),
             name: new_name,
             storage_path: new_storage_path,
-            path_string: new_path_string,
             parent_id: self.parent_id.clone(),
-            owner_id: self.owner_id,
             drive_id: self.drive_id,
             created_at: self.created_at,
             modified_at: now,
@@ -487,9 +518,6 @@ impl Folder {
             None => StoragePath::from_string(&self.name), // Root
         };
 
-        // Update string representation
-        let new_path_string = new_storage_path.to_string();
-
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -499,9 +527,7 @@ impl Folder {
             id: self.id.clone(),
             name: self.name.clone(),
             storage_path: new_storage_path,
-            path_string: new_path_string,
             parent_id,
-            owner_id: self.owner_id,
             drive_id: self.drive_id,
             created_at: self.created_at,
             modified_at: now,
@@ -515,12 +541,9 @@ impl Folder {
     pub fn get_absolute_path<P: AsRef<std::path::Path>>(&self, root_path: P) -> std::path::PathBuf {
         let mut result = std::path::PathBuf::from(root_path.as_ref());
 
-        // Skip leading '/' from path_string to avoid creating absolute path incorrectly
-        let relative_path = if self.path_string.starts_with('/') {
-            &self.path_string[1..]
-        } else {
-            &self.path_string
-        };
+        // Skip leading '/' to avoid creating an absolute path incorrectly
+        let path_string = self.storage_path.as_str();
+        let relative_path = path_string.strip_prefix('/').unwrap_or(path_string);
 
         if !relative_path.is_empty() {
             result.push(relative_path);
@@ -593,7 +616,6 @@ mod tests {
             "folder".to_string(),
             StoragePath::from_string("/folder"),
             None,
-            None,
             Uuid::nil(),
             1_000,
             2_000,
@@ -615,7 +637,6 @@ mod tests {
             "a".to_string(),
             StoragePath::from_string("/a"),
             None,
-            None,
             Uuid::nil(),
             0,
             0,
@@ -626,7 +647,6 @@ mod tests {
             "bbbbbbbbbbbbbbbbZZZZZZZZ".to_string(),
             "b".to_string(),
             StoragePath::from_string("/b"),
-            None,
             None,
             Uuid::nil(),
             0,
@@ -650,7 +670,6 @@ mod tests {
             "folder".to_string(),
             StoragePath::from_string("/folder"),
             None,
-            None,
             Uuid::nil(),
             1_000,
             2_000,
@@ -661,7 +680,6 @@ mod tests {
             "abcd1234efgh5678ZZZZZZZZ".to_string(),
             "folder".to_string(),
             StoragePath::from_string("/folder"),
-            None,
             None,
             Uuid::nil(),
             1_000,

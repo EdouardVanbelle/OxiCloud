@@ -21,18 +21,20 @@ impl RecentItemsPgRepository {
 
 impl RecentItemsRepositoryPort for RecentItemsPgRepository {
     async fn get_recent_items(&self, user_id: Uuid, limit: i32) -> Result<Vec<RecentItemDto>> {
+        // Binary UUID decode + app-side render (ROUND6 §10 pattern) — no
+        // server-side `::TEXT` casts, 16 B per id on the wire instead of 36.
         let rows = sqlx::query(
             r#"
             SELECT
-                ur.id::TEXT                                     AS "id",
-                ur.user_id::TEXT                                AS "user_id",
+                ur.id                                           AS "id",
+                ur.user_id                                      AS "user_id",
                 ur.item_id                                      AS "item_id",
                 ur.item_type                                    AS "item_type",
                 ur.accessed_at                                  AS "accessed_at",
                 COALESCE(f.name, fld.name)                      AS "item_name",
                 f.size                                          AS "item_size",
                 f.mime_type                                     AS "item_mime_type",
-                COALESCE(f.folder_id::TEXT, fld.parent_id::TEXT) AS "parent_id",
+                COALESCE(f.folder_id, fld.parent_id)            AS "parent_id",
                 CASE
                     WHEN ur.item_type = 'folder' THEN fld.path
                     WHEN ur.item_type = 'file'   THEN COALESCE(pfld.path || '/' || f.name, f.name)
@@ -67,15 +69,19 @@ impl RecentItemsRepositoryPort for RecentItemsPgRepository {
             .iter()
             .map(|row| {
                 RecentItemDto {
-                    id: row.get("id"),
-                    user_id: row.get("user_id"),
+                    id: row.get::<i32, _>("id").to_string(),
+                    user_id: row.get::<Uuid, _>("user_id").to_string(),
                     item_id: row.get("item_id"),
                     item_type: row.get("item_type"),
                     accessed_at: row.get("accessed_at"),
                     item_name: row.try_get("item_name").ok(),
                     item_size: row.try_get("item_size").ok(),
                     item_mime_type: row.try_get("item_mime_type").ok(),
-                    parent_id: row.try_get("parent_id").ok(),
+                    parent_id: row
+                        .try_get::<Option<Uuid>, _>("parent_id")
+                        .ok()
+                        .flatten()
+                        .map(|u| u.to_string()),
                     item_path: row.try_get("item_path").ok(),
                     // Temporary defaults; with_display_fields() computes the real values
                     icon_class: String::new(),
@@ -90,19 +96,24 @@ impl RecentItemsRepositoryPort for RecentItemsPgRepository {
         Ok(items)
     }
 
-    async fn upsert_access(&self, user_id: Uuid, item_id: &str, item_type: &str) -> Result<()> {
-        sqlx::query(
+    async fn upsert_access(&self, user_id: Uuid, item_id: &str, item_type: &str) -> Result<bool> {
+        // `xmax = 0` on the affected row is the canonical upsert idiom for
+        // "this was an INSERT, not a DO UPDATE" — lets the caller skip the
+        // prune round-trip on the common re-access (UPDATE) path
+        // (benches/ROUND13.md §Q3).
+        let inserted: bool = sqlx::query_scalar(
             r#"
             INSERT INTO auth.user_recent_files (user_id, item_id, item_type, accessed_at)
             VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
             ON CONFLICT (user_id, item_id, item_type)
             DO UPDATE SET accessed_at = CURRENT_TIMESTAMP
+            RETURNING (xmax = 0)
             "#,
         )
         .bind(user_id)
         .bind(item_id)
         .bind(item_type)
-        .execute(&*self.db_pool)
+        .fetch_one(&*self.db_pool)
         .await
         .map_err(|e| {
             error!("Database error upserting recent item access: {}", e);
@@ -113,7 +124,7 @@ impl RecentItemsRepositoryPort for RecentItemsPgRepository {
             )
         })?;
 
-        Ok(())
+        Ok(inserted)
     }
 
     async fn remove_item(&self, user_id: Uuid, item_id: &str, item_type: &str) -> Result<bool> {
@@ -206,6 +217,20 @@ impl RecentItemsRepositoryPort for RecentItemsPgRepository {
         // ── Build the UNION ALL CTE ─────────────────────────────────────────
         let mut cte_branches: Vec<&str> = Vec::new();
 
+        // Post-D7: `is_owner` means "the caller holds an Owner
+        // role_grant on the drive owning this row". Personal drives:
+        // the single-owner invariant makes this trivially true for the
+        // owner and false for anyone else. Shared drives: multiple
+        // Owners possible; each of them gets `true`. Used only to gate
+        // whether the handler exposes the full path (path-hierarchy
+        // hiding for share recipients — see `recent_handler.rs`).
+        //
+        // The `created_by` projection is separate — §14 provenance,
+        // used for the "Owner" column and the owner sort's username
+        // JOIN. The two signals genuinely differ post-D2: e.g. Bob
+        // (Editor on Alice's shared drive) making a file has
+        // `created_by = Bob` but `is_owner = false` because Alice owns
+        // the drive.
         let folder_branch = r#"
     SELECT
         'folder'::text                   AS resource_type,
@@ -216,9 +241,19 @@ impl RecentItemsRepositoryPort for RecentItemsPgRepository {
         -1::bigint                       AS size,
         fld.created_at                   AS resource_created_at,
         fld.updated_at                   AS modified_at,
-        fld.user_id                      AS owner_id,
+        fld.drive_id                     AS drive_id,
         NULL::text                       AS blob_hash,
-        (fld.user_id = $1::uuid)         AS is_owner,
+        fld.created_by                   AS created_by,
+        fld.updated_by                   AS updated_by,
+        EXISTS (
+            SELECT 1 FROM storage.role_grants g
+             WHERE g.resource_type = 'drive'
+               AND g.resource_id   = fld.drive_id
+               AND g.role          = 'owner'
+               AND g.subject_type  = 'user'
+               AND g.subject_id    = $1::uuid
+               AND (g.expires_at IS NULL OR g.expires_at > NOW())
+        )                                AS is_owner,
         ur.accessed_at                   AS accessed_at,
         fld.path::text                   AS resource_path,
         LOWER(fld.name)                  AS sort_str,
@@ -239,9 +274,19 @@ impl RecentItemsRepositoryPort for RecentItemsPgRepository {
         f.size::bigint,
         f.created_at                     AS resource_created_at,
         f.updated_at                     AS modified_at,
-        f.user_id                        AS owner_id,
+        f.drive_id                       AS drive_id,
         f.blob_hash,
-        (f.user_id = $1::uuid)           AS is_owner,
+        f.created_by                     AS created_by,
+        f.updated_by                     AS updated_by,
+        EXISTS (
+            SELECT 1 FROM storage.role_grants g
+             WHERE g.resource_type = 'drive'
+               AND g.resource_id   = f.drive_id
+               AND g.role          = 'owner'
+               AND g.subject_type  = 'user'
+               AND g.subject_id    = $1::uuid
+               AND (g.expires_at IS NULL OR g.expires_at > NOW())
+        )                                AS is_owner,
         ur.accessed_at                   AS accessed_at,
         COALESCE(pfld.path::text || '/' || f.name, f.name) AS resource_path,
         LOWER(f.name)                    AS sort_str,
@@ -392,7 +437,9 @@ impl RecentItemsRepositoryPort for RecentItemsPgRepository {
         };
 
         let user_join = if need_user_join {
-            "LEFT JOIN auth.users u ON u.id = r.owner_id"
+            // Post-D7: `owner_id` column retired; use `created_by`
+            // (§14 provenance) as the "owner" identity for the sort.
+            "LEFT JOIN auth.users u ON u.id = r.created_by"
         } else {
             ""
         };
@@ -409,7 +456,8 @@ impl RecentItemsRepositoryPort for RecentItemsPgRepository {
 SELECT
     r.resource_type, r.resource_id, r.name, r.parent_id,
     r.mime_type, r.size, r.resource_created_at, r.modified_at,
-    r.owner_id, r.is_owner, r.accessed_at, r.resource_path,
+    r.drive_id, r.blob_hash, r.created_by, r.updated_by,
+    r.is_owner, r.accessed_at, r.resource_path,
     r.sort_str, r.type_order, r.folder_first{username_col}
 FROM resources r
 {user_join}
@@ -484,8 +532,10 @@ LIMIT $6"
                     size,
                     resource_created_at: row.get("resource_created_at"),
                     modified_at: row.get("modified_at"),
-                    owner_id: row.get("owner_id"),
+                    drive_id: row.get("drive_id"),
                     blob_hash: row.try_get("blob_hash").ok(),
+                    created_by: row.try_get("created_by").ok(),
+                    updated_by: row.try_get("updated_by").ok(),
                     is_owner: row.try_get("is_owner").unwrap_or(false),
                     accessed_at: row.get("accessed_at"),
                     path: row.try_get("resource_path").ok(),

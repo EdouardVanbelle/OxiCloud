@@ -58,6 +58,8 @@
   "photos": {
     "empty_state": "لا توجد صور بعد",
     "empty_hint": "ارفع صوراً أو مقاطع فيديو لعرضها هنا",
+    "empty_hidden": "{{n}} من الصور مخفية وفقاً لتفضيلاتك",
+    "empty_hidden_hint": "قم بإيقاف تشغيل \"إخفاء الملفات المخفية\" في ملفك الشخصي لرؤيتها.",
     "items_selected": "محدد",
     "view_daily": "يوم",
     "view_monthly": "شهر",
@@ -232,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "إشعار عبر البريد الإلكتروني",
     "revoke": "Remove",
-    "role_label": "الدور"
+    "role_label": "الدور",
+    "col_shared_by": "شورك بواسطة",
+    "col_shared": "مشترك"
   },
   "share_dialogTitle": "رابط المشاركة",
   "share_linkLabel": "رابط المشاركة:",
@@ -335,6 +339,7 @@
     "modified": "تاريخ التعديل",
     "no_files": "لا توجد ملفات في هذا المجلد",
     "empty_hint": "ارفع ملفات أو أنشئ مجلدات للبدء",
+    "drop_to_upload": "أفلت الملفات هنا للرفع",
     "loading": "جارٍ تحميل الملفات…",
     "view_grid": "عرض شبكي",
     "view_list": "عرض قائمة",
@@ -365,7 +370,21 @@
     "folder": "مجلد",
     "new_folder": "مجلد جديد",
     "share": "مشاركة",
-    "view": "عرض"
+    "view": "عرض",
+    "empty_hidden_title": "{{n}} عنصر مخفي في هذا المجلد",
+    "empty_hidden_hint": "الملفات التي يبدأ اسمها بـ '.' مخفية. غيّر الإعداد لرؤيتها.",
+    "show_hidden": "إظهار الملفات المخفية",
+    "upload_dotfile_hidden": "تم رفع {{n}} ملف/ملفات ولكن تم إخفاؤها وفقاً لتفضيلاتك.",
+    "rename_dotfile_hidden": "تمت إعادة التسمية إلى \"{{name}}\" — أصبحت الآن مخفية وفقاً لتفضيلاتك.",
+    "new_folder_dotfile_hidden": "تم إنشاء المجلد \"{{name}}\" — مخفي وفقاً لتفضيلاتك.",
+    "dotfiles_hidden_toast": "تم إخفاء الملفات المخفية",
+    "dotfiles_shown_toast": "تم إظهار الملفات المخفية",
+    "col_modified": "معدل",
+    "col_added": "أضيف",
+    "col_created_by": "أنشئ بواسطة",
+    "col_opened": "افتُح",
+    "col_path": "الموقع",
+    "new_elements": "عناصر جديدة"
   },
   "dialogs": {
     "rename_folder": "إعادة تسمية المجلد",
@@ -451,7 +470,8 @@
       "trashed_time": "وقت الحذف"
     },
     "delete": "حذف نهائياً",
-    "empty_action": "تفريغ سلة المهملات"
+    "empty_action": "تفريغ سلة المهملات",
+    "expires_at": "ينتهي في"
   },
   "daysRemaining": {
     "expired": "منتهية الصلاحية",
@@ -570,7 +590,10 @@
     "accessed": "تم الوصول",
     "empty_state": "لا توجد ملفات حديثة",
     "empty_hint": "الملفات التي تفتحها ستظهر هنا",
-    "loadMore": "تحميل المزيد"
+    "empty_hidden_state": "{{n}} من العناصر الأخيرة مخفية وفقاً لتفضيلاتك",
+    "empty_hidden_hint": "قم بإيقاف تشغيل \"إخفاء الملفات المخفية\" في ملفك الشخصي لرؤيتها.",
+    "loadMore": "تحميل المزيد",
+    "remove_item": "إزالة من الأخيرة"
   },
   "notifications": {
     "file_renamed": "تمت إعادة تسمية الملف",
@@ -806,7 +829,70 @@
     "title": "مسؤول",
     "user": "المستخدم",
     "username": "اسم المستخدم",
-    "users": "المستخدمون"
+    "users": "المستخدمون",
+    "drive_manage_policies": "إدارة السياسات",
+    "drive_manage_policies_for": "إدارة السياسات — {{name}}",
+    "drive_manage_policies_help": "السياسات مخصصة للمسؤول فقط — لا يمكن لمالكي السائق تعديلها. كل مفتاح يتحكم في قيد تنفيذي واحد.",
+    "drive_policy": {
+      "forbid_sharing": "منع المشاركة لكل مورد",
+      "forbid_sharing_help": "منع المنح حسب الملف / حسب المجلد (يشمل أيضاً الروابط العامة والمشاركة الخارجية). تظل عضوية السائق متاحة.",
+      "forbid_public_links": "منع الروابط العامة",
+      "forbid_public_links_help": "منع روابط المشاركة المجهولة على الموارد في هذا السائق.",
+      "forbid_external_sharing": "منع المشاركة الخارجية",
+      "forbid_external_sharing_help": "منع المنح للمستخدمين الخارجيين (دعوات البريد الإلكتروني والحسابات الخارجية الموجودة مسبقاً).",
+      "forbid_cross_drive_move": "منع النقل بين السائقين",
+      "forbid_cross_drive_move_help": "منع نقل الملفات أو المجلدات إلى سائق آخر. لا يمنع التنزيل ثم إعادة الرفع.",
+      "forbid_owner_role_change": "قفل قائمة المالكين",
+      "forbid_owner_role_change_help": "يمكن للمسؤول فقط إضافة أو إزالة أو خفض مالكي السائق عندما يكون هذا مفعّلاً.",
+      "include_in_photo_index": "تضمين في الصور",
+      "include_in_photo_index_help": "عرض ملفات الصور والفيديو من هذا قرص في الجدول الزمني للصور وعلى خريطة الأماكن. تُضمَّن قرصs الشخصية الافتراضية تلقائيًا؛ فعِّل هذا الخيار مع قرصs المشتركة التي تحتوي فعلاً على صور (مثل «صور العائلة»).",
+      "include_in_music_index": "تضمين في الموسيقى",
+      "include_in_music_index_help": "تضمين الملفات الصوتية من هذا قرص في مكتبة الموسيقى. تُضمَّن قرصs الشخصية الافتراضية تلقائيًا؛ فعِّل هذا الخيار مع قرصs المشتركة التي تحتوي فعلاً على مجموعة موسيقية (مثل «موسيقى العائلة»، «تعاون فرقة»).",
+      "implied_by_forbid_sharing": "مُطبَّق بالفعل من قبل «منع المشاركة لكل مورد».",
+      "read_only": "Read-only (freeze)",
+      "read_only_help": "Freeze the drive entirely — every mutation is refused (uploads, edits, deletes, renames, sharing, membership changes). Reads and downloads keep working. The trash-retention janitor also pauses. Use for archives, legal holds, or account wind-downs. Only an admin can un-freeze."
+    },
+    "drives": "أقراص",
+    "drive_name": "الاسم",
+    "drive_kind": "النوع",
+    "drive_owners": "الملّاك",
+    "drive_usage": "الاستخدام",
+    "drive_created_at": "أُنشئ في",
+    "drive_kind_shared": "مشترك",
+    "drive_kind_personal": "شخصي",
+    "drive_kind_default_suffix": "(افتراضي)",
+    "drive_manage_owners": "إدارة الملّاك",
+    "drive_manage_owners_for": "إدارة الملّاك — {{name}}",
+    "drive_edit_quota": "تعديل الحصة",
+    "drive_delete": "حذف قرص",
+    "drive_delete_confirm": "هل تريد حذف قرص «{{name}}»؟ لا يمكن التراجع عن هذا الإجراء.",
+    "drive_deleted": "تم حذف قرص.",
+    "drive_created": "تم إنشاء قرص.",
+    "drive_add_owner": "إضافة مالك",
+    "drive_current_owners": "الملّاك الحاليون",
+    "drive_no_owners": "لا يوجد ملّاك",
+    "drive_owner": "المالك",
+    "drive_owner_hint": "اختر مستخدمًا (المالك الوحيد) أو مجموعة (يصبح كل عضو مالكًا عبر توسيع الموضوع).",
+    "drive_owner_picked": "المالك: {{name}}",
+    "drive_owner_placeholder": "ابحث عن مستخدم أو مجموعة…",
+    "drive_owner_remove_confirm": "إزالة هذا المالك من قرص؟",
+    "drive_name_placeholder": "مثال: الهندسة",
+    "drive_error_name_required": "اسم قرص مطلوب.",
+    "drive_error_owner_required": "اختر مستخدمًا أو مجموعة كمالك للقرص.",
+    "create_drive": "إنشاء قرص مشترك",
+    "no_drives": "لا توجد أقراص بعد.",
+    "external_user": "خارجي",
+    "external_user_hint": "حساب بالدعوة فقط (magic-link أو OCM). لا يمكن أن يكون مسؤولًا ولا يمتلك حصة تخزين.",
+    "no_storage_for_external": "الحسابات الخارجية ليس لديها حصة تخزين.",
+    "promote_to_internal_title": "ترقية إلى مستخدم داخلي",
+    "confirm_promote_user": "ترقية {{name}} إلى مستخدم داخلي؟ سيتم تجهيز قرص شخصي ومنح حصة تخزين عادية. تُحفظ هوية الحساب؛ يظل تسجيل الدخول عبر magic-link هو طريقة الوصول حتى يتم تعيين كلمة مرور.",
+    "delete_user_title": "حذف المستخدم",
+    "delete_user_warning": "أنت على وشك حذف «{{name}}» نهائيًا. سيؤدي ذلك إلى إزالة الحساب وإلغاء جميع الجلسات وحذف القرص الشخصي. لا يمكن التراجع عن هذا الإجراء.",
+    "delete_user_confirm_hint": "للتأكيد، اكتب بريد الحساب أدناه: {{email}}",
+    "deleting": "جارٍ الحذف…",
+    "auth": "المصادقة",
+    "quota": "استخدام التخزين",
+    "last_login": "آخر دخول"
   },
   "profile": {
     "page_title": "الملف الشخصي",
@@ -859,6 +945,7 @@
     "family_name": "اسم العائلة",
     "notify_on_share": "أرسل لي بريدًا إلكترونيًا عندما يشاركني شخص ما",
     "notify_on_share_hint": "عند إلغاء التحديد، ستظل المشاركات تظهر في حسابك — لن تتلقى فقط بريدًا إلكترونيًا بشأنها.",
+    "hide_dotfiles": "إخفاء الملفات التي يبدأ اسمها بنقطة (.env، .git، …)",
     "save_profile": "حفظ التغييرات",
     "profile_saved": "تم تحديث الملف الشخصي",
     "profile_no_changes": "لا توجد تغييرات لحفظها.",
@@ -979,7 +1066,17 @@
     "notifyRateLimited": "عدد كبير من الإشعارات لهذا المستلم — حاول لاحقًا.",
     "removeAccess": "إزالة الوصول",
     "resendInvitation": "إعادة إرسال بريد الدعوة",
-    "publicLinks": "Public links"
+    "publicLinks": "Public links",
+    "filter": {
+      "button": "الأنواع",
+      "title": "تصفية حسب النوع",
+      "files": "ملفات",
+      "folders": "مجلدات",
+      "drives": "الأقراص",
+      "emptyTitle": "لا توجد مشاركات تطابق التصفية الحالية",
+      "emptyHint": "اضبط تصفية النوع أو أعِد ضبطها إلى الافتراضي (ملفات + مجلدات).",
+      "reset": "إعادة تعيين التصفية"
+    }
   },
   "sort": {
     "asc": "ascending",
@@ -1078,7 +1175,9 @@
     "rename": "إعادة التسمية",
     "save": "حفظ",
     "search": "بحث",
-    "yes": "نعم"
+    "yes": "نعم",
+    "saving": "جارٍ الحفظ…",
+    "deleting": "جارٍ الحذف…"
   },
   "device": {
     "continue": "متابعة",
@@ -1108,5 +1207,79 @@
   "view": {
     "grid": "عرض شبكي",
     "list": "عرض قائمة"
+  },
+  "preferences": {
+    "save_failed": "تعذّر حفظ تفضيلك. حاول مرة أخرى."
+  },
+  "upgrade": {
+    "title": "الترقية إلى حساب كامل",
+    "lede": "احصل على مساحة تخزين خاصة بك وابدأ في رفع الملفات. تبقى مشاركاتك الحالية دون تغيير.",
+    "busy": "جارٍ الترقية…",
+    "submit": "ترقية حسابي",
+    "cancel": "ليس الآن — العودة إلى المشارك معي",
+    "success": "تمت ترقية حسابك. جارٍ التوجيه إلى ملفاتك…",
+    "error": "فشلت الترقية.",
+    "password_required": "كلمة المرور مطلوبة — لا يوفر هذا الإصدار تسجيل الدخول عبر رابط بريد إلكتروني.",
+    "password_too_short": "يجب أن تتكون كلمة المرور من 8 أحرف على الأقل.",
+    "oidc_user": "تُدار حسابات SSO/OIDC من قبل مزود الهوية الخاص بك. الترقية غير متوفرة.",
+    "domain_not_allowed": "لا يقبل هذا الإصدار حسابات جديدة من نطاق بريدك الإلكتروني. تواصل مع المسؤول لتفعيله.",
+    "banner_aria": "دعوة إلى الترقية",
+    "banner_title": "احصل على مساحة تخزين خاصة بك",
+    "banner_body": "أنت تستخدم حساب ضيف. قم بالترقية للحصول على قرص شخصي وبدء رفع الملفات.",
+    "banner_cta": "ترقية"
+  },
+  "drive": {
+    "read_only_banner": {
+      "title": "هذا القرص للقراءة فقط",
+      "title_named": "القرص «{{name}}» للقراءة فقط",
+      "body": "يُرفض الرفع والتحرير والحذف وإعادة التسمية والمشاركة وتغييرات العضوية. القراءة والتنزيل يعملان بشكل طبيعي. تواصل مع مسؤول لإلغاء تجميد القرص.",
+      "aria": "هذا القرص للقراءة فقط"
+    },
+    "back_to_files": "العودة إلى الملفات",
+    "danger_zone": "منطقة الخطر",
+    "delete": "حذف القرص",
+    "delete_confirm": "حذف القرص «{{name}}»؟ لا يمكن التراجع عن هذا الإجراء — يجب أن يكون القرص فارغًا، وإلا سيرفض الخادم.",
+    "delete_hint": "حذف القرص يزيله بشكل دائم. يجب أن يكون القرص فارغًا (بدون ملفات أو مجلدات نشطة) قبل السماح بالحذف.",
+    "deleted": "تم حذف القرص.",
+    "field": {
+      "created": "أُنشئ في",
+      "default": "افتراضي",
+      "default_yes": "هذا هو قرصك الرئيسي",
+      "id": "المُعرِّف",
+      "kind": "النوع",
+      "updated": "آخر تحديث"
+    },
+    "info": "معلومات القرص",
+    "kind_personal": "قرص شخصي",
+    "kind_shared": "قرص مشترك",
+    "manage_members": "إدارة الأعضاء",
+    "members": "الأعضاء",
+    "members_empty": "لا يوجد أعضاء.",
+    "not_found_body": "هذا القرص غير موجود أو ليس لديك صلاحية الوصول إليه.",
+    "not_found_title": "القرص غير موجود",
+    "policies": "القواعد",
+    "policies_help": "قواعد ضبطها مسؤول OxiCloud لهذا القرص. المسؤولون فقط يمكنهم تغييرها؛ أنت ترى الحالة الحالية.",
+    "quota": "الحصة",
+    "rename": "إعادة تسمية القرص",
+    "role": {
+      "commenter": "معلّق",
+      "contributor": "مساهم",
+      "editor": "محرّر",
+      "owner": "المالك",
+      "viewer": "مشاهد"
+    },
+    "storage": "التخزين",
+    "usage": "الاستخدام",
+    "used": "المُستخدَم",
+    "members_personal_immutable": "الأقراص الشخصية لها عضوية ثابتة بمالك واحد."
+  },
+  "group": {
+    "members_empty": "لا يوجد أعضاء",
+    "member_count": "{{n}} أعضاء"
+  },
+  "resource_list": {
+    "location": "الموقع",
+    "wrong_drop_zone_msg": "الرفع يعمل فقط في قسم الملفات — افتح قسم الملفات وأفلت العناصر هناك.",
+    "wrong_drop_zone_action": "انتقل إلى الملفات"
   }
 }

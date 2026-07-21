@@ -33,22 +33,45 @@ pub enum ErrorKind {
     DatabaseError,
     /// Storage quota exceeded
     QuotaExceeded,
+    /// State conflict — the request is well-formed and permitted, but
+    /// the resource is in a state that refuses it (e.g. "drive must
+    /// be empty before delete"). Maps to HTTP 409. Distinct from
+    /// `AlreadyExists` (which is a uniqueness violation) so audit
+    /// readers can tell them apart.
+    Conflict,
+    /// RFC 7232 precondition failure — a caller-supplied conditional
+    /// (If-Match, or an internal compare-and-swap standing in for one)
+    /// did not hold against the resource's current state. Maps to
+    /// HTTP 412. Distinct from `Conflict` (409): this is specifically
+    /// "the state you thought you were writing against has moved."
+    PreconditionFailed,
+}
+
+impl ErrorKind {
+    /// Stable human-readable name; `Display` delegates here so the two can
+    /// never drift. Being `&'static` it lets the HTTP error path borrow the
+    /// value instead of allocating per response (benches/ROUND11.md §9).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ErrorKind::NotFound => "Not Found",
+            ErrorKind::AlreadyExists => "Already Exists",
+            ErrorKind::InvalidInput => "Invalid Input",
+            ErrorKind::AccessDenied => "Access Denied",
+            ErrorKind::Timeout => "Timeout",
+            ErrorKind::InternalError => "Internal Error",
+            ErrorKind::NotImplemented => "Not Implemented",
+            ErrorKind::UnsupportedOperation => "Unsupported Operation",
+            ErrorKind::DatabaseError => "Database Error",
+            ErrorKind::QuotaExceeded => "Quota Exceeded",
+            ErrorKind::Conflict => "Conflict",
+            ErrorKind::PreconditionFailed => "Precondition Failed",
+        }
+    }
 }
 
 impl Display for ErrorKind {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            ErrorKind::NotFound => write!(f, "Not Found"),
-            ErrorKind::AlreadyExists => write!(f, "Already Exists"),
-            ErrorKind::InvalidInput => write!(f, "Invalid Input"),
-            ErrorKind::AccessDenied => write!(f, "Access Denied"),
-            ErrorKind::Timeout => write!(f, "Timeout"),
-            ErrorKind::InternalError => write!(f, "Internal Error"),
-            ErrorKind::NotImplemented => write!(f, "Not Implemented"),
-            ErrorKind::UnsupportedOperation => write!(f, "Unsupported Operation"),
-            ErrorKind::DatabaseError => write!(f, "Database Error"),
-            ErrorKind::QuotaExceeded => write!(f, "Quota Exceeded"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -84,11 +107,14 @@ impl DomainError {
     /// Creates an entity not found error
     pub fn not_found<S: Into<String>>(entity_type: &'static str, entity_id: S) -> Self {
         let id = entity_id.into();
+        // Message first, then move the id — the old `Some(id.clone())`
+        // paid an extra allocation on every 404 construction.
+        let message = format!("{} not found: {}", entity_type, id);
         Self {
             kind: ErrorKind::NotFound,
             entity_type,
-            entity_id: Some(id.clone()),
-            message: format!("{} not found: {}", entity_type, id),
+            entity_id: Some(id),
+            message,
             source: None,
         }
     }
@@ -96,11 +122,12 @@ impl DomainError {
     /// Creates an entity already exists error
     pub fn already_exists<S: Into<String>>(entity_type: &'static str, entity_id: S) -> Self {
         let id = entity_id.into();
+        let message = format!("{} already exists: {}", entity_type, id);
         Self {
             kind: ErrorKind::AlreadyExists,
             entity_type,
-            entity_id: Some(id.clone()),
-            message: format!("{} already exists: {}", entity_type, id),
+            entity_id: Some(id),
+            message,
             source: None,
         }
     }
@@ -170,6 +197,17 @@ impl DomainError {
         Self {
             kind: ErrorKind::QuotaExceeded,
             entity_type: "Storage",
+            entity_id: None,
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// Creates a precondition-failed error (RFC 7232 / CAS mismatch)
+    pub fn precondition_failed<S: Into<String>>(entity_type: &'static str, message: S) -> Self {
+        Self {
+            kind: ErrorKind::PreconditionFailed,
+            entity_type,
             entity_id: None,
             message: message.into(),
             source: None,

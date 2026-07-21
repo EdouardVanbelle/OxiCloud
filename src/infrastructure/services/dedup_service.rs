@@ -112,13 +112,33 @@ impl ChunkIngestOutcome {
 /// mid-stream — a client disconnect aborts the whole handler future — the
 /// guard spawns a rollback so pinned chunks don't leak references forever and
 /// written files become GC-collectible rows instead of invisible orphans.
-struct IngestGuard {
-    pool: Arc<PgPool>,
-    backend: Arc<dyn BlobStorageBackend>,
+/// Whether the ingest loop overlaps batch settling with source reading
+/// (default on). `OXICLOUD_INGEST_OVERLAP=0` restores the old inline
+/// behaviour — kept as a bench/ops escape hatch.
+fn ingest_overlap_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("OXICLOUD_INGEST_OVERLAP").map_or(true, |v| v != "0" && v != "false")
+    })
+}
+
+/// Compensation ledger of one ingest session. Shared (`Arc<tokio::Mutex>`)
+/// between the ingest loop and the overlapped batch-settle task: the settler
+/// holds the lock for the whole batch and records progressively, so a
+/// rollback (explicit or Drop-spawned) that acquires the lock is guaranteed
+/// to observe every pin/write the in-flight settle made.
+#[derive(Default)]
+struct IngestState {
     /// Pre-existing chunks whose ref_count this session bumped (distinct).
     pinned: Vec<String>,
     /// Chunks written to the backend but not yet registered: (hash, size).
     written: Vec<(String, i64)>,
+}
+
+struct IngestGuard {
+    pool: Arc<PgPool>,
+    backend: Arc<dyn BlobStorageBackend>,
+    state: Arc<tokio::sync::Mutex<IngestState>>,
     armed: bool,
 }
 
@@ -127,8 +147,7 @@ impl IngestGuard {
         Self {
             pool,
             backend,
-            pinned: Vec::new(),
-            written: Vec::new(),
+            state: Arc::new(tokio::sync::Mutex::new(IngestState::default())),
             armed: true,
         }
     }
@@ -143,8 +162,15 @@ impl IngestGuard {
     /// spawned Drop path).
     async fn rollback(mut self) {
         self.armed = false;
-        let pinned = std::mem::take(&mut self.pinned);
-        let written = std::mem::take(&mut self.written);
+        // Lock acquisition serializes after any in-flight batch settle, so
+        // its pins/writes are visible here.
+        let (pinned, written) = {
+            let mut st = self.state.lock().await;
+            (
+                std::mem::take(&mut st.pinned),
+                std::mem::take(&mut st.written),
+            )
+        };
         Self::run_rollback(self.pool.clone(), self.backend.clone(), pinned, written).await;
     }
 
@@ -183,8 +209,11 @@ impl IngestGuard {
         // sweep can reclaim the bytes — a backend file with no PG row would be
         // invisible to it. ON CONFLICT DO NOTHING keeps a concurrent
         // uploader's row (and its references) intact.
-        let hashes: Vec<String> = written.iter().map(|(h, _)| h.clone()).collect();
-        let sizes: Vec<i64> = written.iter().map(|(_, s)| *s).collect();
+        // `written` is owned and dead after this rollback — unzip it (moving each
+        // 64-byte hash String out) instead of cloning every hash purely to
+        // reshape for `sync_blobs(&[String])` + the UNNEST bind.
+        // (benches/ROUND23.md §U1)
+        let (hashes, sizes): (Vec<String>, Vec<i64>) = written.into_iter().unzip();
         if let Err(e) = backend.sync_blobs(&hashes).await {
             tracing::warn!(
                 "Ingest rollback: sync of {} chunks failed: {e}",
@@ -211,24 +240,33 @@ impl IngestGuard {
 
 impl Drop for IngestGuard {
     fn drop(&mut self) {
-        if !self.armed || (self.pinned.is_empty() && self.written.is_empty()) {
+        if !self.armed {
             return;
         }
-        let pinned = std::mem::take(&mut self.pinned);
-        let written = std::mem::take(&mut self.written);
+        // The rollback task locks the shared state first, so it naturally
+        // waits out an in-flight batch settle and observes its recordings.
+        let state = self.state.clone();
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 let pool = self.pool.clone();
                 let backend = self.backend.clone();
                 handle.spawn(async move {
+                    let (pinned, written) = {
+                        let mut st = state.lock().await;
+                        (
+                            std::mem::take(&mut st.pinned),
+                            std::mem::take(&mut st.written),
+                        )
+                    };
+                    if pinned.is_empty() && written.is_empty() {
+                        return;
+                    }
                     Self::run_rollback(pool, backend, pinned, written).await;
                 });
             }
             Err(_) => tracing::warn!(
-                "Ingest guard dropped outside a runtime: {} pins / {} written chunks \
+                "Ingest guard dropped outside a runtime: any pins / written chunks \
                  stay leaked until the next GC sweep",
-                pinned.len(),
-                written.len()
             ),
         }
     }
@@ -240,6 +278,16 @@ impl Drop for IngestGuard {
 /// in the [`BlobStorageBackend`], and maintains a manifest in PostgreSQL
 /// mapping file_hash → \[chunk_hashes\].  BLAKE3 hashing, ref-counting
 /// and the PostgreSQL dedup index all live here.
+/// Immutable chunk map of one CDC blob (`storage.chunk_manifests` row,
+/// minus the mutable `ref_count`). Content-addressed: for a given
+/// `file_hash` the chunk list and total size never change, which is what
+/// makes [`DedupService::manifest_cached`] safe.
+pub struct ChunkManifest {
+    pub chunk_hashes: Vec<String>,
+    pub chunk_sizes: Vec<i64>,
+    pub total_size: i64,
+}
+
 pub struct DedupService {
     /// Pluggable blob storage backend (local FS, S3, …).
     backend: Arc<dyn BlobStorageBackend>,
@@ -251,6 +299,13 @@ pub struct DedupService {
     maintenance_pool: Arc<PgPool>,
     /// Single lifecycle dispatcher — fired on blob created / deleted.
     blob_lifecycle: Option<Arc<BlobLifecycleService>>,
+    /// `file_hash → ChunkManifest` for the read path — every stream / range
+    /// / full read of a CDC blob used to pay one manifest query first, even
+    /// for the media the gallery re-reads constantly. Positive-only (a
+    /// legacy blob gaining a manifest via background rechunking must be
+    /// seen immediately), weight-bounded (a manifest is ~72 B per chunk),
+    /// short TTL so GC'd manifests age out fast (benches/MANIFEST-CACHE.md).
+    manifest_cache: moka::future::Cache<String, Arc<ChunkManifest>>,
 }
 
 impl DedupService {
@@ -269,7 +324,20 @@ impl DedupService {
             pool,
             maintenance_pool,
             blob_lifecycle: None,
+            manifest_cache: Self::build_manifest_cache(),
         }
+    }
+
+    /// See the `manifest_cache` field docs. Weight ≈ real heap bytes of one
+    /// entry; 32 MiB cap ≈ tens of thousands of typical (sub-1 GB) files.
+    fn build_manifest_cache() -> moka::future::Cache<String, Arc<ChunkManifest>> {
+        moka::future::Cache::builder()
+            .weigher(|key: &String, value: &Arc<ChunkManifest>| {
+                (key.len() + value.chunk_hashes.len() * 80 + 64) as u32
+            })
+            .max_capacity(32 * 1024 * 1024)
+            .time_to_live(std::time::Duration::from_secs(60))
+            .build()
     }
 
     /// Registers the blob lifecycle dispatcher (thumbnail cleanup, …).
@@ -311,6 +379,7 @@ impl DedupService {
             pool: stub_pool.clone(),
             maintenance_pool: stub_pool,
             blob_lifecycle: None,
+            manifest_cache: Self::build_manifest_cache(),
         }
     }
 
@@ -597,6 +666,13 @@ impl DedupService {
         .map_err(|e| DomainError::internal_error("Dedup", format!("chunk_sizes query: {e}")))
     }
 
+    /// Read-ahead depth the backend recommends for multi-chunk drains
+    /// (1 local, 8 for request-latency-bound object stores) — see
+    /// `BlobStorageBackend::read_prefetch` and benches/BLOB-PREFETCH.md.
+    pub fn read_prefetch(&self) -> usize {
+        self.backend.read_prefetch()
+    }
+
     /// Stream one chunk's raw bytes from the backend. The caller is
     /// responsible for entitlement (see [`claimable_chunks`]).
     pub async fn chunk_stream(
@@ -608,17 +684,26 @@ impl DedupService {
     }
 
     /// Of `hashes` (distinct), the subset `caller_id` may claim without
-    /// uploading bytes: chunks referenced by manifests of the caller's
-    /// files (live or trashed), or directly referenced as (legacy)
-    /// whole-file blobs. Backed by the GIN index on
+    /// uploading bytes: chunks referenced by manifests of files in drives
+    /// where the caller holds a **writable role** (owner / editor /
+    /// contributor), or directly referenced as (legacy) whole-file blobs
+    /// under the same predicate. Backed by the GIN index on
     /// `chunk_manifests.chunk_hashes`.
     ///
+    /// Post-D7 (`project_d7_policy_calls` LOCKED design): entitlement is
+    /// drive-membership + writable-role, not the legacy `user_id`
+    /// filter. Viewers/commenters are excluded — they can't legitimately
+    /// upload content into a drive, so they can't claim
+    /// "already-uploaded" via dedup. Group memberships (direct +
+    /// transitive) are expanded inline through
+    /// `storage.caller_group_ids($2)`.
+    ///
     /// Trashed files count as ownership: a trashed file's content is still
-    /// the caller's (restorable until trash-empty), so a re-upload of the
-    /// same content should hit the dedup fast path instead of forcing the
-    /// caller to re-send bytes they already have on the server. Must stay
-    /// in lockstep with [`pin_claimable_chunks`], which actually bumps the
-    /// ref_count using the same entitlement set.
+    /// under the caller's writable scope (restorable until trash-empty),
+    /// so a re-upload of the same content should hit the dedup fast path
+    /// instead of forcing the caller to re-send bytes they already have
+    /// on the server. Must stay in lockstep with [`pin_claimable_chunks`],
+    /// which actually bumps the ref_count using the same entitlement set.
     pub async fn claimable_chunks(
         &self,
         caller_id: uuid::Uuid,
@@ -633,13 +718,35 @@ impl DedupService {
                         SELECT 1
                           FROM storage.files f
                           JOIN storage.chunk_manifests m ON m.file_hash = f.blob_hash
-                         WHERE f.user_id = $2
-                           AND m.chunk_hashes @> ARRAY[c.h]
+                         WHERE m.chunk_hashes @> ARRAY[c.h]
+                           AND EXISTS (
+                                 SELECT 1 FROM storage.role_grants g
+                                  WHERE g.resource_type = 'drive'
+                                    AND g.resource_id   = f.drive_id
+                                    AND g.role IN ('owner', 'editor', 'contributor')
+                                    AND (g.expires_at IS NULL OR g.expires_at > NOW())
+                                    AND (
+                                          (g.subject_type = 'user'  AND g.subject_id = $2)
+                                       OR (g.subject_type = 'group' AND g.subject_id IN
+                                               (SELECT storage.caller_group_ids($2)))
+                                        )
+                               )
                     )
                  OR EXISTS (
                         SELECT 1 FROM storage.files f2
-                         WHERE f2.user_id = $2
-                           AND f2.blob_hash = c.h
+                         WHERE f2.blob_hash = c.h
+                           AND EXISTS (
+                                 SELECT 1 FROM storage.role_grants g
+                                  WHERE g.resource_type = 'drive'
+                                    AND g.resource_id   = f2.drive_id
+                                    AND g.role IN ('owner', 'editor', 'contributor')
+                                    AND (g.expires_at IS NULL OR g.expires_at > NOW())
+                                    AND (
+                                          (g.subject_type = 'user'  AND g.subject_id = $2)
+                                       OR (g.subject_type = 'group' AND g.subject_id IN
+                                               (SELECT storage.caller_group_ids($2)))
+                                        )
+                               )
                     )",
         )
         .bind(hashes)
@@ -651,17 +758,23 @@ impl DedupService {
     }
 
     /// Pin one reference on each of `hashes` (distinct) that the caller is
-    /// entitled to claim — owned chunks (see [`claimable_chunks`]) or
-    /// unreferenced orphans (`ref_count = 0`, the just-uploaded state).
+    /// entitled to claim — writably-scoped chunks (see [`claimable_chunks`])
+    /// or unreferenced orphans (`ref_count = 0`, the just-uploaded state).
     /// One statement: entitlement check and bump are atomic per row, so a
     /// concurrent last-reference delete can never be resurrected and a
     /// non-entitled hash is simply not returned.
     ///
-    /// Entitlement includes files in trash: a trashed file is still owned
-    /// by the user, the content is still theirs to re-reference, and the
-    /// race with trash-empty is handled the same way as `add_reference` —
-    /// if GC has already deleted the blob row, the UPDATE affects 0 rows
-    /// and the hash is simply absent from the returned set.
+    /// Post-D7 (`project_d7_policy_calls` LOCKED): entitlement uses the
+    /// same drive-membership + writable-role predicate as
+    /// [`claimable_chunks`] — MUST STAY IN LOCKSTEP with that query.
+    /// Group memberships resolve through `storage.caller_group_ids($2)`.
+    ///
+    /// Entitlement includes files in trash: a trashed file is still
+    /// within the caller's writable scope, the content is still theirs
+    /// to re-reference, and the race with trash-empty is handled the
+    /// same way as `add_reference` — if GC has already deleted the blob
+    /// row, the UPDATE affects 0 rows and the hash is simply absent from
+    /// the returned set.
     ///
     /// Returns the set actually pinned; the caller compares against its
     /// input and reports the difference as `still_missing`.
@@ -682,13 +795,35 @@ impl DedupService {
                              SELECT 1
                                FROM storage.files f
                                JOIN storage.chunk_manifests m ON m.file_hash = f.blob_hash
-                              WHERE f.user_id = $2
-                                AND m.chunk_hashes @> ARRAY[b.hash::text]
+                              WHERE m.chunk_hashes @> ARRAY[b.hash::text]
+                                AND EXISTS (
+                                      SELECT 1 FROM storage.role_grants g
+                                       WHERE g.resource_type = 'drive'
+                                         AND g.resource_id   = f.drive_id
+                                         AND g.role IN ('owner', 'editor', 'contributor')
+                                         AND (g.expires_at IS NULL OR g.expires_at > NOW())
+                                         AND (
+                                               (g.subject_type = 'user'  AND g.subject_id = $2)
+                                            OR (g.subject_type = 'group' AND g.subject_id IN
+                                                    (SELECT storage.caller_group_ids($2)))
+                                             )
+                                    )
                          )
                       OR EXISTS (
                              SELECT 1 FROM storage.files f2
-                              WHERE f2.user_id = $2
-                                AND f2.blob_hash = b.hash
+                              WHERE f2.blob_hash = b.hash
+                                AND EXISTS (
+                                      SELECT 1 FROM storage.role_grants g
+                                       WHERE g.resource_type = 'drive'
+                                         AND g.resource_id   = f2.drive_id
+                                         AND g.role IN ('owner', 'editor', 'contributor')
+                                         AND (g.expires_at IS NULL OR g.expires_at > NOW())
+                                         AND (
+                                               (g.subject_type = 'user'  AND g.subject_id = $2)
+                                            OR (g.subject_type = 'group' AND g.subject_id IN
+                                                    (SELECT storage.caller_group_ids($2)))
+                                             )
+                                    )
                          ) )
               RETURNING b.hash",
         )
@@ -728,7 +863,12 @@ impl DedupService {
 
         let mut received: Vec<(String, u64)> = Vec::new();
         let mut new_rows: Vec<(String, i64)> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
+        // Intra-request dedup set keyed on the raw 32-byte BLAKE3 digest
+        // (`[u8; 32]`, `Copy` — no per-distinct-chunk 64-byte `String` heap
+        // key), mirroring the streaming ingest loop (benches/ROUND17.md §D2).
+        // hex ↔ digest is bijective, so membership is identical to the old
+        // `HashSet<String>`.
+        let mut seen: HashSet<[u8; 32]> = HashSet::new();
 
         while let Some(frame) = frames.next().await {
             let data = frame?;
@@ -738,22 +878,31 @@ impl DedupService {
                     data.len()
                 )));
             }
-            let hash = blake3::hash(&data).to_hex().to_string();
-            received.push((hash.clone(), data.len() as u64));
-            if seen.insert(hash.clone()) {
-                let len = data.len() as i64;
+            let digest = blake3::hash(&data);
+            let hash = digest.to_hex().to_string();
+            let len = data.len();
+            if seen.insert(*digest.as_bytes()) {
                 self.backend
                     .put_blob_from_bytes_unsynced(&hash, data)
                     .await?;
-                new_rows.push((hash, len));
+                // First occurrence: `received` needs a copy, `new_rows` moves it.
+                received.push((hash.clone(), len as u64));
+                new_rows.push((hash, len as i64));
+            } else {
+                // Duplicate within this request — move the hex into `received`
+                // (no clone; the blob is already registered by its first
+                // occurrence). Same `received` sequence, input order preserved.
+                received.push((hash, len as u64));
             }
         }
 
         if !new_rows.is_empty() {
             // Durability before visibility — same invariant as the ingest
             // engine: no PG row may ever point at unsynced bytes.
-            let hashes: Vec<String> = new_rows.iter().map(|(h, _)| h.clone()).collect();
-            let sizes: Vec<i64> = new_rows.iter().map(|(_, s)| *s).collect();
+            // `new_rows` is owned and dead after this block — unzip (move the
+            // hash Strings out) instead of cloning each one for the reshape +
+            // UNNEST bind. (benches/ROUND23.md §U1)
+            let (hashes, sizes): (Vec<String>, Vec<i64>) = new_rows.into_iter().unzip();
             self.backend.sync_blobs(&hashes).await?;
             sqlx::query(
                 "INSERT INTO storage.blobs (hash, size, ref_count, orphaned_at)
@@ -780,14 +929,34 @@ impl DedupService {
     /// the declared one — the manifest's Range arithmetic depends on it.
     pub async fn hash_chunk_sequence(
         &self,
-        chunks: &[(String, u64)],
+        chunks: Vec<(String, u64)>,
         sniff_len: usize,
     ) -> Result<(String, Vec<u8>), DomainError> {
         let mut hasher = blake3::Hasher::new();
         let mut head: Vec<u8> = Vec::with_capacity(sniff_len.min(16 * 1024));
 
-        for (hash, declared_size) in chunks {
-            let mut stream = self.backend.get_blob_stream(hash).await?;
+        // Overlap the NEXT chunk's open with the current chunk's hash+drain
+        // — the same `buffered(read_prefetch)` combinator as the download
+        // path (benches/BLOB-PREFETCH.md measured +7-12 % on local disk;
+        // request-latency-bound object stores gain far more). Hashing stays
+        // strictly in manifest order: `buffered` yields in input order.
+        let prefetch = self.backend.read_prefetch().max(1);
+        let backend = self.backend.clone();
+        let mut opened = futures::stream::iter(chunks)
+            .map(move |(hash, declared_size)| {
+                let backend = backend.clone();
+                async move {
+                    backend
+                        .get_blob_stream(&hash)
+                        .await
+                        .map(|s| (hash, declared_size, s))
+                }
+            })
+            .buffered(prefetch);
+
+        while let Some(next) = opened.next().await {
+            let (hash, declared_size, mut stream) = next?;
+            let (hash, declared_size) = (&hash, &declared_size);
             let mut actual: u64 = 0;
             while let Some(part) = stream.next().await {
                 let part = part.map_err(|e| {
@@ -864,7 +1033,7 @@ impl DedupService {
     where
         S: Stream<Item = Result<Bytes, std::io::Error>> + Send,
     {
-        let mut guard = IngestGuard::new(self.pool.clone(), self.backend.clone());
+        let guard = IngestGuard::new(self.pool.clone(), self.backend.clone());
 
         let reader = StreamReader::new(Box::pin(source));
         let mut chunker = fastcdc::v2020::AsyncStreamCDC::new(
@@ -880,14 +1049,42 @@ impl DedupService {
         let mut total_size: u64 = 0;
         let mut chunk_hashes: Vec<String> = Vec::new();
         let mut chunk_sizes: Vec<u64> = Vec::new();
-        let mut session_seen: HashSet<String> = HashSet::new();
+        // Keyed on the raw 32-byte BLAKE3 digest (`Copy`, no heap) rather than
+        // the 64-char hex String: the intra-upload dedup set no longer clones a
+        // String per chunk, holds 32-byte inline keys, and hashes 32 bytes not
+        // 64 on every membership test (benches/ROUND17.md §D2).
+        let mut session_seen: HashSet<[u8; 32]> = HashSet::new();
         let mut pending: Vec<(String, Bytes)> = Vec::new();
         let mut pending_bytes: usize = 0;
+        // Depth-1 settle pipeline: batch N settles on a spawned task while
+        // the loop keeps reading/chunking/hashing batch N+1 from the source
+        // — the inline shape froze the reader (and the client's socket) for
+        // every settle (benches/INGEST-OVERLAP.md). The task records into
+        // the guard's shared state under its lock, so rollback stays exact
+        // even if this future is dropped mid-settle.
+        let mut in_flight: Option<tokio::task::JoinHandle<Result<(), DomainError>>> = None;
+
+        /// Await the previous batch's settle, mapping panics/aborts to a
+        /// domain error so both are compensated identically.
+        async fn join_settle(
+            handle: tokio::task::JoinHandle<Result<(), DomainError>>,
+        ) -> Result<(), DomainError> {
+            match handle.await {
+                Ok(res) => res,
+                Err(e) => Err(DomainError::internal_error(
+                    "Dedup",
+                    format!("Chunk settle task failed: {e}"),
+                )),
+            }
+        }
 
         while let Some(item) = chunk_stream.next().await {
             let chunk = match item {
                 Ok(chunk) => chunk,
                 Err(e) => {
+                    if let Some(handle) = in_flight.take() {
+                        let _ = join_settle(handle).await;
+                    }
                     guard.rollback().await;
                     return Err(DomainError::internal_error(
                         "Dedup",
@@ -901,25 +1098,68 @@ impl DedupService {
             // Per-chunk hashing is ≤ 1 MiB of BLAKE3 (< 1 ms) — cheaper than
             // a spawn_blocking round-trip per chunk.
             file_hasher.update(&data);
-            let hash = blake3::hash(&data).to_hex().to_string();
+            let digest = blake3::hash(&data);
+            let hash = digest.to_hex().to_string();
             chunk_sizes.push(data.len() as u64);
-            chunk_hashes.push(hash.clone());
 
-            if session_seen.insert(hash.clone()) {
+            // The hex `hash` is materialised once. A genuinely new chunk needs
+            // it in three places — the ordered manifest, the dedup set key and
+            // the backend write — but the set keys on the raw digest (no clone),
+            // so only `chunk_hashes` is cloned before `pending` takes the
+            // original. A duplicate within this upload needs it only for the
+            // manifest: the `else` moves it in, no clone (benches/ROUND17.md §D2).
+            if session_seen.insert(*digest.as_bytes()) {
                 pending_bytes += data.len();
+                chunk_hashes.push(hash.clone());
                 pending.push((hash, Bytes::from(data)));
                 if pending.len() >= Self::FLUSH_MAX_CHUNKS || pending_bytes >= Self::FLUSH_MAX_BYTES
                 {
-                    if let Err(e) = self.flush_pending(&mut guard, &mut pending).await {
+                    if let Some(handle) = in_flight.take()
+                        && let Err(e) = join_settle(handle).await
+                    {
+                        guard.rollback().await;
+                        return Err(e);
+                    }
+                    let batch = std::mem::take(&mut pending);
+                    let handle = tokio::spawn(Self::settle_batch(
+                        self.pool.clone(),
+                        self.backend.clone(),
+                        guard.state.clone(),
+                        batch,
+                    ));
+                    // Bench/ops escape hatch: OXICLOUD_INGEST_OVERLAP=0
+                    // reproduces the old inline-settle behaviour (await the
+                    // batch before reading on) — used by
+                    // benches/INGEST-OVERLAP.md for an in-binary A/B.
+                    if ingest_overlap_enabled() {
+                        in_flight = Some(handle);
+                    } else if let Err(e) = join_settle(handle).await {
                         guard.rollback().await;
                         return Err(e);
                     }
                     pending_bytes = 0;
                 }
+            } else {
+                // Duplicate within this upload: only the ordered manifest needs
+                // the hash. Move it in — no set/pending copy, zero extra allocs.
+                chunk_hashes.push(hash);
             }
         }
 
-        if let Err(e) = self.flush_pending(&mut guard, &mut pending).await {
+        if let Some(handle) = in_flight.take()
+            && let Err(e) = join_settle(handle).await
+        {
+            guard.rollback().await;
+            return Err(e);
+        }
+        if let Err(e) = Self::settle_batch(
+            self.pool.clone(),
+            self.backend.clone(),
+            guard.state.clone(),
+            std::mem::take(&mut pending),
+        )
+        .await
+        {
             guard.rollback().await;
             return Err(e);
         }
@@ -928,10 +1168,15 @@ impl DedupService {
         // One batched fsync sweep (no-op for remote backends, durable on
         // PUT), then one batched INSERT. A crash before the INSERT leaves
         // only unreferenced files; never a row pointing at unsynced bytes.
-        if !guard.written.is_empty() {
-            let new_hashes: Vec<String> = guard.written.iter().map(|(h, _)| h.clone()).collect();
-            let new_sizes: Vec<i64> = guard.written.iter().map(|(_, s)| *s).collect();
-
+        // No settle is in flight past this point — the lock is uncontended.
+        let (new_hashes, new_sizes): (Vec<String>, Vec<i64>) = {
+            let st = guard.state.lock().await;
+            (
+                st.written.iter().map(|(h, _)| h.clone()).collect(),
+                st.written.iter().map(|(_, s)| *s).collect(),
+            )
+        };
+        if !new_hashes.is_empty() {
             if let Err(e) = self.backend.sync_blobs(&new_hashes).await {
                 guard.rollback().await;
                 return Err(e);
@@ -957,7 +1202,7 @@ impl DedupService {
             }
         }
 
-        let newly_written = guard.written.len();
+        let newly_written = new_hashes.len();
         guard.disarm();
 
         Ok(ChunkIngestOutcome {
@@ -971,36 +1216,47 @@ impl DedupService {
 
     /// Settle one batch of distinct in-RAM chunks against PG + the backend.
     ///
-    /// Successfully pinned hashes and written chunks are recorded on the
-    /// guard as they happen, so a failure mid-batch leaves nothing
-    /// untracked for rollback.
-    async fn flush_pending(
-        &self,
-        guard: &mut IngestGuard,
-        pending: &mut Vec<(String, Bytes)>,
+    /// Static (no `&self`) so the ingest loop can run it on a spawned task
+    /// and keep consuming the source stream while the batch settles — the
+    /// inline shape stalled the reader for the whole settle every 8 MiB
+    /// (benches/INGEST-OVERLAP.md). The shared-state lock is held for the
+    /// entire batch: pinned hashes and written chunks are recorded
+    /// progressively under it, so a failure (or a rollback racing this
+    /// settle) leaves nothing untracked.
+    async fn settle_batch(
+        pool: Arc<PgPool>,
+        backend: Arc<dyn BlobStorageBackend>,
+        state: Arc<tokio::sync::Mutex<IngestState>>,
+        batch: Vec<(String, Bytes)>,
     ) -> Result<(), DomainError> {
-        if pending.is_empty() {
+        if batch.is_empty() {
             return Ok(());
         }
-        let batch = std::mem::take(pending);
-        let hashes: Vec<String> = batch.iter().map(|(h, _)| h.clone()).collect();
+        let mut guard = state.lock().await;
 
         // Pin-or-classify in one statement: rows that exist take this
         // session's reference NOW; hashes not returned don't exist and are
-        // ours to write.
-        let pinned: HashSet<String> = sqlx::query_scalar::<_, String>(
-            "UPDATE storage.blobs SET ref_count = ref_count + 1, orphaned_at = NULL
-              WHERE hash = ANY($1)
-              RETURNING hash",
-        )
-        .bind(&hashes)
-        .fetch_all(self.pool.as_ref())
-        .await
-        .map_err(|e| {
-            DomainError::internal_error("Dedup", format!("Failed to pin existing chunks: {e}"))
-        })?
-        .into_iter()
-        .collect();
+        // ours to write. Bind borrowed `&str`s — sqlx encodes `&[&str]` to
+        // `text[]` identically to the owned Strings the old `.clone()` built,
+        // so no per-chunk hash String is allocated just to run the query
+        // (the pattern favorites_pg_repository.rs:271 already uses). The
+        // borrow is scoped so it ends before `batch` is moved below.
+        let pinned: HashSet<String> = {
+            let hashes: Vec<&str> = batch.iter().map(|(h, _)| h.as_str()).collect();
+            sqlx::query_scalar::<_, String>(
+                "UPDATE storage.blobs SET ref_count = ref_count + 1, orphaned_at = NULL
+                  WHERE hash = ANY($1)
+                  RETURNING hash",
+            )
+            .bind(&hashes)
+            .fetch_all(pool.as_ref())
+            .await
+            .map_err(|e| {
+                DomainError::internal_error("Dedup", format!("Failed to pin existing chunks: {e}"))
+            })?
+            .into_iter()
+            .collect()
+        };
 
         let mut to_write: Vec<(String, Bytes)> = Vec::with_capacity(batch.len());
         for (hash, data) in batch {
@@ -1016,7 +1272,6 @@ impl DedupService {
 
         // Unsynced writes — durability comes from the single end-of-stream
         // sweep, before any PG row references these chunks.
-        let backend = self.backend.clone();
         let results: Vec<Result<(String, i64), DomainError>> = stream::iter(to_write)
             .map(|(hash, data)| {
                 let backend = backend.clone();
@@ -1068,11 +1323,36 @@ impl DedupService {
             .unwrap_or(false)
     }
 
-    /// Returns `true` if `user_id` owns at least one (even trashed) file that
-    /// references the blob identified by `hash`.
+    /// Returns `true` if the caller has a **writable role** on at least one
+    /// drive containing a (possibly trashed) file that references the blob
+    /// identified by `hash`.
+    ///
+    /// Post-D7 (`project_d7_policy_calls` LOCKED): same
+    /// drive-membership + writable-role predicate as
+    /// [`claimable_chunks`] / [`pin_claimable_chunks`] — MUST stay in
+    /// lockstep with them. Group memberships (direct + transitive)
+    /// expand inline via `storage.caller_group_ids($2)`. Viewers /
+    /// commenters are excluded — they can't legitimately upload into
+    /// a drive, so they can't claim "already-uploaded" via dedup.
     pub async fn user_owns_blob_reference(&self, hash: &str, user_id: &str) -> bool {
         sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM storage.files WHERE blob_hash = $1 AND user_id = $2::uuid)",
+            "SELECT EXISTS(
+                SELECT 1
+                  FROM storage.files f
+                 WHERE f.blob_hash = $1
+                   AND EXISTS (
+                         SELECT 1 FROM storage.role_grants g
+                          WHERE g.resource_type = 'drive'
+                            AND g.resource_id   = f.drive_id
+                            AND g.role IN ('owner', 'editor', 'contributor')
+                            AND (g.expires_at IS NULL OR g.expires_at > NOW())
+                            AND (
+                                  (g.subject_type = 'user'  AND g.subject_id = $2::uuid)
+                               OR (g.subject_type = 'group' AND g.subject_id IN
+                                       (SELECT storage.caller_group_ids($2::uuid)))
+                                )
+                       )
+             )",
         )
         .bind(hash)
         .bind(user_id)
@@ -1082,13 +1362,14 @@ impl DedupService {
     }
 
     /// Batch variant of [`Self::user_owns_blob_reference`]: given candidate
-    /// hashes, return the subset the user already references — in ONE query
-    /// (backed by `idx_files_blob_hash`). Lets a client hash a whole upload set
-    /// and learn which files it can skip with a single round trip instead of
-    /// one probe per file.
+    /// hashes, return the subset the caller can already reference — in ONE
+    /// query (backed by `idx_files_blob_hash`). Lets a client hash a whole
+    /// upload set and learn which files it can skip with a single round trip
+    /// instead of one probe per file.
     ///
-    /// User-scoped, exactly like the single check: only the caller's own blobs
-    /// are returned, so it cannot probe whether *other* users hold a blob.
+    /// Post-D7: same drive-membership + writable-role predicate as the
+    /// single check. Anti-enumeration is preserved — only hashes present
+    /// in a drive the caller can write to come back.
     pub async fn user_owned_blob_references(
         &self,
         hashes: &[String],
@@ -1098,8 +1379,21 @@ impl DedupService {
             return Vec::new();
         }
         sqlx::query_scalar::<_, String>(
-            "SELECT DISTINCT blob_hash FROM storage.files \
-             WHERE blob_hash = ANY($1) AND user_id = $2::uuid",
+            "SELECT DISTINCT f.blob_hash
+               FROM storage.files f
+              WHERE f.blob_hash = ANY($1)
+                AND EXISTS (
+                      SELECT 1 FROM storage.role_grants g
+                       WHERE g.resource_type = 'drive'
+                         AND g.resource_id   = f.drive_id
+                         AND g.role IN ('owner', 'editor', 'contributor')
+                         AND (g.expires_at IS NULL OR g.expires_at > NOW())
+                         AND (
+                               (g.subject_type = 'user'  AND g.subject_id = $2::uuid)
+                            OR (g.subject_type = 'group' AND g.subject_id IN
+                                    (SELECT storage.caller_group_ids($2::uuid)))
+                             )
+                    )",
         )
         .bind(hashes)
         .bind(user_id)
@@ -1286,6 +1580,10 @@ impl DedupService {
             tx.commit()
                 .await
                 .map_err(|e| DomainError::internal_error("Dedup", format!("Commit: {}", e)))?;
+
+            // Post-commit so a concurrent read can't re-cache the manifest
+            // between invalidation and the delete becoming visible.
+            self.manifest_cache.invalidate(file_hash).await;
 
             // File content is gone — drop its blob-keyed thumbnails now.
             self.fire_blob_hooks(file_hash);
@@ -1487,18 +1785,24 @@ impl DedupService {
     /// remote object stores where overlapping fetches hide per-chunk latency).
     /// Shared by [`Self::read_blob_stream`] and [`Self::read_blob_bytes`] so both
     /// build the chunk stream identically from a manifest's `chunk_hashes`.
+    /// Takes the shared manifest `Arc` and iterates its hashes by index —
+    /// the old `Vec<String>` signature forced every read to deep-clone the
+    /// whole hash list out of the cached manifest before the first byte
+    /// (N ~64-B String allocs per read of an N-chunk file); the per-chunk
+    /// `Arc` bump here is a single atomic increment.
     fn stream_chunks(
         &self,
-        chunk_hashes: Vec<String>,
+        manifest: Arc<ChunkManifest>,
     ) -> Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> {
         let prefetch = self.backend.read_prefetch().max(1);
         let backend = self.backend.clone();
-        let chunk_stream = stream::iter(chunk_hashes)
-            .map(move |chunk_hash| {
+        let chunk_stream = stream::iter(0..manifest.chunk_hashes.len())
+            .map(move |i| {
                 let backend = backend.clone();
+                let manifest = manifest.clone();
                 async move {
                     backend
-                        .get_blob_stream(&chunk_hash)
+                        .get_blob_stream(&manifest.chunk_hashes[i])
                         .await
                         .map_err(|e| std::io::Error::other(e.to_string()))
                 }
@@ -1508,27 +1812,74 @@ impl DedupService {
         Box::pin(chunk_stream)
     }
 
+    /// Cached manifest fetch for the read path (see the `manifest_cache`
+    /// field docs). `None` = legacy whole-file blob — never cached, so a
+    /// background rechunk that creates a manifest is honoured immediately.
+    ///
+    /// Misses are single-flighted through `try_get_with`: K concurrent cold
+    /// readers of one newly-hot file (e.g. parallel Range probes on a big
+    /// video) coalesce onto ONE manifest SELECT instead of K. The
+    /// positive-only contract is preserved by routing "no manifest row" and
+    /// DB failures through the loader's error channel, which moka never
+    /// caches. The zero-alloc `get` fast path stays in front so warm reads
+    /// don't pay the owned-key clone `try_get_with` requires.
+    async fn manifest_cached(&self, hash: &str) -> Result<Option<Arc<ChunkManifest>>, DomainError> {
+        if let Some(m) = self.manifest_cache.get(hash).await {
+            return Ok(Some(m));
+        }
+
+        enum MissKind {
+            Legacy,
+            Db(String),
+        }
+
+        let pool = self.pool.clone();
+        let query_hash = hash.to_string();
+        let result = self
+            .manifest_cache
+            .try_get_with(hash.to_string(), async move {
+                let row = sqlx::query_as::<_, (Vec<String>, Vec<i64>, i64)>(
+                    "SELECT chunk_hashes, chunk_sizes, total_size
+                     FROM storage.chunk_manifests WHERE file_hash = $1",
+                )
+                .bind(&query_hash)
+                .fetch_optional(pool.as_ref())
+                .await
+                .map_err(|e| MissKind::Db(e.to_string()))?;
+                match row {
+                    Some((chunk_hashes, chunk_sizes, total_size)) => Ok(Arc::new(ChunkManifest {
+                        chunk_hashes,
+                        chunk_sizes,
+                        total_size,
+                    })),
+                    None => Err(MissKind::Legacy),
+                }
+            })
+            .await;
+        match result {
+            Ok(m) => Ok(Some(m)),
+            Err(miss) => match &*miss {
+                MissKind::Legacy => Ok(None),
+                MissKind::Db(msg) => Err(DomainError::internal_error(
+                    "Dedup",
+                    format!("Manifest lookup: {}", msg),
+                )),
+            },
+        }
+    }
+
     /// Stream blob content — CDC-aware with legacy fallback.
     ///
-    /// For CDC files: looks up the manifest, then streams chunks in order,
-    /// concatenating them into a single byte stream.
+    /// For CDC files: looks up the manifest (RAM-cached), then streams
+    /// chunks in order, concatenating them into a single byte stream.
     /// For legacy blobs: delegates directly to the backend.
     pub async fn read_blob_stream(
         &self,
         hash: &str,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>, DomainError>
     {
-        // Check manifest
-        let manifest = sqlx::query_scalar::<_, Vec<String>>(
-            "SELECT chunk_hashes FROM storage.chunk_manifests WHERE file_hash = $1",
-        )
-        .bind(hash)
-        .fetch_optional(self.pool.as_ref())
-        .await
-        .map_err(|e| DomainError::internal_error("Dedup", format!("Manifest lookup: {}", e)))?;
-
-        match manifest {
-            Some(chunk_hashes) => Ok(self.stream_chunks(chunk_hashes)),
+        match self.manifest_cached(hash).await? {
+            Some(m) => Ok(self.stream_chunks(m)),
             // Legacy whole-file blob
             None => self.backend.get_blob_stream(hash).await,
         }
@@ -1546,17 +1897,10 @@ impl DedupService {
     /// `blob_size` + `read_blob_stream`) doubled the manifest round-trips on
     /// every full-blob read (e.g. 2N queries for an N-image gallery cold load).
     pub async fn read_blob_bytes(&self, hash: &str) -> Result<Bytes, DomainError> {
-        let manifest = sqlx::query_as::<_, (Vec<String>, i64)>(
-            "SELECT chunk_hashes, total_size FROM storage.chunk_manifests WHERE file_hash = $1",
-        )
-        .bind(hash)
-        .fetch_optional(self.pool.as_ref())
-        .await
-        .map_err(|e| DomainError::internal_error("Dedup", format!("Manifest lookup: {}", e)))?;
-
-        let (mut stream, expected_size) = match manifest {
-            Some((chunk_hashes, total_size)) => {
-                (self.stream_chunks(chunk_hashes), total_size.max(0) as usize)
+        let (mut stream, expected_size) = match self.manifest_cached(hash).await? {
+            Some(m) => {
+                let expected = m.total_size.max(0) as usize;
+                (self.stream_chunks(m), expected)
             }
             None => {
                 // Legacy whole-file blob: size + stream straight from the backend.
@@ -1587,25 +1931,18 @@ impl DedupService {
         end: Option<u64>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>, DomainError>
     {
-        // Check manifest
-        let manifest = sqlx::query_as::<_, (Vec<String>, Vec<i64>, i64)>(
-            "SELECT chunk_hashes, chunk_sizes, total_size
-             FROM storage.chunk_manifests WHERE file_hash = $1",
-        )
-        .bind(hash)
-        .fetch_optional(self.pool.as_ref())
-        .await
-        .map_err(|e| DomainError::internal_error("Dedup", format!("Manifest lookup: {}", e)))?;
+        if let Some(m) = self.manifest_cached(hash).await? {
+            let end = end.unwrap_or(m.total_size as u64);
 
-        if let Some((chunk_hashes, chunk_sizes, total_size)) = manifest {
-            let end = end.unwrap_or(total_size as u64);
-
-            // Calculate which chunks overlap [start, end)
+            // Calculate which chunks overlap [start, end). Chunks are
+            // addressed by manifest INDEX (the hash is read through the
+            // shared `Arc` at fetch time) — a `bytes=0-` probe of an
+            // N-chunk video used to clone all N hash Strings here.
             let mut offset: u64 = 0;
-            // (chunk_hash, range_start_within_chunk, range_end_within_chunk)
-            let mut selected: Vec<(String, u64, Option<u64>)> = Vec::new();
+            // (chunk_index, range_start_within_chunk, range_end_within_chunk)
+            let mut selected: Vec<(usize, u64, Option<u64>)> = Vec::new();
 
-            for (i, &chunk_size) in chunk_sizes.iter().enumerate() {
+            for (i, &chunk_size) in m.chunk_sizes.iter().enumerate() {
                 let chunk_size = chunk_size as u64;
                 let chunk_end = offset + chunk_size;
 
@@ -1616,7 +1953,7 @@ impl DedupService {
                     } else {
                         None
                     };
-                    selected.push((chunk_hashes[i].clone(), range_start, range_end));
+                    selected.push((i, range_start, range_end));
                 }
 
                 offset += chunk_size;
@@ -1630,11 +1967,16 @@ impl DedupService {
             let prefetch = self.backend.read_prefetch().max(1);
             let backend = self.backend.clone();
             let chunk_stream = stream::iter(selected)
-                .map(move |(chunk_hash, range_start, range_end)| {
+                .map(move |(i, range_start, range_end)| {
                     let backend = backend.clone();
+                    let manifest = m.clone();
                     async move {
                         backend
-                            .get_blob_range_stream(&chunk_hash, range_start, range_end)
+                            .get_blob_range_stream(
+                                &manifest.chunk_hashes[i],
+                                range_start,
+                                range_end,
+                            )
                             .await
                             .map_err(|e| std::io::Error::other(e.to_string()))
                     }
@@ -1651,17 +1993,9 @@ impl DedupService {
 
     /// Get blob size — manifest-aware with legacy fallback.
     pub async fn blob_size(&self, hash: &str) -> Result<u64, DomainError> {
-        // Check manifest first (O(1) from PG)
-        let manifest_size = sqlx::query_scalar::<_, i64>(
-            "SELECT total_size FROM storage.chunk_manifests WHERE file_hash = $1",
-        )
-        .bind(hash)
-        .fetch_optional(self.pool.as_ref())
-        .await
-        .map_err(|e| DomainError::internal_error("Dedup", format!("Manifest lookup: {}", e)))?;
-
-        if let Some(size) = manifest_size {
-            return Ok(size as u64);
+        // Check manifest first (RAM cache, else one O(1) PG row)
+        if let Some(m) = self.manifest_cached(hash).await? {
+            return Ok(m.total_size as u64);
         }
 
         // Legacy: delegate to backend
@@ -1895,6 +2229,24 @@ impl DedupService {
     /// The grace window and reference cross-checks together make the sweep safe
     /// against a concurrent uploader re-referencing a just-orphaned chunk.
     pub async fn garbage_collect(&self) -> Result<(u64, u64), DomainError> {
+        self.garbage_collect_with_grace(Self::GC_ORPHAN_GRACE_SECS)
+            .await
+    }
+
+    /// Test-only variant that bypasses the orphan grace window — used by
+    /// `POST /api/admin/internal/trigger-gc?force=true` so the
+    /// integration suite can reap just-orphaned blobs synchronously
+    /// (waiting out the production 1 h grace inside a test run is a
+    /// non-starter). Drops the same rows the regular sweep would, just
+    /// without the time floor. Unsafe under concurrent uploads because
+    /// it reopens the TOCTOU window the grace closes — only the
+    /// admin-internal route, itself gated by
+    /// `OXICLOUD_ENABLE_ADMIN_INTERNAL_ENDPOINTS`, may reach here.
+    pub async fn garbage_collect_force(&self) -> Result<(u64, u64), DomainError> {
+        self.garbage_collect_with_grace(0).await
+    }
+
+    async fn garbage_collect_with_grace(&self, grace_secs: i64) -> Result<(u64, u64), DomainError> {
         const BATCH_SIZE: i64 = 500;
 
         let mut total_deleted = 0u64;
@@ -1932,6 +2284,7 @@ impl DedupService {
             }
 
             for (file_hash, chunk_hashes, size) in &batch {
+                self.manifest_cache.invalidate(file_hash).await;
                 // Decrement chunk ref_counts. GREATEST(.., 0) guards against the
                 // single-chunk file case where the PG file-delete trigger already
                 // decremented blobs.ref_count (because file_hash == chunk_hash);
@@ -1950,6 +2303,16 @@ impl DedupService {
                 .map_err(|e| {
                     DomainError::internal_error("Dedup", format!("GC decrement chunks: {e}"))
                 })?;
+
+                // Fire the blob hooks against the **manifest's file_hash** —
+                // that's the key thumbnails are stored under (whole-file
+                // BLAKE3, not chunk hashes). Phase 2 below fires hooks for
+                // individual chunk hashes only; without this call, a
+                // CDC-chunked file's thumbnails leak on disk because the
+                // chunk-keyed hook never finds them. Symptom: orphan webp
+                // under `.thumbnails/{icon,preview,large}/<file_hash>.webp`
+                // after a user-cascade-delete of a video upload.
+                self.fire_blob_hooks(file_hash);
 
                 total_bytes += *size as u64;
                 tracing::debug!(
@@ -2001,7 +2364,7 @@ impl DedupService {
                   RETURNING hash, size",
             )
             .bind(BATCH_SIZE)
-            .bind(Self::GC_ORPHAN_GRACE_SECS as i32)
+            .bind(grace_secs as i32)
             .fetch_all(self.maintenance_pool.as_ref())
             .await
             .map_err(|e| DomainError::internal_error("Dedup", format!("GC blobs: {e}")))?;
@@ -2921,19 +3284,20 @@ mod rechunk_integration_tests {
         .await
         .expect("insert legacy blob row");
 
-        let (user_id, drive_id) = seed_user(pool).await;
+        let (_user_id, drive_id) = seed_user(pool).await;
         let mut file_ids = Vec::new();
         for i in 0..n_files {
             let name = format!(
                 "rust-test-rechunk-{label}-{}-{i}",
                 &Uuid::new_v4().to_string()[..8]
             );
+            // Post-D7: `user_id` omitted — column is nullable and unused
+            // on new rows.
             let id: Uuid = sqlx::query_scalar(
-                "INSERT INTO storage.files (name, user_id, drive_id, blob_hash, size)
-                 VALUES ($1, $2, $3, $4, $5) RETURNING id",
+                "INSERT INTO storage.files (name, drive_id, blob_hash, size)
+                 VALUES ($1, $2, $3, $4) RETURNING id",
             )
             .bind(&name)
-            .bind(user_id)
             .bind(drive_id)
             .bind(&hash)
             .bind(data.len() as i64)
@@ -3219,20 +3583,55 @@ mod delta_upload_integration_tests {
 
     /// Store `data` through the streaming path and give `user_id` a file
     /// row referencing it — making its chunks claimable by that user.
+    ///
+    /// **Order matters.** BLAKE3 is deterministic, so the file row is
+    /// inserted BEFORE `store_from_stream` runs. This closes a race in
+    /// the shared test pool: Phase 1 of `garbage_collect()` deletes
+    /// manifests with `NOT EXISTS (file referencing it)`. With the old
+    /// order (store first, file second), a concurrent GC-invoking test
+    /// (`garbage_collect_honours_grace_window_and_references`,
+    /// `manifest_dereference_defers_chunk_reclamation_to_gc`) could
+    /// reap our manifest in the microsecond window between the two
+    /// statements, causing CI-flaky `RowNotFound` panics in producers
+    /// like `hash_chunk_sequence_recomputes_and_validates_sizes`.
     async fn seed_owned_content(
         svc: &DedupService,
         pool: &PgPool,
-        user_id: Uuid,
+        _user_id: Uuid,
         drive_id: Uuid,
         data: &[u8],
         label: &str,
     ) -> (String, Vec<String>, Uuid) {
+        let file_hash = blake3::hash(data).to_hex().to_string();
+
+        // Post-D7: `user_id` omitted — column is nullable and unused on
+        // new rows.
+        let file_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO storage.files (name, drive_id, blob_hash, size)
+             VALUES ($1, $2, $3, $4) RETURNING id",
+        )
+        .bind(format!(
+            "rust-test-delta-{label}-{}",
+            &Uuid::new_v4().to_string()[..8]
+        ))
+        .bind(drive_id)
+        .bind(&file_hash)
+        .bind(data.len() as i64)
+        .fetch_one(pool)
+        .await
+        .expect("file row");
+
         let source = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::copy_from_slice(data))]);
         let stored = svc
             .store_from_stream(source, Some("application/octet-stream".into()))
             .await
             .expect("store");
-        let file_hash = stored.hash().to_string();
+        assert_eq!(
+            stored.hash(),
+            file_hash,
+            "pre-computed BLAKE3 must match CDC-store output"
+        );
+
         let chunks: Vec<String> = sqlx::query_scalar(
             "SELECT UNNEST(chunk_hashes) FROM storage.chunk_manifests WHERE file_hash = $1",
         )
@@ -3241,21 +3640,6 @@ mod delta_upload_integration_tests {
         .await
         .expect("chunks");
 
-        let file_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO storage.files (name, user_id, drive_id, blob_hash, size)
-             VALUES ($1, $2, $3, $4, $5) RETURNING id",
-        )
-        .bind(format!(
-            "rust-test-delta-{label}-{}",
-            &Uuid::new_v4().to_string()[..8]
-        ))
-        .bind(user_id)
-        .bind(drive_id)
-        .bind(&file_hash)
-        .bind(data.len() as i64)
-        .fetch_one(pool)
-        .await
-        .expect("file row");
         (file_hash, chunks, file_id)
     }
 
@@ -3325,8 +3709,17 @@ mod delta_upload_integration_tests {
         let orphan = blake3::hash(format!("orphan-{}", Uuid::new_v4()).as_bytes())
             .to_hex()
             .to_string();
+        // Stamp `orphaned_at = now()` on the ref-0 row so it sits inside the
+        // GC grace window for the duration of this test. Without it,
+        // `orphaned_at IS NULL` is treated by `garbage_collect` as
+        // "pre-migration, immediately reapable" — and any sibling test in
+        // the shared pool that calls `garbage_collect()` (e.g.
+        // `garbage_collect_respects_grace_and_cross_checks`) would race
+        // with the pin below and delete the row first.
         sqlx::query(
-            "INSERT INTO storage.blobs (hash, size, ref_count) VALUES ($1, 10, 1), ($2, 10, 0)",
+            "INSERT INTO storage.blobs (hash, size, ref_count, orphaned_at) VALUES
+                ($1, 10, 1, NULL),
+                ($2, 10, 0, now())",
         )
         .bind(&foreign)
         .bind(&orphan)
@@ -3645,7 +4038,7 @@ mod delta_upload_integration_tests {
             .collect();
 
         let (computed, head) = svc
-            .hash_chunk_sequence(&sequence, 16)
+            .hash_chunk_sequence(sequence.clone(), 16)
             .await
             .expect("verification read");
         assert_eq!(computed, file_hash, "recomputed hash must match");
@@ -3660,7 +4053,7 @@ mod delta_upload_integration_tests {
         let mut lying = sequence.clone();
         lying[0].1 += 1;
         assert!(
-            svc.hash_chunk_sequence(&lying, 0).await.is_err(),
+            svc.hash_chunk_sequence(lying, 0).await.is_err(),
             "size lie must fail verification"
         );
 

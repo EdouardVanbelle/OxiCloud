@@ -8,6 +8,7 @@ OxiCloud provides a trash system that soft-deletes files and folders, allowing u
 2. Trashed items are hidden from normal file listings but remain on disk and in the database
 3. Users can browse the trash, restore items, or permanently delete them
 4. Items older than the retention period (default: **30 days**) are automatically purged
+5. **Trash on a read-only drive is paused** — see [Drives → Read-only](/guide/drives#policies-per-drive-guardrails). The retention purge skips frozen drives entirely; trashed items stay put until the drive is unfrozen. Retention clock keeps ticking, so the next post-unfreeze tick catches up on anything past its lifetime.
 
 ## Storage Model
 

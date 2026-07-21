@@ -307,10 +307,15 @@
 }
 
 .auth-toggle-link {
+    background: transparent;
+    border: 0;
+    padding: 0;
     color: var(--color-accent-text);
     cursor: pointer;
     text-decoration: none;
     font-weight: var(--weight-medium);
+    font-family: inherit;
+    font-size: inherit;
 }
 
 .auth-toggle-link:hover {

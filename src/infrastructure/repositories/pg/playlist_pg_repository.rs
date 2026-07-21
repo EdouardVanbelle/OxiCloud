@@ -22,6 +22,21 @@ struct PlaylistRow {
     updated_at: DateTime<Utc>,
 }
 
+/// A public playlist row carrying its aggregated track count, produced by the
+/// single `LEFT JOIN … GROUP BY` that replaces the per-playlist `COUNT(*)` N+1.
+#[derive(FromRow)]
+struct PublicPlaylistCountRow {
+    id: Uuid,
+    name: String,
+    description: Option<String>,
+    owner_id: Uuid,
+    is_public: bool,
+    cover_file_id: Option<Uuid>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    track_count: i64,
+}
+
 #[derive(FromRow)]
 struct PlaylistItemRow {
     id: Uuid,
@@ -78,6 +93,52 @@ impl PlaylistPgRepository {
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Public playlists together with their track counts in a **single**
+    /// round-trip. Replaces the adapter's 1 + N shape (one listing SELECT then
+    /// one `SELECT COUNT(*) FROM audio.playlist_items` per returned playlist —
+    /// up to 101 round-trips at `limit = 100`) with one `LEFT JOIN … GROUP BY`,
+    /// backed by `idx_playlist_items_playlist_id` (benches/ROUND25.md §Q1).
+    pub async fn list_public_playlists_with_counts(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> PlaylistRepositoryResult<Vec<(Playlist, i64)>> {
+        let rows = sqlx::query_as::<_, PublicPlaylistCountRow>(
+            "SELECT p.id, p.name, p.description, p.owner_id, p.is_public, p.cover_file_id, \
+                    p.created_at, p.updated_at, COUNT(pi.id) AS track_count \
+             FROM audio.playlists p \
+             LEFT JOIN audio.playlist_items pi ON pi.playlist_id = p.id \
+             WHERE p.is_public = TRUE \
+             GROUP BY p.id \
+             ORDER BY p.updated_at DESC LIMIT $1 OFFSET $2",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| {
+            DomainError::database_error(format!("Failed to list public playlists: {}", e))
+        })?;
+
+        rows.into_iter()
+            .map(|row| {
+                let track_count = row.track_count;
+                Playlist::with_id(
+                    row.id,
+                    row.name,
+                    row.description,
+                    row.owner_id,
+                    row.is_public,
+                    row.cover_file_id,
+                    row.created_at,
+                    row.updated_at,
+                )
+                .map(|p| (p, track_count))
+                .map_err(|e| DomainError::new(ErrorKind::InternalError, "Playlist", e.to_string()))
+            })
+            .collect()
     }
 }
 
@@ -178,6 +239,35 @@ impl PlaylistRepository for PlaylistPgRepository {
             row.updated_at,
         )
         .map_err(|e| DomainError::new(ErrorKind::InternalError, "Playlist", e.to_string()))
+    }
+
+    async fn find_playlists_by_ids(&self, ids: &[Uuid]) -> PlaylistRepositoryResult<Vec<Playlist>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<_, PlaylistRow>(
+            "SELECT id, name, description, owner_id, is_public, cover_file_id, created_at, updated_at FROM audio.playlists WHERE id = ANY($1)",
+        )
+        .bind(ids)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| DomainError::database_error(format!("Failed to find playlists: {}", e)))?;
+
+        rows.into_iter()
+            .map(|row| {
+                Playlist::with_id(
+                    row.id,
+                    row.name,
+                    row.description,
+                    row.owner_id,
+                    row.is_public,
+                    row.cover_file_id,
+                    row.created_at,
+                    row.updated_at,
+                )
+                .map_err(|e| DomainError::new(ErrorKind::InternalError, "Playlist", e.to_string()))
+            })
+            .collect()
     }
 
     async fn list_playlists_by_owner(
@@ -515,17 +605,27 @@ impl PlaylistItemRepository for PlaylistItemPgRepository {
         playlist_id: &Uuid,
         item_ids: &[Uuid],
     ) -> PlaylistItemRepositoryResult<()> {
-        for (index, item_id) in item_ids.iter().enumerate() {
-            sqlx::query(
-                "UPDATE audio.playlist_items SET position = $2 WHERE id = $1 AND playlist_id = $3",
-            )
-            .bind(item_id)
-            .bind(index as i32)
-            .bind(playlist_id)
-            .execute(&*self.pool)
-            .await
-            .map_err(|e| DomainError::database_error(format!("Failed to reorder: {}", e)))?;
+        if item_ids.is_empty() {
+            return Ok(());
         }
+        // One UNNEST-driven UPDATE instead of one autocommit round-trip per
+        // track — a full drag-reorder of an N-track playlist was N statements
+        // (and non-atomic: a mid-loop failure left a half-applied order).
+        // `WITH ORDINALITY` numbers the ids in array order, 1-based, so
+        // `ord - 1` reproduces the historical 0-based positions.
+        sqlx::query(
+            r#"
+            UPDATE audio.playlist_items AS pi
+               SET position = (t.ord - 1)::int
+              FROM unnest($1::uuid[]) WITH ORDINALITY AS t(id, ord)
+             WHERE pi.id = t.id AND pi.playlist_id = $2
+            "#,
+        )
+        .bind(item_ids)
+        .bind(playlist_id)
+        .execute(&*self.pool)
+        .await
+        .map_err(|e| DomainError::database_error(format!("Failed to reorder: {}", e)))?;
         Ok(())
     }
 

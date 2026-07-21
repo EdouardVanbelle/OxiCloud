@@ -275,6 +275,85 @@ status <  500
 
 
 # ─────────────────────────────────────────────────────────────
+# 14b — Viewer-laundering regression (post-Drive AuthZ audit,
+#       Round 1 HIGH). Before the fix, `POST /api/shares` checked
+#       only "does the item exist" — any authenticated user who
+#       could name the UUID could mint a public Viewer link,
+#       laundering read access into a permanent anonymous URL
+#       that survived their own grant revocation. Now the
+#       service calls `authz.require(Share, resource)` before
+#       minting the token; a caller without `Share`
+#       (Viewer/Commenter/Contributor/no-grant-at-all) gets 404
+#       (anti-enum) + `authz.denied` audit line. See
+#       `docs/plan/authz_audit/admin_membership.md`.
+#
+#       We test the strongest form: an unrelated user with no
+#       grant at all. The intermediate case (Viewer with Read
+#       but not Share) is covered by the same code path — Share
+#       is bundled only with owner/editor role_grants.
+# ─────────────────────────────────────────────────────────────
+
+# Create/lookup the attacker. Idempotent: `HTTP *` accepts either
+# 201 (first run) or 409 (subsequent runs). Login below is the real
+# precondition.
+POST {{base_url}}/api/admin/users
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{ "username": "sh_mallory", "password": "ShMalloryPassword1!", "email": "sh_mallory@example.com", "role": "user" }
+
+HTTP *
+
+
+POST {{base_url}}/api/auth/login
+Content-Type: application/json
+{ "username": "sh_mallory", "password": "ShMalloryPassword1!" }
+
+HTTP 200
+[Captures]
+mallory_token: jsonpath "$.access_token"
+
+
+# Step 14b.i — Mallory tries to mint a public share on admin's
+#              folder: 404 (anti-enum). No token appears in the
+#              response body.
+POST {{base_url}}/api/shares
+Authorization: Bearer {{mallory_token}}
+Content-Type: application/json
+{
+  "item_id":   "{{share_folder_id}}",
+  "item_name": "public-share-test",
+  "item_type": "folder"
+}
+
+HTTP 404
+
+
+# Step 14b.ii — Same attempt on admin's file: 404.
+POST {{base_url}}/api/shares
+Authorization: Bearer {{mallory_token}}
+Content-Type: application/json
+{
+  "item_id":   "{{shared_file_id}}",
+  "item_name": "hello.txt",
+  "item_type": "file"
+}
+
+HTTP 404
+
+
+# Step 14b.iii — Mallory has no shares — no partial success slipped
+#                through. (`GET /api/shares` returns only shares the
+#                caller created; response is paginated.)
+GET {{base_url}}/api/shares
+Authorization: Bearer {{mallory_token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$.items" isCollection
+jsonpath "$.items" count == 0
+
+
+# ─────────────────────────────────────────────────────────────
 # 15 — Teardown: revoke the password share + the direct
 #      file-share, then delete the folder.
 # ─────────────────────────────────────────────────────────────

@@ -2,6 +2,22 @@
 
 OxiCloud provides built-in CalDAV (calendar) and CardDAV (contacts) servers — no extra apps or plugins needed.
 
+## Authentication
+
+CalDAV and CardDAV clients authenticate with an **app password**, not
+your regular OxiCloud account password. Your account password is
+refused on `/caldav/` and `/carddav/` (same as `/webdav/`). This is by
+design — app passwords are the only credential shape that works
+uniformly across all account types (password, magic-link-only, OIDC).
+
+**Generate one:** in OxiCloud web UI, go to **Profile → App Passwords**,
+click *Create*, name it (e.g. "Thunderbird calendar"), and copy the
+token shown once. Use your username + that token in every DAV client
+below.
+
+See [DAV Client Setup](./dav-client-setup#before-you-start-get-an-app-password)
+for full details.
+
 ## CalDAV (Calendars)
 
 ### Endpoint
@@ -58,7 +74,7 @@ Typical resource shapes:
 2. Right-click → **New Calendar** → **On the Network**
 3. Format: **CalDAV**
 4. URL: `https://your-server:8086/caldav/`
-5. Enter your OxiCloud credentials
+5. Enter your OxiCloud username and an [app password](#authentication) — the account password is refused
 
 ---
 
@@ -114,7 +130,7 @@ Typical resource shapes:
 1. Install [DAVx⁵](https://www.davx5.com/) from F-Droid or Play Store
 2. Add account → **Login with URL and user name**
 3. Base URL: `https://your-server:8086/`
-4. Enter your OxiCloud credentials
+4. Enter your OxiCloud username and an [app password](#authentication) — the account password is refused
 5. DAVx⁵ auto-discovers both CalDAV and CardDAV endpoints
 
 ::: info

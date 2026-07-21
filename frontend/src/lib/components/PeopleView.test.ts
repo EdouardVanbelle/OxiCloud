@@ -6,7 +6,10 @@ vi.mock('$lib/api/endpoints/people', () => ({
 	fetchPersonPhotos: vi.fn(),
 	renamePerson: vi.fn()
 }));
-vi.mock('$lib/api/endpoints/files', () => ({ fileThumbnailUrl: () => '/thumb.png' }));
+vi.mock('$lib/api/endpoints/files', () => ({
+	fileThumbnailUrl: () => '/thumb.png',
+	thumbSizeForView: () => 'preview' as const
+}));
 vi.mock('$lib/stores/dialogs.svelte', () => ({ promptDialog: vi.fn() }));
 
 import { fetchPeople, fetchPersonPhotos, renamePerson } from '$lib/api/endpoints/people';

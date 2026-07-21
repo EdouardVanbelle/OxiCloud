@@ -13,6 +13,11 @@ pub trait PlaylistRepository: Send + Sync + 'static {
 
     async fn find_playlist_by_id(&self, id: &Uuid) -> PlaylistRepositoryResult<Playlist>;
 
+    /// Batch sibling of [`Self::find_playlist_by_id`]: one `= ANY($1)`
+    /// round-trip for a page of grant-derived ids. Missing ids drop
+    /// out; ordering is not guaranteed.
+    async fn find_playlists_by_ids(&self, ids: &[Uuid]) -> PlaylistRepositoryResult<Vec<Playlist>>;
+
     async fn list_playlists_by_owner(
         &self,
         owner_id: Uuid,

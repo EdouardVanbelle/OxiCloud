@@ -4,9 +4,7 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use super::cursor::{CursorListResponse, CursorQuery, PageCursor};
-use super::display_helpers::{
-    category_for, format_file_size, icon_class_for, icon_special_class_for,
-};
+use super::display_helpers::{classify_display, format_file_size};
 use super::grant_dto::{ResourceContentDto, ResourceTypeDto};
 use crate::domain::services::authorization::ResourceKind;
 
@@ -55,11 +53,6 @@ pub struct FavoriteItemDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub item_path: Option<String>,
 
-    /// UUID of the file/folder's actual owner (may differ from `user_id` when
-    /// the item was shared and then favourited by another user).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub owner_id: Option<String>,
-
     // ── Pre-computed display fields ──
     /// FontAwesome icon CSS class (e.g. "fas fa-file-image", "fas fa-folder")
     pub icon_class: String,
@@ -89,9 +82,10 @@ impl FavoriteItemDto {
                 .item_mime_type
                 .as_deref()
                 .unwrap_or("application/octet-stream");
-            self.icon_class = icon_class_for(name, mime).to_string();
-            self.icon_special_class = icon_special_class_for(name, mime).to_string();
-            self.category = category_for(name, mime).to_string();
+            let classes = classify_display(name, mime);
+            self.icon_class = classes.icon_class.to_string();
+            self.icon_special_class = classes.icon_special_class.to_string();
+            self.category = classes.category.to_string();
             self.size_formatted = format_file_size(self.item_size.unwrap_or(0) as u64);
         }
         self
@@ -124,11 +118,20 @@ pub struct FavoriteResourceRow {
     pub size: i64,
     pub resource_created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
-    pub owner_id: Uuid,
+    /// Drive that owns this row. Surfaced on the favorites listing
+    /// so a UI can tell when a favorited item lives in a different
+    /// drive than the user's home (post-D6 cross-drive moves +
+    /// copies make this reachable).
+    pub drive_id: Uuid,
     /// Raw BLAKE3 content hash. `Some(_)` for file rows, `None` for
     /// folder rows. Routes into `FileDto::content_hash` and feeds
     /// `File::compute_etag` to populate `FileDto::etag`.
     pub blob_hash: Option<String>,
+    /// §14 provenance — who created the row. `None` when the creator
+    /// was deleted (FK `ON DELETE SET NULL`).
+    pub created_by: Option<Uuid>,
+    /// §14 provenance — who last touched the row.
+    pub updated_by: Option<Uuid>,
     /// `true` when `owner_id == requesting user_id`.
     pub is_owner: bool,
     pub favorited_at: DateTime<Utc>,

@@ -251,5 +251,5 @@ These are intentionally deferred. Each has a clear future trigger; none block th
 
 - [User lifecycle](/architecture/user-lifecycle) — the hook framework that fires on user creation and the deletion modes.
 - [ReBAC Authorization](/architecture/rebac-authorization) — how grants are evaluated against `auth.users` rows (including external ones).
-- [Share Integration](/architecture/share-integration) — how the public-share-link flow relates to the email-invite flow (both create `access_grants` rows; only the former lives in `storage.shares`).
+- [Share Integration](/architecture/share-integration) — how the public-share-link flow relates to the email-invite flow (both create `role_grants` rows; only the former lives in `storage.shares`).
 - [Environment Variables](/config/env) — the full set of `OXICLOUD_*` knobs.

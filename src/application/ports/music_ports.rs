@@ -104,6 +104,11 @@ pub trait MusicStoragePort: Send + Sync {
 
     async fn get_playlist(&self, playlist_id: &str) -> Result<Option<PlaylistDto>, DomainError>;
 
+    /// Batch sibling of [`Self::get_playlist`]: hydrate a page of
+    /// grant-derived ids in ONE storage round-trip. Missing rows drop
+    /// out silently; ordering is not guaranteed.
+    async fn get_playlists_by_ids(&self, ids: &[Uuid]) -> Result<Vec<PlaylistDto>, DomainError>;
+
     async fn list_playlists_by_owner(
         &self,
         owner_id: Uuid,

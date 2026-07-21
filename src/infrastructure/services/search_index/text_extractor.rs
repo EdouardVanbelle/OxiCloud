@@ -243,7 +243,10 @@ fn collect_xml_text<R: std::io::BufRead>(
         }
         match xml.read_event_into(&mut buf) {
             Ok(Event::Text(t)) => {
-                if let Ok(decoded) = t.xml_content() {
+                // quick-xml 0.41+ makes XmlVersion explicit on xml_content()
+                // so callers pick 1.0 vs 1.1 entity-normalization rules. Text
+                // extraction is version-agnostic — 1.0 is the sane default.
+                if let Ok(decoded) = t.xml_content(quick_xml::XmlVersion::Implicit1_0) {
                     out.push_str(&decoded);
                 }
             }

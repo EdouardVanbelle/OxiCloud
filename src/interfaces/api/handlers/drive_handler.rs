@@ -48,25 +48,9 @@ pub async fn list_drives(
 ) -> impl IntoResponse {
     let caller_id = auth_user.id;
 
-    let (subject_types, subject_ids) = match state
-        .authorization
-        .expand_subject_for_listing(Subject::User(caller_id))
-        .await
-    {
-        Ok(pair) => pair,
-        Err(e) => {
-            error!("list_drives: subject expansion failed: {e}");
-            return AppError::from(e).into_response();
-        }
-    };
-
-    match state
-        .drive_repo
-        .list_for_subjects(&subject_types, &subject_ids)
-        .await
-    {
+    match state.drive_repo.list_readable_by(caller_id).await {
         Ok(drives) => {
-            let dtos: Vec<DriveDto> = drives.into_iter().map(DriveDto::from).collect();
+            let dtos: Vec<DriveDto> = drives.iter().cloned().map(DriveDto::from).collect();
             (StatusCode::OK, Json(dtos)).into_response()
         }
         Err(e) => {
@@ -353,6 +337,274 @@ pub async fn remove_drive_member(
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => AppError::from(e).into_response(),
+    }
+}
+
+/// `DELETE /api/drives/{id}` — Owner-only deletion (D3b).
+///
+/// Refuses (per `DriveManagementService::delete_drive`):
+/// - `404` when the caller lacks Manage on the drive (anti-enum).
+/// - `405` when the drive is the user's default Personal drive.
+/// - `409` when the drive still holds live folders/files; the caller
+///   must trash or move them first.
+///
+/// On success the drive row, its root folder, and every role grant
+/// scoped to the drive are removed in one transaction; cached drive
+/// roles are invalidated.
+#[utoipa::path(
+    delete,
+    path = "/api/drives/{id}",
+    params(("id" = Uuid, Path, description = "Drive UUID")),
+    responses(
+        (status = 204, description = "Drive deleted"),
+        (status = 404, description = "Drive not found or caller lacks Manage"),
+        (status = 405, description = "Default Personal drive — undeletable"),
+        (status = 409, description = "Drive is not empty — move/trash contents first"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "drives"
+)]
+pub async fn delete_drive(
+    State(state): State<Arc<AppState>>,
+    auth_user: AuthUser,
+    Path(drive_id): Path<Uuid>,
+) -> impl IntoResponse {
+    match state
+        .drive_management_service
+        .delete_drive(auth_user.id, false, drive_id)
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => AppError::from(e).into_response(),
+    }
+}
+
+/// Body for `PATCH /api/drives/{id}/policies` (D5).
+///
+/// Partial merge: any field left out of the JSON keeps its current
+/// JSONB value (the repo uses `policies || $partial`). Each field
+/// defaults to `false` in `DrivePolicies`, but the merge is keyed on
+/// presence — so omitting a field means "leave it alone", not "set
+/// it to false". Clients flip a single key at a time without
+/// round-tripping the whole bag.
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct UpdateDrivePoliciesDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forbid_sharing: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forbid_external_sharing: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forbid_public_links: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forbid_cross_drive_move: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forbid_owner_role_change: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_in_photo_index: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_in_music_index: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
+}
+
+/// `PATCH /api/drives/{id}/policies` — **OxiCloud-admin only** policy
+/// update (D5).
+///
+/// Policies were originally owner-mutable, but that made them
+/// self-policing soft caps — an owner could disable
+/// `forbid_external_sharing`, create the grant, and re-enable. For
+/// compliance-grade enforcement, mutation is restricted to the
+/// tenant operator (admin role), mirroring the same carve-out that
+/// guards `drives.quota_bytes` and `users.storage_quota_bytes` (§7).
+///
+/// Non-admin callers receive `404` (anti-enumeration — same response
+/// as "drive does not exist", so a probe can't tell apart "no such
+/// drive" from "policies are admin-managed").
+///
+/// Partial merge into the JSONB `policies` column; the post-merge
+/// typed view is returned.
+///
+/// Audit: emits `drive.policy_changed` with `by = <admin_user_id>`
+/// and every key's post-merge value (steady-state observability).
+#[utoipa::path(
+    patch,
+    path = "/api/drives/{id}/policies",
+    params(("id" = Uuid, Path, description = "Drive UUID")),
+    request_body = UpdateDrivePoliciesDto,
+    responses(
+        (status = 200, description = "Policies merged"),
+        (status = 404, description = "Drive not found OR caller is not OxiCloud admin"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "drives"
+)]
+pub async fn update_drive_policies(
+    State(state): State<Arc<AppState>>,
+    auth_user: AuthUser,
+    Path(drive_id): Path<Uuid>,
+    axum::Json(dto): axum::Json<UpdateDrivePoliciesDto>,
+) -> impl IntoResponse {
+    // OxiCloud-admin only. Anti-enumeration: return the same 404 a
+    // non-existent drive would carry, never 403, so the policy
+    // existence isn't probable by error shape.
+    if auth_user.role != "admin" {
+        tracing::info!(
+            target: "audit",
+            event = "drive.policy_change_rejected",
+            reason = "not_admin",
+            caller_id = %auth_user.id,
+            drive_id = %drive_id,
+            "👮🏻‍♂️ policy mutation refused: caller is not OxiCloud admin",
+        );
+        return AppError::not_found(format!("Drive {drive_id} not found")).into_response();
+    }
+    // Translate the Option-per-field DTO into a serde_json partial that
+    // only carries the supplied keys, so the JSONB merge in
+    // `update_policies` skips fields the caller didn't touch. Building a
+    // `DrivePolicies` and serialising would lose the partial-update
+    // semantics (every field defaults to false → omitted vs. "set to
+    // false" become indistinguishable on the wire).
+    let mut partial_obj = serde_json::Map::new();
+    if let Some(v) = dto.forbid_sharing {
+        partial_obj.insert("forbid_sharing".into(), serde_json::Value::Bool(v));
+    }
+    if let Some(v) = dto.forbid_external_sharing {
+        partial_obj.insert("forbid_external_sharing".into(), serde_json::Value::Bool(v));
+    }
+    if let Some(v) = dto.forbid_public_links {
+        partial_obj.insert("forbid_public_links".into(), serde_json::Value::Bool(v));
+    }
+    if let Some(v) = dto.forbid_cross_drive_move {
+        partial_obj.insert("forbid_cross_drive_move".into(), serde_json::Value::Bool(v));
+    }
+    if let Some(v) = dto.forbid_owner_role_change {
+        partial_obj.insert(
+            "forbid_owner_role_change".into(),
+            serde_json::Value::Bool(v),
+        );
+    }
+    if let Some(v) = dto.include_in_photo_index {
+        partial_obj.insert("include_in_photo_index".into(), serde_json::Value::Bool(v));
+    }
+    if let Some(v) = dto.include_in_music_index {
+        partial_obj.insert("include_in_music_index".into(), serde_json::Value::Bool(v));
+    }
+    if let Some(v) = dto.read_only {
+        partial_obj.insert("read_only".into(), serde_json::Value::Bool(v));
+    }
+    // Pass the raw JSON straight through so the JSONB `||` merge in
+    // the repo only touches keys the caller supplied. Round-tripping
+    // via `DrivePolicies` (which has `#[serde(default)]`) would
+    // silently fill every omitted field with `false` — the merge
+    // would then clobber every unmentioned policy on the row.
+    let partial_value = serde_json::Value::Object(partial_obj);
+
+    match state
+        .drive_management_service
+        .update_policies(auth_user.id, drive_id, partial_value)
+        .await
+    {
+        Ok(merged) => (StatusCode::OK, axum::Json(merged)).into_response(),
+        Err(e) => AppError::from(e).into_response(),
+    }
+}
+
+/// Body for `PATCH /api/drives/{id}/quota` (D4).
+///
+/// `quota_bytes = null` (or ≤ 0) means unlimited — matches the DB
+/// convention where NULL on the row is treated as "no cap" by
+/// `storage_usage_service::check_drive_quota`. The service
+/// normalises 0/negative to None before writing.
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct UpdateDriveQuotaDto {
+    /// New quota in bytes. `null` (or omitted) or ≤ 0 → unlimited.
+    /// A value below the drive's current `used_bytes` is accepted
+    /// intentionally (soft-quota semantic — new writes gated,
+    /// existing content untouched; owners recover by deleting
+    /// until the drive comes back under the cap).
+    #[serde(default)]
+    pub quota_bytes: Option<i64>,
+}
+
+/// `PATCH /api/drives/{id}/quota` — **OxiCloud-admin only** storage-cap
+/// mutation for **shared** drives (D4).
+///
+/// Personal drives are refused with `400 InvalidInput` — their
+/// effective cap comes from the owner user's
+/// `users.storage_quota_bytes` envelope (memory
+/// `project_user_envelope_quota_model`); use
+/// `PUT /api/admin/users/{id}/quota` instead. Allowing a per-personal-
+/// drive quota here would fork the model into two competing paths.
+///
+/// Non-admin callers receive `404` (anti-enumeration — same shape as
+/// "no such drive", so a probe can't distinguish "drive doesn't
+/// exist" from "quota edit is admin-only"). Matches the pattern
+/// established by `update_drive_policies` above.
+///
+/// **Soft-quota semantic on reduction.** A newly-lowered quota may
+/// land BELOW the drive's current `used_bytes`. The write succeeds;
+/// `storage_usage_service` then blocks new writes on
+/// `used + delta > quota`, so owners of a shared drive that's now
+/// over its freshly-reduced cap can only shrink (delete) until they
+/// come back under. Existing content is never retroactively touched
+/// — matches xfs `xfs_quota` / ext4 `edquota` behaviour on quota
+/// shrink.
+///
+/// Cache invalidation: the repo drops `readable_cache` +
+/// `default_drive_cache` (both embed the whole drive row incl.
+/// `quota_bytes`), matching the `update_policies` pattern.
+///
+/// Audit: emits `drive.quota_changed` with `new_quota_bytes`,
+/// `used_bytes`, and `over_quota` — so an operator grepping
+/// `audit drive.quota_changed` can spot a shrink that landed the
+/// drive in the over-quota delete-only state.
+#[utoipa::path(
+    patch,
+    path = "/api/drives/{id}/quota",
+    params(("id" = Uuid, Path, description = "Drive UUID")),
+    request_body = UpdateDriveQuotaDto,
+    responses(
+        (status = 200, description = "Quota updated"),
+        (status = 400, description = "Personal drive — quota is envelope-managed via the owner user"),
+        (status = 404, description = "Drive not found OR caller is not OxiCloud admin"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "drives"
+)]
+pub async fn update_drive_quota(
+    State(state): State<Arc<AppState>>,
+    auth_user: AuthUser,
+    Path(drive_id): Path<Uuid>,
+    axum::Json(dto): axum::Json<UpdateDriveQuotaDto>,
+) -> impl IntoResponse {
+    // Same admin gate + anti-enum shape as `update_drive_policies`.
+    // Refusing with 404 (rather than 403) means an unauthorised
+    // caller can't distinguish "no such drive" from "you're not
+    // admin" — the endpoint's existence isn't probable by error
+    // shape.
+    if auth_user.role != "admin" {
+        tracing::info!(
+            target: "audit",
+            event = "drive.quota_change_rejected",
+            reason = "not_admin",
+            caller_id = %auth_user.id,
+            drive_id = %drive_id,
+            "👮🏻‍♂️ quota mutation refused: caller is not OxiCloud admin",
+        );
+        return AppError::not_found(format!("Drive {drive_id} not found")).into_response();
+    }
+
+    match state
+        .drive_management_service
+        .update_quota(auth_user.id, drive_id, dto.quota_bytes)
+        .await
+    {
+        Ok(persisted) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "quota_bytes": persisted })),
+        )
+            .into_response(),
         Err(e) => AppError::from(e).into_response(),
     }
 }

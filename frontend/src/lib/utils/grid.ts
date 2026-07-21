@@ -6,11 +6,26 @@
  *
  * Card-min / gap track the tokens in `lib/styles/base/variables.css` and the
  * ≤640px phone override in `lib/styles/ported/resourceList.css`.
+ *
+ * The phone breakpoint is watched by ONE module-level MediaQueryList listener
+ * — constructing a fresh `matchMedia` per call (a style read) was the same
+ * anti-pattern the photos timeline already hoisted. A flip of the media query
+ * always coincides with a width change, so callers re-run anyway.
  */
+let isMobile = false;
+// `typeof window.matchMedia` (not just `window`): jsdom test environments
+// expose `window` without implementing matchMedia.
+if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+	const mql = window.matchMedia('(max-width: 640px)');
+	isMobile = mql.matches;
+	mql.addEventListener('change', (e) => {
+		isMobile = e.matches;
+	});
+}
+
 export function gridColumns(width: number): number {
 	if (width <= 0) return 1;
-	const mobile = typeof window !== 'undefined' && window.matchMedia('(max-width: 640px)').matches;
-	const cardMin = mobile ? 140 : 200;
-	const gap = mobile ? 8 : 20;
+	const cardMin = isMobile ? 140 : 200;
+	const gap = isMobile ? 8 : 20;
 	return Math.max(1, Math.floor((width + gap) / (cardMin + gap)));
 }

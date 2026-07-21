@@ -30,10 +30,23 @@ class DrivesStore {
 		return this.inflight;
 	}
 
-	/** Force a refresh after a mutation (rename, member change, …). */
-	invalidate(): void {
+	/**
+	 * Re-fetch after a mutation (rename, member change, policy update, …).
+	 *
+	 * Deliberately keeps `this.drives` populated during the refetch —
+	 * the sidebar picker and breadcrumb keep rendering the stale list
+	 * until the new one lands, avoiding an empty-flash during the
+	 * mutation. The atomic replacement inside `load()` swaps in the
+	 * fresh list in a single reactive tick.
+	 *
+	 * Only `loaded` is flipped so `load()`'s cache guard falls through.
+	 * Callers can `await` the returned promise if they need to observe
+	 * the settled list; a fire-and-forget `refresh()` is also fine for
+	 * pure UI-refresh scenarios.
+	 */
+	async refresh(): Promise<Drive[]> {
 		this.loaded = false;
-		this.drives = [];
+		return this.load();
 	}
 
 	/** Caller's default-personal drive (one per internal user), or null. */

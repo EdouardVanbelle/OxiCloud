@@ -35,6 +35,26 @@ mod tests {
             all_day: false,
             rrule: None,
             ical_uid: "uid-evt-001@oxicloud".to_string(),
+            recurrence_id: None,
+            // Post-phase-4 the emitter serves stored ical_data
+            // verbatim (folded per UID) instead of regenerating
+            // from DTO fields. The fixture must therefore carry
+            // a valid single-VEVENT VCALENDAR body — this is what
+            // create_event_from_ical stores per row.
+            ical_data: "BEGIN:VCALENDAR\r\n\
+                VERSION:2.0\r\n\
+                PRODID:-//OxiCloud test//EN\r\n\
+                BEGIN:VEVENT\r\n\
+                UID:uid-evt-001@oxicloud\r\n\
+                DTSTAMP:20250601T090000Z\r\n\
+                DTSTART:20250615T100000Z\r\n\
+                DTEND:20250615T110000Z\r\n\
+                SUMMARY:Team Meeting\r\n\
+                DESCRIPTION:Weekly team sync\r\n\
+                LOCATION:Conference Room A\r\n\
+                END:VEVENT\r\n\
+                END:VCALENDAR\r\n"
+                .to_string(),
             created_at: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
             updated_at: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
         }

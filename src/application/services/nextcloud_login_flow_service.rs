@@ -38,6 +38,12 @@ struct PendingFlow {
     /// if the flow token leaks. `None` for single-drive accounts (legacy
     /// path goes straight to `completed`).
     pending_user_id: Option<Uuid>,
+    /// App-password label to persist when this multi-drive flow finally
+    /// completes. Stashed by `resolve_drive_or_complete` (login_v2_handler)
+    /// alongside `pending_user_id` so `handle_drive_pick` can preserve
+    /// provenance (`"Nextcloud"` vs `"Nextcloud (OIDC)"`) across the
+    /// picker round-trip. Consumed by `take_pending_app_password_label`.
+    pending_app_password_label: Option<String>,
     completed: Option<LoginResult>,
 }
 
@@ -89,6 +95,7 @@ impl NextcloudLoginFlowService {
                 created_at: Instant::now(),
                 poll_token: poll_token.clone(),
                 pending_user_id: None,
+                pending_app_password_label: None,
                 completed: None,
             },
         );
@@ -141,6 +148,35 @@ impl NextcloudLoginFlowService {
             .flows
             .get_mut(flow_token)
             .and_then(|pending| pending.pending_user_id.take())
+    }
+
+    /// Stash the app-password label to use when the flow eventually
+    /// completes via `handle_drive_pick`. Called alongside
+    /// `mark_awaiting_drive` so the multi-drive round-trip preserves
+    /// the provenance string passed in at the auth step
+    /// (`"Nextcloud"` for password login, `"Nextcloud (OIDC)"` for OIDC).
+    /// Silently no-ops when the flow token is unknown or expired —
+    /// the earlier `mark_awaiting_drive` on the same token is the
+    /// authoritative "exists?" signal so we don't need to log again.
+    pub fn set_pending_app_password_label(&self, flow_token: &str, label: &str) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        prune_expired(&mut state, self.ttl);
+        if let Some(pending) = state.flows.get_mut(flow_token) {
+            pending.pending_app_password_label = Some(label.to_string());
+        }
+    }
+
+    /// Consume the stashed app-password label (single-use). Returns
+    /// `None` when the flow was never marked, was password-shortcut
+    /// (single-drive), or the token is unknown / expired — the caller
+    /// falls back to a sensible default in that case.
+    pub fn take_pending_app_password_label(&self, flow_token: &str) -> Option<String> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        prune_expired(&mut state, self.ttl);
+        state
+            .flows
+            .get_mut(flow_token)
+            .and_then(|pending| pending.pending_app_password_label.take())
     }
 
     pub fn complete(

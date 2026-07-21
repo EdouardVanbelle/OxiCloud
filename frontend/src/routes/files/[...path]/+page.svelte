@@ -1,6 +1,4 @@
 <script lang="ts">
-	import SkeletonList from '$lib/components/SkeletonList.svelte';
-	import EmptyState from '$lib/components/EmptyState.svelte';
 	import { errorMessage, errorToast } from '$lib/utils/errors';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
@@ -9,11 +7,9 @@
 	import { SvelteSet } from 'svelte/reactivity';
 	import Icon from '$lib/icons/Icon.svelte';
 	import {
-		cacheFolder,
 		createFolder,
 		deleteFolder,
-		fetchFolderListing,
-		getCachedFolder,
+		fetchFolderPage,
 		getFolder,
 		getFolderName,
 		invalidateFolderCache,
@@ -25,7 +21,6 @@
 	import {
 		deleteFile,
 		fileDownloadUrl,
-		fileThumbnailUrl,
 		moveFile,
 		renameFile,
 		uploadFileWithProgress
@@ -39,11 +34,17 @@
 	import { addFavorite, removeFavorite } from '$lib/api/endpoints/favorites';
 	import { canEditWithWopi, getEditorUrlWithFallback } from '$lib/api/endpoints/wopi';
 	import { addTracks, createPlaylist, listPlaylists } from '$lib/api/endpoints/music';
+	import { copyFiles, copyFolders } from '$lib/api/endpoints/batch';
 	import { apiFetch } from '$lib/api/client';
 	import { getCsrfHeaders } from '$lib/api/csrf';
+	import { countHidden, filterDotfiles } from '$lib/utils/dotfileFilter';
+	import { preferences } from '$lib/stores/preferences.svelte';
 	import type { FileItem, FolderItem, ItemType } from '$lib/api/types';
-	import ListToolbar from '$lib/components/ListToolbar.svelte';
-	import VirtualList from '$lib/components/VirtualList.svelte';
+	import ReadOnlyBanner from '$lib/components/ReadOnlyBanner.svelte';
+	import ResourceList, {
+		isFile,
+		type GroupByDef as RLGroupByDef
+	} from '$lib/components/ResourceList.svelte';
 	import { lazyComponent } from '$lib/composables/lazyComponent.svelte';
 	import { t } from '$lib/i18n/index.svelte';
 	import { confirmDialog, promptDialog } from '$lib/stores/dialogs.svelte';
@@ -51,16 +52,8 @@
 	import { files as filesStore } from '$lib/stores/files.svelte';
 	import { session } from '$lib/stores/session.svelte';
 	import { ui } from '$lib/stores/ui.svelte';
-	import {
-		dateBucket,
-		ownerLabel,
-		relativeTimeAgo,
-		sizeBucket,
-		typeLabel
-	} from '$lib/stores/files.svelte';
-	import { formatBytes } from '$lib/utils/format';
-	import { formatDate, iconNameFromClass, fileIconKindClass } from '$lib/utils/display';
-	import { gridColumns } from '$lib/utils/grid';
+	import { dateBucket, sizeBucket, typeLabel } from '$lib/stores/files.svelte';
+	import { replaceSet } from '$lib/utils/sets';
 
 	// File preview and the WOPI editor are heavy and only appear on demand, so
 	// their modules load the first time the user opens one (see the effects that
@@ -85,7 +78,84 @@
 		return drive ? driveIcon(drive) : 'home';
 	});
 
+	// The drive whose content the user is currently browsing.
+	//
+	// Priorities (first match wins):
+	//   1. `currentFolderDriveId` — set by `load()` after a `getFolder`
+	//      fetch on the current folder. Authoritative for deep-links
+	//      too (the URL's leading segment might not be a drive root).
+	//   2. `listing.folders[0]?.drive_id` — fast-path when the folder
+	//      has at least one subfolder; avoids the extra round-trip on
+	//      the initial `applyListing` before `getFolder` returns.
+	//      (`FileDto` doesn't carry `drive_id` today, so we can't use
+	//      files as a fallback source; folders alone.)
+	//   3. `drivesStore.findByRootFolderId(pathSegments[0])` — legacy
+	//      fallback for the common "sidebar picker → drive root URL"
+	//      navigation, unchanged from `rootIcon` above.
+	//
+	// Feeds the read-only freeze banner further down: when this drive's
+	// `policies.read_only` is on, mutation controls elsewhere in the app
+	// will fail against the backend engine gate; the banner is the
+	// affordance that tells the user why.
+	let currentFolderDriveId = $state<string | null>(null);
+	const currentDrive = $derived.by(() => {
+		if (currentFolderDriveId) {
+			const d = drivesStore.findById(currentFolderDriveId);
+			if (d) return d;
+		}
+		const listingDriveId = listing.folders[0]?.drive_id ?? null;
+		if (listingDriveId) return drivesStore.findById(listingDriveId);
+		return drivesStore.findByRootFolderId(pathSegments[0] ?? null);
+	});
+
 	let listing = $state<FolderListing>({ folders: [], files: [], favoriteIds: [], sharedIds: [] });
+	// Server-order accumulator — items in the exact sequence the backend
+	// returned across pages, honouring `sortField`+`reversed` on the wire.
+	// Under order_by=name/type/size the server puts folders first then files;
+	// under modified_at/created_at they interleave. `rlItems` reads this
+	// directly so ResourceList renders in server order without a re-sort.
+	let orderedItems = $state<Array<FileItem | FolderItem>>([]);
+	// Cursor for the NEXT page. `undefined` after the final page has landed
+	// (or before the first fetch). Bound to ResourceList's `hasMore`.
+	let pageCursor = $state<string | undefined>(undefined);
+	// Guard so a fast-firing onloadmore (double intersection tick) can't
+	// enqueue two concurrent next-page fetches on the same cursor.
+	let loadingMore = $state(false);
+
+	// ── Transient "New elements" swimlane ────────────────────────────
+	// Server sort is authoritative, so an uploaded file lands wherever
+	// its sort key places it — possibly halfway down the list or on an
+	// unloaded page. To confirm "your upload worked", we detect items
+	// that appeared on the current page after a mutation (upload / new
+	// folder / dropped tree) and hoist them into a first-class swimlane
+	// at the top of the list. The swimlane clears on next folder nav.
+	//
+	// Detection strategy: caller of `reloadAndTrackNew()` snapshots the
+	// current id set, runs `reload()`, and diffs the freshly-loaded
+	// page 1 against the snapshot — every new id joins `newlyAdded`.
+	//
+	// Known limitation: server-sort places the new item on an unloaded
+	// page (e.g. sort=size on a 5 000-item folder and the new file is
+	// mid-size). It won't appear in the swimlane until the user scrolls
+	// far enough for that page to load. Threading the returned FileItem
+	// out of the 5-layer upload stack would fix this — deferred until
+	// the diff approach proves insufficient.
+	const newlyAdded = new SvelteSet<string>();
+
+	// Dotfile hide filter is now applied inside `rlItems` (below) directly
+	// on the server-ordered accumulator, so a single filter pass feeds
+	// ResourceList. Selection / batch ops iterate ResourceList's own
+	// selection set, which already excludes hidden rows. Direct lookups
+	// by id (deep-links via `?file=<uuid>`) still go through
+	// `listing.files` so hidden files remain reachable via their own URL
+	// — same UX as macOS Finder.
+	// Count of items suppressed by the filter — surfaced in the
+	// empty-state hint when the folder isn't visually empty but
+	// contains only dotfiles the user has hidden, so a "why is this
+	// empty?" question is answerable at a glance.
+	const hiddenCount = $derived(
+		preferences.hideDotfiles ? countHidden(listing.folders) + countHidden(listing.files) : 0
+	);
 	let crumbs = $state<Array<{ id: string; name: string }>>([]);
 	let currentId = $state<string | null>(null);
 	let loading = $state(false);
@@ -94,7 +164,6 @@
 	let error = $state<string | null>(null);
 	let fileInput = $state<HTMLInputElement | null>(null);
 	let uploading = $state(false);
-	let dragOver = $state(false);
 
 	interface ActionTarget {
 		id: string;
@@ -110,8 +179,11 @@
 	// Favorite + shared badge sets for the current folder, seeded directly from
 	// the listing response (server-computed, scoped to these items — no extra
 	// per-navigation fetch) and updated optimistically on mutation.
-	let favoriteIds = $state<Set<string>>(new Set());
-	let sharedIds = $state<Set<string>>(new Set());
+	// `SvelteSet` mutated in place: a toggle costs O(1) instead of copying
+	// the whole set, and every other present-key `.has()` reader is spared
+	// (measured in selectionPatterns.bench.test.ts).
+	const favoriteIds = new SvelteSet<string>();
+	const sharedIds = new SvelteSet<string>();
 
 	function openMove(kind: ItemType, id: string, name: string) {
 		actionTarget = { id, name, kind };
@@ -133,19 +205,15 @@
 	async function toggleFavorite(kind: ItemType, id: string) {
 		const isFav = favoriteIds.has(id);
 		// Optimistic toggle, reverted on failure.
-		const next = new SvelteSet(favoriteIds);
-		if (isFav) next.delete(id);
-		else next.add(id);
-		favoriteIds = next;
+		if (isFav) favoriteIds.delete(id);
+		else favoriteIds.add(id);
 		try {
 			if (isFav) await removeFavorite(kind, id);
 			else await addFavorite(kind, id);
 		} catch (e) {
 			errorToast(e);
-			const reverted = new SvelteSet(favoriteIds);
-			if (isFav) reverted.add(id);
-			else reverted.delete(id);
-			favoriteIds = reverted;
+			if (isFav) favoriteIds.add(id);
+			else favoriteIds.delete(id);
 		}
 	}
 
@@ -171,101 +239,187 @@
 	// writes state, so a fast navigation can't be clobbered by an older fetch.
 	let loadSeq = 0;
 
-	function applyListing(data: FolderListing) {
-		listing = data;
-		favoriteIds = new Set(data.favoriteIds);
-		sharedIds = new Set(data.sharedIds);
-	}
-
-	async function load() {
+	/**
+	 * Load the current folder's listing.
+	 *
+	 * @param reset  Fresh load (folder nav / sort change / manual reload):
+	 *               clears cursor+accumulator, redoes canonicalization +
+	 *               breadcrumbs, then fetches page 1.
+	 *
+	 *               Append (from `loadMore()` on scroll-bottom): skips
+	 *               preconditions, fetches the NEXT page using the stored
+	 *               cursor and appends to `listing`+`orderedItems`.
+	 *
+	 * Server-side sort: `orderBy=sortField, reverse=reversed` are passed on
+	 * every page request so items arrive already in the requested order —
+	 * client-side sort was removed and `rlItems` reads `orderedItems`
+	 * verbatim. Sort/group changes trigger `load(true)` via `$effect`.
+	 */
+	async function load(reset: boolean = true) {
 		error = null;
 		const seq = ++loadSeq;
 
-		// External users have no home folder; send them to shared-with-me.
-		if (session.isExternalUser && pathSegments.length === 0) {
-			await goto(resolve('/shared-with-me'), { replaceState: true });
-			return;
-		}
-		const home = await session.loadHomeFolder();
-
-		// Canonicalize bare `/files` → `/files/<last-chosen-drive-root>` (or
-		// the default drive's root when there's no memory yet). Keeps the URL
-		// explicit, the breadcrumb populated, and the drive picker correctly
-		// highlighted. The DrivePicker writes `oxi-last-drive-root` on click.
-		if (pathSegments.length === 0) {
-			const last =
-				typeof localStorage !== 'undefined' ? localStorage.getItem('oxi-last-drive-root') : null;
-			const target = last ?? home;
-			if (target) {
-				await goto(resolve(`/files/${target}`), { replaceState: true });
+		let folderId: string;
+		let skeletonTimer: ReturnType<typeof setTimeout> | undefined;
+		if (reset) {
+			// External users have no home folder; send them to shared-with-me.
+			if (session.isExternalUser && pathSegments.length === 0) {
+				await goto(resolve('/shared-with-me'), { replaceState: true });
 				return;
 			}
-		}
+			const home = await session.loadHomeFolder();
 
-		const folderId = pathSegments.at(-1) ?? home;
-		if (!folderId) {
-			error = t('files.no_home', 'No home folder available.');
-			return;
-		}
-		currentId = folderId;
-		filesStore.currentFolder = folderId;
+			// Canonicalize bare `/files` → `/files/<last-chosen-drive-root>` (or
+			// the default drive's root when there's no memory yet). Keeps the URL
+			// explicit, the breadcrumb populated, and the drive picker correctly
+			// highlighted. The DrivePicker writes `oxi-last-drive-root` on click.
+			if (pathSegments.length === 0) {
+				const last =
+					typeof localStorage !== 'undefined' ? localStorage.getItem('oxi-last-drive-root') : null;
+				const target = last ?? home;
+				if (target) {
+					await goto(resolve(`/files/${target}`), { replaceState: true });
+					return;
+				}
+			}
 
-		// Stale-while-revalidate: paint a previously-visited folder instantly,
-		// then revalidate with If-None-Match (304 = keep what's shown).
-		const cached = getCachedFolder(folderId);
-		if (cached) {
-			applyListing(cached.listing);
-			loading = false;
-			showSkeleton = false;
-		} else {
+			const resolvedId = pathSegments.at(-1) ?? home;
+			if (!resolvedId) {
+				error = t('files.no_home', 'No home folder available.');
+				return;
+			}
+			folderId = resolvedId;
+			currentId = folderId;
+			filesStore.currentFolder = folderId;
+
+			// Reset paging state: previous folder's cursor is meaningless here,
+			// and mixing its rows with the new folder's would flash a wrong list.
+			pageCursor = undefined;
+			listing = { folders: [], files: [], favoriteIds: [], sharedIds: [] };
+			orderedItems = [];
 			loading = true;
-		}
-		// Delayed skeleton, only when there's nothing cached to show yet.
-		const skeletonTimer = setTimeout(() => {
-			if (loading) showSkeleton = true;
-		}, 100);
 
-		// Breadcrumbs resolve independently so they never block the grid paint.
-		// Bare `/files` was canonicalized above to `/files/<id>` so pathSegments
-		// is always non-empty here for internal users.
-		void buildCrumbs(pathSegments).then((trail) => {
-			if (seq === loadSeq) crumbs = trail;
-		});
+			// Delayed skeleton so fast loads don't flash it.
+			skeletonTimer = setTimeout(() => {
+				if (loading) showSkeleton = true;
+			}, 100);
+
+			// Breadcrumbs resolve independently so they never block the grid paint.
+			void buildCrumbs(pathSegments).then((trail) => {
+				if (seq === loadSeq) crumbs = trail;
+			});
+
+			// Resolve the current folder's drive_id so the read-only banner
+			// works even on deep-links into a sub-folder. Guarded by `seq`.
+			void getFolder(folderId)
+				.then((folder) => {
+					if (seq === loadSeq) currentFolderDriveId = folder.drive_id;
+				})
+				.catch(() => {
+					// Fallback chain in `currentDrive` still gives us a
+					// best-effort drive resolution.
+				});
+		} else {
+			// Append path: reuse `currentId`. `pageCursor === undefined` means
+			// we've already reached the last page; treat as no-op.
+			if (!currentId || pageCursor === undefined) return;
+			folderId = currentId;
+		}
 
 		try {
-			const res = await fetchFolderListing(folderId, { etag: cached?.etag });
+			const page = await fetchFolderPage(folderId, {
+				orderBy: sortField,
+				reverse: reversed,
+				cursor: reset ? undefined : pageCursor
+			});
 			if (seq !== loadSeq) return; // superseded by a newer navigation
-			if (res.status === 200 && res.listing) {
-				applyListing(res.listing);
-				cacheFolder(folderId, res.listing, res.etag);
+			if (reset) {
+				listing = {
+					folders: page.folders,
+					files: page.files,
+					favoriteIds: [],
+					sharedIds: []
+				};
+				orderedItems = page.items;
+			} else {
+				listing = {
+					folders: [...listing.folders, ...page.folders],
+					files: [...listing.files, ...page.files],
+					favoriteIds: listing.favoriteIds,
+					sharedIds: listing.sharedIds
+				};
+				orderedItems = [...orderedItems, ...page.items];
 			}
-			// 304 → the cached copy already on screen is current.
+			pageCursor = page.nextCursor;
 			error = null;
 		} catch (e) {
 			if (seq !== loadSeq) return;
-			// With a cached view already shown, keep it on a transient failure.
-			if (!cached) {
-				const status = (e as { status?: number })?.status;
-				error =
-					status === 403
-						? t('errors.forbidden', 'Could not load files')
-						: e instanceof Error
-							? e.message
-							: String(e);
-			}
+			const status = (e as { status?: number })?.status;
+			error =
+				status === 403
+					? t('errors.forbidden', 'Could not load files')
+					: e instanceof Error
+						? e.message
+						: String(e);
 		} finally {
-			clearTimeout(skeletonTimer);
-			if (seq === loadSeq) {
+			if (skeletonTimer !== undefined) clearTimeout(skeletonTimer);
+			if (seq === loadSeq && reset) {
 				loading = false;
 				showSkeleton = false;
 			}
 		}
 	}
 
+	/**
+	 * Fetch and append the next page. Invoked by ResourceList's
+	 * IntersectionObserver when the bottom sentinel enters the viewport.
+	 * The `loadingMore` guard collapses a double-fire (the observer can
+	 * tick twice on the same intersection edge).
+	 */
+	async function loadMore() {
+		if (loadingMore || pageCursor === undefined) return;
+		loadingMore = true;
+		try {
+			await load(false);
+		} finally {
+			loadingMore = false;
+		}
+	}
+
 	/** Data changed — drop cached listings and reload the current folder fresh. */
 	async function reload() {
 		invalidateFolderCache();
-		await load();
+		await load(true);
+	}
+
+	/**
+	 * Reload + populate the "new elements" swimlane with anything that
+	 * appeared on page 1 after the mutation.
+	 *
+	 * Called from mutation paths that ADD items (upload / dropped tree /
+	 * create-folder). Renames, deletes, moves use plain `reload()`
+	 * — nothing new to hoist.
+	 */
+	async function reloadAndTrackNew(): Promise<void> {
+		const before = new SvelteSet<string>();
+		for (const it of orderedItems) before.add(it.id);
+		await reload();
+		// `reload()` resets `pageCursor` + fetches page 1 fresh, so
+		// `orderedItems` is now the freshly-loaded page. Every id that
+		// wasn't there before this reload joins the swimlane.
+		newlyAdded.clear();
+		for (const it of orderedItems) if (!before.has(it.id)) newlyAdded.add(it.id);
+		// Scroll the page back to the top so the freshly-hoisted "New
+		// elements" swimlane is visible without the user having to hunt
+		// for it — the whole point of the swimlane is to confirm "your
+		// upload landed". Only fires when we actually detected new items,
+		// so a bare reload doesn't yank the user's scroll position.
+		// Smooth scroll for the visual continuity — instant would feel
+		// like the page reloaded. `scrollTo` at (0, 0) is a no-op if
+		// the user was already at the top; no jitter cost.
+		if (newlyAdded.size > 0 && typeof window !== 'undefined') {
+			window.scrollTo({ top: 0, behavior: 'smooth' });
+		}
 	}
 
 	function openFolder(folder: FolderItem) {
@@ -281,7 +435,22 @@
 		if (!name) return;
 		try {
 			await createFolder(name, currentId);
-			await reload();
+			await reloadAndTrackNew();
+			// Vanish-warning: user just made a `.folder` and it's
+			// already hidden by their preference — otherwise the new
+			// folder would appear to have not been created. Third hook
+			// point in the "creating a dotfile while hide is on" family
+			// (upload + rename cover the other two).
+			if (preferences.hideDotfiles && name.startsWith('.')) {
+				ui.notify(
+					t(
+						'files.new_folder_dotfile_hidden',
+						{ name },
+						"Created folder '{{name}}' — hidden by your dotfile preference."
+					),
+					'info'
+				);
+			}
 		} catch (e) {
 			errorToast(e);
 		}
@@ -550,10 +719,30 @@
 			} else {
 				finishUpload(nid, 0, 0, 0, skipped.length);
 			}
-			await reload();
+			await reloadAndTrackNew();
 			// Storage usage changed server-side — pull the fresh figure so the
 			// "Almacenamiento" bar moves off its login value instead of 0%.
 			void session.refresh();
+			// Vanish-warning: if hide-dotfiles is on and any uploaded
+			// files start with `.`, the successfully-uploaded rows are
+			// invisible in the grid the moment they land. Fire a
+			// single grouped nudge so users don't think the upload
+			// failed. Only fires when the preference is on AND at
+			// least one uploaded file matched. Bell notification
+			// stays quiet (already covers success/failure counts).
+			if (preferences.hideDotfiles) {
+				const hidden = files.filter((f) => f.name.startsWith('.')).length;
+				if (hidden > 0) {
+					ui.notify(
+						t(
+							'files.upload_dotfile_hidden',
+							{ n: hidden },
+							'{{n}} file(s) uploaded but hidden by your dotfile preference.'
+						),
+						'info'
+					);
+				}
+			}
 		} catch (err) {
 			ui.finishProgress(nid, errorMessage(err), 'error');
 		} finally {
@@ -570,7 +759,6 @@
 
 	async function onDrop(e: DragEvent) {
 		e.preventDefault();
-		dragOver = false;
 		const dt = e.dataTransfer;
 		if (!dt) return;
 		// A dropped folder isn't expanded into `.files`, so walk the dropped entry
@@ -640,6 +828,23 @@
 				rememberFolderName(id, name); // keep breadcrumbs current immediately
 			}
 			await reload();
+			// Vanish-warning: the file didn't start with `.` before but
+			// does now, AND the user has hide-dotfiles on → the row is
+			// about to disappear from the grid. Toast so the operation
+			// doesn't feel like a silent failure. Only fires on the
+			// transition (`.env` renamed to `.env2` doesn't need the
+			// nudge — it was already hidden). No toast when hide is off
+			// because nothing vanished.
+			if (preferences.hideDotfiles && name.startsWith('.') && !current.startsWith('.')) {
+				ui.notify(
+					t(
+						'files.rename_dotfile_hidden',
+						{ name },
+						"Renamed to '{{name}}' — now hidden by your preference."
+					),
+					'info'
+				);
+			}
 		} catch (e) {
 			errorToast(e);
 		}
@@ -721,68 +926,17 @@
 		});
 	});
 
-	/**
-	 * Whether the server can render a thumbnail preview for this file. Only images
-	 * and videos have server-side thumbnails (see `ThumbnailService::is_supported_image`
-	 * plus client-uploaded video frames); the backend does NOT rasterise PDFs or
-	 * documents, so claiming it could left their tiles blank (the doomed <img>
-	 * 404s and `onerror` hides it). Non-thumbnail files fall back to their colour
-	 * type icon, which renders underneath the <img> regardless.
-	 */
-	function canThumbnail(file: FileItem): boolean {
-		const m = file.mime_type ?? '';
-		return m.startsWith('image/') || m.startsWith('video/');
-	}
-
 	// ── Multi-select + batch ────────────────────────────────────────────────
-	let selected = $state<Set<string>>(new Set());
-	// Anchor row id for shift-click range selection.
-	let selectionAnchor = $state<string | null>(null);
+	// After the ResourceList migration the row-level selection UX (shift-
+	// range, ctrl-toggle, anchor tracking, header select-all) lives inside
+	// `<ResourceList>` and mirrors state OUT via `onselectionchange`. This
+	// SvelteSet is the local reflection the batch action functions consume;
+	// it stays a plain in-place `SvelteSet` (per benches ROUND11 §S2) so
+	// batch buttons see the same set as the row template does.
+	const selected = new SvelteSet<string>();
 
-	function toggleSelected(id: string) {
-		const next = new SvelteSet(selected);
-		if (next.has(id)) next.delete(id);
-		else next.add(id);
-		selected = next;
-		selectionAnchor = id;
-	}
 	function clearSelection() {
-		selected = new Set();
-		selectionAnchor = null;
-	}
-
-	/**
-	 * Row click selection mirroring static/js/components/resourceList.js:
-	 *  - Shift+click selects the contiguous range from the anchor to this row.
-	 *  - Ctrl/Cmd+click toggles this row without clearing the rest.
-	 *  - A plain click (no modifier) opens the item — handled by the caller.
-	 * Returns true when the click was consumed as a selection gesture.
-	 */
-	function handleSelectionClick(e: MouseEvent, id: string): boolean {
-		if (e.shiftKey && selectionAnchor) {
-			e.preventDefault();
-			const a = orderedIds.indexOf(selectionAnchor);
-			const b = orderedIds.indexOf(id);
-			if (a !== -1 && b !== -1) {
-				const [lo, hi] = a < b ? [a, b] : [b, a];
-				selected = new Set([...selected, ...orderedIds.slice(lo, hi + 1)]);
-			}
-			return true;
-		}
-		if (e.ctrlKey || e.metaKey) {
-			e.preventDefault();
-			toggleSelected(id);
-			return true;
-		}
-		return false;
-	}
-
-	const selectedCount = $derived(selected.size);
-	const totalCount = $derived(listing.folders.length + listing.files.length);
-
-	function toggleSelectAll() {
-		if (selected.size === totalCount) clearSelection();
-		else selected = new Set([...listing.folders, ...listing.files].map((i) => i.id));
+		selected.clear();
 	}
 
 	/**
@@ -799,9 +953,12 @@
 	async function batchDownload() {
 		const fileIds: string[] = [];
 		const folderIds: string[] = [];
+		// One O(M) pass over the listing instead of an O(N·M) `some` per id.
+		const folderIdSet = new Set(listing.folders.map((f) => f.id));
+		const fileIdSet = new Set(listing.files.map((f) => f.id));
 		for (const id of selected) {
-			if (listing.folders.some((f) => f.id === id)) folderIds.push(id);
-			else if (listing.files.some((f) => f.id === id)) fileIds.push(id);
+			if (folderIdSet.has(id)) folderIds.push(id);
+			else if (fileIdSet.has(id)) fileIds.push(id);
 		}
 		if (fileIds.length === 0 && folderIds.length === 0) return;
 
@@ -860,7 +1017,7 @@
 				})
 			});
 			if (!res.ok) throw new Error(`Server returned ${res.status}`);
-			favoriteIds = new Set([...favoriteIds, ...items.map((it) => it.id)]);
+			for (const it of items) favoriteIds.add(it.id);
 			ui.notify(t('files.added_favorites', 'Added to favorites'), 'success');
 			clearSelection();
 		} catch (e) {
@@ -869,13 +1026,14 @@
 	}
 
 	function selectionTargets(): ActionTarget[] {
+		// One O(M) index build instead of an O(N·M) `find` per selected id.
+		// Folders win id collisions, matching the old folder-first probe.
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity -- ephemeral local index, discarded before any reactive read
+		const byId = new Map<string, ActionTarget>();
+		for (const f of listing.files) byId.set(f.id, { id: f.id, name: f.name, kind: 'file' });
+		for (const f of listing.folders) byId.set(f.id, { id: f.id, name: f.name, kind: 'folder' });
 		return [...selected]
-			.map((id) => {
-				const folder = listing.folders.find((f) => f.id === id);
-				if (folder) return { id, name: folder.name, kind: 'folder' as ItemType };
-				const file = listing.files.find((f) => f.id === id);
-				return file ? { id, name: file.name, kind: 'file' as ItemType } : null;
-			})
+			.map((id) => byId.get(id) ?? null)
 			.filter((x): x is ActionTarget => x !== null);
 	}
 
@@ -900,16 +1058,18 @@
 	function onKeydown(e: KeyboardEvent) {
 		const tag = (e.target as HTMLElement)?.tagName;
 		if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-		if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
-			e.preventDefault();
-			toggleSelectAll();
-		} else if (e.key === 'Escape' && selected.size) {
+		if (e.key === 'Escape' && selected.size) {
 			clearSelection();
 		} else if (e.key === 'Delete' && selected.size) {
 			// Delete only — Backspace was dropped: it triggered accidental deletes.
 			e.preventDefault();
 			void batchDelete();
 		}
+		// Ctrl+A "select all" moved to the list-header checkbox owned by
+		// ResourceList — the row-level selection UX now lives entirely
+		// there, so the shortcut is served by clicking that box. Kept the
+		// binding surface here for the still-page-level Escape / Delete
+		// gestures that reference the local `selected` mirror.
 	}
 
 	async function batchDelete() {
@@ -921,15 +1081,19 @@
 			danger: true
 		});
 		if (!ok) return;
-		for (const id of ids) {
-			const folder = listing.folders.find((f) => f.id === id);
+		// Bounded fan-out instead of a serial await per item: 100 deletes at
+		// ~30 ms RTT collapse from ~3 s of waterfall to a few round-trip
+		// windows. Failures toast individually and the rest still proceed,
+		// exactly like the old serial loop.
+		const folderIdSet = new Set(listing.folders.map((f) => f.id));
+		await mapLimit(ids, 6, async (id) => {
 			try {
-				if (folder) await deleteFolder(id);
+				if (folderIdSet.has(id)) await deleteFolder(id);
 				else await deleteFile(id);
 			} catch (e) {
 				errorToast(e);
 			}
-		}
+		});
 		clearSelection();
 		await reload();
 		void session.refresh();
@@ -938,6 +1102,39 @@
 	// ── Drag-to-move ─────────────────────────────────────────────────────────
 	const DRAG_TYPE = 'application/x-oxi-item';
 	let dropFolderId = $state<string | null>(null);
+	// Highlighted breadcrumb crumb during an OxiCloud drag. Holds the
+	// crumb's folder id, or the sentinel `'__home__'` for the home link
+	// (which doesn't have a stable folder id — depends on the caller's
+	// home folder resolution).
+	const CRUMB_HOME_ID = '__home__';
+	let dropCrumbId = $state<string | null>(null);
+
+	// Copy-vs-move on drop.
+	//
+	// Cursor visual: `effectAllowed = 'copyMove'` set at dragstart AND
+	// the dragover handlers touching only `preventDefault()` (no
+	// `dropEffect` write) leaves the browser free to negotiate the
+	// cursor glyph from OS-native modifier keys (macOS Option, Win/Linux
+	// Ctrl) — arrow-with-plus for copy, plain arrow for move.
+	//
+	// Routing: at DROP time we read the modifier keys DIRECTLY on the
+	// event (DragEvent extends MouseEvent, so `altKey`/`metaKey`/`ctrlKey`
+	// are all live). This is deliberately independent of
+	// `dataTransfer.dropEffect` — that value isn't reliably updated by
+	// every browser for JS-initiated drags, but the raw modifier bits
+	// on the drop event ARE. One source of truth, one path.
+	//
+	// OS convention:
+	//   * macOS: ⌥ Option (altKey) → copy — Finder convention. ⌘
+	//     (metaKey) accepted too as a forgiving fallback.
+	//   * Windows / Linux: Ctrl (ctrlKey) → copy — Explorer / Nautilus
+	//     convention.
+	const IS_MAC =
+		typeof navigator !== 'undefined' &&
+		/Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || '');
+	function isCopyDrop(e: DragEvent): boolean {
+		return IS_MAC ? e.altKey || e.metaKey : e.ctrlKey;
+	}
 
 	/**
 	 * Begin dragging an item. When the dragged row is part of the current
@@ -949,8 +1146,19 @@
 			selected.has(id) && selected.size > 1 ? selectionTargets() : [{ id, name, kind }];
 		e.dataTransfer?.setData(DRAG_TYPE, JSON.stringify(items));
 		if (e.dataTransfer) {
-			e.dataTransfer.effectAllowed = 'move';
-			if (items.length > 1) showDragGhost(e.dataTransfer, items);
+			// `copyMove` advertises both operations; the drop-target's
+			// `dropEffect` (set on dragover by our handlers based on
+			// modifier key) picks the effective operation and the OS
+			// cursor reflects it (arrow-with-plus for copy, plain for
+			// move). Was `'move'`, which forced the cursor to always
+			// show move even when Ctrl/Cmd was held.
+			e.dataTransfer.effectAllowed = 'copyMove';
+			// Custom drag ghost for both single and multi-item drags —
+			// consistent UX. The `.dragged-items-badge` always shows
+			// the count (reads "1" on a single-item drag) so the user
+			// gets the same visual feedback shape regardless of how
+			// many rows they're moving.
+			showDragGhost(e.dataTransfer, items);
 			// Drag-out-to-OS download: the OS reads `DownloadURL` (a GET URL) and
 			// downloads the dragged item(s) — a single file directly, a folder or a
 			// multi-selection as one server-zipped archive.
@@ -1036,16 +1244,52 @@
 	async function moveInto(targetFolderId: string, e: DragEvent) {
 		const items = dragPayload(e).filter((it) => it.id !== targetFolderId);
 		if (items.length === 0) return;
+		// Bounded fan-out (was a serial await per item). Every item is
+		// attempted; on any failure the first error is surfaced and the
+		// selection is kept so the drop can be retried, like the old loop.
+		const failures = (
+			await mapLimit(items, 6, async (it) => {
+				try {
+					if (it.kind === 'file') await moveFile(it.id, targetFolderId);
+					else await moveFolder(it.id, targetFolderId);
+					return null;
+				} catch (err) {
+					return err ?? new Error('move failed');
+				}
+			})
+		).filter((err) => err !== null);
+		if (failures.length > 0) {
+			errorToast(failures[0]);
+			return;
+		}
+		clearSelection();
+		await reload();
+	}
+
+	/**
+	 * Copy variant of `moveInto` used when the drop happens with the copy
+	 * modifier held (Ctrl on Win/Linux, ⌘ on macOS). Files and folders go
+	 * through the batch copy endpoints (`copyFiles` / `copyFolders`) —
+	 * there's no per-item copy in the REST API today, only batch.
+	 */
+	async function copyInto(targetFolderId: string, e: DragEvent) {
+		const items = dragPayload(e).filter((it) => it.id !== targetFolderId);
+		if (items.length === 0) return;
+		const fileIds = items.filter((it) => it.kind === 'file').map((it) => it.id);
+		const folderIds = items.filter((it) => it.kind === 'folder').map((it) => it.id);
 		try {
-			for (const it of items) {
-				if (it.kind === 'file') await moveFile(it.id, targetFolderId);
-				else await moveFolder(it.id, targetFolderId);
-			}
-			clearSelection();
-			await reload();
+			// Two batch calls in parallel — the endpoints are independent
+			// and the aggregate error surface is a single toast anyway.
+			await Promise.all([
+				copyFiles(fileIds, targetFolderId),
+				copyFolders(folderIds, targetFolderId)
+			]);
 		} catch (err) {
 			errorToast(err);
+			return;
 		}
+		clearSelection();
+		await reloadAndTrackNew();
 	}
 
 	function onFolderDrop(e: DragEvent, folder: FolderItem) {
@@ -1053,13 +1297,15 @@
 		e.preventDefault();
 		e.stopPropagation();
 		dropFolderId = null;
-		void moveInto(folder.id, e);
+		if (isCopyDrop(e)) void copyInto(folder.id, e);
+		else void moveInto(folder.id, e);
 	}
 
 	function onCrumbDrop(e: DragEvent, folderId: string) {
 		if (!e.dataTransfer?.types.includes(DRAG_TYPE)) return;
 		e.preventDefault();
-		void moveInto(folderId, e);
+		if (isCopyDrop(e)) void copyInto(folderId, e);
+		else void moveInto(folderId, e);
 	}
 
 	// ── Right-click context menu ─────────────────────────────────────────────
@@ -1252,7 +1498,7 @@
 
 			const { savedBytes, failures } = await uploadAll(items, nid, label);
 			finishUpload(nid, savedBytes, failures, total, skipped.length);
-			await reload();
+			await reloadAndTrackNew();
 			void session.refresh();
 		} catch (err) {
 			ui.finishProgress(nid, errorMessage(err), 'error');
@@ -1275,148 +1521,169 @@
 		input.value = '';
 	}
 
-	const isEmpty = $derived(listing.folders.length === 0 && listing.files.length === 0);
-	const viewClass = $derived(
-		filesStore.viewMode === 'grid' ? 'files-grid-view' : 'files-list-view'
-	);
-
 	// Client-side sort (flat, Drive-style). The listing endpoint returns the
 	// folder contents unsorted; sorting here avoids a refetch per column click.
+	//
+	// `reversed` is the single source of truth for direction — bound to
+	// ResourceList's `bind:reversed` below and read by the comparators.
+	// The legacy `sortDir: 1 | -1` value used by the comparators is a
+	// read-only `$derived` off `reversed` so we don't need two-way sync
+	// (the previous `$state` + two `$effect` mirror was fragile — a
+	// programmatic write to either side triggered an update on the
+	// other, and eslint's `prefer-writable-derived` rightly flagged it).
 	type SortField = 'name' | 'type' | 'size' | 'modified_at' | 'created_at';
 	let sortField = $state<SortField>('name');
-	let sortDir = $state<1 | -1>(1);
+	let reversed = $state(false);
 
-	function toggleSort(field: SortField) {
-		if (sortField === field) sortDir = (sortDir * -1) as 1 | -1;
-		else {
-			sortField = field;
-			sortDir = 1;
+	// Server does the sort (order_by=sortField, reverse=reversed on every
+	// page request), so ResourceList reads `orderedItems` in server order
+	// straight through the dotfile filter. No client-side comparator
+	// necessary. Under order_by=name/type/size the server puts folders
+	// first then files; under modified_at/created_at they interleave —
+	// preserving the accumulator order is what surfaces that correctly.
+	//
+	// Hoist step: items in `newlyAdded` (populated by `reloadAndTrackNew`
+	// after an upload / create / dropped tree) are pulled OUT of their
+	// natural-order position and PREPENDED to the list, so the
+	// "__new__" bucket rendered by the composed groupBy below appears
+	// at the top of the swimlanes regardless of what sort/group the
+	// user has active. First-appearance bucketing in
+	// `buildResourceSections` keys off the item order in the input list.
+	const rlItems = $derived.by<Array<FileItem | FolderItem>>(() => {
+		const filtered = filterDotfiles(orderedItems, preferences.hideDotfiles);
+		if (newlyAdded.size === 0) return filtered;
+		const hoisted: Array<FileItem | FolderItem> = [];
+		const rest: Array<FileItem | FolderItem> = [];
+		for (const it of filtered) {
+			if (newlyAdded.has(it.id)) hoisted.push(it);
+			else rest.push(it);
 		}
-	}
-
-	function cmpFolders(a: FolderItem, b: FolderItem): number {
-		let v: number;
-		if (sortField === 'modified_at') v = a.modified_at - b.modified_at;
-		else if (sortField === 'created_at') v = a.created_at - b.created_at;
-		// Folders have no size; fall back to name for size/type so they stay stable.
-		else v = a.name.localeCompare(b.name);
-		return v * sortDir;
-	}
-	function cmpFiles(a: FileItem, b: FileItem): number {
-		let v: number;
-		if (sortField === 'size') v = (a.size ?? 0) - (b.size ?? 0);
-		else if (sortField === 'modified_at') v = a.modified_at - b.modified_at;
-		else if (sortField === 'created_at') v = a.created_at - b.created_at;
-		else if (sortField === 'type') v = (a.category ?? '').localeCompare(b.category ?? '');
-		else v = a.name.localeCompare(b.name);
-		return v * sortDir;
-	}
-
-	const sortedFolders = $derived([...listing.folders].sort(cmpFolders));
-	const sortedFiles = $derived([...listing.files].sort(cmpFiles));
-
-	/** Flat id order matching how rows are displayed (folders then files). */
-	const orderedIds = $derived([...sortedFolders.map((f) => f.id), ...sortedFiles.map((f) => f.id)]);
-
-	// Folders-then-files as one ordered, discriminated list so the (flat) view can
-	// be windowed by a single VirtualList. Content width drives the grid columns.
-	type Entry = { kind: 'folder'; folder: FolderItem } | { kind: 'file'; file: FileItem };
-	const entries = $derived<Entry[]>([
-		...sortedFolders.map((folder) => ({ kind: 'folder' as const, folder })),
-		...sortedFiles.map((file) => ({ kind: 'file' as const, file }))
-	]);
-	const entryKey = (e: Entry): string => (e.kind === 'folder' ? e.folder.id : e.file.id);
-	let gridWidth = $state(0);
-
-	// ── Group-by / swimlanes ─────────────────────────────────────────────────
-	// Mirrors GROUP_BY_DEFS in static/js/app/filesView.js: a flat list ('') plus
-	// Type / Size / Modified date / Created date dimensions. Folders always group
-	// into their own lane (Folder / "Folders" size sentinel) ahead of the files.
-	type GroupBy = '' | 'type' | 'size' | 'modifiedAt' | 'createdAt';
-	let groupBy = $state<GroupBy>('');
-
-	interface ResourceGroup {
-		key: string;
-		label: string;
-		folders: FolderItem[];
-		files: FileItem[];
-	}
-
-	function folderGroupKey(folder: FolderItem): string {
-		if (groupBy === 'type') return t('files.file_types.folder', 'Folders');
-		if (groupBy === 'size') return sizeBucket(-1);
-		if (groupBy === 'modifiedAt') return dateBucket(folder.modified_at);
-		if (groupBy === 'createdAt') return dateBucket(folder.created_at);
-		return '';
-	}
-	function fileGroupKey(file: FileItem): string {
-		if (groupBy === 'type') return typeLabel(file.category);
-		if (groupBy === 'size') return sizeBucket(file.size ?? 0);
-		if (groupBy === 'modifiedAt') return dateBucket(file.modified_at);
-		if (groupBy === 'createdAt') return dateBucket(file.created_at);
-		return '';
-	}
-
-	// Grouped rendering: ordered lanes preserving the sorted folder-then-file order
-	// within each lane. Lanes appear in first-seen order (folders precede files).
-	const groups = $derived.by<ResourceGroup[]>(() => {
-		if (groupBy === '') return [];
-		// Transient grouping map, local to this derivation and discarded once the
-		// array is built — must stay a plain Map (a reactive one created inside a
-		// $derived would be unsafe state).
-		// eslint-disable-next-line svelte/prefer-svelte-reactivity
-		const map = new Map<string, ResourceGroup>();
-		const ensure = (key: string): ResourceGroup => {
-			let g = map.get(key);
-			if (!g) {
-				g = { key, label: key, folders: [], files: [] };
-				map.set(key, g);
-			}
-			return g;
-		};
-		for (const folder of sortedFolders) ensure(folderGroupKey(folder)).folders.push(folder);
-		for (const file of sortedFiles) ensure(fileGroupKey(file)).files.push(file);
-		return [...map.values()];
+		return [...hoisted, ...rest];
 	});
 
-	// ── Toolbar controls (upload split-button + group-by popup menu) ─────────
-	// The group-by popup + sort-direction + view toggle live in the shared
-	// <ListToolbar>; this page only owns the upload split-button dropdown.
-	let uploadMenuOpen = $state(false);
+	// Group-by state (bound to <ResourceList>). Kept as a `string` prop
+	// value; the current `sortField` mirrors from the picked group's
+	// `orderBy` so a group-by change also drives the sort.
+	let groupBy = $state<string>('');
 
-	interface GroupByDef {
-		key: GroupBy;
-		label: string;
-		icon: string;
-		/** Sort field implied by this dimension (the old group-by drove order_by). */
-		sort?: SortField;
-	}
-	// Mirrors the old GROUP_BY_DEFS: "Name" is the default (flat, sorted by name)
-	// entry — there is no "None" option — followed by the swimlane dimensions.
-	const GROUP_BYS = $derived<GroupByDef[]>([
-		{ key: '', label: t('files.name', 'Name'), icon: 'arrow-up-a-z', sort: 'name' },
-		{ key: 'type', label: t('groupby.type', 'Type'), icon: 'layer-group', sort: 'type' },
-		{ key: 'size', label: t('groupby.size', 'Size'), icon: 'layer-group', sort: 'size' },
+	// Same swimlane keys as the bespoke groups above (Type / Size /
+	// modifiedAt / createdAt). The `orderBy` values are what the
+	// GROUP_BYS toolbar emits, so <ResourceList>'s onreload gets the
+	// legacy `sortField` name and can drive the same sort path.
+	//
+	// Every dimension composes a `__new__` branch on top of its natural
+	// `bucketOf` so that whenever the transient "new elements" swimlane
+	// is active, hoisted items get their own bucket-first-in-order
+	// regardless of the user's chosen group. On the default `''` (flat)
+	// dimension the wrapped `bucketOf` returns the empty string for
+	// non-new items — that renders as one unlabeled section (header
+	// suppressed by ResourceList when `label === ''`), preserving the
+	// current flat-list look with just the "New elements" header on
+	// top. `labelForNew` renders the localised header.
+	const NEW_KEY = '__new__';
+	const labelForNew = $derived(t('files.new_elements', 'New elements'));
+	const wrapNew =
+		<T extends FileItem | FolderItem>(inner?: (item: T) => string | null) =>
+		(item: T): string | null => {
+			if (newlyAdded.has(item.id)) return NEW_KEY;
+			return inner ? inner(item) : '';
+		};
+	const wrapLabel =
+		(inner?: (key: string) => string) =>
+		(key: string): string => {
+			if (key === NEW_KEY) return labelForNew;
+			return inner ? inner(key) : key;
+		};
+	const rlGroupBys = $derived<RLGroupByDef[]>([
+		{
+			key: '',
+			label: t('files.name', 'Name'),
+			orderBy: 'name',
+			icon: 'arrow-up-a-z',
+			// Only synthesize a bucketOf when the swimlane is active; when
+			// no new items exist we want the plain flat-list rendering
+			// (no bucketing pass at all).
+			bucketOf: newlyAdded.size > 0 ? wrapNew() : undefined,
+			labelOf: newlyAdded.size > 0 ? wrapLabel() : undefined
+		},
+		{
+			key: 'type',
+			label: t('groupby.type', 'Type'),
+			orderBy: 'type',
+			icon: 'layer-group',
+			bucketOf: wrapNew((item) =>
+				isFile(item) ? typeLabel(item.category) : t('files.file_types.folder', 'Folders')
+			),
+			labelOf: wrapLabel((k) => k)
+		},
+		{
+			key: 'size',
+			label: t('groupby.size', 'Size'),
+			orderBy: 'size',
+			icon: 'layer-group',
+			bucketOf: wrapNew((item) => (isFile(item) ? sizeBucket(item.size ?? 0) : sizeBucket(-1))),
+			labelOf: wrapLabel((k) => k)
+		},
 		{
 			key: 'modifiedAt',
 			label: t('groupby.modifiedAt', 'Modified date'),
+			orderBy: 'modified_at',
 			icon: 'layer-group',
-			sort: 'modified_at'
+			bucketOf: wrapNew((item) => dateBucket(item.modified_at)),
+			labelOf: wrapLabel((k) => k)
 		},
 		{
 			key: 'createdAt',
 			label: t('groupby.createdAt', 'Created date'),
+			orderBy: 'created_at',
 			icon: 'layer-group',
-			sort: 'created_at'
+			bucketOf: wrapNew((item) => dateBucket(item.created_at)),
+			labelOf: wrapLabel((k) => k)
 		}
 	]);
 
-	/** Group-by chosen in the toolbar — also sets the matching sort field. */
-	function onPickGroup(key: string) {
-		groupBy = key as GroupBy;
-		const def = GROUP_BYS.find((g) => g.key === key);
-		if (def?.sort) sortField = def.sort;
+	// Bridge for <ResourceList>'s callbacks — the row's open/favorite/drag
+	// props take one item; the legacy handlers take `(kind, id, name)`.
+	function rlOnOpen(item: FileItem | FolderItem) {
+		if (isFile(item)) openFile(item);
+		else openFolder(item);
 	}
+	function rlOnFavorite(item: FileItem | FolderItem) {
+		void toggleFavorite(isFile(item) ? 'file' : 'folder', item.id);
+	}
+	function rlOnContextMenu(e: MouseEvent, item: FileItem | FolderItem) {
+		openContext(e, isFile(item) ? 'file' : 'folder', item.id, item.name);
+	}
+	// Row-drag: everything is draggable; only folders accept drops.
+	function rlIsDraggable(_item: FileItem | FolderItem): boolean {
+		return true;
+	}
+	function rlIsDropTarget(item: FileItem | FolderItem): boolean {
+		return !isFile(item);
+	}
+	function rlOnItemDragStart(e: DragEvent, item: FileItem | FolderItem) {
+		onItemDragStart(e, isFile(item) ? 'file' : 'folder', item.id, item.name);
+	}
+	function rlOnItemDragOver(e: DragEvent, item: FileItem | FolderItem) {
+		if (isFile(item)) return;
+		if (e.dataTransfer?.types.includes(DRAG_TYPE)) {
+			// preventDefault is what accepts the drop. Leaving
+			// `dropEffect` untouched lets the browser negotiate it
+			// from OS-native modifier keys.
+			e.preventDefault();
+			dropFolderId = item.id;
+		}
+	}
+	function rlOnItemDragLeave(_e: DragEvent, item: FileItem | FolderItem) {
+		if (dropFolderId === item.id) dropFolderId = null;
+	}
+	function rlOnItemDrop(e: DragEvent, item: FileItem | FolderItem) {
+		if (isFile(item)) return;
+		onFolderDrop(e, item);
+	}
+
+	// ── Upload split-button popup state ─────────────────────────────────────
+	let uploadMenuOpen = $state(false);
 
 	// Close the upload popup when clicking outside of it.
 	$effect(() => {
@@ -1428,13 +1695,30 @@
 		return () => window.removeEventListener('pointerdown', onDown);
 	});
 
-	const SKELETON = [0, 1, 2, 3, 4, 5, 6, 7];
-
-	// Reload whenever the route path changes.
+	// Reload whenever the route path OR the server sort dimension/direction
+	// changes.
+	//
+	// `load()` reads several reactive signals in its sync phase
+	// (session.isExternalUser, session.homeFolderId, plus whatever
+	// its awaited callees touch). Naively calling `void load()` here
+	// tracks all of those as dependencies of this effect — and
+	// `session.loadHomeFolder()`'s own writes to `homeFolderId`
+	// during its resolution then re-trigger the effect, firing a
+	// second and third `load()` before the first has settled. Wrap
+	// in `untrack` so the ONLY dependencies are the three we WANT
+	// to reload on: pathSegments, sortField, reversed.
 	$effect(() => {
-		// reference pathSegments so the effect re-runs on navigation
 		void pathSegments;
-		void load();
+		void sortField;
+		void reversed;
+		untrack(() => {
+			// Route/sort change → drop the transient "new elements"
+			// swimlane. It's a per-folder confirmation of "here's what
+			// you just added"; carrying it across folders would surface
+			// stale ids that don't belong to the new listing.
+			newlyAdded.clear();
+			void load(true);
+		});
 	});
 
 	// The command palette's "Upload files" action navigates here then dispatches
@@ -1450,558 +1734,272 @@
 
 <svelte:window onkeydown={onKeydown} />
 
-<div
-	class="files-page"
-	class:dropzone-active={dragOver}
-	role="region"
-	aria-label={t('nav.files', 'Files')}
-	ondragover={(e) => {
-		e.preventDefault();
-		dragOver = true;
-	}}
-	ondragleave={() => (dragOver = false)}
-	ondrop={onDrop}
->
-	<div class="page-sticky-header">
-		<!-- Hidden upload inputs stay mounted even while the batch bar is shown. -->
-		<input
-			bind:this={fileInput}
-			type="file"
-			multiple
-			hidden
-			data-testid="files-upload-file-input"
-			onchange={onUpload}
-		/>
-		<input
-			bind:this={folderInput}
-			type="file"
-			multiple
-			hidden
-			webkitdirectory
-			data-testid="files-upload-folder-input"
-			onchange={onUploadFolder}
-		/>
+<div class="files-page" data-testid="files-dropzone">
+	<!-- Read-only freeze banner, placed inside the listing container so it
+	     lives in the same visual/scroll flow as the file list (previously
+	     rendered above the page container, which visually detached it from
+	     the listing). Scrolls with the content — sticky header below stays
+	     pinned. Shows when either any item in the current listing surfaces
+	     a `drive_id` for a frozen drive, or (empty folder fallback) the
+	     URL's leading segment resolves to one. -->
+	{#if currentDrive?.policies?.read_only}
+		<ReadOnlyBanner driveName={currentDrive.name} />
+	{/if}
 
-		<ListToolbar
-			groups={GROUP_BYS}
-			{groupBy}
-			reversed={sortDir === -1}
-			ongroup={onPickGroup}
-			ondirection={() => (sortDir = (sortDir * -1) as 1 | -1)}
-		>
-			{#snippet start()}
-				{#if selectedCount > 0}
-					<div class="action-buttons batch-selection-bar" data-testid="files-batch-bar">
-						<div class="list-header-checkbox">
-							<button
-								class="batch-bar-close"
-								title={t('files.cancel_selection', 'Cancel selection')}
-								aria-label={t('files.cancel_selection', 'Cancel selection')}
-								data-testid="files-batch-cancel-btn"
-								onclick={clearSelection}
-							>
-								<Icon name="times" />
-							</button>
-							<span class="batch-bar-count"
-								>{t('files.selected_count', { count: selectedCount }, '{{count}} selected')}</span
-							>
-						</div>
-						<div class="batch-selection-info">
-							<div class="batch-bar-actions">
-								<button
-									class="batch-btn"
-									title={t('files.add_favorites', 'Add to favorites')}
-									data-testid="files-batch-favorite-btn"
-									onclick={() => void batchFavorites()}
-								>
-									<Icon name="star" />
-									<span>{t('files.add_favorites', 'Add to favorites')}</span>
-								</button>
-								<button
-									class="batch-btn"
-									title={t('files.move', 'Move')}
-									data-testid="files-batch-move-btn"
-									onclick={batchMove}
-								>
-									<Icon name="arrows-alt" />
-									<span>{t('files.move', 'Move')}</span>
-								</button>
-								<button
-									class="batch-btn"
-									title={t('files.copy', 'Copy')}
-									data-testid="files-batch-copy-btn"
-									onclick={batchCopy}
-								>
-									<Icon name="copy" />
-									<span>{t('files.copy', 'Copy')}</span>
-								</button>
-								<button
-									class="batch-btn"
-									title={t('common.download', 'Download')}
-									data-testid="files-batch-download-btn"
-									onclick={() => void batchDownload()}
-								>
-									<Icon name="download" />
-									<span>{t('common.download', 'Download')}</span>
-								</button>
-								<button
-									class="batch-btn batch-btn-danger"
-									title={t('common.delete', 'Delete')}
-									data-testid="files-batch-delete-btn"
-									onclick={batchDelete}
-								>
-									<Icon name="trash" />
-									<span>{t('common.delete', 'Delete')}</span>
-								</button>
-							</div>
-						</div>
-					</div>
-				{:else}
-					<div class="action-buttons">
-						<div class="upload-dropdown" data-testid="files-upload-dropdown">
-							<button
-								class="btn btn-primary"
-								data-testid="files-upload-btn"
-								onclick={() => (uploadMenuOpen = !uploadMenuOpen)}
-								disabled={uploading}
-								aria-haspopup="true"
-								aria-expanded={uploadMenuOpen}
-							>
-								<Icon name="cloud-upload-alt" class="icon-mr" />
-								<span
-									>{uploading
-										? t('files.uploading', 'Uploading…')
-										: t('actions.upload', 'Upload')}</span
-								>
-								<Icon name="caret-down" class="upload-caret" />
-							</button>
-							{#if uploadMenuOpen}
-								<div class="upload-dropdown-menu" data-testid="files-upload-menu">
-									<button
-										class="upload-dropdown-item"
-										data-testid="files-upload-files-item"
-										onclick={() => {
-											uploadMenuOpen = false;
-											fileInput?.click();
-										}}
-									>
-										<Icon name="file" />
-										<span>{t('actions.upload_files', 'Upload files')}</span>
-									</button>
-									<button
-										class="upload-dropdown-item"
-										data-testid="files-upload-folder-item"
-										onclick={() => {
-											uploadMenuOpen = false;
-											folderInput?.click();
-										}}
-									>
-										<Icon name="folder-open" />
-										<span>{t('actions.upload_folder', 'Upload folder')}</span>
-									</button>
-								</div>
-							{/if}
-						</div>
-						<button
-							class="btn btn-secondary"
-							data-testid="files-new-folder-btn"
-							onclick={onNewFolder}
+	<!-- Hidden upload inputs stay mounted even while the batch bar is shown.
+	     Kept OUTSIDE ResourceList so the split-button dropdown in the
+	     `actions` snippet can click() them without ResourceList's internal
+	     scoping getting in the way. -->
+	<input
+		bind:this={fileInput}
+		type="file"
+		multiple
+		hidden
+		data-testid="files-upload-file-input"
+		onchange={onUpload}
+	/>
+	<input
+		bind:this={folderInput}
+		type="file"
+		multiple
+		hidden
+		webkitdirectory
+		data-testid="files-upload-folder-input"
+		onchange={onUploadFolder}
+	/>
+
+	<ResourceList
+		title={t('nav.files', 'Files')}
+		items={rlItems}
+		{favoriteIds}
+		emptyText={hiddenCount > 0
+			? t('files.empty_hidden_title', { n: hiddenCount }, '{{n}} hidden item(s) in this folder')
+			: t('files.empty_title', 'This folder is empty')}
+		emptyHint={hiddenCount > 0
+			? t(
+					'files.empty_hidden_hint',
+					"Files whose name starts with '.' are hidden. Toggle the setting to see them."
+				)
+			: t('files.empty_hint', 'Drop files here or use the Upload button to add files.')}
+		emptyIcon={hiddenCount > 0 ? 'eye-slash' : undefined}
+		loading={showSkeleton}
+		error={error ?? undefined}
+		selectable
+		shiftRangeSelect
+		showOwner
+		showType
+		showDate
+		dateLabel={t('files.col_modified', 'Modified')}
+		showPath={false}
+		showDotfileToggle
+		enableSystemDrop
+		onsystemdrop={onDrop}
+		groupBys={rlGroupBys}
+		bind:groupBy
+		bind:reversed
+		hasMore={pageCursor !== undefined}
+		onloadmore={loadMore}
+		onreload={(orderBy) => {
+			sortField = orderBy as SortField;
+		}}
+		onopen={rlOnOpen}
+		onfavorite={rlOnFavorite}
+		oncontextmenu={rlOnContextMenu}
+		onselectionchange={(ids) => replaceSet(selected, ids)}
+		isDraggable={rlIsDraggable}
+		isDropTarget={rlIsDropTarget}
+		dropTargetId={dropFolderId}
+		onitemdragstart={rlOnItemDragStart}
+		onitemdragover={rlOnItemDragOver}
+		onitemdragleave={rlOnItemDragLeave}
+		onitemdrop={rlOnItemDrop}
+	>
+		{#snippet emptyAction()}
+			<!-- Surfaces only when the folder isn't really empty — it's just
+			     filtered because the user chose to hide dotfiles. Clicking
+			     flips the app-wide `preferences.hideDotfiles` back off,
+			     re-populating the list without a hunt through settings. -->
+			{#if hiddenCount > 0}
+				<button
+					class="btn btn-secondary"
+					onclick={() => preferences.setHideDotfiles(false)}
+					data-testid="files-show-hidden-btn"
+				>
+					<Icon name="eye" />
+					{t('files.show_hidden', 'Show hidden files')}
+				</button>
+			{/if}
+		{/snippet}
+
+		{#snippet breadcrumb()}
+			<nav class="breadcrumb" aria-label="Breadcrumb">
+				<!-- Persistent home link → the root listing (bare /files canonicalizes to
+				     the user's drive root). `buildCrumbs` returns only the path folders,
+				     so this is the single always-present "go home" affordance. Both the
+				     home link and every crumb accept row drops via the same
+				     `application/x-oxi-item` MIME the item-drag uses. The
+				     `.drop-target` class visually highlights the crumb during a
+				     hover-over so the user sees WHICH crumb the drop will land on. -->
+				<a
+					href={resolve('/files')}
+					class="breadcrumb-item breadcrumb-home breadcrumb-link"
+					class:drop-target={dropCrumbId === CRUMB_HOME_ID}
+					title={t('breadcrumb.home', 'Home')}
+					data-testid="files-breadcrumb-home-link"
+					ondragover={(e) => e.dataTransfer?.types.includes(DRAG_TYPE) && e.preventDefault()}
+					ondragenter={(e) => {
+						if (e.dataTransfer?.types.includes(DRAG_TYPE)) dropCrumbId = CRUMB_HOME_ID;
+					}}
+					ondragleave={() => {
+						if (dropCrumbId === CRUMB_HOME_ID) dropCrumbId = null;
+					}}
+					ondrop={(e) => {
+						dropCrumbId = null;
+						if (session.homeFolderId) onCrumbDrop(e, session.homeFolderId);
+					}}
+				>
+					<Icon name={rootIcon} />
+				</a>
+				{#each crumbs as c, i (c.id)}
+					<span class="breadcrumb-separator">&gt;</span>
+					{#if i === crumbs.length - 1}
+						<span class="breadcrumb-item breadcrumb-current">{c.name}</span>
+					{:else}
+						<a
+							href={resolve(`/files/${pathSegments.slice(0, i + 1).join('/')}`)}
+							class="breadcrumb-item breadcrumb-link"
+							class:drop-target={dropCrumbId === c.id}
+							data-testid={`files-breadcrumb-${c.id}`}
+							ondragover={(e) => e.dataTransfer?.types.includes(DRAG_TYPE) && e.preventDefault()}
+							ondragenter={(e) => {
+								if (e.dataTransfer?.types.includes(DRAG_TYPE)) dropCrumbId = c.id;
+							}}
+							ondragleave={() => {
+								if (dropCrumbId === c.id) dropCrumbId = null;
+							}}
+							ondrop={(e) => {
+								dropCrumbId = null;
+								onCrumbDrop(e, c.id);
+							}}
 						>
-							<Icon name="folder-plus" class="icon-mr" />
-							<span>{t('actions.new_folder', 'New folder')}</span>
+							{c.name}
+						</a>
+					{/if}
+				{/each}
+			</nav>
+		{/snippet}
+
+		{#snippet actions()}
+			<div class="upload-dropdown" data-testid="files-upload-dropdown">
+				<button
+					class="btn btn-primary"
+					data-testid="files-upload-btn"
+					onclick={() => (uploadMenuOpen = !uploadMenuOpen)}
+					disabled={uploading}
+					aria-haspopup="true"
+					aria-expanded={uploadMenuOpen}
+				>
+					<Icon name="cloud-upload-alt" class="icon-mr" />
+					<span
+						>{uploading ? t('files.uploading', 'Uploading…') : t('actions.upload', 'Upload')}</span
+					>
+					<Icon name="caret-down" class="upload-caret" />
+				</button>
+				{#if uploadMenuOpen}
+					<div class="upload-dropdown-menu" data-testid="files-upload-menu">
+						<button
+							class="upload-dropdown-item"
+							data-testid="files-upload-files-item"
+							onclick={() => {
+								uploadMenuOpen = false;
+								fileInput?.click();
+							}}
+						>
+							<Icon name="file" />
+							<span>{t('actions.upload_files', 'Upload files')}</span>
+						</button>
+						<button
+							class="upload-dropdown-item"
+							data-testid="files-upload-folder-item"
+							onclick={() => {
+								uploadMenuOpen = false;
+								folderInput?.click();
+							}}
+						>
+							<Icon name="folder-open" />
+							<span>{t('actions.upload_folder', 'Upload folder')}</span>
 						</button>
 					</div>
 				{/if}
-			{/snippet}
-		</ListToolbar>
-
-		<nav class="breadcrumb" aria-label="Breadcrumb">
-			<!-- Persistent home link → the root listing (bare /files canonicalizes to
-			     the user's drive root). `buildCrumbs` returns only the path folders,
-			     so this is the single always-present "go home" affordance. -->
-			<a
-				href={resolve('/files')}
-				class="breadcrumb-item breadcrumb-home breadcrumb-link"
-				title={t('breadcrumb.home', 'Home')}
-				data-testid="files-breadcrumb-home-link"
-				ondragover={(e) => e.dataTransfer?.types.includes(DRAG_TYPE) && e.preventDefault()}
-				ondrop={(e) => session.homeFolderId && onCrumbDrop(e, session.homeFolderId)}
-			>
-				<Icon name={rootIcon} />
-			</a>
-			{#each crumbs as c, i (c.id)}
-				<span class="breadcrumb-separator">&gt;</span>
-				{#if i === crumbs.length - 1}
-					<span class="breadcrumb-item breadcrumb-current">{c.name}</span>
-				{:else}
-					<a
-						href={resolve(`/files/${pathSegments.slice(0, i + 1).join('/')}`)}
-						class="breadcrumb-item breadcrumb-link"
-						data-testid={`files-breadcrumb-${c.id}`}
-						ondragover={(e) => e.dataTransfer?.types.includes(DRAG_TYPE) && e.preventDefault()}
-						ondrop={(e) => onCrumbDrop(e, c.id)}
-					>
-						{c.name}
-					</a>
-				{/if}
-			{/each}
-		</nav>
-	</div>
-
-	{#if error}
-		<EmptyState title={error} error />
-	{:else if showSkeleton && isEmpty}
-		<SkeletonList count={SKELETON.length} />
-	{:else if isEmpty}
-		<EmptyState
-			title={t('files.empty_title', 'This folder is empty')}
-			hint={t('files.empty_hint', 'Drop files here or use the Upload button to add files.')}
-		/>
-	{:else}
-		<div class="files-container" bind:clientWidth={gridWidth}>
-			{#if groupBy !== ''}
-				<div class={viewClass}>
-					{@render fileListHeader()}
-					{#each groups as group (group.key)}
-						<div class="resource-list__swimlane-header">{group.label}</div>
-						{#each group.folders as folder (folder.id)}
-							{@render folderRow(folder)}
-						{/each}
-						{#each group.files as file (file.id)}
-							{@render fileRow(file)}
-						{/each}
-					{/each}
-				</div>
-			{:else if filesStore.viewMode === 'list'}
-				<!-- Flat list: only the rows near the viewport are mounted. -->
-				<div class="files-list-view">
-					{@render fileListHeader()}
-					<VirtualList items={entries} rowHeight={56} key={entryKey} row={entryRow} />
-				</div>
-			{:else}
-				<!-- Grid: the windowed list's inner element IS the card grid. -->
-				<VirtualList
-					items={entries}
-					columns={gridColumns(gridWidth)}
-					rowHeight={240}
-					windowClass="files-grid-view"
-					key={entryKey}
-					row={entryRow}
-				/>
-			{/if}
-		</div>
-	{/if}
-</div>
-
-{#snippet fileListHeader()}
-	<div class="list-header">
-		<div class="list-header-checkbox">
-			<input
-				type="checkbox"
-				aria-label={t('files.select_all', 'Select all')}
-				data-testid="files-select-all-checkbox"
-				checked={selectedCount > 0 && selectedCount === totalCount}
-				indeterminate={selectedCount > 0 && selectedCount < totalCount}
-				onchange={toggleSelectAll}
-			/>
-		</div>
-		{#each [{ f: 'name', l: t('files.col_name', 'Name') }, { f: 'owner', l: t('files.col_owner', 'Owner') }, { f: 'type', l: t('files.col_type', 'Type') }, { f: 'size', l: t('files.col_size', 'Size') }, { f: 'modified_at', l: t('files.col_modified', 'Modified') }] as col (col.f)}
-			{#if col.f === 'owner'}
-				<div class="list-header-owner">{col.l}</div>
-			{:else}
-				<button
-					class="list-header-sort"
-					class:is-active={sortField === col.f}
-					data-sort-field={col.f}
-					data-testid={`files-sort-${col.f}-btn`}
-					onclick={() => toggleSort(col.f as SortField)}
-				>
-					{col.l}
-					{#if sortField === col.f}
-						<Icon
-							name={sortDir === 1 ? 'arrow-down' : 'arrow-up'}
-							class="list-header-sort__arrow"
-						/>
-					{/if}
-				</button>
-			{/if}
-		{/each}
-		<div></div>
-	</div>
-{/snippet}
-
-{#snippet entryRow(e: Entry)}
-	{#if e.kind === 'folder'}
-		{@render folderRow(e.folder)}
-	{:else}
-		{@render fileRow(e.file)}
-	{/if}
-{/snippet}
-
-{#snippet folderRow(folder: FolderItem)}
-	<div
-		class="file-item"
-		class:selected={selected.has(folder.id)}
-		class:drop-target={dropFolderId === folder.id}
-		role="button"
-		tabindex="0"
-		draggable="true"
-		aria-label={folder.name}
-		data-testid={folder.name}
-		ondragstart={(e) => onItemDragStart(e, 'folder', folder.id, folder.name)}
-		ondragover={(e) => {
-			if (e.dataTransfer?.types.includes(DRAG_TYPE)) {
-				e.preventDefault();
-				dropFolderId = folder.id;
-			}
-		}}
-		ondragleave={() => {
-			if (dropFolderId === folder.id) dropFolderId = null;
-		}}
-		ondrop={(e) => onFolderDrop(e, folder)}
-		ondblclick={() => openFolder(folder)}
-		onclick={(e) => {
-			if (!handleSelectionClick(e, folder.id)) openFolder(folder);
-		}}
-		oncontextmenu={(e) => openContext(e, 'folder', folder.id, folder.name)}
-		onkeydown={(e) => e.key === 'Enter' && openFolder(folder)}
-	>
-		<div class="checkbox-cell">
-			<input
-				type="checkbox"
-				checked={selected.has(folder.id)}
-				aria-label={folder.name}
-				data-testid={`files-folder-checkbox-${folder.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					toggleSelected(folder.id);
-				}}
-			/>
-		</div>
-		<div class="name-cell">
-			<div class="file-icon file-icon--folder"><Icon name="folder" /></div>
-			<span title={folder.name}>{folder.name}</span>
-			{#if favoriteIds.has(folder.id)}<div
-					class="item-badge item-badge--fav"
-					title={t('files.favorited', 'Favorite')}
-				>
-					<Icon name="star" />
-				</div>{/if}
-			{#if sharedIds.has(folder.id)}<div
-					class="file-badge file-badge-shared"
-					title={t('files.shared', 'Shared')}
-				>
-					<Icon name="oxiexport" />
-				</div>{/if}
-		</div>
-		<div class="grid-meta">
-			<span class="grid-meta__date">{relativeTimeAgo(folder.modified_at)}</span>
-		</div>
-		<div class="owner-cell">{ownerLabel(folder.owner_id, session.user?.id ?? null)}</div>
-		<div class="type-cell">{t('files.file_types.folder', 'Folder')}</div>
-		<div class="size-cell">—</div>
-		<div class="date-cell">{formatDate(folder.modified_at)}</div>
-		<div class="action-cell">
-			<button
-				class="favorite-star"
-				class:active={favoriteIds.has(folder.id)}
-				title={favoriteIds.has(folder.id)
-					? t('files.unfavorite', 'Remove favorite')
-					: t('files.favorite', 'Add favorite')}
-				aria-pressed={favoriteIds.has(folder.id)}
-				data-testid={`files-folder-favorite-${folder.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					void toggleFavorite('folder', folder.id);
-				}}><Icon name={favoriteIds.has(folder.id) ? 'star' : 'star-outline'} /></button
-			>
-			<button
-				class="btn-action"
-				title={t('files.share', 'Share')}
-				data-testid={`files-folder-share-${folder.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					openShare('folder', folder.id, folder.name);
-				}}><Icon name="link" /></button
-			>
-			<button
-				class="btn-action"
-				title={t('files.move', 'Move')}
-				data-testid={`files-folder-move-${folder.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					openMove('folder', folder.id, folder.name);
-				}}><Icon name="arrows-alt" /></button
-			>
-			<button
-				class="btn-action"
-				title={t('common.rename', 'Rename')}
-				data-testid={`files-folder-rename-${folder.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					renameItem('folder', folder.id, folder.name);
-				}}><Icon name="pen" /></button
-			>
-			<button
-				class="btn-action btn-action--delete"
-				title={t('common.delete', 'Delete')}
-				data-testid={`files-folder-delete-${folder.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					deleteItem('folder', folder.id, folder.name);
-				}}><Icon name="trash" /></button
-			>
-			<button
-				class="file-actions"
-				title={t('files.more_actions', 'More actions')}
-				aria-label={t('files.more_actions', 'More actions')}
-				aria-haspopup="menu"
-				data-testid={`files-folder-more-${folder.id}`}
-				onclick={(e) => openContext(e, 'folder', folder.id, folder.name)}
-				><Icon name="ellipsis-v" /></button
-			>
-		</div>
-	</div>
-{/snippet}
-
-{#snippet fileRow(file: FileItem)}
-	{@const iconName = iconNameFromClass(file.icon_class)}
-	<div
-		class="file-item"
-		class:selected={selected.has(file.id)}
-		role="button"
-		tabindex="0"
-		draggable="true"
-		aria-label={file.name}
-		data-testid={file.name}
-		ondragstart={(e) => onItemDragStart(e, 'file', file.id, file.name)}
-		ondblclick={() => openFile(file)}
-		onclick={(e) => {
-			if (!handleSelectionClick(e, file.id)) openFile(file);
-		}}
-		oncontextmenu={(e) => openContext(e, 'file', file.id, file.name)}
-		onkeydown={(e) => e.key === 'Enter' && openFile(file)}
-	>
-		<div class="checkbox-cell">
-			<input
-				type="checkbox"
-				checked={selected.has(file.id)}
-				aria-label={file.name}
-				data-testid={`files-file-checkbox-${file.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					toggleSelected(file.id);
-				}}
-			/>
-		</div>
-		<div class="name-cell">
-			<div class="file-icon {fileIconKindClass(iconName)}">
-				<!-- Colour type icon is always rendered; a successful thumbnail covers it
-				     edge-to-edge, and a failed one (onerror hides the <img>) reveals it. -->
-				<Icon name={iconName} />
-				{#if canThumbnail(file)}
-					<img
-						class="file-thumb"
-						src={fileThumbnailUrl(file.id)}
-						alt=""
-						loading="lazy"
-						onerror={(e) => ((e.currentTarget as HTMLImageElement).style.display = 'none')}
-					/>
-				{/if}
 			</div>
-			<span title={file.name}>{file.name}</span>
-			{#if favoriteIds.has(file.id)}<div
-					class="item-badge item-badge--fav"
-					title={t('files.favorited', 'Favorite')}
-				>
-					<Icon name="star" />
-				</div>{/if}
-			{#if sharedIds.has(file.id)}<div
-					class="file-badge file-badge-shared"
-					title={t('files.shared', 'Shared')}
-				>
-					<Icon name="oxiexport" />
-				</div>{/if}
-		</div>
-		<div class="grid-meta">
-			<span class="grid-meta__date">{relativeTimeAgo(file.modified_at)}</span>
-			{#if file.size != null}<span class="grid-meta__size">{formatBytes(file.size)}</span>{/if}
-		</div>
-		<div class="owner-cell">{ownerLabel(file.owner_id, session.user?.id ?? null)}</div>
-		<div class="type-cell">{typeLabel(file.category)}</div>
-		<div class="size-cell">{file.size != null ? formatBytes(file.size) : ''}</div>
-		<div class="date-cell">{formatDate(file.modified_at)}</div>
-		<div class="action-cell">
+			<button class="btn btn-secondary" data-testid="files-new-folder-btn" onclick={onNewFolder}>
+				<Icon name="folder-plus" class="icon-mr" />
+				<span>{t('actions.new_folder', 'New folder')}</span>
+			</button>
+		{/snippet}
+
+		{#snippet batchActions(_sel)}
 			<button
-				class="favorite-star"
-				class:active={favoriteIds.has(file.id)}
-				title={favoriteIds.has(file.id)
-					? t('files.unfavorite', 'Remove favorite')
-					: t('files.favorite', 'Add favorite')}
-				aria-pressed={favoriteIds.has(file.id)}
-				data-testid={`files-file-favorite-${file.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					void toggleFavorite('file', file.id);
-				}}><Icon name={favoriteIds.has(file.id) ? 'star' : 'star-outline'} /></button
+				class="batch-btn"
+				title={t('files.add_favorites', 'Add to favorites')}
+				data-testid="files-batch-favorite-btn"
+				onclick={() => void batchFavorites()}
 			>
+				<Icon name="star" />
+				<span>{t('files.add_favorites', 'Add to favorites')}</span>
+			</button>
 			<button
-				class="btn-action"
-				title={t('files.share', 'Share')}
-				data-testid={`files-file-share-${file.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					openShare('file', file.id, file.name);
-				}}><Icon name="link" /></button
-			>
-			<button
-				class="btn-action"
+				class="batch-btn"
 				title={t('files.move', 'Move')}
-				data-testid={`files-file-move-${file.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					openMove('file', file.id, file.name);
-				}}><Icon name="arrows-alt" /></button
+				data-testid="files-batch-move-btn"
+				onclick={batchMove}
 			>
-			<a
-				class="btn-action"
-				href={fileDownloadUrl(file.id)}
-				rel="external"
-				download
+				<Icon name="arrows-alt" />
+				<span>{t('files.move', 'Move')}</span>
+			</button>
+			<button
+				class="batch-btn"
+				title={t('files.copy', 'Copy')}
+				data-testid="files-batch-copy-btn"
+				onclick={batchCopy}
+			>
+				<Icon name="copy" />
+				<span>{t('files.copy', 'Copy')}</span>
+			</button>
+			<button
+				class="batch-btn"
 				title={t('common.download', 'Download')}
-				data-testid={`files-file-download-${file.id}`}
-				onclick={(e) => e.stopPropagation()}><Icon name="download" /></a
+				data-testid="files-batch-download-btn"
+				onclick={() => void batchDownload()}
 			>
+				<Icon name="download" />
+				<span>{t('common.download', 'Download')}</span>
+			</button>
 			<button
-				class="btn-action"
-				title={t('common.rename', 'Rename')}
-				data-testid={`files-file-rename-${file.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					renameItem('file', file.id, file.name);
-				}}><Icon name="pen" /></button
-			>
-			<button
-				class="btn-action btn-action--delete"
+				class="batch-btn batch-btn-danger"
 				title={t('common.delete', 'Delete')}
-				data-testid={`files-file-delete-${file.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					deleteItem('file', file.id, file.name);
-				}}><Icon name="trash" /></button
+				data-testid="files-batch-delete-btn"
+				onclick={batchDelete}
 			>
-			<button
-				class="file-actions"
-				title={t('files.more_actions', 'More actions')}
-				aria-label={t('files.more_actions', 'More actions')}
-				aria-haspopup="menu"
-				data-testid={`files-file-more-${file.id}`}
-				onclick={(e) => openContext(e, 'file', file.id, file.name)}
-				><Icon name="ellipsis-v" /></button
-			>
-		</div>
-	</div>
-{/snippet}
+				<Icon name="trash" />
+				<span>{t('common.delete', 'Delete')}</span>
+			</button>
+		{/snippet}
+
+		{#snippet rowBadge(item)}
+			{#if favoriteIds.has(item.id)}
+				<span class="item-badge item-badge--fav" title={t('files.favorited', 'Favorite')}>
+					<Icon name="star" />
+				</span>
+			{/if}
+			{#if sharedIds.has(item.id)}
+				<span class="file-badge file-badge-shared" title={t('files.shared', 'Shared')}>
+					<Icon name="oxiexport" />
+				</span>
+			{/if}
+		{/snippet}
+	</ResourceList>
+</div>
 
 {#if moveDialog.component}
 	{@const MoveDialog = moveDialog.component}
@@ -2018,11 +2016,7 @@
 {/if}
 {#if shareDialog.component}
 	{@const ShareDialog = shareDialog.component}
-	<ShareDialog
-		bind:open={shareOpen}
-		item={actionTarget}
-		onshared={(id) => (sharedIds = new SvelteSet(sharedIds).add(id))}
-	/>
+	<ShareDialog bind:open={shareOpen} item={actionTarget} onshared={(id) => sharedIds.add(id)} />
 {/if}
 {#if fileViewer.component}
 	{@const FileViewer = fileViewer.component}
@@ -2147,7 +2141,7 @@
 				const tg = ctxTarget!;
 				closeContext();
 				openShare(tg.kind, tg.id, tg.name);
-			}}><Icon name="link" /> {t('files.share', 'Share')}</button
+			}}><Icon name="share-alt" /> {t('files.share', 'Share')}</button
 		>
 		<button
 			class="ctx-item"
@@ -2210,41 +2204,6 @@
 <style>
 	.files-page {
 		min-height: 100%;
-	}
-
-	.files-page.dropzone-active {
-		outline: 2px dashed var(--color-accent);
-		outline-offset: -8px;
-		border-radius: var(--radius-xl);
-	}
-
-	.page-sticky-header {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-	}
-
-	.action-cell {
-		display: flex;
-		gap: var(--space-1);
-		justify-content: flex-end;
-	}
-
-	.btn-action--delete:hover {
-		color: var(--color-danger-text);
-	}
-
-	.btn-action {
-		text-decoration: none;
-	}
-
-	/* Owner column header — non-sortable, so it's a plain div rather than a
-	   sort button. Inherits the header row's weight/colour. */
-	.list-header-owner {
-		min-width: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
 	}
 
 	.item-badge {

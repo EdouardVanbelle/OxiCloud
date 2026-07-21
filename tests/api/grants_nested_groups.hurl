@@ -367,34 +367,38 @@ HTTP 200
 jsonpath "$.items[?(@.resource.id=='{{perm_folder_id}}')].resource_type" == "folder"
 jsonpath "$.items[?(@.resource.id=='{{perm_folder_id}}')].permissions"   contains "read"
 
-# ── Mutations still denied (Viewer has no Update/Create/Delete) ─
+# ── Mutations still denied (Viewer has no Update/Create/Delete).
+#    Henry has Read via nested-group cascade → graduated denial
+#    returns 403 (see [[project_authz_require_graduated_denial]]).
+#    Anti-enum 404 stays reserved for the earlier phase where the
+#    cascade hadn't given Henry any Read at all.
 POST {{base_url}}/api/folders
 Authorization: Bearer {{henry_token}}
 Content-Type: application/json
 { "name": "henry-attack-2", "parent_id": "{{perm_folder_id}}" }
 
-HTTP 404
+HTTP 403
 
 PUT {{base_url}}/api/folders/{{perm_folder_id}}/rename
 Authorization: Bearer {{henry_token}}
 Content-Type: application/json
 { "name": "henry-rename-as-viewer" }
 
-HTTP 404
+HTTP 403
 
 PUT {{base_url}}/api/files/{{perm_file_id}}/rename
 Authorization: Bearer {{henry_token}}
 Content-Type: application/json
 { "name": "henry-file-rename-as-viewer" }
 
-HTTP 404
+HTTP 403
 
 PUT {{base_url}}/api/files/{{perm_file_id}}/thumbnail/icon
 Authorization: Bearer {{henry_token}}
 Content-Type: image/png
 file,fixtures/blue-image.png;
 
-HTTP 404
+HTTP 403
 
 POST {{base_url}}/api/files/upload
 Authorization: Bearer {{henry_token}}
@@ -402,17 +406,17 @@ Authorization: Bearer {{henry_token}}
 folder_id: {{perm_folder_id}}
 file: file,fixtures/hello.txt; text/plain
 
-HTTP 404
+HTTP 403
 
 DELETE {{base_url}}/api/files/{{perm_file_id}}
 Authorization: Bearer {{henry_token}}
 
-HTTP 404
+HTTP 403
 
 DELETE {{base_url}}/api/folders/{{perm_folder_id}}
 Authorization: Bearer {{henry_token}}
 
-HTTP 404
+HTTP 403
 
 # Viewer cannot start a chunked upload (no Create grant).
 POST {{base_url}}/api/uploads
@@ -426,7 +430,7 @@ Content-Type: application/json
   "chunk_size": 3000000
 }
 
-HTTP 404
+HTTP 403
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -520,16 +524,16 @@ HTTP 200
 [Asserts]
 jsonpath "$[?(@.id=='{{henry_chunked_file_id}}')].name" == "henry-chunked-video.mp4"
 
-# Editor still cannot delete.
+# Editor still cannot delete. Editor bundle carries Read → 403.
 DELETE {{base_url}}/api/files/{{perm_file_id}}
 Authorization: Bearer {{henry_token}}
 
-HTTP 404
+HTTP 403
 
 DELETE {{base_url}}/api/folders/{{perm_folder_id}}
 Authorization: Bearer {{henry_token}}
 
-HTTP 404
+HTTP 403
 
 
 # ════════════════════════════════════════════════════════════════════

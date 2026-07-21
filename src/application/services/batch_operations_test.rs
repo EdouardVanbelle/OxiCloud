@@ -10,6 +10,7 @@ mod tests {
     use crate::application::services::batch_operations::{
         BatchOperationService, BatchResult, BatchStats,
     };
+    use crate::application::services::file_lifecycle_service::FileLifecycleService;
     use crate::application::services::file_management_service::FileManagementService;
     use crate::application::services::file_retrieval_service::FileRetrievalService;
     use crate::application::services::folder_service::FolderService;
@@ -105,7 +106,12 @@ mod tests {
                 crate::application::services::mount_registry::MountRegistry::empty(),
             )),
         );
-        let folder_service = Arc::new(FolderService::new(folder_repo, authz, mount_router));
+        let folder_service = Arc::new(FolderService::new(
+            folder_repo,
+            authz,
+            Arc::new(FileLifecycleService::new()),
+            mount_router,
+        ));
 
         let _batch_service = BatchOperationService::new(
             file_retrieval,

@@ -17,6 +17,7 @@
 	import { confirmDialog } from '$lib/stores/dialogs.svelte';
 	import { t } from '$lib/i18n/index.svelte';
 	import { errorToast } from '$lib/utils/errors';
+	import { dateTimeFormatFor } from '$lib/utils/display';
 	import { isVideo, photoTimestamp } from '$lib/utils/media';
 
 	interface Props {
@@ -47,13 +48,13 @@
 	});
 
 	function baseMeta(p: FileItem): string {
-		const dateStr = new Date(photoTimestamp(p)).toLocaleDateString(undefined, {
+		const dateStr = dateTimeFormatFor(undefined, {
 			year: 'numeric',
 			month: 'short',
 			day: 'numeric',
 			hour: '2-digit',
 			minute: '2-digit'
-		});
+		}).format(photoTimestamp(p));
 		return p.size_formatted ? `${dateStr} · ${p.size_formatted}` : dateStr;
 	}
 

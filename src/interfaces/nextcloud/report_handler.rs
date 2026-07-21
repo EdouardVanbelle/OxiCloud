@@ -10,9 +10,7 @@ use quick_xml::{
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::application::dtos::display_helpers::{
-    category_for, format_file_size, icon_class_for, icon_special_class_for,
-};
+use crate::application::dtos::display_helpers::{format_file_size, intern_display};
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
 use crate::application::dtos::search_dto::SearchCriteriaDto;
@@ -21,9 +19,13 @@ use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::ports::inbound::SearchUseCase;
 use crate::common::di::AppState;
 use crate::domain::entities::file::File;
+use crate::interfaces::api::handlers::webdav_handler::{
+    dead_props_for, files_dead_props_map, folders_dead_props_map,
+};
 use crate::interfaces::errors::AppError;
 use crate::interfaces::nextcloud::webdav_handler::{
-    batch_resolve_ids, format_oc_id, nc_href, write_file_response, write_folder_response,
+    batch_resolve_ids, format_oc_id_into, nc_collection_href_into, nc_href_into, nc_id_of,
+    write_file_response, write_folder_response,
 };
 
 /// Handle WebDAV REPORT and SEARCH methods for Nextcloud compatibility.
@@ -62,6 +64,15 @@ async fn handle_filter_files(
 ) -> Result<Response<Body>, AppError> {
     let user = &session.user;
     let url_user = &session.raw_username;
+    // Chroot-scope the response: NC's `oc:filter-files` REPORT is a
+    // single-drive surface (the client PROPFINDs favorites under its
+    // "home" URL and has no cross-drive concept). Favorites that live
+    // in another drive the caller is a member of are dropped from
+    // this response; they're still reachable via REST
+    // `/api/favorites/resources`. `session.require_chroot()` is safe
+    // here — the REPORT verb only reaches this handler through a
+    // path-scoped route.
+    let chroot = session.require_chroot()?;
     let fav_svc = match state.favorites_service.as_ref() {
         Some(svc) => svc,
         None => return Ok(empty_multistatus()),
@@ -84,11 +95,11 @@ async fn handle_filter_files(
     // All items in this response are favorites.
     let favorite_ids: HashSet<String> = favorites.iter().map(|f| f.item_id.clone()).collect();
 
-    // TODO(D1): replace the hardcoded "Personal/" prefix with the
-    // caller's default-drive root folder name read from
-    // `drives.root_folder_id`. Correct for D0-provisioned default
-    // drives; secondary drives keep their original root name.
-    let home_prefix = "Personal/";
+    // `home_prefix` is unused after the chroot-aware strip
+    // (see `strip_home_prefix`); kept as a positional argument in
+    // the emit calls below for signature stability with the
+    // report-handler tests and the parallel search-pass caller.
+    let home_prefix = "";
 
     // Pass 1: resolve the favorited DTOs in two batch queries (was one
     // get_* per favorite — up to N serial round-trips on a sync client's
@@ -104,14 +115,14 @@ async fn handle_filter_files(
         }
     }
 
-    let file_map: HashMap<String, FileDto> = file_service
+    let mut file_map: HashMap<String, FileDto> = file_service
         .get_files_by_ids(&file_ids)
         .await
         .map_err(|e| AppError::internal_error(format!("Failed to resolve favorite files: {e}")))?
         .into_iter()
         .map(|f| (f.id.clone(), f))
         .collect();
-    let folder_map: HashMap<String, FolderDto> = folder_service
+    let mut folder_map: HashMap<String, FolderDto> = folder_service
         .get_folders_by_ids(&folder_ids)
         .await
         .map_err(|e| AppError::internal_error(format!("Failed to resolve favorite folders: {e}")))?
@@ -121,16 +132,21 @@ async fn handle_filter_files(
 
     let mut files: Vec<FileDto> = Vec::new();
     let mut folders: Vec<FolderDto> = Vec::new();
+    // Move the DTO out of the map instead of cloning it: the maps are built
+    // just above solely to hydrate `files`/`folders` in favorites order and are
+    // dropped at fn end, so the clone was pure waste. `favorites.item_id` is
+    // unique per user, so `remove` drops nothing needed and the favorites order
+    // is preserved (benches/ROUND20.md §C3).
     for fav in &favorites {
         match fav.item_type.as_str() {
             "file" => {
-                if let Some(f) = file_map.get(&fav.item_id) {
-                    files.push(f.clone());
+                if let Some(f) = file_map.remove(&fav.item_id) {
+                    files.push(f);
                 }
             }
             "folder" => {
-                if let Some(f) = folder_map.get(&fav.item_id) {
-                    folders.push(f.clone());
+                if let Some(f) = folder_map.remove(&fav.item_id) {
+                    folders.push(f);
                 }
             }
             _ => {}
@@ -138,8 +154,8 @@ async fn handle_filter_files(
     }
 
     // Pass 2: resolve every oc:fileid in two batch queries (was one per item).
-    let file_uuids: Vec<String> = files.iter().map(|f| f.id.clone()).collect();
-    let folder_uuids: Vec<String> = folders.iter().map(|f| f.id.clone()).collect();
+    let file_uuids: Vec<&str> = files.iter().map(|f| f.id.as_str()).collect();
+    let folder_uuids: Vec<&str> = folders.iter().map(|f| f.id.as_str()).collect();
     let (file_id_map, folder_id_map) =
         batch_resolve_ids(file_id_svc, &file_uuids, &folder_uuids).await;
 
@@ -150,40 +166,89 @@ async fn handle_filter_files(
 
         write_multistatus_start(&mut xml)?;
 
+        // Batched dead-props: one = ANY($1) query per type, not one per
+        // result (benches/DEAD-PROPS.md).
+        let file_deads = files_dead_props_map(&state.webdav_dead_props, &files).await;
+        let folder_deads = folders_dead_props_map(&state.webdav_dead_props, &folders).await;
+
         // Keep main's batched-resolution structure (one batch query
         // per type, not 2N round-trips). Hrefs use `url_user` so the
         // multi-drive `~{drive}` form is echoed back to the client;
         // owner-id stays canonical via `&user.username`.
+        // One oc:id buffer reused across both emit loops (benches/ROUND27.md §H1).
+        let mut oc_buf = String::new();
+        // One href buffer reused across both emit loops, with the URL-encoded
+        // user computed once for the page instead of re-encoded per row — the
+        // reused-buffer shape the PROPFIND child loop already uses
+        // (benches/ROUND29.md §A).
+        let encoded_user = urlencoding::encode(url_user);
+        let mut href_buf = String::new();
         for file in &files {
-            let subpath = strip_home_prefix(&file.path, home_prefix);
-            let href = nc_href(url_user, subpath);
-            let fid = file_id_map.get(&file.id).copied();
-            let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
+            // Skip favorites that live outside the caller's chroot
+            // (other-drive favorites); reachable via REST if needed.
+            let Some(subpath) = strip_home_prefix(chroot, &file.path, home_prefix) else {
+                tracing::debug!(
+                    target: "oxicloud::nc",
+                    "REPORT filter-files: dropping cross-chroot favorite '{}' at '{}'",
+                    file.id,
+                    file.path,
+                );
+                continue;
+            };
+            nc_href_into(&mut href_buf, &encoded_user, subpath);
+            let fid = nc_id_of(&file_id_map, &file.id);
+            let oc_id: Option<&str> = match fid {
+                Some(id) => {
+                    format_oc_id_into(&mut oc_buf, id, file_id_svc);
+                    Some(oc_buf.as_str())
+                }
+                None => None,
+            };
+            let dead = dead_props_for(&file.id, &file_deads);
             write_file_response(
                 &mut xml,
                 file,
-                &href,
-                fid,
-                oc_id.as_deref(),
+                &href_buf,
+                (fid, oc_id),
                 &user.username,
                 &favorite_ids,
+                dead,
             )
             .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
         }
 
         for folder in &folders {
-            let subpath = strip_home_prefix(&folder.path, home_prefix);
-            let href = format!("{}/", nc_href(url_user, subpath));
-            let fid = folder_id_map.get(&folder.id).copied();
-            let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
+            let Some(subpath) = strip_home_prefix(chroot, &folder.path, home_prefix) else {
+                tracing::debug!(
+                    target: "oxicloud::nc",
+                    "REPORT filter-files: dropping cross-chroot favorite folder '{}' at '{}'",
+                    folder.id,
+                    folder.path,
+                );
+                continue;
+            };
+            nc_collection_href_into(&mut href_buf, &encoded_user, subpath);
+            let fid = nc_id_of(&folder_id_map, &folder.id);
+            let oc_id: Option<&str> = match fid {
+                Some(id) => {
+                    format_oc_id_into(&mut oc_buf, id, file_id_svc);
+                    Some(oc_buf.as_str())
+                }
+                None => None,
+            };
+            let dead = dead_props_for(&folder.id, &folder_deads);
             write_folder_response(
                 &mut xml,
                 folder,
-                &href,
-                fid,
-                oc_id.as_deref(),
+                &href_buf,
+                (fid, oc_id),
                 &user.username,
                 &favorite_ids,
+                // REPORT results are a flat filter/search listing, not a
+                // PROPFIND on a specific collection — quota isn't
+                // meaningful here (see `AppState::resolve_webdav_quota`).
+                None,
+                dead,
             )
             .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
         }
@@ -207,9 +272,13 @@ async fn handle_search(
     session: &crate::interfaces::nextcloud::session::NcSession,
 ) -> Result<Response<Body>, AppError> {
     let user = &session.user;
-    // Validate chroot up-front (path-scoped handler); `resolve_scope_folder`
-    // below re-pulls it from the session for the path-mapping step.
-    session.require_chroot()?;
+    // Chroot-scope the response: NC's search REPORT is a single-drive
+    // surface. Results that live outside the chroot (other drives the
+    // caller is a member of) are dropped from the multistatus and
+    // recorded at debug — reachable via REST search if needed.
+    // `resolve_scope_folder` below re-pulls chroot from the session
+    // for the path-mapping step.
+    let chroot = session.require_chroot()?;
     let url_user = &session.raw_username;
     let search_svc = match state.applications.search_service.as_ref() {
         Some(svc) => svc,
@@ -241,10 +310,9 @@ async fn handle_search(
 
     let nc = state.nextcloud.as_ref();
     let file_id_svc = nc.map(|n| &n.file_ids);
-    // TODO(D1): same as the favorites pass above — replace the
-    // hardcoded "Personal/" with the caller's actual default-drive
-    // root folder name from `drives.root_folder_id`.
-    let home_prefix = "Personal/";
+    // See the favorites pass above: `home_prefix` is unused after the
+    // chroot-aware strip, kept only for signature stability.
+    let home_prefix = "";
 
     // No favorite checking for search results -- pass an empty set.
     let favorite_ids: HashSet<String> = HashSet::new();
@@ -253,8 +321,8 @@ async fn handle_search(
     // (was one INSERT round-trip per result).
     let files: Vec<FileDto> = results.files.iter().map(file_dto_from_search).collect();
     let folders: Vec<FolderDto> = results.folders.iter().map(folder_dto_from_search).collect();
-    let file_uuids: Vec<String> = files.iter().map(|f| f.id.clone()).collect();
-    let folder_uuids: Vec<String> = folders.iter().map(|f| f.id.clone()).collect();
+    let file_uuids: Vec<&str> = files.iter().map(|f| f.id.as_str()).collect();
+    let folder_uuids: Vec<&str> = folders.iter().map(|f| f.id.as_str()).collect();
     let (file_id_map, folder_id_map) =
         batch_resolve_ids(file_id_svc, &file_uuids, &folder_uuids).await;
 
@@ -264,38 +332,85 @@ async fn handle_search(
 
         write_multistatus_start(&mut xml)?;
 
+        // Batched dead-props: one = ANY($1) query per type, not one per
+        // result (benches/DEAD-PROPS.md).
+        let file_deads = files_dead_props_map(&state.webdav_dead_props, &files).await;
+        let folder_deads = folders_dead_props_map(&state.webdav_dead_props, &folders).await;
+
         // Files.
+        // One oc:id buffer reused across both emit loops (benches/ROUND27.md §H1).
+        let mut oc_buf = String::new();
+        // One href buffer reused across both emit loops, with the URL-encoded
+        // user computed once for the page instead of re-encoded per row — the
+        // reused-buffer shape the PROPFIND child loop already uses
+        // (benches/ROUND29.md §A).
+        let encoded_user = urlencoding::encode(url_user);
+        let mut href_buf = String::new();
         for file in &files {
-            let subpath = strip_home_prefix(&file.path, home_prefix);
-            let href = nc_href(url_user, subpath);
-            let fid = file_id_map.get(&file.id).copied();
-            let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
+            let Some(subpath) = strip_home_prefix(chroot, &file.path, home_prefix) else {
+                tracing::debug!(
+                    target: "oxicloud::nc",
+                    "REPORT search: dropping cross-chroot file '{}' at '{}'",
+                    file.id,
+                    file.path,
+                );
+                continue;
+            };
+            nc_href_into(&mut href_buf, &encoded_user, subpath);
+            let fid = nc_id_of(&file_id_map, &file.id);
+            let oc_id: Option<&str> = match fid {
+                Some(id) => {
+                    format_oc_id_into(&mut oc_buf, id, file_id_svc);
+                    Some(oc_buf.as_str())
+                }
+                None => None,
+            };
+            let dead = dead_props_for(&file.id, &file_deads);
             write_file_response(
                 &mut xml,
                 file,
-                &href,
-                fid,
-                oc_id.as_deref(),
+                &href_buf,
+                (fid, oc_id),
                 &user.username,
                 &favorite_ids,
+                dead,
             )
             .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
         }
 
         // Folders.
         for folder in &folders {
-            let subpath = strip_home_prefix(&folder.path, home_prefix);
-            let href = format!("{}/", nc_href(url_user, subpath));
-            let fid = folder_id_map.get(&folder.id).copied();
-            let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
+            let Some(subpath) = strip_home_prefix(chroot, &folder.path, home_prefix) else {
+                tracing::debug!(
+                    target: "oxicloud::nc",
+                    "REPORT search: dropping cross-chroot folder '{}' at '{}'",
+                    folder.id,
+                    folder.path,
+                );
+                continue;
+            };
+            nc_collection_href_into(&mut href_buf, &encoded_user, subpath);
+            let fid = nc_id_of(&folder_id_map, &folder.id);
+            let oc_id: Option<&str> = match fid {
+                Some(id) => {
+                    format_oc_id_into(&mut oc_buf, id, file_id_svc);
+                    Some(oc_buf.as_str())
+                }
+                None => None,
+            };
+            let dead = dead_props_for(&folder.id, &folder_deads);
             write_folder_response(
                 &mut xml,
                 folder,
-                &href,
-                fid,
-                oc_id.as_deref(),
+                &href_buf,
+                (fid, oc_id),
                 &user.username,
                 &favorite_ids,
+                // REPORT results are a flat filter/search listing, not a
+                // PROPFIND on a specific collection — quota isn't
+                // meaningful here (see `AppState::resolve_webdav_quota`).
+                None,
+                dead,
             )
             .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
         }
@@ -330,17 +445,17 @@ fn file_dto_from_search(fr: &crate::application::dtos::search_dto::SearchFileRes
         name: fr.name.clone(),
         path: fr.path.clone(),
         size: fr.size,
-        mime_type: fr.mime_type.clone().into(),
+        // Interned `Arc<str>` carried through from enrichment — refcount
+        // bumps; the old code re-ran all three display classifiers and
+        // re-allocated each value per converted search row.
+        mime_type: fr.mime_type.clone(),
         folder_id: fr.folder_id.clone(),
         created_at: fr.created_at,
         modified_at: fr.modified_at,
-        icon_class: icon_class_for(&fr.name, &fr.mime_type).to_string().into(),
-        icon_special_class: icon_special_class_for(&fr.name, &fr.mime_type)
-            .to_string()
-            .into(),
-        category: category_for(&fr.name, &fr.mime_type).to_string().into(),
+        icon_class: fr.icon_class.clone(),
+        icon_special_class: fr.icon_special_class.clone(),
+        category: fr.category.clone(),
         size_formatted: format_file_size(fr.size),
-        owner_id: None,
         sort_date: None,
         content_hash: fr.blob_hash.clone(),
         etag,
@@ -348,6 +463,16 @@ fn file_dto_from_search(fr: &crate::application::dtos::search_dto::SearchFileRes
         created_by: None,
         updated_by: None,
     }
+}
+
+/// Bench-only public wrapper (feature = "bench") over the private
+/// search→FileDto conversion so `examples/bench_search_enrich.rs` can
+/// measure and equivalence-gate it.
+#[cfg(feature = "bench")]
+pub fn file_dto_from_search_for_bench(
+    fr: &crate::application::dtos::search_dto::SearchFileResultDto,
+) -> FileDto {
+    file_dto_from_search(fr)
 }
 
 /// Build a `FolderDto` from a search folder result.
@@ -360,17 +485,13 @@ fn folder_dto_from_search(
         name: sr.name.clone(),
         path: sr.path.clone(),
         parent_id: sr.parent_id.clone(),
-        owner_id: None,
-        // Search result — drive_id is informational. The search row
-        // doesn't currently SELECT it, and path-based lookups never
-        // enter this code path.
-        drive_id: uuid::Uuid::nil(),
+        drive_id: sr.drive_id,
         created_at: sr.created_at,
         modified_at: sr.modified_at,
         is_root: sr.is_root,
-        icon_class: Arc::from("fas fa-folder"),
-        icon_special_class: Arc::from("folder-icon"),
-        category: Arc::from("Folder"),
+        icon_class: intern_display("fas fa-folder"),
+        icon_special_class: intern_display("folder-icon"),
+        category: intern_display("Folder"),
         // §14 provenance not selected by search results.
         created_by: None,
         updated_by: None,
@@ -550,7 +671,19 @@ fn extract_subpath_from_scope(href: &str, url_user: &str) -> Option<String> {
     None
 }
 
-/// Strip the `My Folder - {username}/` prefix to get the DAV subpath.
-fn strip_home_prefix<'a>(path: &'a str, prefix: &str) -> &'a str {
-    path.strip_prefix(prefix).unwrap_or(path)
+/// Strip the caller's chroot prefix from an internal path so the
+/// caller-facing DAV subpath is chroot-relative. Delegates to
+/// `webdav_handler::strip_chroot_prefix` — chroot-aware, multi-segment
+/// safe, and rejects items outside the chroot. Callers must decide
+/// per-response whether an out-of-chroot item is dropped or falls
+/// back to the naive strip.
+///
+/// See `strip_chroot_prefix` for the full contract. The `_prefix`
+/// legacy arg stays for signature stability with the emit helpers.
+fn strip_home_prefix<'a>(
+    chroot: &crate::application::dtos::folder_dto::FolderDto,
+    path: &'a str,
+    _prefix: &str,
+) -> Option<&'a str> {
+    crate::interfaces::nextcloud::webdav_handler::strip_chroot_prefix(chroot, path)
 }

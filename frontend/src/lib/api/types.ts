@@ -24,10 +24,30 @@ export interface FolderItem {
 	is_root: boolean;
 	modified_at: number;
 	name: string;
-	owner_id: string;
+	// §14 provenance — who originally created the folder. `null` when
+	// the creating user has since been deleted (backend FK is
+	// `ON DELETE SET NULL`), or when the folder is returned to a
+	// share recipient that lost provenance via
+	// `FolderDto::without_hierarchy_info`. The canonical "owner"
+	// signal on the Files browser / Favorites / Shared surfaces
+	// (replaced the retired `owner_id` field in D7).
+	created_by: string | null;
+	// §14 provenance — who last touched the folder (rename / move /
+	// metadata change). The canonical "who touched this recently"
+	// signal on the Recent surface.
+	updated_by: string | null;
 	parent_id: string | null;
 	path: string;
 	etag: string;
+	/**
+	 * The drive this folder belongs to (post-D0 ownership pivot per
+	 * `docs/plan/drive.md` §3). Populated by the backend `FolderDto`
+	 * on every response; the field was left out of the TS type until
+	 * a caller needed it. Used by `/files` to resolve the current
+	 * drive for the read-only banner without depending on the URL's
+	 * leading segment being a drive-root folder id.
+	 */
+	drive_id: string;
 }
 
 export interface FileItem {
@@ -39,7 +59,10 @@ export interface FileItem {
 	mime_type: string;
 	modified_at: number;
 	name: string;
-	owner_id: string;
+	// §14 provenance — see FolderItem for semantics. Replaced the
+	// retired `owner_id` field in D7.
+	created_by: string | null;
+	updated_by: string | null;
 	folder_id: string;
 	path: string;
 	size: number;
@@ -96,7 +119,6 @@ export interface FavoriteItem {
 	icon_special_class: string;
 	category: string;
 	size_formatted: string;
-	owner_id: string | null;
 }
 
 export interface RecentItem {
@@ -159,6 +181,22 @@ export interface User {
 	email_verified_at?: string;
 	preferred_locale?: string;
 	notify_on_share: boolean;
+	/**
+	 * Opaque UI preferences bag. Server-side JSONB column that persists
+	 * pure UI toggles (hide-dotfiles, view mode, sidebar collapse, …)
+	 * across devices. The server never inspects the contents — the SPA
+	 * defines the keys (see `lib/stores/preferences.svelte.ts` for the
+	 * typed view). Always an object on the wire (empty bag is `{}`,
+	 * never `null` or missing).
+	 *
+	 * When PATCHing back to the server via
+	 * `PATCH /api/auth/me/profile { ui_preferences: {...} }`, the
+	 * server SHALLOW-merges — only the keys present in the patch are
+	 * touched, so partial writes from one device don't clobber
+	 * preferences set on another. Set a key to `null` in the patch to
+	 * delete it from the bag.
+	 */
+	ui_preferences: Record<string, unknown>;
 }
 
 export interface AuthResponse {
@@ -237,11 +275,62 @@ export interface Drive {
 	root_folder_id: string;
 	quota_bytes?: number | null;
 	used_bytes: number;
+	/**
+	 * Drive policies — raw JSONB bag from the backend. Unknown keys are
+	 * preserved verbatim. For the typed view used by the admin policy
+	 * editor, see [`DrivePolicies`].
+	 */
 	policies: Record<string, unknown>;
 	created_at: string;
 	updated_at: string;
 	caller_role?: DriveRole | null;
 }
+
+/**
+ * Typed mirror of the known drive policy keys. Every field defaults to
+ * `false` (= "opted out" for the `include_in_*` keys, "allowed" for the
+ * `forbid_*` keys). The wire shape returned by
+ * `PATCH /api/drives/{id}/policies` carries every known key; the request
+ * body uses [`DrivePoliciesPartial`] so unsupplied keys aren't disturbed
+ * (the backend uses a JSONB `||` merge — see
+ * `drive_pg_repository.rs::update_policies`).
+ *
+ * See `docs/plan/drive.md` §8 for the `forbid_*` gates and §15 for the
+ * `include_in_*_index` scope flags.
+ */
+export interface DrivePolicies {
+	forbid_sharing: boolean;
+	forbid_external_sharing: boolean;
+	forbid_public_links: boolean;
+	forbid_cross_drive_move: boolean;
+	forbid_owner_role_change: boolean;
+	/**
+	 * §15 opt-in for `/api/photos` timeline scope. Default personal drives
+	 * are created with `true`; non-default drives (secondary personals,
+	 * shared) start `false` and opt in via the admin policy modal.
+	 */
+	include_in_photo_index: boolean;
+	/**
+	 * §15 opt-in for the Music library surface (currently playlists;
+	 * future `/api/music/tracks` library view will read this too).
+	 * Symmetric shape to `include_in_photo_index`.
+	 */
+	include_in_music_index: boolean;
+	/**
+	 * Full freeze / legal-hold. When `true`, every mutation on resources
+	 * in the drive is refused — user-initiated AND background alike (the
+	 * trash-retention purge SQL filter excludes read-only drives). Only
+	 * `Read` passes. Admins can un-freeze via the admin-only policy PATCH.
+	 * See `docs/plan/drive.md` §8 (`read_only`).
+	 */
+	read_only: boolean;
+}
+
+/**
+ * Body shape for the admin policy editor — every key optional so omitting
+ * a field leaves that policy untouched (the backend uses a JSONB merge).
+ */
+export type DrivePoliciesPartial = Partial<DrivePolicies>;
 
 /**
  * Request body for `POST /api/drives` (D3a). Mirrors `CreateDriveDto` in

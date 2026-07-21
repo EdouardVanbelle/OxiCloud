@@ -17,7 +17,7 @@ use crate::interfaces::nextcloud::basic_auth_middleware::basic_auth_middleware;
 use crate::interfaces::nextcloud::login_v2_handler;
 use crate::interfaces::nextcloud::ocs_handler;
 use crate::interfaces::nextcloud::preview_handler;
-use crate::interfaces::nextcloud::session::NcSession;
+use crate::interfaces::nextcloud::session::SharedNcSession;
 use crate::interfaces::nextcloud::status_handler;
 use crate::interfaces::nextcloud::trashbin_handler;
 use crate::interfaces::nextcloud::uploads_handler;
@@ -216,7 +216,7 @@ pub fn nextcloud_routes_with_state(state: Arc<AppState>) -> Router<Arc<AppState>
 async fn handle_dav_files(
     State(state): State<Arc<AppState>>,
     Path((_url_user, subpath)): Path<(String, String)>,
-    session: NcSession,
+    session: SharedNcSession,
     req: Request<Body>,
 ) -> Result<Response, Response> {
     webdav_handler::handle_nc_webdav(state, req, session, subpath)
@@ -227,7 +227,7 @@ async fn handle_dav_files(
 async fn handle_dav_files_root(
     State(state): State<Arc<AppState>>,
     Path(_url_user): Path<String>,
-    session: NcSession,
+    session: SharedNcSession,
     req: Request<Body>,
 ) -> Result<Response, Response> {
     webdav_handler::handle_nc_webdav(state, req, session, String::new())
@@ -238,7 +238,7 @@ async fn handle_dav_files_root(
 async fn handle_dav_uploads(
     State(state): State<Arc<AppState>>,
     Path((_url_user, upload_id, rest)): Path<(String, String, String)>,
-    session: NcSession,
+    session: SharedNcSession,
     req: Request<Body>,
 ) -> Result<Response, Response> {
     uploads_handler::handle_nc_uploads(state, req, session, upload_id, rest)
@@ -249,7 +249,7 @@ async fn handle_dav_uploads(
 async fn handle_dav_uploads_root(
     State(state): State<Arc<AppState>>,
     Path((_url_user, upload_id)): Path<(String, String)>,
-    session: NcSession,
+    session: SharedNcSession,
     req: Request<Body>,
 ) -> Result<Response, Response> {
     uploads_handler::handle_nc_uploads(state, req, session, upload_id, String::new())
@@ -279,7 +279,7 @@ async fn handle_legacy_webdav_root(user_ext: AuthUser) -> Response {
 async fn handle_dav_trashbin(
     State(state): State<Arc<AppState>>,
     Path((_url_user, subpath)): Path<(String, String)>,
-    session: NcSession,
+    session: SharedNcSession,
     req: Request<Body>,
 ) -> Result<Response, Response> {
     trashbin_handler::handle_nc_trashbin(state, req, session, subpath)
@@ -290,7 +290,7 @@ async fn handle_dav_trashbin(
 async fn handle_dav_trashbin_root(
     State(state): State<Arc<AppState>>,
     Path(_url_user): Path<String>,
-    session: NcSession,
+    session: SharedNcSession,
     req: Request<Body>,
 ) -> Result<Response, Response> {
     trashbin_handler::handle_nc_trashbin(state, req, session, String::new())

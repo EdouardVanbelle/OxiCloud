@@ -6,23 +6,19 @@
     <meta name="color-scheme" content="light dark">
     <title>OxiCloud</title>
     <link rel="icon" type="image/svg+xml" href="/logo/logo-plain.svg">
-    <script src="/js/core/theme-init.js"></script>
-    <link rel="stylesheet" href="/css/main.css">
-    <link rel="stylesheet" href="/css/views/auth.css">
+    <link rel="stylesheet" href="/askama-common.css">
     <style>
-      /* Cross-browser prompt is the one magic-link page that needs a
-         "warning" callout that auth.css doesn't ship. Inline because the
-         shape is unique to this surface — keep the styling local rather
-         than adding tokens that no other page reuses. */
+      /* Cross-browser prompt overrides `.magic-note` with a warning
+         treatment — this is the only page where the note should shout.
+         Tokens come from the shared design system (variables.css) via
+         askama-common.css above; both are the canonical warning names
+         (`--color-warning-bg` / `--color-warning-border`), replacing the
+         pre-SPA-migration placeholders `--color-warning-bg-light` /
+         `--color-warning-text-amber` which never existed. */
       .magic-note {
-        background: var(--color-warning-bg-light);
-        border-left: 3px solid var(--color-warning-text-amber);
+        background: var(--color-warning-bg);
+        border-left: 3px solid var(--color-warning-border);
         color: var(--color-text);
-        padding: 0.75em 1em;
-        margin: 1.5em 0;
-        border-radius: 8px;
-        font-size: 0.95em;
-        text-align: left;
       }
     </style>
   </head>

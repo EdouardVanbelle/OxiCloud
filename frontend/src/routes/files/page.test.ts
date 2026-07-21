@@ -39,18 +39,17 @@ vi.mock('$lib/api/endpoints/files', () => ({
 	deleteFile: vi.fn(),
 	fileDownloadUrl: () => '/dl',
 	fileThumbnailUrl: () => '/thumb',
+	thumbSizeForView: () => 'preview' as const,
 	moveFile: vi.fn(),
 	renameFile: vi.fn(),
 	uploadFile: vi.fn(),
 	uploadFileWithProgress: vi.fn()
 }));
 vi.mock('$lib/api/endpoints/folders', () => ({
-	cacheFolder: vi.fn(),
 	createFolder: vi.fn(),
 	deleteFolder: vi.fn(),
-	fetchFolderListing: vi.fn(),
+	fetchFolderPage: vi.fn(),
 	folderZipUrl: () => '/zip',
-	getCachedFolder: () => undefined,
 	getFolder: vi.fn(async (id: string) => ({ id, name: id })),
 	getFolderName: () => undefined,
 	invalidateFolderCache: vi.fn(),
@@ -59,7 +58,7 @@ vi.mock('$lib/api/endpoints/folders', () => ({
 	renameFolder: vi.fn()
 }));
 
-import { fetchFolderListing, createFolder, deleteFolder } from '$lib/api/endpoints/folders';
+import { fetchFolderPage, createFolder, deleteFolder } from '$lib/api/endpoints/folders';
 import { deleteFile } from '$lib/api/endpoints/files';
 import { apiFetch } from '$lib/api/client';
 import { files as filesStore } from '$lib/stores/files.svelte';
@@ -68,15 +67,17 @@ import FilesPage from './[...path]/+page.svelte';
 const m = (fn: unknown) => fn as ReturnType<typeof vi.fn>;
 
 function withListing() {
-	m(fetchFolderListing).mockResolvedValue({
-		status: 200,
-		etag: 'v1',
-		listing: {
-			folders: [folderItem('sub1', 'Sub')],
-			files: [fileItem('f1', 'hello.txt')],
-			favoriteIds: [],
-			sharedIds: []
-		}
+	// `fetchFolderPage` returns ONE page with the accumulator shape (items in
+	// server order + folders/files splits). With `nextCursor` omitted the
+	// caller treats it as the last page — the page's items become the whole
+	// on-screen listing without triggering `loadMore`.
+	const folder = folderItem('sub1', 'Sub');
+	const file = fileItem('f1', 'hello.txt');
+	m(fetchFolderPage).mockResolvedValue({
+		items: [folder, file],
+		folders: [folder],
+		files: [file],
+		nextCursor: undefined
 	});
 }
 
@@ -90,7 +91,8 @@ function fileItem(id: string, name: string) {
 		mime_type: 'text/plain',
 		modified_at: 0,
 		name,
-		owner_id: 'me',
+		created_by: 'me',
+		updated_by: 'me',
 		folder_id: 'home',
 		path: '/' + name,
 		size: 4,
@@ -110,7 +112,8 @@ function folderItem(id: string, name: string) {
 		is_root: false,
 		modified_at: 0,
 		name,
-		owner_id: 'me',
+		created_by: 'me',
+		updated_by: 'me',
 		parent_id: 'home',
 		path: '/' + name,
 		etag: 'e'
@@ -128,27 +131,18 @@ beforeEach(() => {
 });
 
 it('loads the home folder listing on mount and renders its contents', async () => {
-	m(fetchFolderListing).mockResolvedValue({
-		status: 200,
-		etag: 'v1',
-		listing: {
-			folders: [folderItem('sub1', 'Sub')],
-			files: [fileItem('f1', 'hello.txt')],
-			favoriteIds: [],
-			sharedIds: []
-		}
-	});
+	withListing();
 	render(FilesPage);
-	await waitFor(() => expect(fetchFolderListing).toHaveBeenCalledWith('home', expect.anything()));
+	await waitFor(() => expect(fetchFolderPage).toHaveBeenCalledWith('home', expect.anything()));
 	// VirtualList windows rows by viewport height (0 in jsdom), so assert the
 	// surrounding chrome rendered rather than the windowed rows themselves.
 	await screen.findByTestId('files-new-folder-btn');
 });
 
 it('shows an error when the listing fails with no cache', async () => {
-	m(fetchFolderListing).mockRejectedValue(Object.assign(new Error('nope'), { status: 500 }));
+	m(fetchFolderPage).mockRejectedValue(Object.assign(new Error('nope'), { status: 500 }));
 	render(FilesPage);
-	await waitFor(() => expect(fetchFolderListing).toHaveBeenCalled());
+	await waitFor(() => expect(fetchFolderPage).toHaveBeenCalled());
 });
 
 it('redirects external users away from the home folder', async () => {
@@ -174,7 +168,7 @@ it('batch-deletes the whole selection after confirmation', async () => {
 	m(deleteFolder).mockResolvedValue(undefined);
 	m(deleteFile).mockResolvedValue(undefined);
 	render(FilesPage);
-	await fireEvent.click(await screen.findByTestId('files-select-all-checkbox'));
+	await fireEvent.click(await screen.findByTestId('resource-list-select-all-checkbox'));
 	await fireEvent.click(await screen.findByTestId('files-batch-delete-btn'));
 	await waitFor(() => expect(deleteFolder).toHaveBeenCalledWith('sub1'));
 	await waitFor(() => expect(deleteFile).toHaveBeenCalledWith('f1'));
@@ -184,7 +178,7 @@ it('batch-favorites the selection via the favorites batch endpoint', async () =>
 	withListing();
 	m(apiFetch).mockResolvedValue({ ok: true });
 	render(FilesPage);
-	await fireEvent.click(await screen.findByTestId('files-select-all-checkbox'));
+	await fireEvent.click(await screen.findByTestId('resource-list-select-all-checkbox'));
 	await fireEvent.click(await screen.findByTestId('files-batch-favorite-btn'));
 	await waitFor(() =>
 		expect(apiFetch).toHaveBeenCalledWith(

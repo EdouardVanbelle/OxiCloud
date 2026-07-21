@@ -49,6 +49,48 @@ pub struct Calendar {
     custom_properties: std::collections::HashMap<String, String>,
 }
 
+/// Owned decomposition of a [`Calendar`] (mirrors `FileParts`/`UserParts`).
+/// Lets `CalendarDto::from` MOVE the heap fields — notably the
+/// `custom_properties` map — instead of cloning them on every CalDAV discovery
+/// listing (benches/ROUND20.md §A4).
+pub struct CalendarParts {
+    pub id: Uuid,
+    pub name: String,
+    pub owner_id: Uuid,
+    pub description: Option<String>,
+    pub color: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub custom_properties: std::collections::HashMap<String, String>,
+}
+
+impl Calendar {
+    /// Decompose into [`CalendarParts`], moving every owned field out
+    /// (exhaustive destructure — compiler-checked against added fields).
+    pub fn into_parts(self) -> CalendarParts {
+        let Calendar {
+            id,
+            name,
+            owner_id,
+            description,
+            color,
+            created_at,
+            updated_at,
+            custom_properties,
+        } = self;
+        CalendarParts {
+            id,
+            name,
+            owner_id,
+            description,
+            color,
+            created_at,
+            updated_at,
+            custom_properties,
+        }
+    }
+}
+
 impl Calendar {
     /**
      * Creates a new calendar with the given properties.

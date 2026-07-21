@@ -1,7 +1,7 @@
 use uuid::Uuid;
 
 use crate::domain::services::path_service::{
-    StoragePath, normalize_storage_name, validate_storage_name,
+    StoragePath, normalize_storage_name_owned, validate_storage_name,
 };
 
 // Re-export entity errors from the centralized module
@@ -16,13 +16,11 @@ pub struct FileParts {
     pub id: String,
     pub name: String,
     pub storage_path: StoragePath,
-    pub path_string: String,
     pub size: u64,
     pub mime_type: String,
     pub folder_id: Option<String>,
     pub created_at: u64,
     pub modified_at: u64,
-    pub owner_id: Option<Uuid>,
     /// BLAKE3 content hash. See [`File::content_hash`] for semantics.
     pub blob_hash: String,
     /// §14 provenance: original creator. See [`File::created_by`].
@@ -49,11 +47,10 @@ pub struct File {
     /// Name of the file including extension
     name: String,
 
-    /// Path to the file in the domain model
+    /// Path to the file in the domain model. Owns the canonical joined
+    /// string; `path_string()` borrows it (the separate duplicate field
+    /// was removed in ROUND11 §20 along with per-segment allocations).
     storage_path: StoragePath,
-
-    /// String representation of the path for API compatibility
-    path_string: String,
 
     /// Size of the file in bytes
     size: u64,
@@ -69,9 +66,6 @@ pub struct File {
 
     /// Last modification timestamp (seconds since UNIX epoch)
     modified_at: u64,
-
-    /// Owner user ID (from storage.files.user_id)
-    owner_id: Option<Uuid>,
 
     /// BLAKE3 content hash. Stable across renames/moves, changes only
     /// when the file's content bytes change. Source of truth for both
@@ -103,13 +97,11 @@ impl Default for File {
             id: "stub-id".to_string(),
             name: "stub-file.txt".to_string(),
             storage_path: StoragePath::from_string("/"),
-            path_string: "/".to_string(),
             size: 0,
             mime_type: "application/octet-stream".to_string(),
             folder_id: None,
             created_at: 0,
             modified_at: 0,
-            owner_id: None,
             blob_hash: String::new(),
             created_by: None,
             updated_by: None,
@@ -127,7 +119,7 @@ impl File {
         mime_type: String,
         folder_id: Option<String>,
     ) -> FileResult<Self> {
-        let name = normalize_storage_name(&name);
+        let name = normalize_storage_name_owned(name);
         if let Err(reason) = validate_storage_name(&name) {
             return Err(FileError::InvalidFileName(format!("{name}: {reason}")));
         }
@@ -137,20 +129,15 @@ impl File {
             .unwrap_or_default()
             .as_secs();
 
-        // Store the path string for serialization compatibility
-        let path_string = storage_path.to_string();
-
         Ok(Self {
             id,
             name,
             storage_path,
-            path_string,
             size,
             mime_type,
             folder_id,
             created_at: now,
             modified_at: now,
-            owner_id: None,
             blob_hash: String::new(),
             created_by: None,
             updated_by: None,
@@ -166,25 +153,20 @@ impl File {
         created_at: u64,
         modified_at: u64,
     ) -> FileResult<Self> {
-        let name = normalize_storage_name(&name);
+        let name = normalize_storage_name_owned(name);
         if let Err(reason) = validate_storage_name(&name) {
             return Err(FileError::InvalidFileName(format!("{name}: {reason}")));
         }
-
-        // Store the path string for serialization compatibility
-        let path_string = storage_path.to_string();
 
         Ok(Self {
             id,
             name,
             storage_path,
-            path_string,
             size: 0,                            // Folders have zero size
             mime_type: "directory".to_string(), // Standard MIME type for directories
             folder_id: parent_id,
             created_at,
             modified_at,
-            owner_id: None,
             blob_hash: String::new(),
             created_by: None,
             updated_by: None,
@@ -201,7 +183,6 @@ impl File {
         folder_id: Option<String>,
         created_at: u64,
         modified_at: u64,
-        owner_id: Option<Uuid>,
     ) -> FileResult<Self> {
         Self::with_timestamps_and_blob_hash(
             id,
@@ -212,7 +193,6 @@ impl File {
             folder_id,
             created_at,
             modified_at,
-            owner_id,
             String::new(),
         )
     }
@@ -227,7 +207,6 @@ impl File {
         folder_id: Option<String>,
         created_at: u64,
         modified_at: u64,
-        owner_id: Option<Uuid>,
         blob_hash: String,
     ) -> FileResult<Self> {
         Self::with_timestamps_blob_hash_and_provenance(
@@ -239,7 +218,6 @@ impl File {
             folder_id,
             created_at,
             modified_at,
-            owner_id,
             blob_hash,
             None,
             None,
@@ -259,30 +237,74 @@ impl File {
         folder_id: Option<String>,
         created_at: u64,
         modified_at: u64,
-        owner_id: Option<Uuid>,
         blob_hash: String,
         created_by: Option<Uuid>,
         updated_by: Option<Uuid>,
     ) -> FileResult<Self> {
-        let name = normalize_storage_name(&name);
+        let name = normalize_storage_name_owned(name);
         if let Err(reason) = validate_storage_name(&name) {
             return Err(FileError::InvalidFileName(format!("{name}: {reason}")));
         }
-
-        // Store the path string for serialization compatibility
-        let path_string = storage_path.to_string();
 
         Ok(Self {
             id,
             name,
             storage_path,
-            path_string,
             size,
             mime_type,
             folder_id,
             created_at,
             modified_at,
-            owner_id,
+            blob_hash,
+            created_by,
+            updated_by,
+        })
+    }
+
+    /// PG-row constructor: the per-listing-row hot path.
+    ///
+    /// Builds `storage_path` **and** `path_string` in one pass from the
+    /// materialized folder path via
+    /// [`StoragePath::from_folder_and_name`], instead of the old chain
+    /// (`format!` temp → `from_string` split → `Display` re-join) that
+    /// allocated the full path three times per row. The owned `name` is
+    /// NFC-normalized without the always-copy of the borrowing variant
+    /// (DB rows are NFC by invariant, so this is a zero-alloc check).
+    ///
+    /// The path is built from the raw incoming name and the name field is
+    /// normalized afterwards — the exact observable sequence of the old
+    /// `make_file_path` + constructor pair, byte-identical for every
+    /// input (for DB rows the two names coincide: stored names are NFC).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_materialized_row(
+        id: String,
+        name: String,
+        folder_path: Option<&str>,
+        size: u64,
+        mime_type: String,
+        folder_id: Option<String>,
+        created_at: u64,
+        modified_at: u64,
+        blob_hash: String,
+        created_by: Option<Uuid>,
+        updated_by: Option<Uuid>,
+    ) -> FileResult<Self> {
+        let storage_path = StoragePath::from_folder_and_name(folder_path, &name);
+
+        let name = normalize_storage_name_owned(name);
+        if let Err(reason) = validate_storage_name(&name) {
+            return Err(FileError::InvalidFileName(format!("{name}: {reason}")));
+        }
+
+        Ok(Self {
+            id,
+            name,
+            storage_path,
+            size,
+            mime_type,
+            folder_id,
+            created_at,
+            modified_at,
             blob_hash,
             created_by,
             updated_by,
@@ -298,13 +320,11 @@ impl File {
             id: self.id,
             name: self.name,
             storage_path: self.storage_path,
-            path_string: self.path_string,
             size: self.size,
             mime_type: self.mime_type,
             folder_id: self.folder_id,
             created_at: self.created_at,
             modified_at: self.modified_at,
-            owner_id: self.owner_id,
             blob_hash: self.blob_hash,
             created_by: self.created_by,
             updated_by: self.updated_by,
@@ -366,8 +386,25 @@ impl File {
     /// formula here changes it everywhere — that is the property
     /// we want.
     pub fn compute_etag(blob_hash: &str, modified_at: u64) -> String {
-        let prefix: String = blob_hash.chars().take(16).collect();
-        format!("{}-{}", prefix, modified_at)
+        use std::fmt::Write as _;
+
+        // Byte index just past the 16th char (whole string when shorter).
+        // `blob_hash` is lowercase hex ASCII in practice, so this is
+        // effectively `min(len, 16)`, but `char_indices` keeps the slice
+        // char-boundary-safe for exotic fixture values — byte-identical
+        // to the old `chars().take(16).collect::<String>()` without the
+        // intermediate allocation.
+        let end = match blob_hash.char_indices().nth(16) {
+            Some((i, _)) => i,
+            None => blob_hash.len(),
+        };
+
+        // Single allocation: prefix + '-' + up to 20 digits (u64::MAX).
+        let mut etag = String::with_capacity(end + 1 + 20);
+        etag.push_str(&blob_hash[..end]);
+        etag.push('-');
+        let _ = write!(etag, "{modified_at}");
+        etag
     }
 
     // Getters
@@ -384,7 +421,7 @@ impl File {
     }
 
     pub fn path_string(&self) -> &str {
-        &self.path_string
+        self.storage_path.as_str()
     }
 
     pub fn size(&self) -> u64 {
@@ -405,10 +442,6 @@ impl File {
 
     pub fn modified_at(&self) -> u64 {
         self.modified_at
-    }
-
-    pub fn owner_id(&self) -> Option<Uuid> {
-        self.owner_id
     }
 
     /// User that originally created this file (§14 provenance).
@@ -437,25 +470,24 @@ impl File {
         created_at: u64,
         modified_at: u64,
     ) -> Self {
-        // Create storage_path from string
-        let storage_path = StoragePath::from_string(&path);
+        // Adopt the DTO path (canonical inputs are reused with zero
+        // copies; non-canonical ones are normalized like from_string did).
+        let storage_path = StoragePath::from_joined(path);
 
         // Create directly without validation to avoid errors in DTO
         // conversions. Still NFC-normalize so even DTO-reconstructed
         // entities maintain the storage invariant.
-        let name = normalize_storage_name(&name);
+        let name = normalize_storage_name_owned(name);
 
         Self {
             id,
             name,
             storage_path,
-            path_string: path,
             size,
             mime_type,
             folder_id,
             created_at,
             modified_at,
-            owner_id: None,
             blob_hash: String::new(),
             // DTO round-trips don't carry provenance; callers needing
             // it must reload from the repository.
@@ -468,7 +500,7 @@ impl File {
 
     /// Creates a new version of the file with updated name
     pub fn with_name(mut self, new_name: String) -> FileResult<Self> {
-        let new_name = normalize_storage_name(&new_name);
+        let new_name = normalize_storage_name_owned(new_name);
         if let Err(reason) = validate_storage_name(&new_name) {
             return Err(FileError::InvalidFileName(format!("{new_name}: {reason}")));
         }
@@ -487,7 +519,6 @@ impl File {
         // Consume `self` and mutate in place — only the path, name and mtime
         // change; id / mime_type / folder_id / blob_hash are carried over
         // without the per-field clone the old `&self` builder paid.
-        self.path_string = new_storage_path.to_string();
         self.storage_path = new_storage_path;
         self.name = new_name;
         self.modified_at = now;
@@ -512,7 +543,6 @@ impl File {
             .as_secs();
 
         // Consume `self`: only the path, folder_id and mtime change.
-        self.path_string = new_storage_path.to_string();
         self.storage_path = new_storage_path;
         self.folder_id = folder_id;
         self.modified_at = now;
@@ -607,7 +637,6 @@ mod tests {
             None,
             1_000,
             2_000,
-            None,
             "abcdef0123456789ZZZZZZZZ".to_string(),
         )
         .unwrap();
@@ -632,7 +661,6 @@ mod tests {
             None,
             1_000,
             2_000,
-            None,
             "shorthash".to_string(),
         )
         .unwrap();
@@ -655,7 +683,6 @@ mod tests {
             None,
             1_000,
             2_000,
-            None,
             "stable-content-hash".to_string(),
         )
         .unwrap();

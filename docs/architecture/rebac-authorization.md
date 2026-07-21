@@ -1,18 +1,22 @@
 # ReBAC Authorization
 
-OxiCloud uses **Relationship-Based Access Control** (ReBAC): permissions are
+OxiCloud uses **Relationship-Based Access Control** (ReBAC): access is
 expressed as a typed triple
 
 ```
-Subject  has  Permission  on  Resource    (until ExpiresAt?)
+Subject  has  Role  on  Resource    (until ExpiresAt?)
 ```
 
-stored as rows in a single table — `storage.access_grants` — and resolved at
+stored as rows in a single table — `storage.role_grants` — and resolved at
 request time by the **`AuthorizationEngine`** (concretely, `PgAclEngine`).
 
-This document explains how subjects, permissions, resources, roles, groups and
-two kinds of cascading fit together. For implementation details, follow the
-links to the relevant Rust modules.
+Each `Role` expands to a fixed set of atomic `Permission`s at engine read
+time (Viewer → `{Read}`, Editor → `{Read, Comment, Create, Update}`, …).
+The database stores the role name; permission expansion happens in Rust.
+
+This document explains how subjects, roles, permissions, resources, groups
+and two kinds of cascading fit together. For implementation details, follow
+the links to the relevant Rust modules.
 
 ---
 
@@ -22,15 +26,19 @@ A simpler RBAC ("Alice is an editor") is global. We need per-resource sharing:
 "Alice can edit *this folder* but not that one"; "Bob can view *that file* until
 March". ReBAC is the natural fit:
 
-- **Grants are facts, not roles.** Each row is `(subject → permission → resource)`.
+- **Grants are facts, not global attributes.** Each row is
+  `(subject → role → resource)`, optionally with an expiration.
 - **The same model covers users, anonymous share-links, groups, and federated
   identities** — they all share the `subject_type` discriminator.
-- **No global "admin of folder X" magic** — the engine answers a yes/no question
-  by scanning `access_grants` plus the relationships (folder ancestry, group
-  membership) that connect a subject to a resource.
+- **The same model covers files, folders, drives, calendars, address books,
+  and playlists** — every resource type routes through the same engine and
+  the same `role_grants` table.
+- **No global "admin of folder X" magic** — the engine answers a yes/no
+  question by scanning `role_grants` plus the relationships (folder ancestry,
+  drive membership, group membership) that connect a subject to a resource.
 
 The owner short-circuit is the one bit of non-ReBAC logic: a resource's owner
-always passes the check without a row in `access_grants`.
+always passes the check without needing a row in `role_grants`.
 
 ---
 
@@ -57,71 +65,105 @@ UUID of the relevant row. The SQL discriminator (`subject_type` column) is
 enum Resource {
     Folder(Uuid),
     File(Uuid),
-    // Calendar / AddressBook / Playlist reserved for future use.
+    Drive(Uuid),        // top-level container (personal / shared)
+    Calendar(Uuid),     // CalDAV
+    AddressBook(Uuid),  // CardDAV
+    Playlist(Uuid),     // music
 }
 ```
 
-Both variants are content resources; the future variants will reuse the same
-machinery.
+`Folder`, `File`, and `Drive` participate in the folder-ancestry cascade
+(a grant on a drive descends to every folder + file inside it — see below).
+`Calendar`, `AddressBook`, and `Playlist` are top-level per user and don't
+cascade — the engine resolves them directly against a single `role_grants`
+row per (subject, resource).
 
-### Permission — *the verb*
+The `Playlist`, `Calendar`, and `AddressBook` cases replaced the pre-2026
+per-feature `*_shares` tables (`caldav.calendar_shares`,
+`carddav.address_book_shares`, `music.playlist_shares`) with a single
+uniform `role_grants` model + bespoke-helper-free code path.
 
-Six atomic permissions:
+### Role — *the primary sharing verb*
+
+Since the D-Prep migration (2026-07), roles are the **primary sharing
+unit**. Each `role_grants` row carries a role name; permissions are
+computed by expanding it in Rust at read time.
+
+| Role | Permissions expanded | Typical UX label |
+|---|---|---|
+| `Viewer` | `Read` | Can view |
+| `Commenter` | `Read`, `Comment` | Can view & comment |
+| `Contributor` | `Read`, `Create` | Can upload but not modify siblings |
+| `Editor` | `Read`, `Comment`, `Create`, `Update` | Can edit |
+| `Owner` | `Read`, `Comment`, `Create`, `Update`, `Delete`, `Share`, `Manage` | Can manage |
+
+Defined in `src/domain/services/authorization.rs::Role::expand()` — the
+single source of truth. The DB column is a Postgres ENUM
+(`storage.grant_role`, migration
+`20260801000000_role_grants_enum.sql`), so unknown values are refused at
+the storage layer.
+
+The REST API accepts the role name directly on grant endpoints
+(`POST /api/grants { "role": "editor", … }`,
+`PUT /api/grants/role`). Callers no longer manipulate permission sets
+by hand.
+
+### Permission — *the atomic verb the engine checks*
+
+Seven atomic permissions. Handlers ask "does this subject have
+`Permission::X` on `Resource::Y`?"; the engine translates that to
+"…does any role granted to this subject include `X`?".
 
 | `Read` | view the resource / list folder contents |
-| `Create` | create a child resource (folders only — meaningful as inherited grant) |
+| `Create` | create a child resource (folders / drives only — meaningful as an inherited grant) |
 | `Update` | rename, move, edit content |
 | `Delete` | delete the resource |
-| `Share` | grant permissions to other subjects |
-| `Comment` | add comments (reserved — feature not implemented yet) |
-
-### Role — *a named bundle of permissions*
-
-Roles are a UX convenience that expand to permission rows server-side. There
-are no role rows in the database — only permissions.
-
-| Role | Permissions |
-|---|---|
-| `viewer` | `read` |
-| `editor` | `read`, `comment`, `create`, `update` |
-| `admin`  | `read`, `comment`, `create`, `update`, `share`, `delete` |
-
-Defined in `src/application/dtos/grant_dto.rs::Role::expand()`. The REST API
-exposes both shapes: clients can `POST /api/grants` with either `"role"` or
-`"permissions"`, and `PUT /api/grants/role` reconciles the row set in one call.
+| `Share` | grant roles to other subjects |
+| `Comment` | add comments (reserved — comments feature not implemented yet) |
+| `Manage` | change resource settings, membership, policies (Drive owners; future Group-as-Resource) |
 
 ---
 
 ## Storage shape
 
 ```
-storage.access_grants
+storage.role_grants
   id           UUID
-  subject_type 'user' | 'group' | 'token' | 'external'
+  subject_type 'user' | 'group' | 'token'
   subject_id   UUID
-  resource_type 'folder' | 'file'
+  resource_type 'drive' | 'folder' | 'file' | 'calendar' | 'address_book' | 'playlist'
   resource_id  UUID
-  permission   'read' | 'create' | 'update' | 'delete' | 'share' | 'comment'
+  role         storage.grant_role
+                 -- ENUM: 'viewer' | 'commenter' | 'contributor' | 'editor' | 'owner'
   granted_by   UUID  (the user who issued the grant)
   granted_at   TIMESTAMPTZ
   expires_at   TIMESTAMPTZ NULL
 ```
 
-One row per `(subject, permission, resource)` triple. An "owner role on folder
-X for user Y" is 6 rows; a "viewer role" is 1 row.
+**One row per role assignment.** A "viewer of folder X for user Y" is one
+row; an "owner of drive Z" is one row. Permission expansion happens in
+Rust at engine read time via `Role::expand()` — the DB never stores a
+permission column.
 
-> **Note (D-Prep, 2026-06-17):** the role assignment has since pivoted into
-> a separate `storage.role_grants` table that stores **one row per role
-> assignment** rather than one per permission. `access_grants` stays
-> populated via dual-write during the transition; the engine reads the
-> role-keyed table for authz decisions. The cleanup PR drops
-> `access_grants` after the dual-write window. The historical role name
-> `Admin` was renamed to `Owner` at the same time, to disambiguate from
-> `UserRole::Admin` (user-account privilege) and match Drive plan
-> terminology.
+### History
 
-Cleanup is trigger-driven (`trg_cleanup_grants_folder`, …): when a resource or
-subject is deleted, all referencing grants disappear in the same transaction.
+The pre-2026-07 model kept one row per `(subject, permission,
+resource)` triple in `storage.access_grants` — an editor was 4 rows,
+an owner was 6. The D-Prep migration
+(`20260730000000_role_grants.sql` + follow-ups through
+`20260801000002_drop_access_grants.sql`) collapsed that into one row
+per assignment, added the DB-side `grant_role` ENUM, renamed the
+former `admin` role bundle to `owner` (to disambiguate from
+`UserRole::Admin`, the JWT-level user-account privilege), and dropped
+`access_grants` entirely. Coverage extension migrations
+(`20260906…_role_grants_calendar_address_book`,
+`20260910…_role_grants_playlist`) folded the last three per-feature
+share tables (CalDAV / CardDAV / Music) into the same `role_grants`
+model.
+
+Cleanup is trigger-driven (`trg_cleanup_role_grants_folder`, one per
+resource type): when a resource or subject is deleted, all referencing
+grants disappear in the same transaction.
 
 ---
 
@@ -145,7 +187,7 @@ auth.subject_groups          (id, name, description, is_virtual, …)
 auth.subject_group_members   (group_id, user_id XOR member_group_id, added_by, …)
 ```
 
-Groups are addressed as a `Subject::Group(uuid)` and appear in `access_grants`
+Groups are addressed as a `Subject::Group(uuid)` and appear in `role_grants`
 just like users. The Rust types live in
 `src/domain/entities/subject_group.rs`.
 
@@ -154,26 +196,33 @@ just like users. The Rust types live in
 ## Two kinds of cascading
 
 OxiCloud has **two independent cascades** that compose on every permission
-check.
+check for the storage-tree resources (`Drive`, `Folder`, `File`). Standalone
+resource types (`Calendar`, `AddressBook`, `Playlist`) skip cascade entirely
+— the engine resolves them via a direct `role_grants` lookup keyed by
+`(subject, resource)`.
 
-### 1. Resource cascade — *down the folder tree*
+### 1. Resource cascade — *down the drive → folder → file tree*
 
-Folder hierarchy uses PostgreSQL `ltree`. A grant on a folder implicitly
-applies to every descendant folder and to every file inside any descendant
-folder. The check uses the GiST index on `storage.folders.lpath` for an
-`O(log N)` ancestor lookup:
+Every folder belongs to exactly one drive (the D0 refactor made
+`storage.folders.drive_id` mandatory); the drive root is itself a folder
+with `parent_id IS NULL`. Folder hierarchy uses PostgreSQL `ltree`. A
+grant on a drive OR a folder implicitly applies to every descendant folder
+and to every file inside any descendant folder. The check uses the GiST
+index on `storage.folders.lpath` for an `O(log N)` ancestor lookup:
 
 ```
 grant.lpath  @>  target.lpath
 ```
 
-So one grant on `/projects` permits reading `/projects/q4/report.pdf`. Files
-are not part of the ltree — instead, a file inherits its containing folder's
-position and the cascade query joins on `target.folder_id`.
+So one Owner grant on a drive permits reading any file within it; one
+Editor grant on `/projects` permits editing `/projects/q4/report.pdf`.
+Files are not part of the ltree — instead, a file inherits its containing
+folder's position and the cascade query joins on `target.folder_id`.
 
 The handler-layer `_cascade_grant_exists` functions in
 `src/infrastructure/services/pg_acl_engine.rs` are the canonical
-implementation.
+implementation. Drives cascade through the same code path — the drive's
+root folder is what the ltree query anchors on.
 
 ### 2. Subject cascade — *up the group tree*
 
@@ -200,22 +249,29 @@ first lookup per user per ~30 s window.
 
 ### Composition
 
-The engine combines both cascades in a single SQL round-trip:
+The engine combines both cascades in a single SQL round-trip. The role
+column carries the assignment; permission expansion happens by filtering
+on the set of role names that include the requested permission
+(computed once at process start via `Permission::roles_implying(...)`):
 
 ```
-SELECT 1 FROM access_grants g
-  JOIN folders gf ON gf.id = g.resource_id
- WHERE g.subject_type = ANY('{user,group}')        -- subject cascade
-   AND g.subject_id   = ANY($expanded_set)         --   (user + groups + Internal)
-   AND g.permission   = $permission
-   AND g.resource_type = 'folder'
+SELECT 1 FROM storage.role_grants g
+  JOIN storage.folders gf ON gf.id = g.resource_id
+ WHERE g.subject_type = ANY('{user,group}')          -- subject cascade
+   AND g.subject_id   = ANY($expanded_set)           --   (user + groups + Internal)
+   AND g.role         = ANY($roles_implying_perm)    -- role → permission
+   AND g.resource_type IN ('drive','folder')         -- drive OR folder ancestry
    AND (g.expires_at IS NULL OR g.expires_at > NOW())
-   AND gf.lpath @> (SELECT lpath FROM folders       -- resource cascade
+   AND gf.lpath @> (SELECT lpath FROM storage.folders  -- resource cascade
                      WHERE id = $target_folder_id)
  LIMIT 1
 ```
 
-The file variant adds a `UNION ALL` branch for the direct-file-grant case.
+The file variant adds a `UNION ALL` branch for the direct-file-grant case
+(where the grant is on the file itself, not a folder or drive above it).
+The `Calendar` / `AddressBook` / `Playlist` variants skip the cascade join
+entirely and check `(g.resource_type = <kind> AND g.resource_id = $target)`
+directly.
 
 ---
 
@@ -271,28 +327,70 @@ on `granted_by = caller`. Group membership has no role there.
 
 Two state machines run alongside grants:
 
-- **Resource deletion** — folder/file delete fires a trigger
-  (`trg_cleanup_grants_folder`, `trg_cleanup_grants_file`) that nukes every
-  grant whose `resource_id` matches. Same transaction; clients see grants
-  vanish from incoming lists immediately.
+- **Resource deletion** — folder / file / drive / calendar / address book
+  / playlist delete each fire a per-type trigger
+  (`trg_cleanup_role_grants_folder`, `trg_cleanup_role_grants_file`,
+  `trg_cleanup_role_grants_drive`, and the three for the standalone
+  resource types) that nukes every grant whose `resource_id` matches.
+  Same transaction; clients see grants vanish from incoming lists
+  immediately.
 - **Subject deletion** — deleting a user or group cascades to their
   outgoing/incoming grants via FK + matching triggers.
 
-Expiry is enforced inline: `expires_at IS NULL OR expires_at > NOW()` is part
-of every cascade query, so a soft expiry doesn't need a sweeper.
+Expiry is enforced inline at read time: `expires_at IS NULL OR expires_at > NOW()`
+is part of every cascade query, so an expired grant is invisible to the engine the
+moment its timestamp passes. The AuthZ hot path never needs to consult a sweeper.
+
+### Post-expiry cleanup
+
+Dead rows are physically deleted by a background daemon, `GrantCleanupService`,
+so `role_grants` doesn't accumulate lapsed rows indefinitely (each share with a
+TTL would otherwise leave a permanent row unless someone manually revoked it).
+
+| Env | Default | Meaning |
+|---|---|---|
+| `OXICLOUD_GRANT_CLEANUP_ENABLED` | `true` | Master switch. Default **on** — expired-grant purge is a security-hygiene default, not opt-in. |
+| `OXICLOUD_GRANT_CLEANUP_GRACE_DAYS` | `15` | Days past `expires_at` before a row is eligible for deletion. |
+| `OXICLOUD_GRANT_CLEANUP_INTERVAL_HOURS` | `24` | How often the daemon fires. |
+
+The grace window (default 15 days) preserves the audit / support answer to
+*"what happened to my access?"* for two weeks past expiration, then the row
+goes. Because the AuthZ engine's `expires_at` filter is at read time, the
+grace window has zero effect on live access decisions — an expired grant is
+invisible to `check(...)` even during the grace period. Cleanup only affects
+storage bloat and the `list_grants_*` history surface.
+
+The daemon runs inside the same process (`tokio::spawn` at startup, same
+lifecycle as trash-cleanup / storage-usage sweep), so no external scheduler
+is needed. An admin-triggered `POST /api/admin/internal/trigger-grant-cleanup`
+lets operators force a purge in test or incident scenarios; the internal-
+endpoints gate (`OXICLOUD_ENABLE_ADMIN_INTERNAL_ENDPOINTS`) applies.
+
+The [Share Integration](/architecture/share-integration) doc's reverse
+trigger takes it from there: when the daemon deletes the last `role_grants`
+row for a share-token subject, `trg_cleanup_share_on_grant_delete` fires and
+deletes the paired `storage.shares` row in the same transaction. Expired
+public shares vanish end-to-end after the grace window without any operator
+intervention.
 
 ---
 
 ## What ReBAC does *not* cover (yet)
 
-The two extensions sketched in the design notes but not yet implemented:
+Extensions sketched in the design notes but not yet implemented:
 
-- **`Resource::SubjectGroup(id)`** — per-group manage / use-as-subject grants.
-  Would let non-admins curate their own groups, with the same engine path as
-  files/folders.
-- **Global roles in the JWT** (`role = "admin"`) — today these gate a few
-  admin-only management endpoints (user CRUD, group CRUD). They live outside
-  ReBAC because they're cross-cutting concerns, not per-resource permissions.
+- **`Resource::SubjectGroup(id)`** — per-group Manage / use-as-subject
+  grants. Would let non-admins curate their own groups via the same
+  engine path as files/folders/drives. `Permission::Manage` already
+  exists in the enum for this reason; only the resource variant and
+  the handler wiring are pending.
+- **Global roles in the JWT** (`role = "admin"`) — today these gate a
+  few admin-only management endpoints (user CRUD, group CRUD, admin
+  settings). They live outside ReBAC because they're cross-cutting
+  concerns, not per-resource permissions.
+- **Materialised rights (v2)** — a future flattening of the cascade
+  into an indexed materialised view for O(1) reads. Deferred; see
+  `docs/plan/` for design.
 
 ---
 
@@ -300,11 +398,11 @@ The two extensions sketched in the design notes but not yet implemented:
 
 | Concern | Module |
 |---|---|
-| Domain types (`Subject`, `Resource`, `Permission`) | `src/domain/services/authorization.rs` |
+| Domain types (`Subject`, `Resource`, `Role`, `Permission`) + `Role::expand()` | `src/domain/services/authorization.rs` |
 | Subject groups (entity + repo trait) | `src/domain/entities/subject_group.rs`, `src/domain/repositories/subject_group_repository.rs` |
 | Engine — `check`, listing, expansion, cache | `src/infrastructure/services/pg_acl_engine.rs` |
 | Group repo — recursive CTEs, cycle/depth | `src/infrastructure/repositories/pg/subject_group_pg_repository.rs` |
-| Grant DTOs + `Role::expand` | `src/application/dtos/grant_dto.rs` |
-| Schema — `access_grants`, `subject_groups`, `subject_group_members` | `migrations/` |
+| Grant DTOs | `src/application/dtos/grant_dto.rs` |
+| Schema — `role_grants` + ENUM + triggers, `subject_groups`, `subject_group_members` | `migrations/20260730000000_role_grants.sql` and follow-ups |
 | REST handlers | `src/interfaces/api/handlers/grant_handler.rs`, `subject_group_handler.rs` |
-| Hurl coverage | `tests/api/grants.hurl`, `subject_groups.hurl`, `grants_nested_groups.hurl` |
+| Hurl coverage | `tests/api/grants.hurl`, `subject_groups.hurl`, `grants_nested_groups.hurl`, `drives_membership.hurl` |

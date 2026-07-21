@@ -1,4 +1,52 @@
 import { defineConfig } from "vitepress";
+import type MarkdownIt from "markdown-it";
+
+// When a doc page links to a source-tree file with a relative path
+// escaping the docs directory (e.g. `[build.rs](../build.rs)` or
+// `[handler](../src/…/file_handler.rs)`), VitePress rightly flags it
+// as a dead link — those files aren't part of the built site. On the
+// deployed site the click would 404. Locally in an editor / on
+// GitHub, though, those relative paths ARE useful — they let a
+// reader jump to the actual source.
+//
+// This plugin bridges the two: at build time, links whose href
+// starts with `../` get rewritten to their equivalent GitHub blob
+// URL. Source stays terse and useful in-editor; deployed site links
+// resolve on GitHub instead of 404ing.
+//
+// Same repo the `editLink` already points at + the main branch —
+// keep in sync if the canonical repo ever moves.
+const GITHUB_REPO = "DioCrafts/OxiCloud";
+const GITHUB_BRANCH = "main";
+
+function rewriteSourceTreeLinks(md: MarkdownIt): void {
+  const defaultRender =
+    md.renderer.rules.link_open ??
+    ((tokens, idx, options, _env, self) =>
+      self.renderToken(tokens, idx, options));
+  md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+    const token = tokens[idx];
+    const hrefIdx = token.attrIndex("href");
+    if (hrefIdx >= 0) {
+      const href = token.attrs![hrefIdx][1];
+      // Match paths that escape the docs directory. Only `../` prefix
+      // is targeted — leaves in-docs relative links alone so real
+      // dead links still get caught.
+      if (href.startsWith("../")) {
+        // Strip the leading `../` — everything after is the repo-root
+        // relative path. `#L123` line anchors on GitHub are preserved
+        // as-is because the URL fragment isn't touched.
+        const path = href.slice(3);
+        token.attrs![hrefIdx][1] =
+          `https://github.com/${GITHUB_REPO}/blob/${GITHUB_BRANCH}/${path}`;
+        // Open in a new tab since it now leaves the doc site.
+        token.attrSet("target", "_blank");
+        token.attrSet("rel", "noopener noreferrer");
+      }
+    }
+    return defaultRender(tokens, idx, options, env, self);
+  };
+}
 
 export default defineConfig({
   title: "OxiCloud",
@@ -26,6 +74,9 @@ export default defineConfig({
     image: {
       lazyLoading: true,
     },
+    // Rewrite `../src/…`, `../build.rs`, etc. → GitHub blob URLs at
+    // build time. See the `rewriteSourceTreeLinks` docstring above.
+    config: (md) => rewriteSourceTreeLinks(md),
   },
 
   lastUpdated: true,
@@ -89,6 +140,8 @@ export default defineConfig({
         {
           text: "Features",
           items: [
+            { text: "Drives", link: "/guide/drives" },
+            { text: "Sharing", link: "/guide/sharing" },
             { text: "WebDAV", link: "/guide/webdav" },
             { text: "CalDAV & CardDAV", link: "/guide/caldav-carddav" },
             { text: "DAV Client Setup", link: "/guide/dav-client-setup" },
@@ -98,7 +151,6 @@ export default defineConfig({
             { text: "Favorites & Recent", link: "/guide/favorites-and-recent" },
             { text: "Search", link: "/guide/search" },
             { text: "Thumbnails & Transcoding", link: "/guide/thumbnails-and-transcoding" },
-            { text: "Sharing", link: "/guide/sharing" },
             { text: "Trash & Recycle Bin", link: "/guide/trash" },
             { text: "ZIP & Compression", link: "/guide/zip-and-compression" },
             { text: "Internationalization", link: "/guide/i18n" },

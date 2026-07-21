@@ -484,10 +484,6 @@ mod tests {
     #[test]
     fn test_generate_contacts_response() {
         let contacts = vec![sample_contact()];
-        let vcards = vec![(
-            "contact-001".to_string(),
-            contact_to_vcard(&sample_contact()),
-        )];
         let report = CardDavReportType::AddressbookQuery {
             props: vec![
                 QualifiedName {
@@ -505,7 +501,6 @@ mod tests {
         let result = CardDavAdapter::generate_contacts_response(
             &mut output,
             &contacts,
-            &vcards,
             &report,
             "/carddav/ab-001",
         );
@@ -528,14 +523,12 @@ mod tests {
     #[test]
     fn test_generate_empty_contacts_response() {
         let contacts: Vec<ContactDto> = vec![];
-        let vcards: Vec<(String, String)> = vec![];
         let report = CardDavReportType::AddressbookQuery { props: vec![] };
 
         let mut output = Vec::new();
         let result = CardDavAdapter::generate_contacts_response(
             &mut output,
             &contacts,
-            &vcards,
             &report,
             "/carddav/ab-001",
         );

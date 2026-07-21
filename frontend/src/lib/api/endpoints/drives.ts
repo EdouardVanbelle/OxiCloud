@@ -13,6 +13,8 @@ import type {
 	Drive,
 	DriveMember,
 	DriveMemberSubject,
+	DrivePolicies,
+	DrivePoliciesPartial,
 	DriveRole
 } from '$lib/api/types';
 
@@ -102,6 +104,67 @@ export async function updateDriveMember(
 	});
 	if (!res.ok) throw new Error(`update member failed: ${res.status}`);
 	return (await res.json()) as DriveMember;
+}
+
+/**
+ * `DELETE /api/drives/{id}` — Owner-only drive delete (D3b).
+ *
+ * Refused with `405` for the default Personal drive and `409` for a
+ * non-empty drive (caller must move/trash content first). Throws on
+ * non-2xx with the server's detail message when present so the caller
+ * can decide whether to surface a confirmation prompt vs an error.
+ */
+export async function deleteDrive(driveId: string): Promise<void> {
+	const res = await apiFetch(`/api/drives/${encodeURIComponent(driveId)}`, {
+		method: 'DELETE',
+		credentials: 'same-origin',
+		headers: getCsrfHeaders()
+	});
+	if (!res.ok) {
+		let detail = '';
+		try {
+			const parsed = (await res.json()) as { error?: string; message?: string };
+			detail = parsed.error ?? parsed.message ?? '';
+		} catch {
+			/* response body wasn't JSON */
+		}
+		throw new Error(detail || `delete drive failed: ${res.status}`);
+	}
+}
+
+/**
+ * `PATCH /api/drives/{id}/policies` — update drive policies (D5).
+ *
+ * **OxiCloud-admin only.** Owners cannot mutate policies — the carve-out
+ * exists because policies are a compliance surface (an owner who could
+ * flip them would defeat the gates by disabling, sharing, re-enabling).
+ * Non-admin callers receive 404 (anti-enum). The frontend only surfaces
+ * this from the admin panel.
+ *
+ * Body is a partial — keys not present are left untouched at the JSONB
+ * merge layer. Returns the post-merge typed view.
+ */
+export async function updateDrivePolicies(
+	driveId: string,
+	partial: DrivePoliciesPartial
+): Promise<DrivePolicies> {
+	const res = await apiFetch(`/api/drives/${encodeURIComponent(driveId)}/policies`, {
+		method: 'PATCH',
+		headers: { ...JSON_HEADERS, ...getCsrfHeaders() },
+		credentials: 'same-origin',
+		body: JSON.stringify(partial)
+	});
+	if (!res.ok) {
+		let detail = '';
+		try {
+			const parsed = (await res.json()) as { error?: string; message?: string };
+			detail = parsed.error ?? parsed.message ?? '';
+		} catch {
+			/* response body wasn't JSON */
+		}
+		throw new Error(detail || `update policies failed: ${res.status}`);
+	}
+	return (await res.json()) as DrivePolicies;
 }
 
 /**

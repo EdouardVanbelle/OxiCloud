@@ -307,20 +307,30 @@ impl MagicLinkInviteService {
         let (kind, resource_id) = match resource {
             Resource::Folder(id) => (MagicLinkResourceKind::Folder, id),
             Resource::File(id) => (MagicLinkResourceKind::File, id),
-            // Drive sharing — and therefore drive magic-link invitations —
-            // land in D2. The grant DTOs accept `Resource::Drive` from the
-            // wire today (see ResourceTypeDto) but no public API path
-            // actually grants on a drive in D0, so this arm is
-            // defensively unreachable. Treating it as an audit-logged
-            // no-op (grant is in place, mail suppressed) matches the
-            // ineligible-recipient branch above.
-            Resource::Drive(_) => {
+            // Drive / Calendar / AddressBook / Playlist sharing is
+            // out-of-band for the magic-link flow. Drive shares land
+            // through `/api/drives/{id}/members`; Calendar /
+            // AddressBook shares through the Round-3
+            // `/api/(calendars|address-books)/{id}/shares` endpoints;
+            // Playlist shares through `/api/playlists/{id}/share`.
+            // The DTOs accept every `Resource` variant on the wire
+            // (see `ResourceTypeDto`) but only file/folder grants
+            // trigger an invitation email. Treating the other arms
+            // as audit-logged suppressed no-ops keeps the grant in
+            // place while matching the ineligible-recipient branch
+            // above.
+            Resource::Drive(_)
+            | Resource::Calendar(_)
+            | Resource::AddressBook(_)
+            | Resource::Playlist(_) => {
                 tracing::info!(
                     target: "audit",
                     event = "magic_link.invitation_suppressed",
-                    reason = "drive_resource_unsupported",
+                    reason = "resource_kind_unsupported",
                     user_id = %recipient.id(),
-                    "📭 magic-link invitation suppressed: drive resources aren't invitable until D2",
+                    resource_kind = %resource.type_str(),
+                    "📭 magic-link invitation suppressed: {} resources aren't invitable via email",
+                    resource.type_str(),
                 );
                 return Ok(());
             }
@@ -347,10 +357,13 @@ impl MagicLinkInviteService {
             Resource::Folder(_) => "server.magic_link.email.kind_folder",
             Resource::File(_) => "server.magic_link.email.kind_file",
             // Unreachable — the early-return above exits before we get
-            // here for a Drive resource. The arm exists only to satisfy
-            // exhaustiveness; if you find this firing, the early-return
-            // was bypassed.
-            Resource::Drive(_) => "server.magic_link.email.kind_folder",
+            // here for Drive / Calendar / AddressBook / Playlist
+            // resources. The arms exist only to satisfy exhaustiveness;
+            // if you find any firing, the early-return was bypassed.
+            Resource::Drive(_)
+            | Resource::Calendar(_)
+            | Resource::AddressBook(_)
+            | Resource::Playlist(_) => "server.magic_link.email.kind_folder",
         };
         // PR C: render in the recipient's preferred locale (set by UI
         // switcher, OIDC JIT claim, or inviter inheritance at row
@@ -436,7 +449,8 @@ impl MagicLinkInviteService {
     /// is reserved for `resolve_or_create_recipient` — and if the
     /// matched user has no other login credential, mint a NULL-resource
     /// magic-link token and email a sign-in link. The redemption
-    /// endpoint lands a NULL-resource token on `/#/sharedwithme`.
+    /// endpoint lands a NULL-resource token on `/shared-with-me`
+    /// (external users) or `/files` (internal users).
     ///
     /// Always returns `Ok(())` so the caller can emit a uniform
     /// response shape (`"If an account exists, a link will be sent."`)
@@ -595,6 +609,123 @@ impl MagicLinkInviteService {
                     error = %e.message,
                     "🔗 login-link SMTP send failed for '{}'",
                     normalised,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Mint + email a magic-link for **email verification**, called
+    /// only after another authentication factor has already proven the
+    /// caller's identity (currently: the login handler after a
+    /// successful password check).
+    ///
+    /// Contract: the caller MUST have validated the user's identity via
+    /// an independent factor before invoking this. The method does NOT
+    /// re-verify credentials — it exists specifically to bypass the
+    /// `has_password` eligibility gate, which would otherwise deadlock
+    /// the `OXICLOUD_REQUIRE_VERIFIED_EMAIL` flow (login rejected as
+    /// unverified → user asks for a verification link → refused
+    /// because they have a password).
+    ///
+    /// Rejected: OIDC-linked users, deactivated users. Everything else
+    /// gets a token — including the "has password" case that
+    /// `send_login_link` refuses.
+    pub async fn send_verification_link_authenticated(
+        &self,
+        user: &User,
+        request_challenge: &str,
+    ) -> Result<(), DomainError> {
+        // OIDC boundary is unconditional even here — the IdP owns the
+        // identity contract and we must not mint a session-primitive
+        // for a user it manages.
+        if user.is_oidc_user() {
+            tracing::info!(
+                target: "audit",
+                event = "auth.magic_link_send",
+                reason = "oidc_user",
+                user_id = %user.id(),
+                username = %user.display_for_audit(),
+                "🔗 verify-link suppressed: OIDC user",
+            );
+            return Ok(());
+        }
+        if !user.is_active() {
+            tracing::info!(
+                target: "audit",
+                event = "auth.magic_link_send",
+                reason = "account_deactivated",
+                user_id = %user.id(),
+                username = %user.display_for_audit(),
+                "🔗 verify-link suppressed: account deactivated",
+            );
+            return Ok(());
+        }
+
+        let token = MagicLinkToken::new(
+            user.id(),
+            chrono::Duration::minutes(self.magic_link_cfg.login_ttl_minutes as i64),
+            None,
+            Some(request_challenge.to_string()),
+        );
+        self.magic_link_repo.create(&token).await?;
+
+        let link = format!(
+            "{}/magic/v1/{}",
+            self.public_base_url.trim_end_matches('/'),
+            token.token(),
+        );
+        // Reuses the login email template for now — same call to
+        // action (click the link), same TTL, same challenge binding.
+        // A dedicated "verify your email" template can land later
+        // without wire changes.
+        let locale = self.locale_for(user);
+        let ttl_minutes = self.magic_link_cfg.login_ttl_minutes.to_string();
+        let login_args: Vec<(&str, &str)> = vec![("link", &link), ("ttl_minutes", &ttl_minutes)];
+
+        let subject = self
+            .i18n_or(
+                "server.magic_link.email.login.subject",
+                &locale,
+                &login_args,
+            )
+            .await;
+        let text_body = self
+            .render_bilingual("server.magic_link.email.login.body", &locale, &login_args)
+            .await;
+
+        let message = EmailMessage {
+            to: user.email().to_string(),
+            subject,
+            text_body,
+            html_body: None,
+        };
+
+        match self.email_sender.send(message).await {
+            Ok(outcome) => {
+                tracing::info!(
+                    target: "audit",
+                    event = "auth.magic_link_send",
+                    reason = "sent_verification",
+                    user_id = %user.id(),
+                    username = %user.display_for_audit(),
+                    email = %user.email(),
+                    smtp_code = outcome.code,
+                    smtp_message = %outcome.message,
+                    "🔗 verify-link sent to '{}'",
+                    user.email(),
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "audit",
+                    event = "auth.magic_link_send_failed",
+                    user_id = %user.id(),
+                    email = %user.email(),
+                    error = %e.message,
+                    "🔗 verify-link SMTP send failed for '{}'",
+                    user.email(),
                 );
             }
         }

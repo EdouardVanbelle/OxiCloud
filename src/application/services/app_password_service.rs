@@ -15,6 +15,7 @@ use crate::infrastructure::services::password_hasher::Argon2PasswordHasher;
 use chrono::{Duration, Utc};
 use moka::future::Cache;
 use rand_core::RngCore;
+use smol_str::SmolStr;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 use uuid::Uuid;
@@ -56,12 +57,17 @@ const BASIC_AUTH_CACHE_TTL_SECS: u64 = 300;
 const BASIC_AUTH_CACHE_MAX_ENTRIES: u64 = 10_000;
 
 /// Cached identity returned after a successful Basic Auth verification.
+///
+/// `Arc<str>` / inline `SmolStr` fields: moka's `get` clones the value, so
+/// with owned `String`s every warm Basic-auth request (all DAV traffic)
+/// paid 3 string copies just to read the cached identity. Now a hit is
+/// refcount bumps + a 24-byte memcpy.
 #[derive(Clone)]
 struct CachedBasicAuthResult {
     user_id: Uuid,
-    username: String,
-    email: String,
-    role: String,
+    username: Arc<str>,
+    email: Arc<str>,
+    role: SmolStr,
 }
 
 pub struct AppPasswordService {
@@ -299,17 +305,62 @@ impl AppPasswordService {
         &self,
         username: &str,
         password: &str,
-    ) -> Result<(Uuid, String, String, String), DomainError> {
+    ) -> Result<(Uuid, Arc<str>, Arc<str>, SmolStr), DomainError> {
         // ── 1. Compute cache key = blake3("username:password") ────────
-        let cache_key: [u8; 32] =
-            blake3::hash(format!("{}:{}", username, password).as_bytes()).into();
+        // Stream the parts into an incremental hasher instead of
+        // `blake3::hash(format!("{username}:{password}").as_bytes())` — the
+        // `format!` heap-allocated one throw-away `String` per request (this
+        // runs before the cache lookup, so even cache hits paid it), and DAV
+        // sync clients hammer Basic auth on every request. Byte-identical key:
+        // blake3 is a stream hash, so `hash(a || ":" || b)` == feeding the same
+        // bytes in order (benches/ROUND19.md §M1).
+        let cache_key: [u8; 32] = {
+            let mut h = blake3::Hasher::new();
+            h.update(username.as_bytes());
+            h.update(b":");
+            h.update(password.as_bytes());
+            h.finalize().into()
+        };
 
-        // ── 2. Cache hit → return immediately ────────────────────────
-        if let Some(cached) = self.auth_cache.get(&cache_key).await {
-            return Ok((cached.user_id, cached.username, cached.email, cached.role));
-        }
+        // ── 2. Single-flight cache lookup ─────────────────────────────
+        // Concurrent misses on the same credential coalesce into ONE
+        // full verification: DAV sync clients hold 4-8 parallel
+        // connections, so an expiring cache entry used to fan out into
+        // K simultaneous Argon2id runs (~100-300 ms CPU + 64 MiB RAM
+        // apiece) every TTL — a recurring p99 spike on every DAV
+        // surface (8 -> 1 verifications, benches/AUTH-HERD.md).
+        // `try_get_with` caches only `Ok` results, so failed
+        // verifications are still never cached, preserving the full
+        // Argon2id cost as a brute-force deterrent.
+        let result = self
+            .auth_cache
+            .try_get_with(
+                cache_key,
+                self.verify_basic_auth_uncached(username, password),
+            )
+            .await
+            .map_err(
+                |e: std::sync::Arc<DomainError>| match std::sync::Arc::try_unwrap(e) {
+                    Ok(err) => err,
+                    // Another coalesced waiter still holds the Arc — rebuild
+                    // an equivalent error (the source chain isn't clonable).
+                    Err(shared) => {
+                        DomainError::new(shared.kind, shared.entity_type, shared.message.clone())
+                    }
+                },
+            )?;
+        Ok((result.user_id, result.username, result.email, result.role))
+    }
 
-        // ── 3. Cache miss → full verification ────────────────────────
+    /// The uncached Basic Auth slow path: user lookup, prefix-scoped
+    /// candidate fetch, Argon2id verification. Runs at most once per
+    /// credential per TTL — `verify_basic_auth` coalesces concurrent
+    /// callers onto a single in-flight instance of this future.
+    async fn verify_basic_auth_uncached(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<CachedBasicAuthResult, DomainError> {
         let user = self
             .user_repo
             .get_user_by_username(username)
@@ -363,15 +414,14 @@ impl AppPasswordService {
             {
                 let _ = self.repo.touch_last_used(ap.id).await;
 
-                let result = CachedBasicAuthResult {
+                // Caching happens in `verify_basic_auth`: `try_get_with`
+                // stores this value under the blake3 key on return.
+                return Ok(CachedBasicAuthResult {
                     user_id: user.id(),
-                    username: user.username().unwrap_or("").to_string(),
-                    email: user.email().to_string(),
-                    role: user.role().to_string(),
-                };
-
-                self.auth_cache.insert(cache_key, result.clone()).await;
-                return Ok((result.user_id, result.username, result.email, result.role));
+                    username: Arc::from(user.username().unwrap_or("")),
+                    email: Arc::from(user.email()),
+                    role: SmolStr::new_static(user.role().as_str()),
+                });
             }
         }
 

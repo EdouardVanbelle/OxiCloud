@@ -23,12 +23,15 @@ test('recent shows accessed items, batch selection, and clear', async ({ page })
   await expect(page.getByTestId('appshell-logo-link')).toBeVisible({ timeout: 15_000 });
 
   // Switch to list view (reveals the select-all header) and batch-select.
-  await page.getByTestId('list-toolbar-view-list-btn').click({ timeout: 3_000 }).catch(() => {});
+  // /recent's batch bar was trimmed to Download + Remove-from-recent
+  // (destructive-to-content actions moved into the row context menu),
+  // so this exercises the new remove-from-recent batch instead of the
+  // old batch-move-into-dialog flow.
+  await page.getByTestId('display-mode-view-list-btn').click({ timeout: 3_000 }).catch(() => {});
   const selectAll = page.getByTestId('resource-list-select-all-checkbox');
   if (await selectAll.isVisible().catch(() => false)) {
     await selectAll.check();
-    await page.getByTestId('recent-batch-move-btn').click({ timeout: 3_000 }).catch(() => {});
-    await page.getByTestId('move-dialog-cancel-btn').click({ timeout: 3_000 }).catch(() => {});
+    await page.getByTestId('recent-batch-remove-btn').click({ timeout: 3_000 }).catch(() => {});
   }
 
   // Clear the history if the control is present.
@@ -45,16 +48,16 @@ test('recent grouping and sort cycle (ResourceList toolbar)', async ({ page }) =
   await apiRecordRecent(page, 'folder', a.id);
   await page.goto('/recent');
   await expect(page.getByTestId('appshell-logo-link')).toBeVisible({ timeout: 15_000 });
-  await page.getByTestId('list-toolbar-view-list-btn').click({ timeout: 3_000 }).catch(() => {});
+  await page.getByTestId('display-mode-view-list-btn').click({ timeout: 3_000 }).catch(() => {});
 
   // Cycle every group-by dimension exposed by the shared ResourceList toolbar.
   for (let i = 0; i < 5; i++) {
-    await page.getByTestId('list-toolbar-groupby-btn').click({ timeout: 2_000 }).catch(() => {});
+    await page.getByTestId('display-mode-groupby-btn').click({ timeout: 2_000 }).catch(() => {});
     await page
-      .locator('[data-testid^="list-toolbar-groupby-"][data-testid$="-item"]')
+      .locator('[data-testid^="display-mode-groupby-"][data-testid$="-item"]')
       .nth(i)
       .click({ timeout: 2_000 })
       .catch(() => {});
   }
-  await page.getByTestId('list-toolbar-sort-direction-btn').click({ timeout: 2_000 }).catch(() => {});
+  await page.getByTestId('display-mode-sort-direction-btn').click({ timeout: 2_000 }).catch(() => {});
 });

@@ -95,6 +95,18 @@ jobs:
     if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     steps:
+      # Same scope as the `tests` job below — `--all-targets
+      # --all-features` builds examples + benches across the full
+      # feature matrix and runs into the same disk ceiling. See the
+      # rationale on the `tests` job's free-disk-space step.
+      - uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -159,14 +171,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned to match wasm/oxicloud-plugin-hello/rust-toolchain.toml.
+      # Reproducibility of the committed .wasm fixtures depends on both
+      # sides using the same rustc — even a patch bump shifts codegen.
+      # Bump both together.
+      - uses: dtolnay/rust-toolchain@1.96.1
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Rebuild committed wasm fixtures
         run: bash scripts/build-plugin-hello.sh
-      - name: Fail if fixtures are stale (rebuild + commit them)
-        run: git diff --exit-code tests/fixtures/plugins/
+      # NOTE: no `git diff --exit-code` staleness check.
+      #
+      # Cross-host wasm builds (contributor aarch64-macOS vs CI
+      # x86_64-linux, same rustc 1.96.1, same `--remap-path-prefix`,
+      # same `CARGO_INCREMENTAL=0`, same profile) still produce
+      # byte-different .wasm — plain `cargo build` doesn't guarantee
+      # bit-reproducible cross-host wasm output. The proper fixes
+      # (containerised builds, or dropping the committed fixtures and
+      # rebuilding from source everywhere) are deferred; the frontend
+      # wasm crate (`wasm/oxicloud-hash`) will hit the same wall when
+      # we add a similar check for it, so we'll tackle both together.
+      # For now: CI rebuilds the fixtures fresh above and uses those
+      # for the plugin runtime tests below. The versions committed at
+      # HEAD are a convenience for local dev without the wasm32
+      # toolchain — they may drift from what CI produces, which is
+      # fine as long as the runtime tests pass.
       - name: Run plugin runtime tests
         # Quote: the trailing `::` confuses GitHub's YAML parser (mapping
         # values not allowed) and aborts the whole workflow at load time.
@@ -192,6 +222,22 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
+      # Free ~26 GB of preinstalled tools the runner image ships with
+      # (Android SDK ~12 GB, Haskell/GHC ~5 GB, .NET ~2 GB, swap +
+      # docker images by the action's defaults). `cargo test
+      # --all-features --workspace` on this repo blows past the
+      # ubuntu-latest ~14 GB free budget otherwise (PR #520 died on
+      # the `bench_owner_cache` example link step with ENOSPC).
+      # `tool-cache: false` is load-bearing — wiping it breaks
+      # `setup-rust`/`setup-node`/etc.
+      - uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -234,6 +280,19 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
+      # `cargo build --release --features plugins` is the heaviest
+      # link step in the workflow — release-profile linking emits
+      # large intermediate objects + plugins drags Wasmtime in.
+      # Preemptive cleanup keeps it well inside the runner disk
+      # budget; same rationale as the tests/clippy jobs above.
+      - uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -257,7 +316,7 @@ jobs:
           retention-days: 1
 
   api-test:
-    name: API & Webdav tests
+    name: API, WebDAV & OIDC tests
     needs: build
     if: github.event_name == 'pull_request'
     timeout-minutes: 30
@@ -290,13 +349,43 @@ jobs:
           tar -xzf "xq_${XQ_VERSION}_linux_amd64.tar.gz" xq
           sudo install -m 0755 xq /usr/local/bin/xq
 
+      # Node for the OIDC fake IdP (tests/oidc/fake_idp/server.js — a
+      # panva/node-oidc-provider wrapper). Pinned to match the version
+      # used elsewhere in this workflow (frontend Playwright job uses
+      # 26.3.0 too).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26.3.0
+          cache: npm
+          cache-dependency-path: tests/oidc/fake_idp/package-lock.json
+
       - name: Run Hurl API tests
         run: bash tests/api/run.sh
         env:
           BUILD_TARGET: release
 
-      - name: Run Webdav tests
+      - name: Run WebDAV tests
         run: bash tests/webdav/run.sh
+        env:
+          BUILD_TARGET: release
+
+      # WebDAV URL-scheme variant: `OXICLOUD_WEBDAV_DRIVE_PATH=""`
+      # (drive listing at `/webdav/`, no `@drive` sigil). Runs a
+      # separately-configured server on its own port so the default
+      # WebDAV suite above stays on the `"@drive"` back-compat config.
+      - name: Run WebDAV drive-root variant tests
+        run: bash tests/webdav-drive-root/run.sh
+        env:
+          BUILD_TARGET: release
+
+      # OIDC integration: drives the SPA's SSO flow end-to-end against
+      # the fake IdP (auto-approve login + consent, real PKCE/JWT
+      # round-trip) and asserts the d1bbe8ba contract — OIDC callback
+      # MUST redirect to `/login?oidc_code=…`, not `/?oidc_code=…`.
+      # That bug shipped to users in production once already; the
+      # assertion at tests/oidc/oidc.hurl:Step 4 is its guard.
+      - name: Run OIDC tests
+        run: bash tests/oidc/run.sh
         env:
           BUILD_TARGET: release
 
@@ -305,6 +394,80 @@ jobs:
         with:
           name: hurl-report
           path: tests/api/storage/
+          retention-days: 7
+
+  litmus:
+    name: WebDAV RFC 4918 — litmus (59/59)
+    needs: build
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: oxicloud-release
+          path: target/release/
+
+      - name: Set execute bit on pre-built binary
+        run: chmod +x target/release/oxicloud
+
+      - name: Install litmus and jq
+        run: sudo apt-get update -q && sudo apt-get install -y litmus jq
+
+      - name: Run litmus WebDAV compliance tests
+        run: bash tests/webdav/run-litmus.sh
+        env:
+          BUILD_TARGET: release
+          LITMUS_TESTS: "basic copymove props locks"
+
+  caldav-test:
+    # CalDAV + CardDAV client-driven suite via python-caldav — the
+    # same library Thunderbird / DAVx⁵ / Radicale / xandikos / davical
+    # test against. Complements the raw-HTTP Hurl coverage in
+    # api-test by proving a real client library round-trips through
+    # OxiCloud's CalDAV/CardDAV surface.
+    #
+    # Runs AFTER litmus so both DAV-family compliance surfaces
+    # (RFC 4918 WebDAV via litmus, RFC 4791 CalDAV + RFC 6352
+    # CardDAV via python-caldav) execute in sequence on the same
+    # pre-built binary. Sharing `needs: build` + `needs: litmus`
+    # means one binary download is enough; running after litmus
+    # rather than in parallel keeps CI runner load predictable.
+    name: CalDAV + CardDAV — python-caldav
+    needs: litmus
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: oxicloud-release
+          path: target/release/
+
+      - name: Set execute bit on pre-built binary
+        run: chmod +x target/release/oxicloud
+
+      - name: Install jq + python3 venv
+        # jq for the /api/setup + /api/auth/login parsing inside
+        # run-pycaldav.sh. python3 ships on ubuntu-latest but
+        # python3-venv is a separate package on Debian-family images.
+        run: sudo apt-get update -q && sudo apt-get install -y jq python3 python3-venv
+
+      - name: Run python-caldav suite
+        run: bash tests/caldav/run-pycaldav.sh
+        env:
+          BUILD_TARGET: release
+
+      - name: Upload server log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: caldav-server-log
+          path: tests/caldav/server.log
           retention-days: 7
 
   front-test:

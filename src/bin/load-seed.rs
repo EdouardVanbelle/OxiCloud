@@ -526,10 +526,12 @@ async fn build_subtree(
 
     // Level 0 — the subtree's "root" sits inside `mount_under`, not at
     // parent_id=NULL. drive_id is inherited from the mount point.
+    // Post-D7: `user_id` omitted; `created_by` / `updated_by` bind to
+    // the seed caller.
     let root: (Uuid,) = sqlx::query_as(
         "INSERT INTO storage.folders
-            (name, parent_id, user_id, drive_id, created_by, updated_by)
-         SELECT $1, parent.id, $2, parent.drive_id, $2, $2
+            (name, parent_id, drive_id, created_by, updated_by)
+         SELECT $1, parent.id, parent.drive_id, $2, $2
            FROM storage.folders parent
           WHERE parent.id = $3::uuid
          RETURNING id",
@@ -568,13 +570,13 @@ async fn build_subtree(
         );
 
         // drive_id derives from the parent folder — same pattern as
-        // file_blob_write_repository's resolve_owner_and_drive helper.
-        // Every parent in `current_level` already has a drive_id set,
-        // so the JOIN is guaranteed to find one.
+        // file_blob_write_repository's resolve_parent_drive helper.
+        // Post-D7: `user_id` omitted; provenance via `created_by` /
+        // `updated_by`.
         let rows: Vec<(Uuid,)> = sqlx::query_as(
             "INSERT INTO storage.folders
-                (name, parent_id, user_id, drive_id, created_by, updated_by)
-             SELECT f.name, f.parent_id, $1, parent.drive_id, $1, $1
+                (name, parent_id, drive_id, created_by, updated_by)
+             SELECT f.name, f.parent_id, parent.drive_id, $1, $1
                FROM UNNEST($2::uuid[], $3::text[]) AS f(parent_id, name)
                JOIN storage.folders parent ON parent.id = f.parent_id
              RETURNING id",
@@ -653,13 +655,17 @@ async fn insert_files(
 
     // Post-D0: storage.files.drive_id is NOT NULL — derive it from the
     // parent folder (same pattern as file_blob_write_repository's
-    // INSERTs and the resolve_owner_and_drive helper). The folder's
+    // INSERTs and the resolve_parent_drive helper). The folder's
     // drive_id was set during the M2 backfill or by the lifecycle hook
     // for users provisioned after D0.
+    //
+    // Post-D7: `user_id` omitted; `created_by` / `updated_by` bind to
+    // the seed caller so provenance is preserved.
     sqlx::query(
         "INSERT INTO storage.files
-            (name, folder_id, user_id, drive_id, blob_hash, size, mime_type)
-         SELECT f.name, f.folder_id, $1, fo.drive_id, $2, 0, 'text/plain'
+            (name, folder_id, drive_id, blob_hash, size, mime_type,
+             created_by, updated_by)
+         SELECT f.name, f.folder_id, fo.drive_id, $2, 0, 'text/plain', $1, $1
            FROM UNNEST($3::uuid[], $4::text[]) AS f(folder_id, name)
            JOIN storage.folders fo ON fo.id = f.folder_id",
     )

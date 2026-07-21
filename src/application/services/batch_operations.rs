@@ -726,25 +726,46 @@ impl BatchOperationService {
         let mut items_added: usize = 0;
 
         // ── Add individual files at the root of the ZIP ──────────────────
+        // Authorize + fetch metadata for the whole multi-select in 2 round-trips
+        // (one batch Read check + one batch get) instead of the per-file
+        // `get_file_with_perms` N+1 (2 round-trips/file). The batch check also
+        // primes the resource→drive cache, so `add_file_entry_streamed`'s
+        // per-file stream-open re-check lands on the cache. A denied / missing /
+        // unparseable id is absent from the map → skipped in the same input
+        // order, exactly as the old per-file loop skipped it. Authorization is
+        // UNCHANGED — still enforced (pre-check here + the stream open's own
+        // Read check + Recents recording) before any ZIP entry is written, so a
+        // denied file never leaks its name into the archive (benches/ROUND24.md).
+        let authorized = self
+            .file_retrieval
+            .get_files_by_ids_with_perms(&file_ids, user_id)
+            .await
+            .map_err(BatchOperationError::Domain)?;
+        let by_id: HashMap<Uuid, FileDto> = authorized
+            .into_iter()
+            .filter_map(|f| Uuid::parse_str(&f.id).ok().map(|u| (u, f)))
+            .collect();
         for file_id in &file_ids {
+            let file_dto = match Uuid::parse_str(file_id).ok().and_then(|u| by_id.get(&u)) {
+                Some(f) => f,
+                None => {
+                    info!("Skipping file {} (not accessible or missing)", file_id);
+                    continue;
+                }
+            };
             match self
-                .file_retrieval
-                .get_file_with_perms(file_id, user_id)
+                .add_file_entry_streamed(
+                    &mut zip,
+                    file_id,
+                    &file_dto.name,
+                    &file_dto.mime_type,
+                    Some(user_id),
+                )
                 .await
             {
-                Ok(file_dto) => {
-                    match self
-                        .add_file_entry_streamed(&mut zip, file_id, &file_dto.name, user_id)
-                        .await
-                    {
-                        Ok(_) => items_added += 1,
-                        Err(e) => {
-                            info!("Could not add file {} to ZIP: {}", file_dto.name, e);
-                        }
-                    }
-                }
+                Ok(_) => items_added += 1,
                 Err(e) => {
-                    info!("Could not get file metadata {}: {}", file_id, e);
+                    info!("Could not add file {} to ZIP: {}", file_dto.name, e);
                 }
             }
         }
@@ -758,7 +779,7 @@ impl BatchOperationService {
             {
                 Ok(root_folder) => {
                     match self
-                        .add_folder_subtree_to_zip(&mut zip, folder_id, &root_folder, user_id)
+                        .add_folder_subtree_to_zip(&mut zip, folder_id, &root_folder)
                         .await
                     {
                         Ok(_) => items_added += 1,
@@ -803,24 +824,44 @@ impl BatchOperationService {
     }
 
     /// Streams a single file into an async ZIP entry (~64 KB peak RAM per file).
+    ///
+    /// Already-compressed content (per its MIME type) is `Stored` — deflating
+    /// JPEG/MP4/… burns ~a CPU core per download for ~0 % size gain.
+    ///
+    /// `caller_id = Some(uid)` enforces the per-file Read check and records
+    /// the access in Recents (explicitly-selected top-level files).
+    /// `None` = the file was enumerated from a folder subtree whose ROOT the
+    /// caller already passed `get_folder_with_perms` for — per-file
+    /// re-authorization and per-file Recent spam (2 writes/file via the
+    /// recent hook) are skipped, mirroring `ZipService::create_folder_zip`
+    /// on the native folder-download path (benches/ZIP-BATCH-AUTHZ.md).
     async fn add_file_entry_streamed(
         &self,
         zip: &mut ZipFileWriter<tokio_util::compat::Compat<BufWriter<tokio::fs::File>>>,
         file_id: &str,
         entry_name: &str,
-        caller_id: Uuid,
+        mime_type: &str,
+        caller_id: Option<Uuid>,
     ) -> Result<(), BatchOperationError> {
-        let entry = ZipEntryBuilder::new(entry_name.to_string().into(), Compression::Deflate);
+        let compression = crate::common::mime_detect::zip_entry_compression(mime_type);
+        let entry = ZipEntryBuilder::new(entry_name.to_string().into(), compression);
         let mut writer = zip
             .write_entry_stream(entry)
             .await
             .map_err(|e| BatchOperationError::Internal(format!("zip entry start: {}", e)))?;
 
-        let stream = self
-            .file_retrieval
-            .get_file_stream_with_perms(file_id, caller_id)
-            .await
-            .map_err(BatchOperationError::Domain)?;
+        let stream = match caller_id {
+            Some(uid) => self
+                .file_retrieval
+                .get_file_stream_with_perms(file_id, uid)
+                .await
+                .map_err(BatchOperationError::Domain)?,
+            None => self
+                .file_retrieval
+                .get_file_stream(file_id)
+                .await
+                .map_err(BatchOperationError::Domain)?,
+        };
         let mut stream = std::pin::Pin::from(stream);
 
         while let Some(chunk) = stream.next().await {
@@ -849,7 +890,6 @@ impl BatchOperationService {
         zip: &mut ZipFileWriter<tokio_util::compat::Compat<BufWriter<tokio::fs::File>>>,
         folder_id: &str,
         root_folder: &FolderDto,
-        caller_id: Uuid,
     ) -> Result<(), BatchOperationError> {
         // Bulk-fetch folder tree (small — one entry per folder)
         let all_folders = self
@@ -903,8 +943,10 @@ impl BatchOperationService {
             if let Some(files) = files_by_folder.get(&folder.id) {
                 for file in files {
                     let file_path = format!("{}{}", zip_dir, file.name);
+                    // Subtree pre-authorized at the root folder — see
+                    // `add_file_entry_streamed` docs for why `None`.
                     if let Err(e) = self
-                        .add_file_entry_streamed(zip, &file.id, &file_path, caller_id)
+                        .add_file_entry_streamed(zip, &file.id, &file_path, &file.mime_type, None)
                         .await
                     {
                         info!("Could not add file {} to ZIP: {}", file.name, e);

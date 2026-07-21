@@ -58,6 +58,8 @@
   "photos": {
     "empty_state": "Brak zdjęć",
     "empty_hint": "Prześlij obrazy lub filmy, aby zobaczyć je tutaj",
+    "empty_hidden": "{{n}} zdjęć ukrytych zgodnie z Twoją preferencją",
+    "empty_hidden_hint": "Wyłącz \"Ukryj ukryte pliki\" w swoim profilu, aby je zobaczyć.",
     "items_selected": "wybrane",
     "view_daily": "Dzień",
     "view_monthly": "Miesiąc",
@@ -232,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "Powiadom e-mailem",
     "revoke": "Usuń",
-    "role_label": "Rola"
+    "role_label": "Rola",
+    "col_shared_by": "Udostępnione przez",
+    "col_shared": "Udostępnione"
   },
   "share_dialogTitle": "Link udostępniania",
   "share_linkLabel": "Link udostępniania:",
@@ -335,6 +339,7 @@
     "modified": "Zmodyfikowano",
     "no_files": "Brak plików w tym folderze",
     "empty_hint": "Prześlij pliki lub utwórz foldery, aby rozpocząć",
+    "drop_to_upload": "Upuść pliki tutaj, aby wysłać",
     "loading": "Ładowanie plików…",
     "view_grid": "Widok siatki",
     "view_list": "Widok listy",
@@ -365,7 +370,21 @@
     "folder": "Folder",
     "new_folder": "Nowy folder",
     "share": "Udostępnij",
-    "view": "Pokaż"
+    "view": "Pokaż",
+    "empty_hidden_title": "{{n}} ukrytych elementów w tym folderze",
+    "empty_hidden_hint": "Pliki, których nazwa zaczyna się od '.', są ukryte. Zmień ustawienie, aby je zobaczyć.",
+    "show_hidden": "Pokaż ukryte pliki",
+    "upload_dotfile_hidden": "Przesłano {{n}} plik(ów), ale są ukryte zgodnie z Twoją preferencją.",
+    "rename_dotfile_hidden": "Zmieniono nazwę na \"{{name}}\" — teraz ukryty zgodnie z Twoją preferencją.",
+    "new_folder_dotfile_hidden": "Utworzono folder \"{{name}}\" — ukryty zgodnie z Twoją preferencją.",
+    "dotfiles_hidden_toast": "Ukryte pliki ukryte",
+    "dotfiles_shown_toast": "Ukryte pliki wyświetlone",
+    "col_modified": "Zmodyfikowano",
+    "col_added": "Dodano",
+    "col_created_by": "Utworzone przez",
+    "col_opened": "Otwarte",
+    "col_path": "Lokalizacja",
+    "new_elements": "Nowe elementy"
   },
   "dialogs": {
     "rename_folder": "Zmień nazwę folderu",
@@ -451,7 +470,8 @@
       "trashed_time": "Czas usunięcia"
     },
     "delete": "Usuń trwale",
-    "empty_action": "Opróżnij kosz"
+    "empty_action": "Opróżnij kosz",
+    "expires_at": "Wygasa"
   },
   "daysRemaining": {
     "expired": "Wygasł",
@@ -570,7 +590,10 @@
     "accessed": "Otwarte",
     "empty_state": "Brak ostatnich plików",
     "empty_hint": "Otwarte pliki pojawią się tutaj",
-    "loadMore": "Załaduj więcej"
+    "empty_hidden_state": "{{n}} ostatnich elementów ukrytych zgodnie z Twoją preferencją",
+    "empty_hidden_hint": "Wyłącz \"Ukryj ukryte pliki\" w swoim profilu, aby je zobaczyć.",
+    "loadMore": "Załaduj więcej",
+    "remove_item": "Usuń z ostatnich"
   },
   "notifications": {
     "file_renamed": "Zmieniono nazwę pliku",
@@ -806,7 +829,70 @@
     "title": "Administrator",
     "user": "Użytkownik",
     "username": "Nazwa użytkownika",
-    "users": "Użytkownicy"
+    "users": "Użytkownicy",
+    "drive_manage_policies": "Zarządzaj zasadami",
+    "drive_manage_policies_for": "Zasady — {{name}}",
+    "drive_manage_policies_help": "Zasady są tylko dla administratorów — właściciele Dysk nie mogą ich modyfikować. Każdy przełącznik kontroluje jedną regułę.",
+    "drive_policy": {
+      "forbid_sharing": "Zakaz udostępniania per-zasób",
+      "forbid_sharing_help": "Blokuje uprawnienia na poszczególne pliki / foldery (obejmuje również linki publiczne i udostępnianie zewnętrzne). Członkostwo na poziomie Dysk nadal działa.",
+      "forbid_public_links": "Zakaz linków publicznych",
+      "forbid_public_links_help": "Blokuje tworzenie anonimowych linków udostępniających dla zasobów w tym Dysk.",
+      "forbid_external_sharing": "Zakaz udostępniania zewnętrznego",
+      "forbid_external_sharing_help": "Blokuje uprawnienia dla użytkowników zewnętrznych (zaproszenia e-mail i istniejące konta zewnętrzne).",
+      "forbid_cross_drive_move": "Zakaz przenoszenia między Dysk",
+      "forbid_cross_drive_move_help": "Blokuje przenoszenie plików lub folderów do innego Dysk. Nie zatrzymuje pobierania + ponownego przesyłania.",
+      "forbid_owner_role_change": "Zablokuj listę właścicieli",
+      "forbid_owner_role_change_help": "Tylko administrator może dodawać, usuwać lub degradować właścicieli Dysk, gdy ta zasada jest aktywna.",
+      "include_in_photo_index": "Uwzględnij w Zdjęciach",
+      "include_in_photo_index_help": "Wyświetlaj obrazy i filmy z tego Dysku na osi czasu Zdjęć i na mapie Miejsc. Domyślne dyski osobiste są uwzględniane automatycznie; włącz to dla dysków współdzielonych, które faktycznie zawierają zdjęcia (np. «Zdjęcia rodzinne»).",
+      "include_in_music_index": "Uwzględnij w Muzyce",
+      "include_in_music_index_help": "Uwzględniaj pliki audio z tego Dysku w bibliotece Muzyki. Domyślne dyski osobiste są uwzględniane automatycznie; włącz to dla dysków współdzielonych, które faktycznie zawierają kolekcję muzyczną (np. «Muzyka rodzinna», «Współpraca zespołu»).",
+      "implied_by_forbid_sharing": "Już egzekwowane przez «Zakaz udostępniania per-zasób».",
+      "read_only": "Tylko do odczytu (zamrożenie)",
+      "read_only_help": "Zamrożenie Dysku w całości — każda modyfikacja zostaje odrzucona (wysyłki, edycje, usunięcia, zmiany nazw, udostępnianie, zmiany członkostwa). Odczyt i pobieranie nadal działają. Automatyczne czyszczenie kosza również jest wstrzymane. Używaj do archiwów, blokad prawnych lub zamykania kont. Tylko administrator może odblokować."
+    },
+    "drives": "Dyski",
+    "drive_name": "Nazwa",
+    "drive_kind": "Typ",
+    "drive_owners": "Właściciele",
+    "drive_usage": "Użycie",
+    "drive_created_at": "Utworzono",
+    "drive_kind_shared": "Współdzielony",
+    "drive_kind_personal": "Osobisty",
+    "drive_kind_default_suffix": "(domyślny)",
+    "drive_manage_owners": "Zarządzaj właścicielami",
+    "drive_manage_owners_for": "Zarządzaj właścicielami — {{name}}",
+    "drive_edit_quota": "Edytuj limit",
+    "drive_delete": "Usuń dysk",
+    "drive_delete_confirm": "Usunąć dysk „{{name}}\"? Tej operacji nie można cofnąć.",
+    "drive_deleted": "Dysk usunięty.",
+    "drive_created": "Dysk utworzony.",
+    "drive_add_owner": "Dodaj właściciela",
+    "drive_current_owners": "Obecni właściciele",
+    "drive_no_owners": "Brak właścicieli",
+    "drive_owner": "Właściciel",
+    "drive_owner_hint": "Wybierz użytkownika (jedyny właściciel) lub grupę (każdy członek staje się właścicielem poprzez rozszerzenie podmiotu).",
+    "drive_owner_picked": "Właściciel: {{name}}",
+    "drive_owner_placeholder": "Szukaj użytkownika lub grupy…",
+    "drive_owner_remove_confirm": "Usunąć tego właściciela z dysku?",
+    "drive_name_placeholder": "np. Inżynieria",
+    "drive_error_name_required": "Nazwa dysku jest wymagana.",
+    "drive_error_owner_required": "Wybierz użytkownika lub grupę jako właściciela dysku.",
+    "create_drive": "Utwórz dysk współdzielony",
+    "no_drives": "Brak dysków.",
+    "external_user": "zewnętrzny",
+    "external_user_hint": "Konto tylko z zaproszenia (magic-link lub OCM). Nie może być administratorem i nie ma limitu przestrzeni.",
+    "no_storage_for_external": "Konta zewnętrzne nie mają koperty przestrzeni.",
+    "promote_to_internal_title": "Promuj do użytkownika wewnętrznego",
+    "confirm_promote_user": "Promować {{name}} do użytkownika wewnętrznego? Zostanie utworzony dysk osobisty i przypisana normalna koperta przestrzeni. Tożsamość konta jest zachowana; logowanie magic-link pozostaje sposobem dostępu, dopóki nie ustawiono hasła.",
+    "delete_user_title": "Usuń użytkownika",
+    "delete_user_warning": "Zamierzasz trwale usunąć „{{name}}\". Konto zostanie usunięte, wszystkie sesje unieważnione, a dysk osobisty skasowany. Tej operacji nie można cofnąć.",
+    "delete_user_confirm_hint": "Aby potwierdzić, wpisz poniżej e-mail konta: {{email}}",
+    "deleting": "Usuwanie…",
+    "auth": "Uwierzytelnianie",
+    "quota": "Użycie przestrzeni",
+    "last_login": "Ostatnie logowanie"
   },
   "profile": {
     "page_title": "Profil",
@@ -859,6 +945,7 @@
     "family_name": "Nazwisko",
     "notify_on_share": "Wyślij mi e-mail, gdy ktoś coś mi udostępni",
     "notify_on_share_hint": "Gdy odznaczone, udostępnienia nadal pojawiają się na Twoim koncie — po prostu nie otrzymasz o nich e-maila.",
+    "hide_dotfiles": "Ukryj pliki, których nazwa zaczyna się od kropki (.env, .git, …)",
     "save_profile": "Zapisz zmiany",
     "profile_saved": "Profil zaktualizowany",
     "profile_no_changes": "Brak zmian do zapisania.",
@@ -979,7 +1066,17 @@
     "notifyRateLimited": "Zbyt wiele powiadomień dla tego odbiorcy — spróbuj ponownie później.",
     "removeAccess": "Usuń dostęp",
     "resendInvitation": "Wyślij ponownie e-mail z zaproszeniem",
-    "publicLinks": "Public links"
+    "publicLinks": "Public links",
+    "filter": {
+      "button": "Rodzaje",
+      "title": "Filtruj według rodzaju",
+      "files": "Pliki",
+      "folders": "Foldery",
+      "drives": "Dyski",
+      "emptyTitle": "Żadne udostępnienie nie pasuje do bieżącego filtru",
+      "emptyHint": "Dostosuj filtr rodzaju lub przywróć wartość domyślną (Pliki + Foldery).",
+      "reset": "Resetuj filtr"
+    }
   },
   "sort": {
     "asc": "ascending",
@@ -1078,7 +1175,9 @@
     "rename": "Zmień nazwę",
     "save": "Zapisz",
     "search": "Szukaj",
-    "yes": "Tak"
+    "yes": "Tak",
+    "saving": "Zapisywanie…",
+    "deleting": "Usuwanie…"
   },
   "device": {
     "continue": "Kontynuuj",
@@ -1108,5 +1207,79 @@
   "view": {
     "grid": "Widok siatki",
     "list": "Widok listy"
+  },
+  "preferences": {
+    "save_failed": "Nie udało się zapisać ustawienia. Spróbuj ponownie."
+  },
+  "upgrade": {
+    "title": "Rozszerz do pełnego konta",
+    "lede": "Uzyskaj własną przestrzeń i zacznij przesyłać pliki. Twoje istniejące udostępnienia pozostają nienaruszone.",
+    "busy": "Rozszerzanie…",
+    "submit": "Rozszerz moje konto",
+    "cancel": "Nie teraz — powrót do udostępnionych mi",
+    "success": "Twoje konto zostało rozszerzone. Przekierowywanie do plików…",
+    "error": "Rozszerzenie nie powiodło się.",
+    "password_required": "Hasło jest wymagane — ta instancja nie oferuje logowania przez link e-mail.",
+    "password_too_short": "Hasło musi mieć co najmniej 8 znaków.",
+    "oidc_user": "Konta SSO/OIDC są zarządzane przez Twojego dostawcę tożsamości. Rozszerzenie jest niedostępne.",
+    "domain_not_allowed": "Ta instancja nie akceptuje nowych kont z Twojej domeny e-mail. Skontaktuj się z administratorem, aby ją włączyć.",
+    "banner_aria": "Zachęta do rozszerzenia",
+    "banner_title": "Uzyskaj własną przestrzeń",
+    "banner_body": "Używasz konta gościa. Rozszerz, aby uzyskać osobisty dysk i przesyłać pliki.",
+    "banner_cta": "Rozszerz"
+  },
+  "drive": {
+    "read_only_banner": {
+      "title": "Ten Dysk jest tylko do odczytu",
+      "title_named": "Dysk \"{{name}}\" jest tylko do odczytu",
+      "body": "Wysyłki, edycje, usunięcia, zmiany nazw, udostępnianie i zmiany członkostwa są odrzucane. Odczyt i pobieranie nadal działają. Skontaktuj się z administratorem, aby odblokować Dysk.",
+      "aria": "Ten Dysk jest tylko do odczytu"
+    },
+    "back_to_files": "Powrót do plików",
+    "danger_zone": "Strefa niebezpieczna",
+    "delete": "Usuń dysk",
+    "delete_confirm": "Usunąć dysk „{{name}}\"? Tej operacji nie można cofnąć — dysk musi być pusty, w przeciwnym razie serwer odmówi.",
+    "delete_hint": "Usunięcie dysku jest trwałe. Dysk musi być pusty (bez aktywnych plików ani folderów) przed usunięciem.",
+    "deleted": "Dysk usunięty.",
+    "field": {
+      "created": "Utworzono",
+      "default": "Domyślny",
+      "default_yes": "To jest twój dysk domowy",
+      "id": "Identyfikator",
+      "kind": "Typ",
+      "updated": "Ostatnia aktualizacja"
+    },
+    "info": "Informacje o dysku",
+    "kind_personal": "Dysk osobisty",
+    "kind_shared": "Dysk współdzielony",
+    "manage_members": "Zarządzaj członkami",
+    "members": "Członkowie",
+    "members_empty": "Brak członków.",
+    "not_found_body": "Ten dysk nie istnieje lub nie masz do niego dostępu.",
+    "not_found_title": "Dysk nie znaleziony",
+    "policies": "Reguły",
+    "policies_help": "Reguły ustawione przez administratora OxiCloud dla tego dysku. Tylko administratorzy mogą je zmieniać; widzisz obecny stan.",
+    "quota": "Limit",
+    "rename": "Zmień nazwę dysku",
+    "role": {
+      "commenter": "Komentujący",
+      "contributor": "Współpracownik",
+      "editor": "Edytor",
+      "owner": "Właściciel",
+      "viewer": "Obserwator"
+    },
+    "storage": "Pamięć",
+    "usage": "Użycie",
+    "used": "Wykorzystano",
+    "members_personal_immutable": "Osobiste dyski mają stałe członkostwo z jednym właścicielem."
+  },
+  "group": {
+    "members_empty": "Brak członków",
+    "member_count": "{{n}} członków"
+  },
+  "resource_list": {
+    "location": "Lokalizacja",
+    "wrong_drop_zone_msg": "Przesyłanie działa tylko w Plikach — otwórz sekcję Pliki i upuść tam pliki.",
+    "wrong_drop_zone_action": "Przejdź do Plików"
   }
 }

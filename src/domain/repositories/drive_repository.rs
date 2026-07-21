@@ -52,7 +52,7 @@ pub struct DriveWithRootName {
     /// of the root folder via JOIN at read time.
     pub root_folder_name: String,
     /// Highest role the calling user holds on this drive (direct OR
-    /// group-mediated). Populated by `list_for_subjects` (which already
+    /// group-mediated). Populated by `list_readable_by` (which already
     /// JOINs `role_grants` for accessibility, so the role is in scope at
     /// query time). `None` for repo methods called without a caller
     /// context (`get_by_id`, `get_by_ids`, `find_default_for_user`,
@@ -164,23 +164,63 @@ pub trait DriveRepository: Send + Sync + 'static {
     }
 
     /// List drives the caller can read, resolved via `role_grants` for
-    /// `resource_type='drive'`. The caller's group memberships are
-    /// expanded by the engine's `subject_match_set`; that expanded set
-    /// is what this method's `subject_ids` argument carries.
+    /// `resource_type='drive'`. Group memberships (direct + transitive)
+    /// are expanded inline by the `storage.caller_group_ids(caller)`
+    /// SQL function — callers pass only the caller's uuid, no
+    /// expansion ceremony.
     ///
     /// Returns rows in a stable order: default drive first (if any),
     /// then by display name. The `/api/drives` handler relies on that
     /// order for the picker UI without a follow-up sort.
-    async fn list_for_subjects(
+    /// Returned as `Arc<Vec<…>>`: warm hits are a refcount bump straight
+    /// off the per-user cache instead of a deep clone of every row's
+    /// Strings — this runs per DAV request with an explicit drive
+    /// selector.
+    async fn list_readable_by(
         &self,
-        subject_types: &[&str],
-        subject_ids: &[Uuid],
-    ) -> Result<Vec<DriveWithRootName>, DriveRepositoryError>;
+        caller_id: Uuid,
+    ) -> Result<std::sync::Arc<Vec<DriveWithRootName>>, DriveRepositoryError>;
+
+    /// `true` when the drive holds no live (non-trashed) folders other
+    /// than its own root and no live files at all. Used by
+    /// `DriveManagementService::delete_drive` to enforce the
+    /// "empty-before-delete" rule — owners must clear / trash the
+    /// content first so a single click can't wipe a populated drive.
+    async fn is_empty(&self, drive_id: Uuid) -> Result<bool, DriveRepositoryError>;
+
+    /// Drop the cached readable-drive list for one user. Called by
+    /// service-layer code paths that mutate state affecting a specific
+    /// caller's drive listing (grant writes, membership changes) but
+    /// don't reach through the drive-repo itself. Default no-op — the
+    /// no-cache stubs need no plumbing.
+    async fn invalidate_readable_for_user(&self, _user_id: Uuid) {}
+
+    /// Drop every cached readable-drive list. Called when the affected
+    /// user set is unknown at this layer — group-subject grants, drive
+    /// deletion, policy edits, root-folder renames (drive.name is
+    /// sourced from the root folder, so a rename affects the listing
+    /// for every user with a grant on the drive). Default no-op.
+    fn invalidate_readable_all(&self) {}
+
+    /// Drop every entry in the "default drive per user" cache. Called
+    /// from paths that mutate a drive's display name or its root
+    /// folder id at the concrete cache level (root-folder rename is
+    /// the only one today). Same class of bug as
+    /// `invalidate_readable_all` — the cache holds a `DriveWithRootName`
+    /// with `root_folder_name` baked in, so a rename would otherwise
+    /// stay stale for the cache TTL. Default no-op.
+    fn invalidate_default_drive_all(&self) {}
+
+    /// Hard-delete a drive: its `role_grants` rows, its root folder,
+    /// and the drive row itself, in one transaction. Caller is
+    /// responsible for ensuring `is_empty` first; this method does
+    /// **not** re-check. Returns `NotFound` if the drive id is gone.
+    async fn delete_atomic(&self, drive_id: Uuid) -> Result<(), DriveRepositoryError>;
 
     /// List every drive on the system, regardless of caller membership.
     ///
     /// Used by the admin panel's `GET /api/admin/drives`. Distinct from
-    /// `list_for_subjects` (which filters by `role_grants`) because an
+    /// `list_readable_by` (which filters by `role_grants`) because an
     /// admin who creates a shared drive for someone else has no grant
     /// on it — but still needs to see, audit, and manage it. The HTTP
     /// gate (admin-only middleware) is what makes the unrestricted
@@ -191,6 +231,104 @@ pub trait DriveRepository: Send + Sync + 'static {
     /// necessarily a member, so the per-drive role would be misleading
     /// here.
     async fn list_all(&self) -> Result<Vec<DriveWithRootName>, DriveRepositoryError>;
+
+    /// Resolve a file's owning drive policies in one round-trip. Used by
+    /// D5 enforcement points (`forbid_public_links`, `forbid_sharing`, …)
+    /// to gate per-resource actions without a separate file-lookup +
+    /// drive-lookup pair.
+    ///
+    /// Returns `NotFound` when the file id is gone or its `drive_id`
+    /// doesn't resolve to a drive row (a state the no-orphan triggers
+    /// prevent in production, but the caller should still propagate the
+    /// 404 cleanly).
+    async fn get_policies_for_file(
+        &self,
+        file_id: Uuid,
+    ) -> Result<crate::domain::entities::drive::DrivePolicies, DriveRepositoryError>;
+
+    /// Resolve a folder's owning drive policies in one round-trip. Same
+    /// shape as [`Self::get_policies_for_file`].
+    async fn get_policies_for_folder(
+        &self,
+        folder_id: Uuid,
+    ) -> Result<crate::domain::entities::drive::DrivePolicies, DriveRepositoryError>;
+
+    /// Resolve a file's owning drive id + its drive's policies in one
+    /// round-trip. Used by D5 `forbid_cross_drive_move` enforcement —
+    /// the move-file service needs both pieces (drive id to compare
+    /// against the destination, policies to gate). Returns `NotFound`
+    /// when the file row or its drive_id doesn't resolve.
+    async fn get_drive_id_and_policies_for_file(
+        &self,
+        file_id: Uuid,
+    ) -> Result<(Uuid, crate::domain::entities::drive::DrivePolicies), DriveRepositoryError>;
+
+    /// Same as [`Self::get_drive_id_and_policies_for_file`] for folders.
+    async fn get_drive_id_and_policies_for_folder(
+        &self,
+        folder_id: Uuid,
+    ) -> Result<(Uuid, crate::domain::entities::drive::DrivePolicies), DriveRepositoryError>;
+
+    /// Resolve just the drive id of a folder — fast PK probe used by
+    /// the cross-drive-move gate to identify the move destination
+    /// (where we don't need policies, just the discriminator). Returns
+    /// `NotFound` when the folder row doesn't exist.
+    async fn drive_id_for_folder(&self, folder_id: Uuid) -> Result<Uuid, DriveRepositoryError>;
+
+    /// Merge the given partial policy bag into the drive's existing
+    /// `policies` JSONB, returning the updated bag. JSONB-level merge
+    /// preserves unknown keys already present on disk (the column stays
+    /// the canonical bag — see `DrivePolicies::from_value`). `caller_id`
+    /// is recorded for the audit log emitted at the service layer.
+    ///
+    /// Caller is responsible for the `Manage` permission check; this
+    /// method does not re-verify.
+    ///
+    /// `partial` is a raw JSON object carrying **only** the keys the
+    /// caller wants to change — the repo passes it verbatim to the
+    /// `policies || $partial` JSONB merge. Using the typed
+    /// `DrivePolicies` here would serialise every field (including
+    /// unset ones as `false`) and clobber other flags on the row;
+    /// keeping the merge on the raw `Value` preserves the
+    /// partial-update semantic the handler documents.
+    async fn update_policies(
+        &self,
+        drive_id: Uuid,
+        partial: &serde_json::Value,
+    ) -> Result<crate::domain::entities::drive::DrivePolicies, DriveRepositoryError>;
+
+    /// Set the drive-level storage quota on a **shared** drive.
+    ///
+    /// `quota_bytes = None` means unlimited (matches the wire and DB
+    /// convention — `drives.quota_bytes` is nullable; a NULL row → the
+    /// storage-usage service treats it as no cap).
+    ///
+    /// **Personal drives are refused at the service layer** — their
+    /// effective cap comes from the owner user's
+    /// `users.storage_quota_bytes` envelope (see the memory
+    /// `project_user_envelope_quota_model`). This method does not
+    /// re-check the kind; the service does, and only calls the repo
+    /// with a validated shared-drive id.
+    ///
+    /// A newly-lowered quota can be **under** the drive's current
+    /// `used_bytes` — that's a deliberate soft-quota semantic. The
+    /// `storage_usage_service` gates NEW writes on
+    /// `used + delta <= quota`, so a shared drive already over its
+    /// freshly-reduced cap can only shrink (delete) until it comes back
+    /// under the limit; no existing content is retroactively touched.
+    ///
+    /// Cache invalidation mirrors `update_policies` — the user-keyed
+    /// readable-drive-list caches carry the quota alongside the row so
+    /// they'd serve stale numbers otherwise; the default-drive cache
+    /// carries the DriveWithRootName which also includes the quota.
+    ///
+    /// Returns the persisted post-mutation value so the caller can
+    /// echo it back in the audit log and API response.
+    async fn update_quota(
+        &self,
+        drive_id: Uuid,
+        quota_bytes: Option<i64>,
+    ) -> Result<Option<i64>, DriveRepositoryError>;
 }
 
 /// Convenience: convert the canonical kind discriminator from its SQL

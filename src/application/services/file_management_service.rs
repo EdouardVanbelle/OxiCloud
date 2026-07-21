@@ -4,6 +4,7 @@ use crate::application::dtos::file_dto::FileDto;
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::file_lifecycle::FileLifecycleHook;
 use crate::application::ports::file_ports::FileManagementUseCase;
+use crate::application::ports::resource_access_hook::ResourceAccessHook;
 use crate::application::ports::storage_ports::{CopyFolderTreeResult, FileWritePort};
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::application::services::external_mount_router::{MountRouter, ResolvedId};
@@ -38,6 +39,24 @@ pub struct FileManagementService {
     /// External-mount classifier. `None` in stub/test construction → all ids
     /// are treated as native.
     mount_router: Option<Arc<MountRouter>>,
+    /// Read/write access hook — fired so Recent reflects "this is the file
+    /// I just copied / renamed / moved", same way the read paths surface
+    /// downloads. Distinct from the lifecycle hook because lifecycle hooks
+    /// don't carry the `caller_id` the recording side needs.
+    resource_access_hook: Option<Arc<dyn ResourceAccessHook>>,
+    /// Drive repository — used by D5's `forbid_cross_drive_move` gate
+    /// on `move_file_with_perms`. Optional so stubs / test factories
+    /// can build the service without wiring the full drive repo; in
+    /// that case the cross-drive move check is skipped (the policy
+    /// is silently off). Production DI wires it in.
+    drive_repo: Option<Arc<dyn crate::domain::repositories::drive_repository::DriveRepository>>,
+    /// Storage-usage service — used to pre-check the destination
+    /// drive's `used_bytes + delta ≤ quota_bytes` invariant on
+    /// cross-drive MOVE, matching the pre-write check the upload path
+    /// already performs. Without it, the check is silently skipped
+    /// (stub/test builders); production DI wires it in.
+    storage_usage:
+        Option<Arc<crate::application::services::storage_usage_service::StorageUsageService>>,
 }
 
 impl FileManagementService {
@@ -61,6 +80,9 @@ impl FileManagementService {
             authz,
             file_lifecycle_hook: None,
             mount_router: None,
+            resource_access_hook: None,
+            drive_repo: None,
+            storage_usage: None,
         }
     }
 
@@ -121,6 +143,42 @@ impl FileManagementService {
             }
             _ => Err(cross_boundary_move_err()),
         }
+    }
+
+    /// Registers the read/write access hook (Recent list recorder).
+    pub fn with_resource_access_hook(mut self, hook: Arc<dyn ResourceAccessHook>) -> Self {
+        self.resource_access_hook = Some(hook);
+        self
+    }
+
+    /// Internal helper: fire the access hook if registered.
+    fn notify_file_accessed(&self, caller_id: Uuid, file_id: &str) {
+        if let Some(hook) = &self.resource_access_hook {
+            hook.on_file_accessed(caller_id, file_id);
+        }
+    }
+
+    /// Wires the drive repository, enabling D5 `forbid_cross_drive_move`
+    /// enforcement on `move_file_with_perms`. Without it, the gate is
+    /// silently skipped.
+    pub fn with_drive_repo(
+        mut self,
+        drive_repo: Arc<dyn crate::domain::repositories::drive_repository::DriveRepository>,
+    ) -> Self {
+        self.drive_repo = Some(drive_repo);
+        self
+    }
+
+    /// Wires the storage-usage service so `move_file_with_perms` can
+    /// pre-check the destination drive's quota on cross-drive moves.
+    pub fn with_storage_usage(
+        mut self,
+        storage_usage: Arc<
+            crate::application::services::storage_usage_service::StorageUsageService,
+        >,
+    ) -> Self {
+        self.storage_usage = Some(storage_usage);
+        self
     }
 
     /// Engine check for a file resource. Parses the id into a `Uuid` and
@@ -217,6 +275,9 @@ impl FileManagementService {
         if let Some(hook) = &self.file_lifecycle_hook {
             hook.on_file_copied(&dto.id, &dto.content_hash, &dto.mime_type, file_id);
         }
+        // The caller just spawned a fresh file — show it in their Recent
+        // list. The source file isn't recorded; only the visible target.
+        self.notify_file_accessed(caller_id, &dto.id);
         Ok(dto)
     }
 
@@ -344,7 +405,96 @@ impl FileManagementUseCase for FileManagementService {
             .await?;
         self.require_target_folder_perm(folder_id.as_deref(), Permission::Create, caller_id)
             .await?;
-        self.move_file(file_id, folder_id, caller_id).await
+
+        // D5 `forbid_cross_drive_move` + D6 `resource.moved_between_drives` audit
+        // share the same src/dst drive_id lookup: the gate refuses
+        // before the move; the audit fires after a successful move
+        // when the two drives differ. Silently skipped if the drive
+        // repo isn't wired (stub builders) or the move target is None
+        // (root namespace — same-drive semantics).
+        let mut cross_drive: Option<(Uuid, Uuid)> = None;
+        if let Some(drive_repo) = &self.drive_repo
+            && let Some(target_folder_id) = folder_id.as_deref()
+        {
+            let file_uuid =
+                Uuid::parse_str(file_id).map_err(|_| DomainError::not_found("File", file_id))?;
+            let dst_folder_uuid = Uuid::parse_str(target_folder_id)
+                .map_err(|_| DomainError::not_found("Folder", target_folder_id))?;
+            // Independent point reads — overlapped so the pre-move drive
+            // resolution pays one round-trip, not two (ROUND10).
+            let (src_res, dst_res) = tokio::join!(
+                drive_repo.get_drive_id_and_policies_for_file(file_uuid),
+                drive_repo.drive_id_for_folder(dst_folder_uuid),
+            );
+            let (src_drive_id, src_policies) = src_res.map_err(|e| {
+                DomainError::internal_error("Drive", format!("source drive lookup: {e:?}"))
+            })?;
+            let dst_drive_id = dst_res.map_err(|e| {
+                DomainError::internal_error("Drive", format!("destination drive lookup: {e:?}"))
+            })?;
+            if src_drive_id != dst_drive_id {
+                src_policies.refuse_cross_drive_move(
+                    crate::domain::entities::drive::CrossDriveMoveGateContext {
+                        caller_id,
+                        resource_type: "file",
+                        resource_id: file_uuid,
+                        src_drive_id,
+                        dst_drive_id,
+                    },
+                )?;
+                // Destination drive quota: same pre-write check the
+                // upload path already runs (`file_upload_service.rs`
+                // `check_storage_quota`), applied here so a caller
+                // can't sneak content past the drive cap via MOVE.
+                // Denial → `DomainError::QuotaExceeded` → 507
+                // Insufficient Storage. Skipped when `storage_usage`
+                // isn't wired (stub builders) — same shape as the
+                // upload path's skip semantics.
+                if let Some(storage_usage) = &self.storage_usage
+                    && let Some(size_bytes) = storage_usage.file_bytes(file_uuid).await?
+                    && let Ok(size_u64) = u64::try_from(size_bytes)
+                {
+                    storage_usage
+                        .check_drive_quota(dst_drive_id, size_u64)
+                        .await?;
+                }
+                cross_drive = Some((src_drive_id, dst_drive_id));
+            }
+        }
+
+        let dto = self.move_file(file_id, folder_id, caller_id).await?;
+
+        // Cross-drive move invalidates the file's `owner_cache` entry
+        // in the authz engine — the cache assumed drive_id stability
+        // that no longer holds. Without this call the drive-role
+        // precheck at `check_inner` steers to the (stale) source
+        // drive and legitimate Delete/Update by a destination-drive
+        // role-holder returns 404 for up to the cache TTL.
+        if cross_drive.is_some()
+            && let Ok(file_uuid) = Uuid::parse_str(file_id)
+        {
+            self.authz
+                .invalidate_owner_cache_for_resource(Resource::File(file_uuid))
+                .await;
+        }
+
+        // D6 §11 audit: emit only when the move actually crossed a
+        // drive boundary. Same-drive moves are too noisy to audit at
+        // info — operators care about the cross-drive case for
+        // exfiltration / quota tracking.
+        if let Some((src_drive_id, dst_drive_id)) = cross_drive {
+            tracing::info!(
+                target: "audit",
+                event = "resource.moved_between_drives",
+                resource_type = "file",
+                resource_id = %dto.id,
+                src_drive_id = %src_drive_id,
+                dst_drive_id = %dst_drive_id,
+                by = %caller_id,
+                "📦 file moved between drives",
+            );
+        }
+        Ok(dto)
     }
 
     async fn copy_file_with_perms(
@@ -359,6 +509,31 @@ impl FileManagementUseCase for FileManagementService {
             .await?;
         self.require_target_folder_perm(target_folder_id.as_deref(), Permission::Create, caller_id)
             .await?;
+
+        // Destination drive quota: COPY creates a new file row that
+        // counts against the destination drive's `used_bytes` even
+        // though blob dedup means no new bytes hit the store. Same
+        // pre-flight shape the delta-upload path already uses.
+        // Skipped when `storage_usage` isn't wired (stub builders) or
+        // `target_folder_id` is None (root namespace — same-drive
+        // semantics inherit the source's cap coverage). Denial →
+        // `QuotaExceeded` → 507.
+        if let (Some(storage_usage), Some(target_folder)) =
+            (&self.storage_usage, target_folder_id.as_deref())
+        {
+            let file_uuid =
+                Uuid::parse_str(file_id).map_err(|_| DomainError::not_found("File", file_id))?;
+            let target_folder_uuid = Uuid::parse_str(target_folder)
+                .map_err(|_| DomainError::not_found("Folder", target_folder))?;
+            if let Some(size_bytes) = storage_usage.file_bytes(file_uuid).await?
+                && let Ok(size_u64) = u64::try_from(size_bytes)
+            {
+                storage_usage
+                    .check_drive_quota_by_folder(target_folder_uuid, size_u64)
+                    .await?;
+            }
+        }
+
         self.copy_file(file_id, target_folder_id, new_name.as_deref(), caller_id)
             .await
     }
@@ -466,6 +641,26 @@ impl FileManagementUseCase for FileManagementService {
             .await?;
         self.require_target_folder_perm(target_parent_id.as_deref(), Permission::Create, caller_id)
             .await?;
+
+        // Destination drive quota: sum the subtree's non-trashed files
+        // and refuse if the destination couldn't hold them. Skipped
+        // when `storage_usage` isn't wired or the target is root
+        // (same rationale as `copy_file_with_perms`).
+        if let (Some(storage_usage), Some(target_parent)) =
+            (&self.storage_usage, target_parent_id.as_deref())
+        {
+            let source_uuid = Uuid::parse_str(source_folder_id)
+                .map_err(|_| DomainError::not_found("Folder", source_folder_id))?;
+            let target_parent_uuid = Uuid::parse_str(target_parent)
+                .map_err(|_| DomainError::not_found("Folder", target_parent))?;
+            let subtree_bytes = storage_usage.folder_subtree_bytes(source_uuid).await?;
+            if let Ok(subtree_u64) = u64::try_from(subtree_bytes) {
+                storage_usage
+                    .check_drive_quota_by_folder(target_parent_uuid, subtree_u64)
+                    .await?;
+            }
+        }
+
         self.copy_folder_tree(source_folder_id, target_parent_id, dest_name)
             .await
     }

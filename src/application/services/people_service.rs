@@ -23,17 +23,30 @@ use crate::common::errors::DomainError;
 use crate::domain::entities::face::Person;
 use crate::infrastructure::repositories::pg::FacePgRepository;
 
-/// Cosine similarity of two equal-length vectors. Embeddings are produced
-/// L2-normalized, so this is ~a dot product; we normalize anyway for safety.
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
+/// Squared L2 norm, accumulated in the same order `cosine` used to, so
+/// the precomputed-norm path is bit-identical to the old per-pair one.
+fn norm_sq(v: &[f32]) -> f32 {
+    let mut n = 0.0f32;
+    for &x in v {
+        n += x * x;
+    }
+    n
+}
+
+/// Cosine similarity of two equal-length vectors given their precomputed
+/// squared norms. Embeddings are produced L2-normalized, so this is ~a dot
+/// product; we normalize anyway for safety. The O(N²) recluster pair loop
+/// used to re-accumulate BOTH norms on every pair — precomputing them once
+/// per face keeps only the dot product in the hot loop while the final
+/// `dot / (√na · √nb)` expression (and the zero guards) stay exactly as
+/// before, so results are bit-identical (benches/ROUND11.md §17).
+fn cosine_with_norms(a: &[f32], b: &[f32], na: f32, nb: f32) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
-    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
+    let mut dot = 0.0f32;
     for (&x, &y) in a.iter().zip(b.iter()) {
         dot += x * y;
-        na += x * x;
-        nb += y * y;
     }
     if na == 0.0 || nb == 0.0 {
         return 0.0;
@@ -102,10 +115,13 @@ impl PeopleService {
             return Ok(0);
         }
 
+        let norms: Vec<f32> = faces.iter().map(|f| norm_sq(&f.embedding)).collect();
         let mut uf = UnionFind::new(n);
         for i in 0..n {
             for j in (i + 1)..n {
-                if cosine(&faces[i].embedding, &faces[j].embedding) >= self.cluster_threshold {
+                if cosine_with_norms(&faces[i].embedding, &faces[j].embedding, norms[i], norms[j])
+                    >= self.cluster_threshold
+                {
                     uf.union(i, j);
                 }
             }
@@ -117,13 +133,19 @@ impl PeopleService {
             groups.entry(root).or_default().push(i);
         }
 
+        // Accumulate every (face, person) change and apply them in ONE
+        // UNNEST batch at the end — the old per-face `assign_person` loop
+        // issued up to F sequential UPDATE round-trips per recluster
+        // (benches/ROUND11.md §Q5; the ROUND10 `save_faces` pattern). The
+        // final column state is identical.
+        let mut assignments: Vec<(Uuid, Option<Uuid>)> = Vec::new();
         let mut created = 0usize;
         for idxs in groups.into_values() {
             if idxs.len() < self.min_faces {
                 // Too small to be a person — leave/reset these faces unassigned.
                 for &i in &idxs {
                     if faces[i].person_id.is_some() {
-                        self.repo.assign_person(faces[i].id, None).await?;
+                        assignments.push((faces[i].id, None));
                     }
                 }
                 continue;
@@ -151,9 +173,7 @@ impl PeopleService {
             };
             for &i in &idxs {
                 if faces[i].person_id != Some(person_id) {
-                    self.repo
-                        .assign_person(faces[i].id, Some(person_id))
-                        .await?;
+                    assignments.push((faces[i].id, Some(person_id)));
                 }
             }
             let _ = self
@@ -161,23 +181,29 @@ impl PeopleService {
                 .set_person_cover(person_id, faces[idxs[0]].id)
                 .await;
         }
+        self.repo.assign_person_batch(&assignments).await?;
 
         Ok(created)
     }
 
     /// People (non-empty clusters), most-photographed first.
+    ///
+    /// Counts come from a grouped-COUNT query and cover photos from one
+    /// batched lookup of just the cover face ids — the previous
+    /// `faces_for_user` shipped every face row (2 KiB embedding included)
+    /// only to count them: ~20 MB of BYTEA per request on a 10k-face
+    /// library (benches/PEOPLE-LIST.md).
     pub async fn list_people(&self, caller_id: Uuid) -> Result<Vec<PersonDto>, DomainError> {
         let persons = self.repo.persons_for_user(caller_id).await?;
-        let faces = self.repo.faces_for_user(caller_id).await?;
-
-        let mut count: HashMap<Uuid, i64> = HashMap::new();
-        let mut face_file: HashMap<Uuid, Uuid> = HashMap::new();
-        for f in &faces {
-            if let Some(pid) = f.person_id {
-                *count.entry(pid).or_default() += 1;
-            }
-            face_file.insert(f.id, f.file_id);
-        }
+        let count: HashMap<Uuid, i64> = self
+            .repo
+            .person_face_stats(caller_id)
+            .await?
+            .into_iter()
+            .collect();
+        let cover_ids: Vec<Uuid> = persons.iter().filter_map(|p| p.cover_face_id).collect();
+        let face_file: HashMap<Uuid, Uuid> =
+            self.repo.file_ids_for_faces(caller_id, &cover_ids).await?;
 
         let mut out: Vec<PersonDto> = persons
             .into_iter()
@@ -219,10 +245,11 @@ impl PeopleService {
         caller_id: Uuid,
         file_id: Uuid,
     ) -> Result<Vec<FaceBoxDto>, DomainError> {
-        let faces = self.repo.faces_for_file(file_id).await?;
-        Ok(faces
+        // The narrow projection scopes to the caller in SQL (WHERE user_id),
+        // so no post-filter is needed here. See benches/ROUND14.md §Q1.
+        let boxes = self.repo.face_boxes_for_file(file_id, caller_id).await?;
+        Ok(boxes
             .into_iter()
-            .filter(|f| f.user_id == caller_id)
             .map(|f| FaceBoxDto {
                 id: f.id.to_string(),
                 person_id: f.person_id.map(|u| u.to_string()),
@@ -245,11 +272,13 @@ impl PeopleService {
 
     /// Merge `from` into `into` by reassigning all of `from`'s faces. The
     /// now-empty `from` person is hidden by `list_people`.
+    ///
+    /// One set-based UPDATE — the previous shape loaded every face row
+    /// (embeddings included) and issued one UPDATE per matching face.
     pub async fn merge(&self, caller_id: Uuid, into: Uuid, from: Uuid) -> Result<(), DomainError> {
-        let faces = self.repo.faces_for_user(caller_id).await?;
-        for f in faces.into_iter().filter(|f| f.person_id == Some(from)) {
-            self.repo.assign_person(f.id, Some(into)).await?;
-        }
+        self.repo
+            .reassign_person_faces(caller_id, from, into)
+            .await?;
         Ok(())
     }
 

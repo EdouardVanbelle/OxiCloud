@@ -319,6 +319,14 @@ where
         // via `drive_repo.list_for_subjects` + role-bundle filter.
         self.trash_repository.clear_trash(&[user_id]).await
     }
+
+    async fn empty_trash_for_drive(&self, _user_id: Uuid, drive_id: Uuid) -> Result<()> {
+        // Test mock — uses the passed-in drive id verbatim. Production
+        // checks the caller's Delete-bearing drives first and refuses
+        // with NotFound on a mismatch; the mock skips that and just
+        // clears the given drive directly.
+        self.trash_repository.clear_trash(&[drive_id]).await
+    }
 }
 
 // Mock repositories for testing
@@ -528,15 +536,6 @@ impl FileReadPort for MockFileRepository {
         Ok((Vec::new(), 0))
     }
 
-    async fn count_files(
-        &self,
-        _folder_id: Option<&str>,
-        _criteria: &crate::application::dtos::search_dto::SearchCriteriaDto,
-        _user_id: Uuid,
-    ) -> std::result::Result<usize, DomainError> {
-        Ok(0)
-    }
-
     async fn stream_files_in_subtree(
         &self,
         _folder_id: &str,
@@ -545,15 +544,6 @@ impl FileReadPort for MockFileRepository {
         DomainError,
     > {
         Ok(Box::pin(futures::stream::empty()))
-    }
-
-    async fn get_file_for_owner(
-        &self,
-        id: &str,
-        _owner_id: Uuid,
-    ) -> std::result::Result<File, DomainError> {
-        // In this mock, ignore ownership — trash tests don't focus on ownership
-        self.get_file(id).await
     }
 }
 
@@ -599,6 +589,7 @@ impl FileWritePort for MockFileRepository {
         _size: u64,
         _modified_at: Option<i64>,
         _caller_id: Uuid,
+        _expected_hash: Option<&str>,
     ) -> std::result::Result<(String, i64), DomainError> {
         Ok((String::new(), 0))
     }
@@ -737,10 +728,9 @@ impl FolderRepository for MockFolderRepository {
         Ok(vec![])
     }
 
-    async fn list_folders_by_owner(
+    async fn list_root_folders_for_caller(
         &self,
-        _parent_id: Option<&str>,
-        _owner_id: Uuid,
+        _caller_id: Uuid,
     ) -> std::result::Result<Vec<Folder>, DomainError> {
         Ok(vec![])
     }
@@ -755,10 +745,9 @@ impl FolderRepository for MockFolderRepository {
         Ok((vec![], Some(0)))
     }
 
-    async fn list_folders_by_owner_paginated(
+    async fn list_root_folders_for_caller_paginated(
         &self,
-        _parent_id: Option<&str>,
-        _owner_id: Uuid,
+        _caller_id: Uuid,
         _offset: usize,
         _limit: usize,
         _include_total: bool,

@@ -19,6 +19,17 @@
 #      MOVE → verify the assembled file's BLAKE3 over REST.
 #   2. CAP REJECTION — MKCOL a fresh session → PUT a 5 MiB chunk →
 #      413 Payload Too Large.
+#   3. QUOTA REJECTION (D4 / per-chunk gate) — tighten the caller's
+#      storage envelope to 100 B, MKCOL a fresh session (still under
+#      cap, used=0), then PUT a 200 B chunk → 507 Insufficient
+#      Storage. Pre-D4 the chunked path never gated until the final
+#      MOVE — clients could waste GB of upload before learning they
+#      were over. Validates `refuse_if_over_quota` in
+#      `uploads_handler::handle_put_chunk` runs the
+#      `used + session_so_far + content_length` projection
+#      ahead of accepting body bytes. Admin's original quota is
+#      restored on exit so subsequent tests in the suite are
+#      unaffected.
 #
 # Prerequisites:
 #   - Server running at $base_url with admin credentials (test.env).
@@ -88,6 +99,12 @@ EXPECTED_BLAKE3="b2208c5dc33ff951227bd0c139f5eccb04105d6da6a7519ee23f7bc00a17bb5
 REMOTE_NAME="nc-chunked-cap-test.txt"
 UPLOAD_ID_OK="oxi-cap-ok-$(date +%s)"
 UPLOAD_ID_BIG="oxi-cap-big-$(date +%s)"
+UPLOAD_ID_QUOTA="oxi-cap-quota-$(date +%s)"
+# 200 B fixture for the D4 quota-gate case. Lives in $TMPDIR so it
+# never lands in `tests/fixtures/` — generated on the fly, deleted
+# by the EXIT trap. mktemp keeps the path race-free across parallel
+# runs.
+FIXTURE_200B=""
 
 echo
 echo "=== NextCloud chunked upload: cap + streaming ==="
@@ -110,8 +127,34 @@ APP_PASSWORD_ID=$(jq -r '.id' <<<"$APP_PASSWORD_RESPONSE")
     || fail "Failed to mint NC app password: $APP_PASSWORD_RESPONSE"
 echo "  app password minted (id=$APP_PASSWORD_ID)"
 
-# Clean up the app password when the script exits (success or fail).
-trap '[[ -n "${APP_PASSWORD_ID:-}" ]] && rest_delete "/api/auth/app-passwords/$APP_PASSWORD_ID" > /dev/null || true' EXIT
+# Capture admin's id + current envelope quota up front so Case 3
+# can tighten the cap and the EXIT trap can restore it on any
+# failure path. `storage_quota_bytes == 0` is the unlimited
+# sentinel (see `check_storage_quota`); we read it back here in
+# case a prior test set a real value.
+ADMIN_ID=$(rest_get "/api/auth/me" | jq -r '.id')
+[[ -n "$ADMIN_ID" && "$ADMIN_ID" != "null" ]] || fail "Failed to read admin user id"
+ORIGINAL_ADMIN_QUOTA=$(rest_get "/api/auth/me" | jq -r '.storage_quota_bytes // 0')
+
+# Single cleanup on exit:
+#   - restore admin's original storage envelope (in case Case 3
+#     fired and we exited before its own restore),
+#   - revoke the test app password,
+#   - drop the on-the-fly 200 B fixture.
+cleanup_test() {
+    if [[ -n "${ADMIN_ID:-}" ]]; then
+        curl -s -X PUT \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"quota_bytes\":${ORIGINAL_ADMIN_QUOTA}}" \
+            "$base_url/api/admin/users/$ADMIN_ID/quota" > /dev/null || true
+    fi
+    if [[ -n "${APP_PASSWORD_ID:-}" ]]; then
+        rest_delete "/api/auth/app-passwords/$APP_PASSWORD_ID" > /dev/null || true
+    fi
+    [[ -n "${FIXTURE_200B:-}" && -f "$FIXTURE_200B" ]] && rm -f "$FIXTURE_200B"
+}
+trap cleanup_test EXIT
 
 # Idempotent cleanup of any leftover file from a previous failed run.
 HOME_FOLDER_ID=$(rest_get "/api/folders" | jq -r '.[0].id')
@@ -126,7 +169,7 @@ fi
 # ── Case 1: SUCCESS path ──────────────────────────────────────────────────────
 
 echo
-echo "[1/2] SUCCESS path — MKCOL → PUT → MOVE → verify BLAKE3"
+echo "[1/3] SUCCESS path — MKCOL → PUT → MOVE → verify BLAKE3"
 
 # 1a. Create chunked-upload session.
 STATUS=$(nc_req MKCOL "/remote.php/dav/uploads/$username/$UPLOAD_ID_OK")
@@ -167,7 +210,7 @@ purge_from_trash "$REMOTE_NAME"
 # ── Case 2: CAP REJECTION ─────────────────────────────────────────────────────
 
 echo
-echo "[2/2] CAP REJECTION — 5 MiB chunk on a 4 MiB cap → 413"
+echo "[2/3] CAP REJECTION — 5 MiB chunk on a 4 MiB cap → 413"
 
 # 2a. Fresh session.
 STATUS=$(nc_req MKCOL "/remote.php/dav/uploads/$username/$UPLOAD_ID_BIG")
@@ -191,6 +234,74 @@ pass "PUT over-cap chunk rejected (status=$STATUS)"
 STATUS=$(nc_req DELETE "/remote.php/dav/uploads/$username/$UPLOAD_ID_BIG")
 [[ "$STATUS" =~ ^(204|404)$ ]] || fail "DELETE abandoned session: got $STATUS"
 pass "DELETE abandoned session (status=$STATUS)"
+
+# ── Case 3: QUOTA REJECTION (D4 per-chunk gate) ───────────────────────────────
+
+echo
+echo "[3/3] QUOTA REJECTION — envelope tightened to (used + 100 B), PUT 200 B chunk → 507"
+
+# 3a. Compute the tight quota dynamically: admin has accumulated
+#     `used_bytes` from every earlier test in the suite, so a hard-
+#     coded "100 B" cap would trip MKCOL (`used + 0 > 100`). Read
+#     the current cached envelope and set the cap to
+#     `current + 100` — leaves enough headroom that MKCOL passes
+#     (`used + 0 = used < used + 100`) while a 200 B chunk PUT
+#     overflows by exactly 100 (`used + 0 + 200 > used + 100`).
+CURRENT_USED=$(rest_get "/api/auth/me" | jq -r '.storage_used_bytes')
+[[ -n "$CURRENT_USED" && "$CURRENT_USED" != "null" ]] || fail "Failed to read current used_bytes"
+TIGHT_QUOTA=$(( CURRENT_USED + 100 ))
+
+# 3b. Tighten admin's storage envelope. The pre-existing
+#     `cleanup_test` EXIT trap restores `ORIGINAL_ADMIN_QUOTA` so a
+#     mid-test failure doesn't leave the suite running under a
+#     barely-headroom cap.
+curl -s -X PUT \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"quota_bytes\":${TIGHT_QUOTA}}" \
+    "$base_url/api/admin/users/$ADMIN_ID/quota" > /dev/null
+
+# 3c. Generate the 200 B fixture in $TMPDIR — never lands in
+#     `tests/fixtures/` (avoids polluting the committed dir + the
+#     gitignore list).
+FIXTURE_200B=$(mktemp -t nc-chunked-quota-200b.XXXXXX.bin)
+dd if=/dev/zero of="$FIXTURE_200B" bs=1 count=200 status=none
+
+# 3d. Fresh session. MKCOL gate projects `used + 0` against the
+#     tight cap; with quota = used + 100 the projection sits 100 B
+#     under the limit so MKCOL passes. The real gate fires at the
+#     PUT below.
+STATUS=$(nc_req MKCOL "/remote.php/dav/uploads/$username/$UPLOAD_ID_QUOTA")
+[[ "$STATUS" =~ ^(201|204)$ ]] || fail "MKCOL quota session: got $STATUS"
+pass "MKCOL quota session (status=$STATUS)"
+
+# 3e. PUT a 200 B chunk → expect 507. The handler reads
+#     Content-Length (200), sums on-disk chunks for this session
+#     (0), and runs `check_storage_quota(admin_id, 200)`:
+#     used + 200 > used + 100 → QuotaExceeded → 507.
+#     Pre-D4 this would have returned 201 and the whole upload
+#     would have wasted bandwidth until the final MOVE.
+STATUS=$(nc_req PUT \
+    "/remote.php/dav/uploads/$username/$UPLOAD_ID_QUOTA/00001" \
+    -H "Content-Type: application/octet-stream" \
+    --data-binary "@$FIXTURE_200B")
+[[ "$STATUS" == "507" ]] || fail "PUT over-quota chunk: got $STATUS, expected 507"
+pass "PUT over-quota chunk rejected (status=$STATUS)"
+
+# 3e. Abort the leftover session.
+STATUS=$(nc_req DELETE "/remote.php/dav/uploads/$username/$UPLOAD_ID_QUOTA")
+[[ "$STATUS" =~ ^(204|404)$ ]] || fail "DELETE quota session: got $STATUS"
+pass "DELETE quota session (status=$STATUS)"
+
+# 3f. Restore admin's original envelope immediately — keeps the rest
+#     of the suite running under the right cap. The EXIT trap also
+#     restores it as belt-and-braces.
+curl -s -X PUT \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"quota_bytes\":${ORIGINAL_ADMIN_QUOTA}}" \
+    "$base_url/api/admin/users/$ADMIN_ID/quota" > /dev/null
+pass "Admin envelope restored to ${ORIGINAL_ADMIN_QUOTA}"
 
 # ── summary ──────────────────────────────────────────────────────────────────
 

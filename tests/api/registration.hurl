@@ -5,8 +5,8 @@
 # `POST /api/auth/register`. Email-only signup:
 #   - returns a uniform 200 message (no JWT, no UserDto)
 #   - mints a welcome magic-link mailed to `email`
-#   - redemption lands the new internal user on `/#/files`
-#     (not `/#/sharedwithme`, which is for externals)
+#   - redemption lands the new internal user on `/files`
+#     (not `/shared-with-me`, which is for externals)
 #
 # Requires `OXICLOUD_SMTP_MOCK=true` (set in tests/common/server.env).
 # =============================================================
@@ -111,14 +111,19 @@ body contains "different browser"
 # Step 5b — Same link, this time with the matching cookie.
 #           PR 22 binds the magic-link to the requesting browser;
 #           a matching cookie redeems instantly. Internal user
-#           with no resource target → lands on `/#/files`.
+#           with no resource target → lands on `/files`.
 # ─────────────────────────────────────────────────────────────
 GET {{pr18_magic_url}}
 Cookie: oxicloud_magic_request={{pr18_magic_cookie}}
 
 HTTP 302
 [Asserts]
-header "Location" == "/#/files"
+# SPA route (SvelteKit path-based). Historical value pre-migration was
+# `/#/files` (legacy vanilla frontend hash-routing). Changed alongside
+# the migration off the legacy shell — landing on the hash route now
+# serves the legacy `static/index.html` with its meta-CSP inline
+# scripts, which the SPA CSP blocks.
+header "Location" == "/files"
 [Captures]
 pr18_access_token: cookie "oxicloud_access"
 
@@ -343,6 +348,61 @@ Content-Type: application/json
   "username": "charlie",
   "email": "charlie-other@example.com",
   "password": "AttackerPassword99!"
+}
+
+HTTP 200
+[Asserts]
+jsonpath "$.message" contains "request received"
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 12 — OXICLOUD_REGISTRATION_ALLOWED_EMAIL_DOMAINS gate.
+#
+# `tests/common/server.env` pins the allowlist to
+# `example.com,example.test`. Every legitimate signup above stayed
+# inside that set. Now attempt an off-domain address and assert:
+#
+#   * HTTP 403 (NOT the anti-enumeration 200 — instance-wide policy
+#     is not a per-user oracle; a rejected domain hasn't
+#     established whether a specific address exists).
+#   * `RegistrationDomainNotAllowed` error code so operators and
+#     frontends can distinguish this from other 403 shapes
+#     (`RegistrationDisabled`, `PasswordRegistrationDisabled`).
+#
+# The gate is CASE-INSENSITIVE on the post-`@` part — extra
+# request with mixed case pins that behaviour so a future refactor
+# can't silently regress a lowercase-only match.
+# ─────────────────────────────────────────────────────────────
+POST {{base_url}}/api/auth/register
+Content-Type: application/json
+{
+  "username": "off-domain",
+  "email": "someone@nowhere.invalid",
+  "password": "TestPassword1!"
+}
+
+HTTP 403
+[Asserts]
+# `$.error` carries the human-readable message; the stable
+# machine-readable code lives at `$.error_type` (see
+# `interfaces/errors.rs::ErrorResponse`). Pin `error_type` so a
+# future copy-edit of the message doesn't break the test.
+jsonpath "$.error_type" == "RegistrationDomainNotAllowed"
+
+
+# Case-insensitive matching regression pin: `EXAMPLE.COM` in the
+# post-`@` part is normalised to `example.com` and accepted. Reuse
+# charlie's already-taken email so the request lands on the
+# anti-enum-200 collision path — this way we exercise the domain
+# gate (must pass) without creating a new user that would need
+# cleanup, and pin the "case-insensitive normalization" invariant
+# in one step.
+POST {{base_url}}/api/auth/register
+Content-Type: application/json
+{
+  "username": "case-check",
+  "email": "charlie@EXAMPLE.COM",
+  "password": "TestPassword1!"
 }
 
 HTTP 200

@@ -31,15 +31,17 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 use uuid::Uuid;
 
 use moka::future::Cache;
 use sqlx::PgPool;
+use tokio::sync::oneshot;
 
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::common::errors::DomainError;
+use crate::domain::entities::drive::DrivePolicies;
 use crate::domain::entities::subject_group::INTERNAL_GROUP_ID;
 use crate::domain::repositories::subject_group_repository::SubjectGroupRepository;
 use crate::domain::services::authorization::{
@@ -91,6 +93,49 @@ const DRIVE_ROLE_CACHE_CAPACITY: u64 = 100_000;
 /// enough that any oversight self-heals in <1 minute.
 const DRIVE_ROLE_CACHE_TTL: Duration = Duration::from_secs(30);
 
+/// `drive_policies_cache` bound: entries are `(Uuid, DrivePolicies)` — a
+/// handful of bools per drive. 100k is generous headroom for the drive
+/// population of any realistic deployment.
+const DRIVE_POLICIES_CACHE_CAPACITY: u64 = 100_000;
+/// `drive_policies_cache` TTL. Policy mutations explicitly invalidate
+/// (see `invalidate_drive_policies_cache_for_drive`) so the TTL is the
+/// self-heal net for edge cases (direct SQL PATCH by an operator, migration
+/// backfill). Short enough that a manually-flipped `read_only` becomes
+/// effective within a minute on the hot path.
+const DRIVE_POLICIES_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// `cascade_grant_cache` bound: entries are
+/// `((Subject, Resource, Permission), bool)` — a few tens of bytes each. A
+/// shared photo album is one folder grant serving hundreds of file checks, so
+/// 100k comfortably covers the working set of active shared-resource viewers.
+const CASCADE_GRANT_CACHE_CAPACITY: u64 = 100_000;
+/// `cascade_grant_cache` TTL. Direct grant mutations on the file/folder
+/// (`set_role` / `clear_role`) explicitly invalidate the whole cache, so the
+/// TTL is the self-heal net for the *indirect* paths — a group-membership
+/// change, a resource move, or a grant's `expires_at` passing — exactly as
+/// `drive_role_cache` leans on its TTL for group changes "rather than a deep
+/// invalidation tree". Short enough that any such change takes effect in <1 min.
+const CASCADE_GRANT_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// `direct_grant_cache` bound/TTL: memoises the Calendar / AddressBook /
+/// Playlist `role_grants` point decision — the only `check()` arms that had
+/// NO result cache, re-run on every CalDAV/CardDAV/music request by clients
+/// that poll continuously. Same invalidation contract as
+/// `cascade_grant_cache`: grant writes on these resource types flush the
+/// whole cache; group/expiry churn self-heals within the TTL
+/// (benches/ROUND11.md §Q2).
+const DIRECT_GRANT_CACHE_CAPACITY: u64 = 100_000;
+const DIRECT_GRANT_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// `file_parent_cache` bound/TTL: `file_id → Option<folder_id>` point rows
+/// (~50 B each) resolved on the file-cascade path so an N-file album pays
+/// ONE folder-cascade query instead of N (ROUND9). Parentage changes only
+/// on move — an indirect path the cascade cache already self-heals via TTL,
+/// so the same 30 s window applies (grant writes don't alter parentage and
+/// need no flush here).
+const FILE_PARENT_CACHE_CAPACITY: u64 = 100_000;
+const FILE_PARENT_CACHE_TTL: Duration = Duration::from_secs(30);
+
 pub struct PgAclEngine {
     pool: Arc<PgPool>,
     folder_repo: Arc<FolderDbRepository>,
@@ -132,6 +177,118 @@ pub struct PgAclEngine {
     /// `DriveManagementService`, the grant handler's revoke path) hit the
     /// invalidator inline.
     drive_role_cache: Cache<(Subject, Uuid), Option<Role>>,
+
+    /// Memoise `drive_id → DrivePolicies` (the typed view of the JSONB
+    /// `storage.drives.policies` column). Read on every mutating authz
+    /// check on a resource that lives in a drive (File/Folder/Drive) to
+    /// gate the `read_only` freeze.
+    ///
+    /// Subject-independent — policies are the same for every caller, so a
+    /// single entry per drive covers the whole tenant. Kept separate from
+    /// `drive_role_cache` (subject-keyed) so policy changes only flush this
+    /// cache, and membership changes only flush that one.
+    ///
+    /// **Invalidation**: explicit on every `DriveManagementService::update_policies`
+    /// call — a policy PATCH invalidates the entry before the response
+    /// returns, so the next check sees the fresh values. Short 30 s TTL
+    /// as the self-heal net for direct-SQL edits and migration backfills.
+    drive_policies_cache: Cache<Uuid, DrivePolicies>,
+
+    /// Memoise the File/Folder **grant-cascade** decision
+    /// `(subject, resource, permission) → bool` — the result of the
+    /// `role_grants` + folder-ancestor (`lpath @>`) cascade that
+    /// `check_inner` falls through to when the drive-role precheck doesn't
+    /// cover the caller. This is the per-request query a shared-album
+    /// recipient (a grant on the containing folder, no drive membership) pays
+    /// for **every thumbnail** — and browsers revalidate immutable thumbnails
+    /// constantly, so the same `(subject, file, Read)` decision is recomputed
+    /// again and again. Cached here it costs one query then in-memory hits.
+    ///
+    /// Only reached AFTER the drive-role precheck fails, so a caller who is a
+    /// drive member short-circuits above and never populates a (possibly
+    /// negative) entry here — a later drive grant can't be shadowed by a stale
+    /// cascade `false`.
+    ///
+    /// **Invalidation**: explicit `invalidate_all` on every File/Folder
+    /// `set_role` / `clear_role` (the direct share/revoke path — infrequent
+    /// relative to thumbnail reads, so a full flush is cheap and keeps
+    /// revocation immediate). The indirect paths — group-membership changes,
+    /// resource moves that change ancestry, grant `expires_at` expiry — are
+    /// caught by the 30 s TTL, matching `drive_role_cache`'s documented
+    /// convention.
+    ///
+    /// **Safety**: the check still runs on every request (the ordering is
+    /// unchanged — authz is never skipped); only its *result* is memoised, and
+    /// only positively-or-negatively for at most the TTL. A revoke via
+    /// `clear_role` flushes immediately; anything missed self-heals in ≤30 s.
+    cascade_grant_cache: Cache<(Subject, Resource, Permission), bool>,
+
+    /// Memoised Calendar/AddressBook/Playlist direct-grant decision (the
+    /// top-level resources with no cascade parent). See
+    /// `DIRECT_GRANT_CACHE_CAPACITY` for the contract.
+    direct_grant_cache: Cache<(Subject, Resource, Permission), bool>,
+    /// `file_id → Option<parent folder_id>` memo for the file-cascade
+    /// decomposition (see `cascade_grant_cached`): resolving the parent lets
+    /// a whole folder's files share ONE folder-cascade decision, so a shared
+    /// album's first view runs one ltree query instead of one per file.
+    /// Grant writes don't affect parentage — only the TTL applies (moves are
+    /// an indirect path, same self-heal contract as `cascade_grant_cache`).
+    file_parent_cache: Cache<Uuid, Option<Uuid>>,
+    /// Natural-batching collector for cold `file_parent_cache` misses — the
+    /// ROUND9 §10 deferred item. A shared N-photo album's cold first view
+    /// arrives as N near-simultaneous thumbnail requests, each missing the
+    /// parent memo and each paying a point `SELECT folder_id`.
+    ///
+    /// Leader-runs-inline shape: an idle miss marks itself leader (one
+    /// mutex op) and runs its point query exactly as before — the
+    /// SEQUENTIAL path gains no hop, no task, no extra latency (a
+    /// channel-task variant benchmarked at ~66 µs/miss of pure overhead and
+    /// was rejected). Misses arriving while a leader is in flight park a
+    /// oneshot in this queue; the leader drains them into ONE `= ANY($1)`
+    /// batch after its own query, so a K-wide herd collapses to ~2 queries.
+    /// If a leader future is dropped mid-flight, its guard wakes every
+    /// parked waiter to retry (and re-elect); waiters that exhaust retries
+    /// fall back to the inline point query — strictly additive.
+    parent_batch: Arc<std::sync::Mutex<Option<Vec<ParentWaiter>>>>,
+    /// Total parent-resolution queries actually issued (point + batches) —
+    /// exposed via [`Self::parent_query_count`] for benches/operators.
+    parent_queries: Arc<AtomicU64>,
+}
+
+/// One parked parent-resolution request: file id + reply slot. A dropped
+/// sender (leader cancelled) is the retry signal. Errors are shared behind
+/// `Arc` because `DomainError` carries a non-clonable source chain (same
+/// convention as the Basic-auth single-flight).
+type ParentWaiter = (
+    Uuid,
+    oneshot::Sender<Result<Option<Uuid>, Arc<DomainError>>>,
+);
+
+/// Upper bound on ids drained into one `= ANY` parent batch. A browser herd
+/// is O(100); this only guards pathological queue growth.
+const PARENT_BATCH_MAX: usize = 256;
+
+/// How many times a parked waiter re-runs the elect-or-park protocol after
+/// a leader vanished before giving up and querying inline itself.
+const PARENT_WAIT_RETRIES: usize = 3;
+
+/// RAII release of parent-resolution leadership. If the leader future is
+/// dropped at an await point (client disconnect cancels the request), this
+/// clears the in-flight marker and drops every parked waiter's sender —
+/// their `oneshot` recv errors and they re-run the election, so a vanished
+/// leader can never strand the queue.
+struct ParentLeaderGuard<'a> {
+    engine: &'a PgAclEngine,
+}
+
+impl Drop for ParentLeaderGuard<'_> {
+    fn drop(&mut self) {
+        let mut slot = match self.engine.parent_batch.lock() {
+            Ok(s) => s,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *slot = None;
+    }
 }
 
 impl PgAclEngine {
@@ -165,6 +322,24 @@ impl PgAclEngine {
                 .max_capacity(DRIVE_ROLE_CACHE_CAPACITY)
                 .time_to_live(DRIVE_ROLE_CACHE_TTL)
                 .build(),
+            drive_policies_cache: Cache::builder()
+                .max_capacity(DRIVE_POLICIES_CACHE_CAPACITY)
+                .time_to_live(DRIVE_POLICIES_CACHE_TTL)
+                .build(),
+            cascade_grant_cache: Cache::builder()
+                .max_capacity(CASCADE_GRANT_CACHE_CAPACITY)
+                .time_to_live(CASCADE_GRANT_CACHE_TTL)
+                .build(),
+            direct_grant_cache: Cache::builder()
+                .max_capacity(DIRECT_GRANT_CACHE_CAPACITY)
+                .time_to_live(DIRECT_GRANT_CACHE_TTL)
+                .build(),
+            file_parent_cache: Cache::builder()
+                .max_capacity(FILE_PARENT_CACHE_CAPACITY)
+                .time_to_live(FILE_PARENT_CACHE_TTL)
+                .build(),
+            parent_batch: Arc::new(std::sync::Mutex::new(None)),
+            parent_queries: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -231,6 +406,24 @@ impl PgAclEngine {
                 .max_capacity(1)
                 .time_to_live(Duration::from_secs(1))
                 .build(),
+            drive_policies_cache: Cache::builder()
+                .max_capacity(1)
+                .time_to_live(Duration::from_secs(1))
+                .build(),
+            cascade_grant_cache: Cache::builder()
+                .max_capacity(1)
+                .time_to_live(Duration::from_secs(1))
+                .build(),
+            direct_grant_cache: Cache::builder()
+                .max_capacity(1)
+                .time_to_live(Duration::from_secs(1))
+                .build(),
+            file_parent_cache: Cache::builder()
+                .max_capacity(1)
+                .time_to_live(Duration::from_secs(1))
+                .build(),
+            parent_batch: Arc::new(std::sync::Mutex::new(None)),
+            parent_queries: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -257,6 +450,15 @@ impl PgAclEngine {
     /// `drive_role_cache` initialiser above), otherwise moka returns
     /// `InvalidationClosuresDisabled` and the mutation silently leaves
     /// stale role rows in cache for the full TTL.
+    /// Drop the cached `DrivePolicies` entry for one drive. Called by
+    /// `DriveManagementService::update_policies` after every JSONB PATCH so
+    /// the next mutating authz check sees the fresh `read_only` flag and
+    /// other policy values without waiting for the TTL. Single-entry
+    /// invalidate is a cheap concurrent-map op.
+    pub async fn invalidate_drive_policies_cache_for_drive(&self, drive_id: Uuid) {
+        self.drive_policies_cache.invalidate(&drive_id).await;
+    }
+
     pub async fn invalidate_drive_role_cache_for_drive(&self, drive_id: Uuid) {
         // `invalidate_entries_if` rejects predicates returning errors —
         // simple Fn(K, V) -> bool. We capture `drive_id` by value (Copy)
@@ -278,6 +480,76 @@ impl PgAclEngine {
                 drive_id = %drive_id,
                 error = %err,
                 "drive_role_cache cannot be bulk-invalidated — \
+                 cache builder is missing support_invalidation_closures()",
+            );
+        }
+    }
+
+    /// Drop the `owner_cache` entry for `resource`. Called after any
+    /// operation that changes which drive a file/folder belongs to —
+    /// the pre-D6 comment on `owner_cache` ("a resource's owner is
+    /// immutable") stopped being true when cross-drive MOVE landed.
+    ///
+    /// Without this call, admin (or any other role holder) on the
+    /// destination drive gets `authz.denied` when acting on the moved
+    /// resource: the cached (stale) `Resource → src_drive_id` lookup
+    /// steers the drive-role precheck at `check_inner` toward the
+    /// SOURCE drive where the caller has no role, and the fallback
+    /// per-resource cascade doesn't cover drive-level grants. TTL
+    /// backstops eventually (5 min), but every write path that MOVEs
+    /// content across drives MUST invalidate here so authz observes
+    /// the new drive on the next check.
+    pub async fn invalidate_owner_cache_for_resource(&self, resource: Resource) {
+        self.owner_cache.invalidate(&resource).await;
+    }
+
+    /// Bulk cousin of [`Self::invalidate_owner_cache_for_resource`] —
+    /// clears the entire `owner_cache`. Called by folder cross-drive
+    /// MOVE where the moved subtree's descendants each carry their
+    /// own stale entry, and we don't (yet) walk the subtree to
+    /// invalidate them individually. The cache repopulates lazily on
+    /// next access; the overhead is a single JOIN per file/folder
+    /// touched in the following minute or two, versus a stale-authz
+    /// bug that returned `NotFound` for legitimate Delete.
+    pub async fn invalidate_owner_cache_all(&self) {
+        self.owner_cache.invalidate_all();
+    }
+
+    /// Flush the entire `cascade_grant_cache`. Called on every File/Folder
+    /// `set_role` / `clear_role` — the direct share/revoke path. A resource
+    /// grant can widen (or, via ancestry, narrow) the cascade decision for an
+    /// unbounded set of descendant files, and the cache is keyed by the
+    /// decision — not the grant — so we can't target the affected entries
+    /// without walking the subtree. A full flush is correct and cheap here:
+    /// grant mutations are rare next to the thumbnail reads the cache serves,
+    /// and it keeps a revoke immediate. Indirect changes (group membership,
+    /// resource moves, grant expiry) are left to the 30 s TTL, mirroring
+    /// `drive_role_cache`.
+    pub async fn invalidate_cascade_grant_cache_all(&self) {
+        self.cascade_grant_cache.invalidate_all();
+    }
+
+    /// Sibling of [`Self::invalidate_drive_role_cache_for_drive`] keyed by
+    /// subject rather than drive. Used by the user-deleted lifecycle hook
+    /// to reap every cached "user X → drive Y = role R" entry after the
+    /// user row (and its DB-cascade-cleared role_grants) is gone. Without
+    /// this call the entry lingers until TTL; in practice auth rejection
+    /// on the deleted user's tokens fires first, but leaving stale
+    /// authorisation rows in the cache is poor hygiene and would surface
+    /// as an issue if a session survived (e.g. long-lived Basic Auth via
+    /// app password) or if a same-uuid user were ever recreated.
+    pub async fn invalidate_drive_role_cache_for_subject(&self, subject: Subject) {
+        if let Err(err) = self
+            .drive_role_cache
+            .invalidate_entries_if(move |key, _v| key.0 == subject)
+        {
+            tracing::error!(
+                target: "oxicloud::authz",
+                event = "authz.cache_invalidation_failed",
+                cache = "drive_role_cache",
+                subject = ?subject,
+                error = %err,
+                "drive_role_cache cannot be bulk-invalidated by subject — \
                  cache builder is missing support_invalidation_closures()",
             );
         }
@@ -319,26 +591,38 @@ impl PgAclEngine {
         // belong to the Internal virtual group. Unknown user (no row) is
         // treated as external to fail closed: a deleted or bogus user_id
         // must not gain implicit Internal membership.
+        //
+        // The `is_external` point read and the recursive groups CTE are
+        // independent — `join!` overlaps their round-trips on every cold
+        // expansion instead of paying them serially (benches/ROUND11.md
+        // §Q3; the ROUND9/10 pattern).
         counters.sql_queries.fetch_add(1, Ordering::Relaxed);
-        let is_external: bool =
-            sqlx::query_scalar("SELECT is_external FROM auth.users WHERE id = $1")
+        let is_external_fut = async {
+            sqlx::query_scalar::<_, bool>("SELECT is_external FROM auth.users WHERE id = $1")
                 .bind(user_id)
                 .fetch_optional(self.pool.as_ref())
                 .await
                 .map_err(|e| {
                     DomainError::internal_error("PgAcl", format!("lookup is_external: {e}"))
-                })?
-                .unwrap_or(true);
-
-        if !is_external {
+                })
+                .map(|row| row.unwrap_or(true))
+        };
+        let groups_fut = async {
+            match &self.group_repo {
+                Some(repo) => {
+                    counters.sql_queries.fetch_add(1, Ordering::Relaxed);
+                    repo.groups_for_user(user_id).await.map(Some).map_err(|e| {
+                        DomainError::internal_error("PgAcl", format!("groups_for_user: {e}"))
+                    })
+                }
+                None => Ok(None),
+            }
+        };
+        let (is_external, direct) = tokio::join!(is_external_fut, groups_fut);
+        if !is_external? {
             set.insert(INTERNAL_GROUP_ID);
         }
-
-        if let Some(repo) = &self.group_repo {
-            counters.sql_queries.fetch_add(1, Ordering::Relaxed);
-            let direct = repo.groups_for_user(user_id).await.map_err(|e| {
-                DomainError::internal_error("PgAcl", format!("groups_for_user: {e}"))
-            })?;
+        if let Some(direct) = direct? {
             set.extend(direct);
         }
 
@@ -377,10 +661,15 @@ impl PgAclEngine {
 
     /// Public wrapper around `subject_match_set` for callers that need
     /// the expanded `(subject_types, subject_ids)` pair without invoking
-    /// the engine's full `check`/`require` pipeline. Used by
-    /// `GET /api/drives` (and future drive-aware listing surfaces) to
-    /// ask the `DriveRepository` for every drive the caller can read,
-    /// reusing the engine's cached group-expansion logic.
+    /// the engine's full `check`/`require` pipeline.
+    ///
+    /// **Retained for legacy callers only** — new listing queries embed
+    /// the `storage.caller_group_ids` PostgreSQL function inline (see
+    /// migration `20260901000002_caller_group_ids_function.sql`) and
+    /// take a bare `caller_id: Uuid` instead of the pre-expanded arrays.
+    /// The engine's Moka cache still backs the fast path for per-request
+    /// AuthZ decisions (`check_inner`, `drive_role_cache`) where the
+    /// same subject is looked up repeatedly.
     pub async fn expand_subject_for_listing(
         &self,
         subject: Subject,
@@ -418,11 +707,23 @@ impl PgAclEngine {
     /// Returns the `drive_id` for a File / Folder. Drives don't have a parent
     /// drive — this returns `NotFound` for `Resource::Drive` and the caller
     /// must not invoke it on Drive resources.
+    ///
+    /// `Resource::Calendar`, `Resource::AddressBook` and
+    /// `Resource::Playlist` are top-level per user with no drive
+    /// ancestor; they also return `NotFound` and the engine
+    /// short-circuits to a direct `role_grants` lookup (no drive
+    /// precheck applies).
     async fn drive_of(&self, resource: Resource) -> Result<Uuid, DomainError> {
         match resource {
             Resource::Folder(id) => self.folder_repo.get_folder_drive_id(&id.to_string()).await,
             Resource::File(id) => self.file_repo.get_file_drive_id(&id.to_string()).await,
-            Resource::Drive(_) => Err(DomainError::not_found("Drive", resource.id().to_string())),
+            Resource::Drive(_)
+            | Resource::Calendar(_)
+            | Resource::AddressBook(_)
+            | Resource::Playlist(_) => Err(DomainError::not_found(
+                resource.type_str(),
+                resource.id().to_string(),
+            )),
         }
     }
 
@@ -458,6 +759,49 @@ impl PgAclEngine {
     /// permission — see `roles_implying()`.
     ///
     /// Uses the GiST index on `storage.folders.lpath` for O(log N) cascade.
+    /// Direct grant lookup with no cascade — used for top-level
+    /// resources whose ACL lives entirely on their own row
+    /// (`Resource::Calendar`, `Resource::AddressBook`). Same
+    /// role-array + subject-set shape as the cascade helpers so a
+    /// caller's group memberships still resolve, but no ltree /
+    /// folder ancestry / drive precheck applies. Calendars and
+    /// address books have no parent to inherit from.
+    async fn direct_grant_exists(
+        &self,
+        subject_types: &[&str],
+        subject_ids: &[Uuid],
+        permission: Permission,
+        resource_type: &'static str,
+        resource_id: Uuid,
+        counters: &QueryCounters,
+    ) -> Result<bool, DomainError> {
+        counters.sql_queries.fetch_add(1, Ordering::Relaxed);
+        let roles = Self::roles_implying_strings(permission);
+        let exists: Option<i32> = sqlx::query_scalar(
+            r#"
+            SELECT 1
+              FROM storage.role_grants g
+             WHERE g.subject_type  = ANY($1)
+               AND g.subject_id    = ANY($2)
+               AND g.role          = ANY($3::storage.grant_role[])
+               AND g.resource_type = $4
+               AND g.resource_id   = $5
+               AND (g.expires_at IS NULL OR g.expires_at > NOW())
+             LIMIT 1
+            "#,
+        )
+        .bind(subject_types)
+        .bind(subject_ids)
+        .bind(&roles)
+        .bind(resource_type)
+        .bind(resource_id)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(|e| DomainError::internal_error("PgAcl", format!("direct grant: {e}")))?;
+
+        Ok(exists.is_some())
+    }
+
     async fn folder_cascade_grant_exists(
         &self,
         subject_types: &[&str],
@@ -493,11 +837,11 @@ impl PgAclEngine {
         Ok(exists.is_some())
     }
 
-    /// Cascading check for files: either a direct file grant OR a grant on
-    /// any ancestor folder of the file's containing folder. See
-    /// `folder_cascade_grant_exists` for the meaning of `subject_types` /
-    /// `subject_ids` and the D-Prep role-array migration.
-    async fn file_cascade_grant_exists(
+    /// Direct file grant only — the first branch of the historical file
+    /// cascade UNION, split out so `cascade_grant_cached` can amortize the
+    /// ancestor-folder branch per FOLDER (see the `Resource::File` arm).
+    /// A plain indexed `role_grants` point lookup, no ltree join.
+    async fn file_direct_grant_exists(
         &self,
         subject_types: &[&str],
         subject_ids: &[Uuid],
@@ -510,30 +854,12 @@ impl PgAclEngine {
         let exists: Option<i32> = sqlx::query_scalar(
             r#"
             SELECT 1
-              FROM (
-                -- direct file grant
-                SELECT 1
-                  FROM storage.role_grants
-                 WHERE subject_type = ANY($1)
-                   AND subject_id   = ANY($2)
-                   AND role         = ANY($3::storage.grant_role[])
-                   AND resource_type = 'file' AND resource_id = $4
-                   AND (expires_at IS NULL OR expires_at > NOW())
-                UNION ALL
-                -- cascading from any ancestor folder of the file's containing folder
-                SELECT 1
-                  FROM storage.role_grants g
-                  JOIN storage.folders gf     ON gf.id = g.resource_id
-                  JOIN storage.files target_f ON target_f.id = $4
-                 WHERE g.subject_type  = ANY($1)
-                   AND g.subject_id    = ANY($2)
-                   AND g.role          = ANY($3::storage.grant_role[])
-                   AND g.resource_type = 'folder'
-                   AND (g.expires_at IS NULL OR g.expires_at > NOW())
-                   AND target_f.folder_id IS NOT NULL
-                   AND gf.lpath @> (SELECT lpath FROM storage.folders
-                                     WHERE id = target_f.folder_id)
-              ) any_match
+              FROM storage.role_grants
+             WHERE subject_type = ANY($1)
+               AND subject_id   = ANY($2)
+               AND role         = ANY($3::storage.grant_role[])
+               AND resource_type = 'file' AND resource_id = $4
+               AND (expires_at IS NULL OR expires_at > NOW())
              LIMIT 1
             "#,
         )
@@ -543,9 +869,393 @@ impl PgAclEngine {
         .bind(file_id)
         .fetch_optional(self.pool.as_ref())
         .await
-        .map_err(|e| DomainError::internal_error("PgAcl", format!("file cascade: {e}")))?;
+        .map_err(|e| DomainError::internal_error("PgAcl", format!("file direct grant: {e}")))?;
 
         Ok(exists.is_some())
+    }
+
+    /// Memoised `file_id → Option<parent folder_id>` read backing the
+    /// file-cascade decomposition. `None` covers both a missing row and a
+    /// NULL `folder_id` — in either case only the direct-file-grant branch
+    /// can match (mirroring the historical UNION's `folder_id IS NOT NULL`
+    /// guard).
+    ///
+    /// Cold misses run the leader-inline batching protocol (see
+    /// `parent_batch`): an idle miss queries inline exactly as before;
+    /// misses concurrent with an in-flight leader park and are answered by
+    /// the leader's single `= ANY` charity batch.
+    async fn file_parent_folder_cached(
+        &self,
+        file_id: Uuid,
+        counters: &QueryCounters,
+    ) -> Result<Option<Uuid>, DomainError> {
+        if let Some(parent) = self.file_parent_cache.get(&file_id).await {
+            return Ok(parent);
+        }
+        counters.sql_queries.fetch_add(1, Ordering::Relaxed);
+
+        enum Elect {
+            Lead,
+            Park(oneshot::Receiver<Result<Option<Uuid>, Arc<DomainError>>>),
+            Overflow,
+        }
+        for _ in 0..=PARENT_WAIT_RETRIES {
+            // Elect-or-park. The guard lives only inside this block — the
+            // decision is acted on AFTER it drops, so no lock is ever held
+            // across an await (and the handler futures stay `Send`).
+            let outcome = {
+                let mut slot = self.parent_batch.lock().expect("parent_batch poisoned");
+                match slot.as_mut() {
+                    // A leader is in flight — park a oneshot in its queue.
+                    Some(queue) if queue.len() < PARENT_BATCH_MAX => {
+                        let (tx, rx) = oneshot::channel();
+                        queue.push((file_id, tx));
+                        Elect::Park(rx)
+                    }
+                    // Queue full — behave as if idle contention: inline below.
+                    Some(_) => Elect::Overflow,
+                    // Idle — become the leader.
+                    None => {
+                        *slot = Some(Vec::new());
+                        Elect::Lead
+                    }
+                }
+            };
+
+            match outcome {
+                Elect::Lead => return self.parent_leader_resolve(file_id).await,
+                Elect::Park(rx) => match rx.await {
+                    Ok(Ok(parent)) => return Ok(parent),
+                    Ok(Err(shared)) => {
+                        return Err(DomainError::new(
+                            shared.kind,
+                            shared.entity_type,
+                            shared.message.clone(),
+                        ));
+                    }
+                    // Leader vanished (cancelled mid-flight) — retry the
+                    // election; a fresh leader (possibly us) takes over.
+                    Err(_) => continue,
+                },
+                // Queue overflow: don't wait — resolve inline.
+                Elect::Overflow => break,
+            }
+        }
+
+        // Retries exhausted or queue overflow: the historical inline read.
+        self.parent_queries.fetch_add(1, Ordering::Relaxed);
+        let parent = Self::query_parent_point(&self.pool, file_id).await?;
+        self.file_parent_cache.insert(file_id, parent).await;
+        Ok(parent)
+    }
+
+    /// Leader half of the parent-resolution protocol: run own point query
+    /// inline (the exact pre-round-10 cost), then serve everything that
+    /// parked during it with ONE `= ANY` batch. A second wave arriving
+    /// during the charity batch is handed to a detached drainer task so the
+    /// leader's own response is never delayed by more than one batch.
+    ///
+    /// Cancellation-safe: `ParentLeaderGuard` releases leadership on drop
+    /// and wakes parked waiters (their `oneshot` senders drop → they retry
+    /// and re-elect).
+    async fn parent_leader_resolve(&self, file_id: Uuid) -> Result<Option<Uuid>, DomainError> {
+        let guard = ParentLeaderGuard { engine: self };
+
+        self.parent_queries.fetch_add(1, Ordering::Relaxed);
+        let own = Self::query_parent_point(&self.pool, file_id).await;
+        if let Ok(parent) = &own {
+            self.file_parent_cache.insert(file_id, *parent).await;
+        }
+
+        // Take the first charity wave (leave `Some(vec![])` so later
+        // arrivals keep parking while the batch runs).
+        let wave = {
+            let mut slot = self.parent_batch.lock().expect("parent_batch poisoned");
+            match slot.as_mut() {
+                Some(queue) if !queue.is_empty() => std::mem::take(queue),
+                _ => Vec::new(),
+            }
+        };
+        if !wave.is_empty() {
+            self.parent_queries.fetch_add(1, Ordering::Relaxed);
+            Self::serve_parent_wave(&self.pool, &self.file_parent_cache, wave).await;
+        }
+
+        // Release leadership — or, if a second wave parked during the
+        // charity batch, hand leadership to a detached drainer so the
+        // leader's own response isn't delayed further. The drainer loops:
+        // it keeps the slot marked in-flight (newer misses keep parking)
+        // and only clears it when the queue drains empty.
+        let second_wave = {
+            let mut slot = self.parent_batch.lock().expect("parent_batch poisoned");
+            match slot.as_mut() {
+                Some(queue) if !queue.is_empty() => Some(std::mem::take(queue)),
+                _ => {
+                    *slot = None; // idle again
+                    None
+                }
+            }
+        };
+        std::mem::forget(guard); // leadership released or handed to the drainer
+        if let Some(first) = second_wave {
+            let engine = self.clone_batch_handles();
+            tokio::spawn(async move {
+                let mut wave = first;
+                loop {
+                    engine.2.fetch_add(1, Ordering::Relaxed);
+                    Self::serve_parent_wave(&engine.0, &engine.1, wave).await;
+                    let mut slot = match engine.3.lock() {
+                        Ok(s) => s,
+                        Err(p) => p.into_inner(),
+                    };
+                    match slot.as_mut() {
+                        Some(queue) if !queue.is_empty() => {
+                            wave = std::mem::take(queue);
+                        }
+                        _ => {
+                            *slot = None;
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+        own
+    }
+
+    /// The `Arc`'d handles the detached drainer needs (pool, memo cache,
+    /// query counter, queue slot). Cloned individually because the drainer
+    /// outlives this call and the engine isn't guaranteed to sit behind an
+    /// `Arc` here.
+    #[allow(clippy::type_complexity)]
+    fn clone_batch_handles(
+        &self,
+    ) -> (
+        Arc<PgPool>,
+        Cache<Uuid, Option<Uuid>>,
+        Arc<AtomicU64>,
+        Arc<std::sync::Mutex<Option<Vec<ParentWaiter>>>>,
+    ) {
+        (
+            Arc::clone(&self.pool),
+            self.file_parent_cache.clone(),
+            Arc::clone(&self.parent_queries),
+            Arc::clone(&self.parent_batch),
+        )
+    }
+
+    /// Resolve one file's parent with the point query (shared by the
+    /// leader's own read and the no-batching fallback).
+    async fn query_parent_point(pool: &PgPool, file_id: Uuid) -> Result<Option<Uuid>, DomainError> {
+        let parent: Option<Option<Uuid>> =
+            sqlx::query_scalar("SELECT folder_id FROM storage.files WHERE id = $1")
+                .bind(file_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| DomainError::internal_error("PgAcl", format!("file parent: {e}")))?;
+        Ok(parent.flatten())
+    }
+
+    /// Serve a parked wave with one `= ANY` query: memoise every id
+    /// (requested-but-absent rows memoise as `None`, matching the point
+    /// read) and answer every oneshot. On error the shared failure is
+    /// fanned out instead.
+    async fn serve_parent_wave(
+        pool: &PgPool,
+        cache: &Cache<Uuid, Option<Uuid>>,
+        wave: Vec<ParentWaiter>,
+    ) {
+        let mut ids: Vec<Uuid> = Vec::with_capacity(wave.len());
+        for (id, _) in &wave {
+            if !ids.contains(id) {
+                ids.push(*id);
+            }
+        }
+        let fetched: Result<Vec<(Uuid, Option<Uuid>)>, sqlx::Error> =
+            sqlx::query_as("SELECT id, folder_id FROM storage.files WHERE id = ANY($1)")
+                .bind(&ids)
+                .fetch_all(pool)
+                .await;
+        match fetched {
+            Ok(rows) => {
+                let mut by_id: std::collections::HashMap<Uuid, Option<Uuid>> =
+                    rows.into_iter().collect();
+                for id in &ids {
+                    by_id.entry(*id).or_insert(None);
+                }
+                for (id, parent) in &by_id {
+                    cache.insert(*id, *parent).await;
+                }
+                for (id, reply) in wave {
+                    let parent = by_id.get(&id).copied().unwrap_or(None);
+                    let _ = reply.send(Ok(parent));
+                }
+            }
+            Err(e) => {
+                let shared = Arc::new(DomainError::internal_error(
+                    "PgAcl",
+                    format!("file parent batch: {e}"),
+                ));
+                for (_, reply) in wave {
+                    let _ = reply.send(Err(Arc::clone(&shared)));
+                }
+            }
+        }
+    }
+
+    /// Total parent-resolution queries actually issued (point + `= ANY`
+    /// batches). With batching, this is ≤ the number of cold misses — the
+    /// gap is the herd-collapse win. Exposed for benches and operators.
+    pub fn parent_query_count(&self) -> u64 {
+        self.parent_queries.load(Ordering::Relaxed)
+    }
+
+    /// Cache-aware wrapper over the File/Folder grant cascade. Serves the
+    /// memoised `(subject, resource, permission)` decision when warm; on a
+    /// miss it expands the subject set (itself cached) and runs the matching
+    /// cascade query, then stores the result. Only invoked after the drive-role
+    /// precheck fails, so it never caches a decision a drive grant would have
+    /// satisfied — a later drive grant short-circuits above this cache.
+    ///
+    /// **File decomposition (ROUND9).** The historical file query was one
+    /// UNION: `direct file grant ∨ grant on any ancestor of the parent
+    /// folder` — one ltree join per file, so a shared N-photo album's FIRST
+    /// view ran N near-identical ancestor queries (round 8 memoised only the
+    /// per-file result, covering revalidation). The arm now resolves the
+    /// file's parent (memoised point read) and recurses into the FOLDER arm
+    /// for the ancestor half — one ltree query per folder, shared by every
+    /// sibling — falling back to the direct-file-grant lookup only when the
+    /// folder half denies. The decomposition is exactly the UNION split in
+    /// two: no decision changes, including the parentless edge (the UNION's
+    /// `folder_id IS NOT NULL` guard ≡ the direct-only fallback).
+    ///
+    /// The result is a pure function of the subject's group expansion + the
+    /// resource's grants + folder ancestry; `invalidate_cascade_grant_cache_all`
+    /// (on File/Folder grant writes — it holds file AND folder decisions in
+    /// the same map) and the 30 s TTL (indirect changes, incl. moves for the
+    /// parent memo) keep it fresh. See the `cascade_grant_cache` field doc.
+    /// Cached wrapper for the Calendar/AddressBook/Playlist direct-grant
+    /// decision (`try_get_with`: a cold herd on one key coalesces into ONE
+    /// loader run, the ROUND10 single-flight pattern; loader errors are
+    /// never cached). `resource_type` is the `role_grants.resource_type`
+    /// discriminant for `resource`.
+    async fn direct_grant_cached(
+        &self,
+        subject: Subject,
+        resource: Resource,
+        permission: Permission,
+        resource_type: &'static str,
+        id: Uuid,
+        counters: &QueryCounters,
+    ) -> Result<bool, DomainError> {
+        if let Some(allowed) = self
+            .direct_grant_cache
+            .get(&(subject, resource, permission))
+            .await
+        {
+            counters.cache_hit.fetch_add(1, Ordering::Relaxed);
+            return Ok(allowed);
+        }
+        self.direct_grant_cache
+            .try_get_with((subject, resource, permission), async {
+                let (subject_types, subject_ids) =
+                    self.subject_match_set(subject, counters).await?;
+                self.direct_grant_exists(
+                    &subject_types,
+                    &subject_ids,
+                    permission,
+                    resource_type,
+                    id,
+                    counters,
+                )
+                .await
+            })
+            .await
+            .map_err(|e: Arc<DomainError>| {
+                DomainError::internal_error("PgAcl", format!("direct grant load: {e}"))
+            })
+    }
+
+    async fn cascade_grant_cached(
+        &self,
+        subject: Subject,
+        resource: Resource,
+        permission: Permission,
+        counters: &QueryCounters,
+    ) -> Result<bool, DomainError> {
+        if let Some(allowed) = self
+            .cascade_grant_cache
+            .get(&(subject, resource, permission))
+            .await
+        {
+            counters.cache_hit.fetch_add(1, Ordering::Relaxed);
+            return Ok(allowed);
+        }
+        // Only File/Folder reach this helper (see `check_inner`); keep the
+        // defensive arm OUTSIDE the loader so it stays uncached, as before.
+        if !matches!(resource, Resource::Folder(_) | Resource::File(_)) {
+            return Ok(false);
+        }
+        // `try_get_with`: a cold herd on the same key — every photo of an
+        // album recursing into the SAME folder decision at once — coalesces
+        // into ONE loader run. The old get→compute→insert let K concurrent
+        // misses each run the ltree query (ROUND10; the ROUND3 auth-herd
+        // pattern). moka never caches loader errors, preserving the
+        // historical error semantics.
+        self.cascade_grant_cache
+            .try_get_with((subject, resource, permission), async {
+                match resource {
+                    Resource::Folder(id) => {
+                        let (subject_types, subject_ids) =
+                            self.subject_match_set(subject, counters).await?;
+                        self.folder_cascade_grant_exists(
+                            &subject_types,
+                            &subject_ids,
+                            permission,
+                            id,
+                            counters,
+                        )
+                        .await
+                    }
+                    Resource::File(id) => {
+                        // Ancestor half first — amortized to one query per
+                        // FOLDER via the recursive Folder arm (its own cache
+                        // entry + its own single-flight).
+                        let folder_allowed =
+                            match self.file_parent_folder_cached(id, counters).await? {
+                                Some(parent) => {
+                                    Box::pin(self.cascade_grant_cached(
+                                        subject,
+                                        Resource::Folder(parent),
+                                        permission,
+                                        counters,
+                                    ))
+                                    .await?
+                                }
+                                None => false,
+                            };
+                        if folder_allowed {
+                            Ok(true)
+                        } else {
+                            let (subject_types, subject_ids) =
+                                self.subject_match_set(subject, counters).await?;
+                            self.file_direct_grant_exists(
+                                &subject_types,
+                                &subject_ids,
+                                permission,
+                                id,
+                                counters,
+                            )
+                            .await
+                        }
+                    }
+                    _ => unreachable!("guarded above"),
+                }
+            })
+            .await
+            .map_err(|e: Arc<DomainError>| {
+                DomainError::new(e.kind, e.entity_type, e.message.clone())
+            })
     }
 
     /// Cached resolution of `(subject, drive_id) → Option<Role>` — the
@@ -593,6 +1303,65 @@ impl PgAclEngine {
             .insert((subject, drive_id), role)
             .await;
         Ok(role)
+    }
+
+    /// Fetch a drive's typed `DrivePolicies`, going through `drive_policies_cache`
+    /// (30 s TTL, explicit invalidation on policy PATCH). Malformed JSONB
+    /// falls back to the all-false default — consistent with
+    /// `DrivePolicies::from_value` — so enforcement can't panic on legacy
+    /// or partial data.
+    async fn drive_policies_cached(
+        &self,
+        drive_id: Uuid,
+        counters: &QueryCounters,
+    ) -> Result<DrivePolicies, DomainError> {
+        if let Some(cached) = self.drive_policies_cache.get(&drive_id).await {
+            counters.cache_hit.fetch_add(1, Ordering::Relaxed);
+            return Ok(cached);
+        }
+        counters.sql_queries.fetch_add(1, Ordering::Relaxed);
+        let row: Option<(serde_json::Value,)> =
+            sqlx::query_as("SELECT policies FROM storage.drives WHERE id = $1")
+                .bind(drive_id)
+                .fetch_optional(self.pool.as_ref())
+                .await
+                .map_err(|e| {
+                    DomainError::internal_error("PgAcl", format!("policies lookup: {e}"))
+                })?;
+        // Missing drive: cache the default (all-false). Anti-enum handled by
+        // the caller — a missing drive returns NotFound at the resource-resolve
+        // step upstream; here we just make sure the cache doesn't panic-loop
+        // if the read happens post-drive-delete.
+        let policies = row
+            .map(|(v,)| DrivePolicies::from_value(&v))
+            .unwrap_or_default();
+        self.drive_policies_cache
+            .insert(drive_id, policies.clone())
+            .await;
+        Ok(policies)
+    }
+
+    /// Every permission except `Read` mutates persistent state on a
+    /// drive-scoped resource and is therefore refused when the drive is
+    /// `read_only=true`:
+    ///
+    /// - `Create` / `Update` / `Delete` — the obvious file/folder mutations.
+    /// - `Share` — persists a new `role_grants` row.
+    /// - `Comment` — adds user-generated content (reserved feature).
+    /// - `Manage` — mutates drive-level membership (add/remove/promote
+    ///   members) on `Resource::Drive`.
+    ///
+    /// **Admin escape hatch does NOT rely on this gate.** Un-freezing a
+    /// drive goes through `PATCH /api/drives/{id}/policies`, which is
+    /// admin-only via `admin_guard` at the handler layer — it never
+    /// enters `authz.require`. So blocking `Manage` here doesn't lock
+    /// admins out; it locks OWNERS out of membership mutation while the
+    /// freeze holds, which is exactly the legal-hold guarantee.
+    ///
+    /// Only `Read` passes: members can still list, download, and PROPFIND
+    /// the drive's contents.
+    fn read_only_gate_applies(p: Permission) -> bool {
+        !matches!(p, Permission::Read)
     }
 
     /// Look up a single role grant by id, returning the actors a revoke /
@@ -710,6 +1479,36 @@ impl PgAclEngine {
                 }
                 Err(e) => return Err(e),
             };
+            // Read-only drive freeze — every mutating permission on any
+            // resource in this drive is refused, regardless of the caller's
+            // role. Compliance-grade guarantee: paired with the background-
+            // job SQL filters, no state on this drive changes until the
+            // policy is flipped. See `docs/plan/drive.md` §8 (`read_only`).
+            //
+            // Anti-enumeration: emit an audit line with the specific
+            // `drive_read_only` reason, then return `false`. The generic
+            // `authz.denied` line at `require` also fires — operators
+            // filter on the specific event to find freeze-caused denials.
+            if Self::read_only_gate_applies(permission)
+                && self
+                    .drive_policies_cached(drive_id, counters)
+                    .await?
+                    .read_only
+            {
+                tracing::info!(
+                    target: "audit",
+                    event = "authz.denied",
+                    reason = "drive_read_only",
+                    subject_type = subject.type_str(),
+                    subject_id = %subject.id(),
+                    permission = permission.as_str(),
+                    resource_type = resource.type_str(),
+                    resource_id = %resource.id(),
+                    drive_id = %drive_id,
+                    "🧊 mutation refused: drive is read-only",
+                );
+                return Ok(false);
+            }
             if let Some(role) = self
                 .caller_role_on_drive_cached(subject, drive_id, counters)
                 .await?
@@ -722,34 +1521,39 @@ impl PgAclEngine {
         }
 
         match resource {
-            // File/Folder dispatch falls through to the cascade query —
-            // expand the subject set lazily here (it's cached) so the
-            // Drive branch below never pays for an expansion it doesn't need.
-            Resource::Folder(id) => {
-                let (subject_types, subject_ids) =
-                    self.subject_match_set(subject, counters).await?;
-                self.folder_cascade_grant_exists(
-                    &subject_types,
-                    &subject_ids,
-                    permission,
-                    id,
-                    counters,
-                )
-                .await
-            }
-            Resource::File(id) => {
-                let (subject_types, subject_ids) =
-                    self.subject_match_set(subject, counters).await?;
-                self.file_cascade_grant_exists(
-                    &subject_types,
-                    &subject_ids,
-                    permission,
-                    id,
-                    counters,
-                )
-                .await
+            // File/Folder dispatch falls through to the cascade query, now
+            // memoised: a shared-album recipient (folder grant, no drive
+            // membership) reaches this per thumbnail, and browsers revalidate
+            // thumbnails constantly, so the same decision is recomputed over
+            // and over. `cascade_grant_cached` serves it from memory after the
+            // first query; the check is unchanged (never skipped), only cached.
+            Resource::Folder(_) | Resource::File(_) => {
+                self.cascade_grant_cached(subject, resource, permission, counters)
+                    .await
             }
             Resource::Drive(id) => {
+                // Same read_only gate as the File/Folder branch: a frozen
+                // drive refuses every mutating permission (Create / Update /
+                // Delete / Share) targeting the drive resource itself.
+                // Manage stays permitted so admins can toggle the policy
+                // back off; Read stays permitted so members can still list.
+                if Self::read_only_gate_applies(permission)
+                    && self.drive_policies_cached(id, counters).await?.read_only
+                {
+                    tracing::info!(
+                        target: "audit",
+                        event = "authz.denied",
+                        reason = "drive_read_only",
+                        subject_type = subject.type_str(),
+                        subject_id = %subject.id(),
+                        permission = permission.as_str(),
+                        resource_type = "drive",
+                        resource_id = %id,
+                        drive_id = %id,
+                        "🧊 mutation refused: drive is read-only",
+                    );
+                    return Ok(false);
+                }
                 // Same cache-aware path the precheck uses — keeps the
                 // single-source-of-truth for drive role resolution and
                 // benefits identically from `drive_role_cache`.
@@ -757,6 +1561,32 @@ impl PgAclEngine {
                     .caller_role_on_drive_cached(subject, id, counters)
                     .await?
                     .is_some_and(|r| r.expand().contains(&permission)))
+            }
+            // Top-level resources with no cascade parent — the ACL
+            // lives entirely on their own `role_grants` rows. Owner is
+            // an explicit grant seeded at MKCALENDAR / address-book
+            // create time (Round 3 phase 2 migration), so the common
+            // "owner accessing their own calendar" case is one SQL
+            // round-trip — no drive_role_cache short-circuit (no
+            // drive), no cascade.
+            Resource::Calendar(id) => {
+                self.direct_grant_cached(subject, resource, permission, "calendar", id, counters)
+                    .await
+            }
+            Resource::AddressBook(id) => {
+                self.direct_grant_cached(
+                    subject,
+                    resource,
+                    permission,
+                    "address_book",
+                    id,
+                    counters,
+                )
+                .await
+            }
+            Resource::Playlist(id) => {
+                self.direct_grant_cached(subject, resource, permission, "playlist", id, counters)
+                    .await
             }
         }
     }
@@ -792,6 +1622,78 @@ impl AuthorizationEngine for PgAclEngine {
         );
 
         result
+    }
+
+    /// Batched Read check over a page of file ids (see the trait docs).
+    ///
+    /// Decision-equivalent to looping `check`: (1) resolve every file's
+    /// drive in one `= ANY($1)` query (same rows as N ×
+    /// `get_file_drive_id`; absent ids decide `false` exactly like the
+    /// per-file `NotFound` path), (2) evaluate the drive-role floor once
+    /// per distinct drive through the same `drive_role_cache`, (3) send
+    /// only the drive-floor misses through the full per-file cascade —
+    /// preserving per-file grant resolution. `Read` is never gated by the
+    /// read-only drive freeze, so skipping that branch changes nothing.
+    async fn check_files_read_batch(
+        &self,
+        subject: Subject,
+        file_ids: &[Uuid],
+    ) -> Result<std::collections::HashSet<Uuid>, DomainError> {
+        use std::collections::{HashMap, HashSet};
+        let start = std::time::Instant::now();
+        let counters = QueryCounters::default();
+
+        counters.sql_queries.fetch_add(1, Ordering::Relaxed);
+        let pairs = self.file_repo.get_file_drive_ids(file_ids).await?;
+
+        // Prime the resource→drive cache — later single checks on these
+        // files (download, share) skip their point lookup too.
+        for (file_id, drive_id) in &pairs {
+            self.owner_cache
+                .insert(Resource::File(*file_id), *drive_id)
+                .await;
+        }
+
+        let mut drive_readable: HashMap<Uuid, bool> = HashMap::new();
+        for (_, drive_id) in &pairs {
+            if !drive_readable.contains_key(drive_id) {
+                let ok = self
+                    .caller_role_on_drive_cached(subject, *drive_id, &counters)
+                    .await?
+                    .is_some_and(|role| role.expand().contains(&Permission::Read));
+                drive_readable.insert(*drive_id, ok);
+            }
+        }
+
+        let mut allowed: HashSet<Uuid> = HashSet::with_capacity(pairs.len());
+        for (file_id, drive_id) in &pairs {
+            if drive_readable.get(drive_id).copied().unwrap_or(false) {
+                allowed.insert(*file_id);
+            } else if self
+                .check_inner(
+                    subject,
+                    Permission::Read,
+                    Resource::File(*file_id),
+                    &counters,
+                )
+                .await?
+            {
+                // Per-file / folder-cascade grant inside a drive the caller
+                // has no role on — rare, but must keep resolving.
+                allowed.insert(*file_id);
+            }
+        }
+
+        tracing::debug!(
+            target: "oxicloud::authz",
+            event = "authz.check_files_read_batch",
+            subject = %subject,
+            files = file_ids.len(),
+            allowed = allowed.len(),
+            duration_us = start.elapsed().as_micros() as u64,
+            sql_queries = counters.sql_queries.load(Ordering::Relaxed),
+        );
+        Ok(allowed)
     }
 
     async fn list_incoming_grants(&self, subject: Subject) -> Result<Vec<Grant>, DomainError> {
@@ -1913,6 +2815,27 @@ impl AuthorizationEngine for PgAclEngine {
         Ok(())
     }
 
+    async fn purge_expired_grants(&self, grace_days: u32) -> Result<u64, DomainError> {
+        // Uses the partial index `idx_role_grants_expires_at` (migration
+        // 20260730000000), which covers `WHERE expires_at IS NOT NULL`
+        // — so this DELETE only touches indexed rows even when the
+        // `role_grants` table has tens of millions of permanent grants.
+        //
+        // Grace days is bound as bigint and multiplied into an
+        // interval — parameterised, no injection surface. u32 → i64
+        // is loss-free.
+        let result = sqlx::query(
+            "DELETE FROM storage.role_grants \
+              WHERE expires_at IS NOT NULL \
+                AND expires_at < NOW() - ($1::bigint * INTERVAL '1 day')",
+        )
+        .bind(grace_days as i64)
+        .execute(self.pool.as_ref())
+        .await
+        .map_err(|e| DomainError::internal_error("PgAcl", format!("purge_expired_grants: {e}")))?;
+        Ok(result.rows_affected())
+    }
+
     async fn revoke(&self, grant_id: Uuid) -> Result<(), DomainError> {
         sqlx::query("DELETE FROM storage.role_grants WHERE id = $1")
             .bind(grant_id)
@@ -2002,6 +2925,19 @@ impl AuthorizationEngine for PgAclEngine {
         if let Resource::Drive(drive_id) = resource {
             self.invalidate_drive_role_cache_for_drive(drive_id).await;
         }
+        // File/Folder grant write — a new share can widen the cascade
+        // decision for descendant files; flush the cascade cache so the next
+        // thumbnail/read check sees it immediately.
+        if matches!(resource, Resource::File(_) | Resource::Folder(_)) {
+            self.invalidate_cascade_grant_cache_all().await;
+        }
+        // Same immediacy contract for the memoised top-level decisions.
+        if matches!(
+            resource,
+            Resource::Calendar(_) | Resource::AddressBook(_) | Resource::Playlist(_)
+        ) {
+            self.direct_grant_cache.invalidate_all();
+        }
 
         Self::row_to_grant(row)
     }
@@ -2025,6 +2961,19 @@ impl AuthorizationEngine for PgAclEngine {
         // keep passing the precheck for up to 30 s.
         if let Resource::Drive(drive_id) = resource {
             self.invalidate_drive_role_cache_for_drive(drive_id).await;
+        }
+        // Revoking a File/Folder share must stop passing the cascade check
+        // now, not in ≤30 s — flush the cascade cache (see `set_role`).
+        if matches!(resource, Resource::File(_) | Resource::Folder(_)) {
+            self.invalidate_cascade_grant_cache_all().await;
+        }
+        // A revoked calendar/address-book/playlist grant must fail the next
+        // check now, not in ≤30 s (see `set_role`).
+        if matches!(
+            resource,
+            Resource::Calendar(_) | Resource::AddressBook(_) | Resource::Playlist(_)
+        ) {
+            self.direct_grant_cache.invalidate_all();
         }
 
         Ok(())
@@ -2094,8 +3043,19 @@ impl UserLifecycleHook for AuthzCacheLifecycleHook {
         _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ) -> Result<(), DomainError> {
         // No DB writes here — just memory invalidation. `_tx` is
-        // intentionally ignored.
+        // intentionally ignored. The DB cascade
+        // (`trg_cleanup_role_grants_user`) already dropped every
+        // role_grants row for this subject; we mirror that cleanup on
+        // both authz caches:
+        //   1. `user_groups_cache` — recomputed group expansion.
+        //   2. `drive_role_cache` — cached "user X → drive Y = role R"
+        //      entries seeded by prior authz checks. Without this
+        //      the deleted user's role stays visible in-process for
+        //      up to the cache TTL (~30 s).
         self.engine.invalidate_user_groups_cache(user.id()).await;
+        self.engine
+            .invalidate_drive_role_cache_for_subject(Subject::User(user.id()))
+            .await;
         Ok(())
     }
 }

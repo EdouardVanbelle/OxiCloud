@@ -19,7 +19,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::{Buf, Bytes, BytesMut};
-use futures::Stream;
+use futures::{Stream, TryStreamExt};
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 
@@ -343,17 +343,36 @@ pub async fn delta_download_chunks(
 
     // Stream the frames: 4-byte length headers come from the (entitled)
     // index sizes; bytes stream straight from the blob backend. Peak RAM
-    // is one backend read frame, independent of batch size.
+    // is bounded by `read_prefetch` open streams (their first frame),
+    // independent of batch size.
+    //
+    // `buffered(read_prefetch)` overlaps the NEXT chunk's open with the
+    // current chunk's drain — the same combinator/tuning as the main CDC
+    // download path (benches/BLOB-PREFETCH.md). The old per-chunk await
+    // paid every open's full round-trip serially: on an object-store
+    // backend a 64-chunk batch at ~30 ms first-byte cost ~1.9 s of pure
+    // latency. Frames still arrive strictly in request order.
+    let prefetch = service.read_prefetch().max(1);
+    let svc = service.clone();
+    // `futures::StreamExt` spelled out — this handler imports
+    // `tokio_stream::StreamExt`, whose `map` adapter lacks `buffered`.
+    let opened = futures::StreamExt::map(futures::stream::iter(ordered), move |(hash, size)| {
+        let svc = svc.clone();
+        async move {
+            let chunk = svc
+                .chunk_stream(&hash)
+                .await
+                .map_err(std::io::Error::other)?;
+            let header = futures::stream::once(async move {
+                Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&(size as u32).to_be_bytes()))
+            });
+            Ok::<_, std::io::Error>(futures::StreamExt::chain(header, chunk))
+        }
+    });
     let body_stream: std::pin::Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> =
-        Box::pin(async_stream::try_stream! {
-            for (hash, size) in ordered {
-                yield Bytes::copy_from_slice(&(size as u32).to_be_bytes());
-                let mut chunk = service.chunk_stream(&hash).await.map_err(std::io::Error::other)?;
-                while let Some(part) = chunk.next().await {
-                    yield part?;
-                }
-            }
-        });
+        Box::pin(TryStreamExt::try_flatten(futures::StreamExt::buffered(
+            opened, prefetch,
+        )));
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/octet-stream")

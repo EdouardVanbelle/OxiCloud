@@ -58,6 +58,8 @@
   "photos": {
     "empty_state": "写真はまだありません",
     "empty_hint": "画像や動画をアップロードするとここに表示されます",
+    "empty_hidden": "設定により非表示になっている写真が {{n}} 件あります",
+    "empty_hidden_hint": "プロフィールで「非表示ファイルを隠す」をオフにすると表示されます。",
     "items_selected": "件選択中",
     "view_daily": "日",
     "view_monthly": "月",
@@ -232,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "メールで通知",
     "revoke": "Remove",
-    "role_label": "役割"
+    "role_label": "役割",
+    "col_shared_by": "共有者",
+    "col_shared": "共有日時"
   },
   "share_dialogTitle": "共有リンク",
   "share_linkLabel": "共有リンク:",
@@ -335,6 +339,7 @@
     "modified": "更新日",
     "no_files": "このフォルダにファイルはありません",
     "empty_hint": "ファイルをアップロードするかフォルダを作成して始めましょう",
+    "drop_to_upload": "アップロードするファイルをここにドロップ",
     "loading": "ファイルを読み込み中…",
     "view_grid": "グリッド表示",
     "view_list": "リスト表示",
@@ -365,7 +370,21 @@
     "folder": "フォルダ",
     "new_folder": "新しいフォルダ",
     "share": "共有",
-    "view": "表示"
+    "view": "表示",
+    "empty_hidden_title": "このフォルダに非表示の項目が {{n}} 件あります",
+    "empty_hidden_hint": "名前が '.' で始まるファイルは非表示です。設定を切り替えると表示できます。",
+    "show_hidden": "非表示のファイルを表示",
+    "upload_dotfile_hidden": "{{n}} 個のファイルをアップロードしましたが、設定により非表示になっています。",
+    "rename_dotfile_hidden": "「{{name}}」に名前を変更しました — 設定により非表示になりました。",
+    "new_folder_dotfile_hidden": "フォルダ「{{name}}」を作成しました — 設定により非表示になっています。",
+    "dotfiles_hidden_toast": "非表示ファイルを隠しました",
+    "dotfiles_shown_toast": "非表示ファイルを表示しました",
+    "col_modified": "更新日時",
+    "col_added": "追加日",
+    "col_created_by": "作成者",
+    "col_opened": "アクセス日時",
+    "col_path": "場所",
+    "new_elements": "新しいアイテム"
   },
   "dialogs": {
     "rename_folder": "フォルダ名を変更",
@@ -451,7 +470,8 @@
       "trashed_time": "削除日時"
     },
     "delete": "完全に削除",
-    "empty_action": "ゴミ箱を空にする"
+    "empty_action": "ゴミ箱を空にする",
+    "expires_at": "期限"
   },
   "daysRemaining": {
     "expired": "期限切れ",
@@ -570,7 +590,10 @@
     "accessed": "アクセス日",
     "empty_state": "最近のファイルはありません",
     "empty_hint": "開いたファイルがここに表示されます",
-    "loadMore": "さらに読み込む"
+    "empty_hidden_state": "設定により非表示になっている最近の項目が {{n}} 件あります",
+    "empty_hidden_hint": "プロフィールで「非表示ファイルを隠す」をオフにすると表示されます。",
+    "loadMore": "さらに読み込む",
+    "remove_item": "最近使用したものから削除"
   },
   "notifications": {
     "file_renamed": "ファイル名を変更しました",
@@ -806,7 +829,70 @@
     "title": "管理者",
     "user": "ユーザー",
     "username": "ユーザー名",
-    "users": "ユーザー"
+    "users": "ユーザー",
+    "drive_manage_policies": "ポリシーを管理",
+    "drive_manage_policies_for": "ポリシー — {{name}}",
+    "drive_manage_policies_help": "ポリシーは管理者専用です。ドライブの所有者は変更できません。各スイッチが 1 つの実施ルールを制御します。",
+    "drive_policy": {
+      "forbid_sharing": "リソース単位の共有を禁止",
+      "forbid_sharing_help": "ファイル / フォルダー単位の付与をブロック（公開リンクや外部共有もカバー）。ドライブレベルのメンバーシップは引き続き利用可能。",
+      "forbid_public_links": "公開リンクを禁止",
+      "forbid_public_links_help": "このドライブのリソースに対する匿名共有リンクの作成をブロックします。",
+      "forbid_external_sharing": "外部共有を禁止",
+      "forbid_external_sharing_help": "外部ユーザーへの付与をブロック（メール招待および既存の外部アカウント）。",
+      "forbid_cross_drive_move": "ドライブ間移動を禁止",
+      "forbid_cross_drive_move_help": "別のドライブへのファイル・フォルダーの移動をブロックします。ダウンロード + 再アップロードは防げません。",
+      "forbid_owner_role_change": "所有者リストをロック",
+      "forbid_owner_role_change_help": "有効中は、管理者のみがドライブ所有者を追加・削除・降格できます。",
+      "include_in_photo_index": "写真に含める",
+      "include_in_photo_index_help": "この ドライブ の画像・動画ファイルを「写真」タイムラインと「場所」マップに表示します。デフォルトの個人 ドライブ は自動的に含まれます。実際に写真を含む共有 ドライブ の場合はオンにしてください (例: 「家族写真」)。",
+      "include_in_music_index": "音楽に含める",
+      "include_in_music_index_help": "この ドライブ の音声ファイルを「音楽」ライブラリに含めます。デフォルトの個人 ドライブ は自動的に含まれます。実際に音楽コレクションを含む共有 ドライブ の場合はオンにしてください (例: 「家族の音楽」「バンド共同作業」)。",
+      "implied_by_forbid_sharing": "すでに「リソース単位の共有を禁止」によって適用済み。",
+      "read_only": "読み取り専用(凍結)",
+      "read_only_help": "ドライブを完全に凍結します。すべての変更が拒否されます(アップロード、編集、削除、名前変更、共有、メンバーシップの変更)。読み取りとダウンロードは引き続き機能します。ゴミ箱の自動クリーンアップも一時停止します。アーカイブ、法的保留、アカウントの終了に使用します。凍結解除できるのは管理者のみです。"
+    },
+    "drives": "ドライブ",
+    "drive_name": "名前",
+    "drive_kind": "種類",
+    "drive_owners": "所有者",
+    "drive_usage": "使用量",
+    "drive_created_at": "作成日",
+    "drive_kind_shared": "共有",
+    "drive_kind_personal": "個人",
+    "drive_kind_default_suffix": "(デフォルト)",
+    "drive_manage_owners": "所有者を管理",
+    "drive_manage_owners_for": "所有者を管理 — {{name}}",
+    "drive_edit_quota": "クォータを編集",
+    "drive_delete": "ドライブを削除",
+    "drive_delete_confirm": "ドライブ「{{name}}」を削除しますか?この操作は取り消せません。",
+    "drive_deleted": "ドライブを削除しました。",
+    "drive_created": "ドライブを作成しました。",
+    "drive_add_owner": "所有者を追加",
+    "drive_current_owners": "現在の所有者",
+    "drive_no_owners": "所有者なし",
+    "drive_owner": "所有者",
+    "drive_owner_hint": "ユーザー(単独の所有者)またはグループ(サブジェクト展開で全メンバーが所有者)を選択します。",
+    "drive_owner_picked": "所有者: {{name}}",
+    "drive_owner_placeholder": "ユーザーまたはグループを検索…",
+    "drive_owner_remove_confirm": "この所有者をドライブから削除しますか?",
+    "drive_name_placeholder": "例: Engineering",
+    "drive_error_name_required": "ドライブ名は必須です。",
+    "drive_error_owner_required": "ドライブの所有者としてユーザーまたはグループを選択してください。",
+    "create_drive": "共有ドライブを作成",
+    "no_drives": "ドライブはまだありません。",
+    "external_user": "外部",
+    "external_user_hint": "招待専用アカウント(マジックリンクまたは OCM)。管理者にはなれず、ストレージ枠を持ちません。",
+    "no_storage_for_external": "外部アカウントにはストレージ枠がありません。",
+    "promote_to_internal_title": "内部ユーザーに昇格",
+    "confirm_promote_user": "{{name}} を内部ユーザーに昇格しますか?ホームドライブがプロビジョニングされ、通常のストレージ枠が付与されます。アカウントの識別子は保持されます。パスワードが設定されるまで、マジックリンクログインが引き続きアクセス方法になります。",
+    "delete_user_title": "ユーザーを削除",
+    "delete_user_warning": "「{{name}}」を完全に削除しようとしています。アカウントは削除され、すべてのセッションが失効し、個人ドライブが回収されます。この操作は取り消せません。",
+    "delete_user_confirm_hint": "確認のため、下記にアカウントのメールアドレスを入力してください: {{email}}",
+    "deleting": "削除中…",
+    "auth": "認証",
+    "quota": "ストレージ使用量",
+    "last_login": "最終ログイン"
   },
   "profile": {
     "page_title": "プロフィール",
@@ -859,6 +945,7 @@
     "family_name": "姓",
     "notify_on_share": "誰かが共有したときにメールで通知する",
     "notify_on_share_hint": "チェックを外しても、共有はアカウントに表示されますが、メールでの通知は届きません。",
+    "hide_dotfiles": "名前がドットで始まるファイルを非表示にする（.env、.git、…）",
     "save_profile": "変更を保存",
     "profile_saved": "プロフィールを更新しました",
     "profile_no_changes": "保存する変更はありません。",
@@ -979,7 +1066,17 @@
     "notifyRateLimited": "この受信者への通知が多すぎます — しばらくしてから再試行してください。",
     "removeAccess": "アクセスを削除",
     "resendInvitation": "招待メールを再送信",
-    "publicLinks": "Public links"
+    "publicLinks": "Public links",
+    "filter": {
+      "button": "種類",
+      "title": "種類でフィルタ",
+      "files": "ファイル",
+      "folders": "フォルダ",
+      "drives": "ドライブ",
+      "emptyTitle": "現在のフィルタに一致する共有はありません",
+      "emptyHint": "種類フィルタを調整するか、既定 (ファイル + フォルダ) にリセットしてください。",
+      "reset": "フィルタをリセット"
+    }
   },
   "sort": {
     "asc": "ascending",
@@ -1078,7 +1175,9 @@
     "rename": "名前を変更",
     "save": "保存",
     "search": "検索",
-    "yes": "あり"
+    "yes": "あり",
+    "saving": "保存中…",
+    "deleting": "削除中…"
   },
   "device": {
     "continue": "続行",
@@ -1108,5 +1207,79 @@
   "view": {
     "grid": "グリッド表示",
     "list": "リスト表示"
+  },
+  "preferences": {
+    "save_failed": "設定を保存できませんでした。もう一度お試しください。"
+  },
+  "upgrade": {
+    "title": "フルアカウントにアップグレード",
+    "lede": "自分専用のストレージを取得して、ファイルのアップロードを始めましょう。既存の共有はそのまま維持されます。",
+    "busy": "アップグレード中…",
+    "submit": "アカウントをアップグレード",
+    "cancel": "今はしない — 共有に戻る",
+    "success": "アカウントがアップグレードされました。ファイルへリダイレクト中…",
+    "error": "アップグレードに失敗しました。",
+    "password_required": "パスワードが必要です — このデプロイメントはメールリンクによるログインを提供していません。",
+    "password_too_short": "パスワードは8文字以上である必要があります。",
+    "oidc_user": "SSO/OIDCアカウントはIDプロバイダーによって管理されます。アップグレードは利用できません。",
+    "domain_not_allowed": "このデプロイメントはあなたのメールドメインからの新規アカウントを受け付けていません。有効化するには管理者にお問い合わせください。",
+    "banner_aria": "アップグレードの案内",
+    "banner_title": "自分専用のストレージを取得",
+    "banner_body": "ゲストアカウントを使用しています。個人用ドライブを取得してファイルをアップロードするにはアップグレードしてください。",
+    "banner_cta": "アップグレード"
+  },
+  "drive": {
+    "read_only_banner": {
+      "title": "このドライブは読み取り専用です",
+      "title_named": "ドライブ「{{name}}」は読み取り専用です",
+      "body": "アップロード、編集、削除、名前変更、共有、メンバーシップの変更は拒否されます。読み取りとダウンロードは引き続き機能します。ドライブの凍結を解除するには管理者にお問い合わせください。",
+      "aria": "このドライブは読み取り専用です"
+    },
+    "back_to_files": "ファイルに戻る",
+    "danger_zone": "危険な操作",
+    "delete": "ドライブを削除",
+    "delete_confirm": "ドライブ「{{name}}」を削除しますか?この操作は取り消せません — ドライブが空でない場合、サーバーは拒否します。",
+    "delete_hint": "ドライブを削除すると完全に削除されます。削除するにはドライブが空(有効なファイルやフォルダーがない状態)である必要があります。",
+    "deleted": "ドライブを削除しました。",
+    "field": {
+      "created": "作成日",
+      "default": "デフォルト",
+      "default_yes": "これはあなたのホームドライブです",
+      "id": "識別子",
+      "kind": "種類",
+      "updated": "最終更新"
+    },
+    "info": "ドライブ情報",
+    "kind_personal": "個人ドライブ",
+    "kind_shared": "共有ドライブ",
+    "manage_members": "メンバーを管理",
+    "members": "メンバー",
+    "members_empty": "メンバーはいません。",
+    "not_found_body": "このドライブは存在しないか、アクセス権がありません。",
+    "not_found_title": "ドライブが見つかりません",
+    "policies": "ポリシー",
+    "policies_help": "OxiCloud 管理者がこのドライブに設定したルールです。変更できるのは管理者のみで、現在の状態を表示しています。",
+    "quota": "クォータ",
+    "rename": "ドライブ名を変更",
+    "role": {
+      "commenter": "コメンター",
+      "contributor": "投稿者",
+      "editor": "編集者",
+      "owner": "所有者",
+      "viewer": "閲覧者"
+    },
+    "storage": "ストレージ",
+    "usage": "使用量",
+    "used": "使用済み",
+    "members_personal_immutable": "個人ドライブは所有者が固定された単独メンバーシップです。"
+  },
+  "group": {
+    "members_empty": "メンバーなし",
+    "member_count": "{{n}} 人のメンバー"
+  },
+  "resource_list": {
+    "location": "場所",
+    "wrong_drop_zone_msg": "アップロードはファイル セクションでのみ機能します。ファイル セクションを開いてそこにドロップしてください。",
+    "wrong_drop_zone_action": "ファイルへ移動"
   }
 }

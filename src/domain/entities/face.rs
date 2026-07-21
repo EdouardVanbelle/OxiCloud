@@ -32,6 +32,19 @@ impl BoundingBox {
     }
 }
 
+/// A face box for the lightbox tagging overlay — the narrow projection of a
+/// persisted [`Face`] that the People API's `faces_for_file` needs (`id`,
+/// `person_id`, `bbox`). Fetching this instead of a full [`Face`] keeps the
+/// 2 KiB `embedding` BYTEA (plus det_score/quality/blob_hash/created_at) off
+/// the wire on every lightbox open of a face-tagged photo. See
+/// benches/ROUND14.md §Q1.
+#[derive(Debug, Clone)]
+pub struct FaceBox {
+    pub id: Uuid,
+    pub person_id: Option<Uuid>,
+    pub bbox: BoundingBox,
+}
+
 /// A face produced by the analyzer but not yet persisted: where it is, how
 /// confident the detector was, an optional quality score, and a 512-d,
 /// L2-normalized embedding.

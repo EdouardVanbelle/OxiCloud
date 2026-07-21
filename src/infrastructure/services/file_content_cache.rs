@@ -182,7 +182,30 @@ impl FileContentCache {
         if let Some(hit) = self.get(&cache_key).await {
             return Ok(hit);
         }
+        self.load_and_cache(cache_key, etag, content_type, load)
+            .await
+    }
 
+    /// The populate-on-miss half of [`Self::get_or_load`], with single-flight
+    /// coalescing but WITHOUT the leading `get` probe.
+    ///
+    /// Hot read paths that have *already* probed the cache with [`Self::get`]
+    /// (a borrow) call this directly on the miss branch — they then build the
+    /// owned `cache_key` / `etag` / `content_type` (each a heap allocation)
+    /// only when they are actually needed to populate, so a cache HIT allocates
+    /// none of them (benches/ROUND29.md §B). Because the caller's own `get`
+    /// already counted the hit/miss, this method does not re-probe — keeping the
+    /// hit/miss stat counts identical to a single `get_or_load` call.
+    pub async fn load_and_cache<F>(
+        &self,
+        cache_key: String,
+        etag: Arc<str>,
+        content_type: Arc<str>,
+        load: F,
+    ) -> Result<(Bytes, Arc<str>, Arc<str>), DomainError>
+    where
+        F: Future<Output = Result<Bytes, DomainError>>,
+    {
         // Slow path: coalesce concurrent misses into a single `load`.
         let entry = self
             .cache

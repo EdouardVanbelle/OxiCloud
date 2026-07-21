@@ -16,6 +16,17 @@ export default ts.config(
 				...globals.browser,
 				...globals.node
 			}
+		},
+		rules: {
+			// `_`-prefixed args are the codebase's "intentionally unused"
+			// convention — mostly Svelte snippet positional params that
+			// have to be declared but aren't read (e.g. `dateCell(_item,
+			// ctx)`). Match the widely-used JS/TS ecosystem pattern so
+			// the intent is respected without per-line disable comments.
+			'@typescript-eslint/no-unused-vars': [
+				'error',
+				{ argsIgnorePattern: '^_', varsIgnorePattern: '^_' }
+			]
 		}
 	},
 	{

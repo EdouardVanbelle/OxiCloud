@@ -8,8 +8,12 @@
 	}
 
 	onMount(() => {
-		// Mirror the legacy flow: auto-close the popup shortly after success so
-		// the user is returned to their Nextcloud client without an extra click.
+		// Auto-close the tab a few seconds after landing. NC clients
+		// receive their credentials through the LFv2 poll endpoint
+		// (`/login/v2/poll`) in the backchannel — this browser tab is
+		// only useful as a "flow succeeded" landing. Users who want
+		// to keep it around click nothing; users who want it gone
+		// get it gone automatically.
 		const timer = setTimeout(closeWindow, 3000);
 		return () => clearTimeout(timer);
 	});
@@ -34,7 +38,13 @@
 
 <style>
 	.nc-status {
-		min-height: 100vh;
+		/* `base/reset.css` sets `body { display: flex }`. Public
+		   `/nextcloud/*` routes render children directly (bypassing
+		   AppShell), so <main> is a flex item on the body's row axis
+		   and needs to claim the full slot for its own centering to
+		   land in the viewport middle. */
+		flex: 1;
+		min-height: 100dvh;
 		display: flex;
 		flex-direction: column;
 		align-items: center;

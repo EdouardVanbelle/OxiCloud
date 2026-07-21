@@ -58,6 +58,8 @@
   "photos": {
     "empty_state": "Nenhuma foto ainda",
     "empty_hint": "Envie imagens ou vídeos para vê-los aqui",
+    "empty_hidden": "{{n}} foto(s) oculta(s) pela sua preferência",
+    "empty_hidden_hint": "Desative \"Ocultar arquivos ocultos\" no seu perfil para vê-las.",
     "items_selected": "selecionados",
     "view_daily": "Dia",
     "view_monthly": "Mês",
@@ -232,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "Notificar por e-mail",
     "revoke": "Remove",
-    "role_label": "Função"
+    "role_label": "Função",
+    "col_shared_by": "Compartilhado por",
+    "col_shared": "Compartilhado"
   },
   "share_dialogTitle": "Link de compartilhamento",
   "share_linkLabel": "Link compartilhado:",
@@ -335,6 +339,7 @@
     "modified": "Modificado",
     "no_files": "Nenhum arquivo nesta pasta",
     "empty_hint": "Envie arquivos ou crie pastas para começar",
+    "drop_to_upload": "Solte arquivos aqui para enviar",
     "loading": "Carregando arquivos…",
     "view_grid": "Visualização em grade",
     "view_list": "Visualização em lista",
@@ -365,7 +370,21 @@
     "folder": "Pasta",
     "new_folder": "Nova pasta",
     "share": "Compartilhar",
-    "view": "Visualizar"
+    "view": "Visualizar",
+    "empty_hidden_title": "{{n}} item(ns) oculto(s) nesta pasta",
+    "empty_hidden_hint": "Arquivos cujo nome começa com '.' estão ocultos. Altere a configuração para vê-los.",
+    "show_hidden": "Mostrar arquivos ocultos",
+    "upload_dotfile_hidden": "{{n}} arquivo(s) enviado(s) mas oculto(s) pela sua preferência.",
+    "rename_dotfile_hidden": "Renomeado para \"{{name}}\" — agora oculto pela sua preferência.",
+    "new_folder_dotfile_hidden": "Pasta \"{{name}}\" criada — oculta pela sua preferência.",
+    "dotfiles_hidden_toast": "Arquivos ocultos ocultados",
+    "dotfiles_shown_toast": "Arquivos ocultos exibidos",
+    "col_modified": "Modificado",
+    "col_added": "Adicionado",
+    "col_created_by": "Criado por",
+    "col_opened": "Aberto",
+    "col_path": "Localização",
+    "new_elements": "Novos itens"
   },
   "dialogs": {
     "rename_folder": "Renomear pasta",
@@ -451,7 +470,8 @@
       "trashed_time": "Data de exclusão"
     },
     "delete": "Excluir permanentemente",
-    "empty_action": "Esvaziar lixeira"
+    "empty_action": "Esvaziar lixeira",
+    "expires_at": "Expira em"
   },
   "daysRemaining": {
     "expired": "Expirado",
@@ -570,7 +590,10 @@
     "accessed": "Acessado",
     "empty_state": "Nenhum arquivo recente",
     "empty_hint": "Os arquivos que você abrir aparecerão aqui",
-    "loadMore": "Carregar mais"
+    "empty_hidden_state": "{{n}} item(ns) recente(s) oculto(s) pela sua preferência",
+    "empty_hidden_hint": "Desative \"Ocultar arquivos ocultos\" no seu perfil para vê-los.",
+    "loadMore": "Carregar mais",
+    "remove_item": "Remover dos recentes"
   },
   "notifications": {
     "file_renamed": "Arquivo renomeado",
@@ -806,7 +829,70 @@
     "title": "Admin",
     "user": "Usuário",
     "username": "Nome de usuário",
-    "users": "Usuários"
+    "users": "Usuários",
+    "drive_manage_policies": "Gerenciar políticas",
+    "drive_manage_policies_for": "Políticas — {{name}}",
+    "drive_manage_policies_help": "As políticas são exclusivas do administrador — os proprietários do Unidade não podem modificá-las. Cada interruptor controla uma regra.",
+    "drive_policy": {
+      "forbid_sharing": "Proibir compartilhamento por recurso",
+      "forbid_sharing_help": "Bloqueia as concessões por arquivo / pasta (cobre também links públicos e compartilhamento externo). A associação ao Unidade continua funcionando.",
+      "forbid_public_links": "Proibir links públicos",
+      "forbid_public_links_help": "Bloqueia a criação de links de compartilhamento anônimos nos recursos deste Unidade.",
+      "forbid_external_sharing": "Proibir compartilhamento externo",
+      "forbid_external_sharing_help": "Bloqueia as concessões para usuários externos (convites por e-mail e contas externas existentes).",
+      "forbid_cross_drive_move": "Proibir movimentação entre Unidades",
+      "forbid_cross_drive_move_help": "Bloqueia mover arquivos ou pastas para outro Unidade. Não impede download + reupload.",
+      "forbid_owner_role_change": "Bloquear lista de proprietários",
+      "forbid_owner_role_change_help": "Apenas o administrador pode adicionar, remover ou rebaixar proprietários do Unidade enquanto esta política estiver ativa.",
+      "include_in_photo_index": "Incluir em Fotos",
+      "include_in_photo_index_help": "Mostrar os ficheiros de imagem e vídeo deste Unidade na cronologia Fotos e no mapa Lugares. Os Unidades pessoais predefinidos são incluídos automaticamente; ative esta opção nos Unidades partilhados que realmente contêm fotos (por ex. «Fotos da família»).",
+      "include_in_music_index": "Incluir em Música",
+      "include_in_music_index_help": "Incluir os ficheiros de áudio deste Unidade na biblioteca Música. Os Unidades pessoais predefinidos são incluídos automaticamente; ative esta opção nos Unidades partilhados que realmente contêm uma coleção musical (por ex. «Música da família», «Colaboração da banda»).",
+      "implied_by_forbid_sharing": "Já aplicado por «Proibir compartilhamento por recurso».",
+      "read_only": "Somente leitura (congelar)",
+      "read_only_help": "Congelar o Unidade por completo — qualquer alteração é recusada (envios, edições, exclusões, renomeações, compartilhamentos, mudanças de membros). Leitura e download continuam funcionando. A limpeza automática da lixeira também é pausada. Use para arquivos, retenções legais ou encerramento de contas. Somente um administrador pode descongelar."
+    },
+    "drives": "Unidades",
+    "drive_name": "Nome",
+    "drive_kind": "Tipo",
+    "drive_owners": "Proprietários",
+    "drive_usage": "Utilização",
+    "drive_created_at": "Criada",
+    "drive_kind_shared": "Partilhada",
+    "drive_kind_personal": "Pessoal",
+    "drive_kind_default_suffix": "(padrão)",
+    "drive_manage_owners": "Gerir proprietários",
+    "drive_manage_owners_for": "Gerir proprietários — {{name}}",
+    "drive_edit_quota": "Editar quota",
+    "drive_delete": "Eliminar unidade",
+    "drive_delete_confirm": "Eliminar a unidade «{{name}}»? Esta ação é irreversível.",
+    "drive_deleted": "Unidade eliminada.",
+    "drive_created": "Unidade criada.",
+    "drive_add_owner": "Adicionar proprietário",
+    "drive_current_owners": "Proprietários atuais",
+    "drive_no_owners": "Sem proprietários",
+    "drive_owner": "Proprietário",
+    "drive_owner_hint": "Escolha um utilizador (proprietário único) ou um grupo (cada membro passa a proprietário via expansão do sujeito).",
+    "drive_owner_picked": "Proprietário: {{name}}",
+    "drive_owner_placeholder": "Procurar um utilizador ou grupo…",
+    "drive_owner_remove_confirm": "Remover este proprietário da unidade?",
+    "drive_name_placeholder": "ex. Engenharia",
+    "drive_error_name_required": "O nome da unidade é obrigatório.",
+    "drive_error_owner_required": "Escolha um utilizador ou grupo como proprietário da unidade.",
+    "create_drive": "Criar unidade partilhada",
+    "no_drives": "Ainda não existem unidades.",
+    "external_user": "externo",
+    "external_user_hint": "Conta apenas por convite (magic-link ou OCM). Não pode ser administrador e não tem quota de armazenamento.",
+    "no_storage_for_external": "As contas externas não têm envelope de armazenamento.",
+    "promote_to_internal_title": "Promover a utilizador interno",
+    "confirm_promote_user": "Promover {{name}} a utilizador interno? Isto aprovisiona uma unidade pessoal e atribui um envelope de armazenamento normal. A identidade da conta é preservada; o login por magic-link continua a ser a via de acesso enquanto não for definida uma palavra-passe.",
+    "delete_user_title": "Eliminar utilizador",
+    "delete_user_warning": "Está prestes a eliminar permanentemente «{{name}}». A conta será removida, todas as sessões revogadas e a unidade pessoal apagada. Esta ação é irreversível.",
+    "delete_user_confirm_hint": "Para confirmar, escreva o e-mail da conta abaixo: {{email}}",
+    "deleting": "A eliminar…",
+    "auth": "Autenticação",
+    "quota": "Uso de armazenamento",
+    "last_login": "Último acesso"
   },
   "profile": {
     "page_title": "Perfil",
@@ -859,6 +945,7 @@
     "family_name": "Sobrenome",
     "notify_on_share": "Avisar-me por e-mail quando alguém compartilhar comigo",
     "notify_on_share_hint": "Quando desmarcado, os compartilhamentos continuarão aparecendo na sua conta — você apenas não receberá um e-mail sobre eles.",
+    "hide_dotfiles": "Ocultar arquivos cujo nome começa com um ponto (.env, .git, …)",
     "save_profile": "Salvar alterações",
     "profile_saved": "Perfil atualizado",
     "profile_no_changes": "Sem alterações para salvar.",
@@ -979,7 +1066,17 @@
     "notifyRateLimited": "Demasiadas notificações para este destinatário — tente novamente mais tarde.",
     "removeAccess": "Remover acesso",
     "resendInvitation": "Reenviar e-mail de convite",
-    "publicLinks": "Public links"
+    "publicLinks": "Public links",
+    "filter": {
+      "button": "Tipos",
+      "title": "Filtrar por tipo",
+      "files": "Arquivos",
+      "folders": "Pastas",
+      "drives": "Unidades",
+      "emptyTitle": "Nenhum compartilhamento corresponde ao filtro atual",
+      "emptyHint": "Ajuste o filtro de tipo ou redefina-o para o padrão (Arquivos + Pastas).",
+      "reset": "Redefinir filtro"
+    }
   },
   "sort": {
     "asc": "ascendente",
@@ -1078,7 +1175,9 @@
     "rename": "Renomear",
     "save": "Salvar",
     "search": "Pesquisar",
-    "yes": "Sim"
+    "yes": "Sim",
+    "saving": "Salvando…",
+    "deleting": "A eliminar…"
   },
   "device": {
     "continue": "Continuar",
@@ -1108,5 +1207,79 @@
   "view": {
     "grid": "Visualização em grade",
     "list": "Visualização em lista"
+  },
+  "preferences": {
+    "save_failed": "Não foi possível salvar sua preferência. Tente novamente."
+  },
+  "upgrade": {
+    "title": "Atualizar para conta completa",
+    "lede": "Obtenha seu próprio armazenamento e comece a enviar arquivos. Seus compartilhamentos existentes permanecem intactos.",
+    "busy": "Atualizando…",
+    "submit": "Atualizar minha conta",
+    "cancel": "Agora não — voltar a compartilhados comigo",
+    "success": "Sua conta foi atualizada. Redirecionando para seus arquivos…",
+    "error": "Falha na atualização.",
+    "password_required": "A senha é obrigatória — esta instância não oferece login por link de e-mail.",
+    "password_too_short": "A senha deve ter pelo menos 8 caracteres.",
+    "oidc_user": "Contas SSO/OIDC são gerenciadas pelo seu provedor de identidade. A atualização não está disponível.",
+    "domain_not_allowed": "Esta instância não aceita novas contas do seu domínio de e-mail. Contate o administrador para habilitar.",
+    "banner_aria": "Solicitação de atualização",
+    "banner_title": "Obtenha seu próprio armazenamento",
+    "banner_body": "Você está usando uma conta de convidado. Atualize para obter uma unidade pessoal e enviar arquivos.",
+    "banner_cta": "Atualizar"
+  },
+  "drive": {
+    "read_only_banner": {
+      "title": "Esta unidade é somente leitura",
+      "title_named": "A unidade \"{{name}}\" é somente leitura",
+      "body": "Envios, edições, exclusões, renomeações, compartilhamentos e mudanças de membros são recusados. Leitura e download continuam funcionando. Contate um administrador para descongelar o unidade.",
+      "aria": "Este unidade é somente leitura"
+    },
+    "back_to_files": "Voltar aos Ficheiros",
+    "danger_zone": "Zona de perigo",
+    "delete": "Eliminar unidade",
+    "delete_confirm": "Eliminar a unidade «{{name}}»? Esta ação é irreversível — a unidade tem de estar vazia, ou o servidor recusará.",
+    "delete_hint": "Eliminar uma unidade remove-a permanentemente. A unidade tem de estar vazia (sem ficheiros nem pastas ativos) antes de poder ser eliminada.",
+    "deleted": "Unidade eliminada.",
+    "field": {
+      "created": "Criada",
+      "default": "Predefinida",
+      "default_yes": "Esta é a sua unidade principal",
+      "id": "Identificador",
+      "kind": "Tipo",
+      "updated": "Última atualização"
+    },
+    "info": "Informação da unidade",
+    "kind_personal": "Unidade pessoal",
+    "kind_shared": "Unidade partilhada",
+    "manage_members": "Gerir membros",
+    "members": "Membros",
+    "members_empty": "Sem membros.",
+    "not_found_body": "Esta unidade não existe ou não tem acesso a ela.",
+    "not_found_title": "Unidade não encontrada",
+    "policies": "Regras",
+    "policies_help": "Regras que um administrador do OxiCloud definiu para esta unidade. Apenas administradores podem alterá-las; está a ver o estado atual.",
+    "quota": "Quota",
+    "rename": "Renomear unidade",
+    "role": {
+      "commenter": "Comentador",
+      "contributor": "Contribuidor",
+      "editor": "Editor",
+      "owner": "Proprietário",
+      "viewer": "Leitor"
+    },
+    "storage": "Armazenamento",
+    "usage": "Utilização",
+    "used": "Utilizado",
+    "members_personal_immutable": "As unidades pessoais têm uma associação fixa a um único proprietário."
+  },
+  "group": {
+    "members_empty": "Sem membros",
+    "member_count": "{{n}} membros"
+  },
+  "resource_list": {
+    "location": "Localização",
+    "wrong_drop_zone_msg": "Os envios só funcionam em Ficheiros — abra a secção Ficheiros e largue-os aí.",
+    "wrong_drop_zone_action": "Ir para Arquivos"
   }
 }

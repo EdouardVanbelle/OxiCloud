@@ -26,6 +26,7 @@ NextCloud was too slow on a home server. So OxiCloud was built to run on minimal
 ## Key Features
 
 ### Storage & Files
+- [Drives](/guide/drives) — Personal + Shared spaces with per-drive quota, members, and policies
 - Drag-and-drop upload, multi-file, grid & list views
 - Chunked uploads (TUS-like, parallel, resumable, MD5 integrity)
 - BLAKE3 content-addressable file deduplication with ref-counting

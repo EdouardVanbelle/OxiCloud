@@ -6,11 +6,11 @@ use axum::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::info;
 use utoipa::ToSchema;
 
 use crate::application::dtos::display_helpers::{
-    category_for, format_file_size, icon_class_for, icon_special_class_for,
+    classify_display, format_file_size, intern_display, intern_mime,
 };
 use crate::application::dtos::favorites_dto::{
     FavoritesResourceItemDto, FavoritesResourcesDto, FavoritesResourcesQuery,
@@ -66,7 +66,8 @@ pub async fn add_favorite(
             Json(serde_json::json!({
                 "error": "Item type must be 'file' or 'folder'"
             })),
-        );
+        )
+            .into_response();
     }
 
     match favorites_service
@@ -81,16 +82,14 @@ pub async fn add_favorite(
                     "message": "Item added to favorites"
                 })),
             )
+                .into_response()
         }
-        Err(err) => {
-            error!("Error adding to favorites: {}", err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to add to favorites"
-                })),
-            )
-        }
+        // Route through AppError so the `DomainError::kind` maps to the
+        // right status code (NotFound → 404 anti-enum for the pre-write
+        // authz gate, InvalidInput → 400 for a malformed UUID, etc.).
+        // A hardcoded 500 here would mask the 404 the Round 1 AuthZ
+        // fix relies on.
+        Err(err) => AppError::from(err).into_response(),
     }
 }
 
@@ -129,6 +128,7 @@ pub async fn remove_favorite(
                         "message": "Item removed from favorites"
                     })),
                 )
+                    .into_response()
             } else {
                 info!("Item {} '{}' was not in favorites", item_type, item_id);
                 (
@@ -137,17 +137,12 @@ pub async fn remove_favorite(
                         "message": "Item was not in favorites"
                     })),
                 )
+                    .into_response()
             }
         }
-        Err(err) => {
-            error!("Error removing from favorites: {}", err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to remove from favorites"
-                })),
-            )
-        }
+        // Same rationale as `add_favorite` — preserve DomainError→HTTP
+        // status mapping instead of collapsing every error to 500.
+        Err(err) => AppError::from(err).into_response(),
     }
 }
 
@@ -202,7 +197,7 @@ pub async fn list_favorites_resources(
                     // Path is only shown to the owner; non-owners see ""
                     // to avoid leaking another user's folder hierarchy.
                     let path = if row.is_owner {
-                        row.path.clone().unwrap_or_default()
+                        row.path.unwrap_or_default()
                     } else {
                         String::new()
                     };
@@ -212,24 +207,18 @@ pub async fn list_favorites_resources(
                         let dto = FolderDto {
                             etag: resource_id.clone(),
                             id: resource_id,
-                            name: row.name.clone(),
+                            name: row.name,
                             path,
                             parent_id: row.parent_id.map(|u| u.to_string()),
-                            owner_id: Some(row.owner_id.to_string()),
-                            // Listing handler — drive_id is informational
-                            // and the favorites row doesn't currently
-                            // SELECT it. Path-based lookups never enter
-                            // this code path.
-                            drive_id: uuid::Uuid::nil(),
+                            drive_id: row.drive_id,
                             created_at: row.resource_created_at.timestamp() as u64,
                             modified_at: row.modified_at.timestamp() as u64,
                             is_root: false,
-                            icon_class: std::sync::Arc::from("fas fa-folder"),
-                            icon_special_class: std::sync::Arc::from("folder-icon"),
-                            category: std::sync::Arc::from("Folder"),
-                            // §14 provenance not selected by the favorites query.
-                            created_by: None,
-                            updated_by: None,
+                            icon_class: intern_display("fas fa-folder"),
+                            icon_special_class: intern_display("folder-icon"),
+                            category: intern_display("Folder"),
+                            created_by: row.created_by,
+                            updated_by: row.updated_by,
                         };
                         FavoritesResourceItemDto {
                             resource_type: ResourceTypeDto::Folder,
@@ -248,34 +237,36 @@ pub async fn list_favorites_resources(
                         // file. `blob_hash` is `None` only for
                         // folder rows, which take the other branch.
                         let modified_at_u = row.modified_at.timestamp() as u64;
-                        let content_hash = row.blob_hash.clone().unwrap_or_default();
+                        let content_hash = row.blob_hash.unwrap_or_default();
                         let etag = if content_hash.is_empty() {
                             String::new()
                         } else {
                             File::compute_etag(&content_hash, modified_at_u)
                         };
+                        // Name-derived display classes borrow `row.name`;
+                        // compute them before the name moves into the DTO.
+                        let classes = classify_display(&row.name, mime);
+                        let icon_class = intern_display(classes.icon_class);
+                        let icon_special_class = intern_display(classes.icon_special_class);
+                        let category = intern_display(classes.category);
                         let dto = FileDto {
                             id: row.resource_id.to_string(),
-                            name: row.name.clone(),
+                            name: row.name,
                             path,
                             size: size_bytes,
-                            mime_type: std::sync::Arc::from(mime),
+                            mime_type: intern_mime(mime),
                             folder_id: row.parent_id.map(|u| u.to_string()),
                             created_at: row.resource_created_at.timestamp() as u64,
                             modified_at: modified_at_u,
-                            icon_class: std::sync::Arc::from(icon_class_for(&row.name, mime)),
-                            icon_special_class: std::sync::Arc::from(icon_special_class_for(
-                                &row.name, mime,
-                            )),
-                            category: std::sync::Arc::from(category_for(&row.name, mime)),
+                            icon_class,
+                            icon_special_class,
+                            category,
                             size_formatted: format_file_size(size_bytes),
-                            owner_id: Some(row.owner_id.to_string()),
                             sort_date: None,
                             content_hash,
                             etag,
-                            // §14 provenance not selected by the favorites query.
-                            created_by: None,
-                            updated_by: None,
+                            created_by: row.created_by,
+                            updated_by: row.updated_by,
                         };
                         FavoritesResourceItemDto {
                             resource_type: ResourceTypeDto::File,
@@ -353,15 +344,10 @@ pub async fn batch_add_favorites(
             );
             (StatusCode::OK, Json(serde_json::json!(result))).into_response()
         }
-        Err(err) => {
-            error!("Error in batch add favorites: {}", err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to batch add favorites"
-                })),
-            )
-                .into_response()
-        }
+        // Preserve DomainError→HTTP status mapping — the Round 1
+        // AuthZ fix relies on a per-item NotFound propagating out
+        // of the batch. A hardcoded 500 would mask the 404 that
+        // signals a cross-tenant probe.
+        Err(err) => AppError::from(err).into_response(),
     }
 }

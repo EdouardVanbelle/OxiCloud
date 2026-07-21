@@ -122,18 +122,23 @@ for REMOTE in "$FILE_A" "$FILE_B"; do
 done
 
 # ── Step 1: Upload file A ─────────────────────────────────────────────────────
+# Post commit 43cf4a2b, PUT distinguishes create (201) from overwrite (204)
+# per RFC 7231 §4.3.4. The wipe loop above ensures A and B are NEW resources
+# here, so we expect 201. Step 5 below tests the overwrite case (expects 204).
 
 echo "  step 1: PUT $FILE_A (dedup-test.jpg)..."
 STATUS=$(webdav_put "$FILE_A" "$FIXTURE_A" "image/jpeg")
-[[ "$STATUS" == "204" ]] || fail "PUT $FILE_A expected 204, got $STATUS"
-pass "PUT $FILE_A → 204"
+[[ "$STATUS" == "201" ]] || fail "PUT $FILE_A expected 201, got $STATUS"
+pass "PUT $FILE_A → 201"
 
 # ── Step 2: Upload file B (identical content, different name) ─────────────────
+# Distinct resource (new path), so PUT emits 201 even though the underlying
+# blob dedup-hits. 201 vs 204 reflects URL freshness, not byte freshness.
 
 echo "  step 2: PUT $FILE_B (dedup-test-2.jpg, same bytes)..."
 STATUS=$(webdav_put "$FILE_B" "$FIXTURE_B" "image/jpeg")
-[[ "$STATUS" == "204" ]] || fail "PUT $FILE_B expected 204, got $STATUS"
-pass "PUT $FILE_B → 204"
+[[ "$STATUS" == "201" ]] || fail "PUT $FILE_B expected 201, got $STATUS"
+pass "PUT $FILE_B → 201"
 
 # ── Step 3: Resolve file IDs and assert two distinct records ──────────────────
 

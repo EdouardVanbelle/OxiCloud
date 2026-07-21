@@ -116,18 +116,24 @@ for REMOTE in "$FILE_A" "$FILE_B"; do
 done
 
 # ── Step 1: Upload file A ─────────────────────────────────────────────────────
+# Post commit 43cf4a2b, PUT distinguishes create (201) from overwrite (204)
+# per RFC 7231 §4.3.4. Both files are NEW here (the purge_from_trash loop
+# above wiped any leftover state), so we expect 201 on each PUT.
 
 echo "  step 1: PUT $FILE_A..."
 STATUS=$(webdav_put "$FILE_A" "$FIXTURE" "video/mp4")
-[[ "$STATUS" == "204" ]] || fail "PUT $FILE_A expected 204, got $STATUS"
-pass "PUT $FILE_A → 204  (new manifest, 8 chunk blobs created)"
+[[ "$STATUS" == "201" ]] || fail "PUT $FILE_A expected 201, got $STATUS"
+pass "PUT $FILE_A → 201  (new manifest, 8 chunk blobs created)"
 
 # ── Step 2: Upload file B (same content, different name → dedup hit) ──────────
+# File B is a distinct resource (new path), so PUT still emits 201 even though
+# the underlying blob is dedup'd. 201 vs 204 reflects "is this a new HTTP
+# resource at this URL", not "is the byte content novel".
 
 echo "  step 2: PUT $FILE_B (same bytes → dedup hit)..."
 STATUS=$(webdav_put "$FILE_B" "$FIXTURE" "video/mp4")
-[[ "$STATUS" == "204" ]] || fail "PUT $FILE_B expected 204, got $STATUS"
-pass "PUT $FILE_B → 204  (dedup hit: manifest ref_count → 2, chunks unchanged)"
+[[ "$STATUS" == "201" ]] || fail "PUT $FILE_B expected 201, got $STATUS"
+pass "PUT $FILE_B → 201  (dedup hit: manifest ref_count → 2, chunks unchanged)"
 
 # ── Resolve file IDs ──────────────────────────────────────────────────────────
 

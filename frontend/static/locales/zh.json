@@ -58,6 +58,8 @@
   "photos": {
     "empty_state": "还没有照片",
     "empty_hint": "上传图片或视频即可在此查看",
+    "empty_hidden": "根据您的偏好隐藏了 {{n}} 张照片",
+    "empty_hidden_hint": "在个人资料中关闭「隐藏隐藏文件」即可查看。",
     "items_selected": "已选择",
     "view_daily": "日",
     "view_monthly": "月",
@@ -232,7 +234,9 @@
     "link_name": "Link name (optional)",
     "notifyByEmail": "通过邮件通知",
     "revoke": "Remove",
-    "role_label": "角色"
+    "role_label": "角色",
+    "col_shared_by": "共享者",
+    "col_shared": "共享日期"
   },
   "share_dialogTitle": "共享链接",
   "share_linkLabel": "共享链接：",
@@ -335,6 +339,7 @@
     "modified": "修改日期",
     "no_files": "此文件夹中没有文件",
     "empty_hint": "上传文件或创建文件夹以开始使用",
+    "drop_to_upload": "将文件拖放到此处上传",
     "loading": "正在加载文件…",
     "view_grid": "网格视图",
     "view_list": "列表视图",
@@ -365,7 +370,21 @@
     "folder": "文件夹",
     "new_folder": "新建文件夹",
     "share": "分享",
-    "view": "查看"
+    "view": "查看",
+    "empty_hidden_title": "此文件夹中有 {{n}} 个隐藏项",
+    "empty_hidden_hint": "以 '.' 开头的文件被隐藏。切换设置即可显示。",
+    "show_hidden": "显示隐藏文件",
+    "upload_dotfile_hidden": "已上传 {{n}} 个文件,但已根据您的偏好隐藏。",
+    "rename_dotfile_hidden": "已重命名为「{{name}}」——现已根据您的偏好隐藏。",
+    "new_folder_dotfile_hidden": "已创建文件夹「{{name}}」——根据您的偏好隐藏。",
+    "dotfiles_hidden_toast": "已隐藏隐藏文件",
+    "dotfiles_shown_toast": "已显示隐藏文件",
+    "col_modified": "修改日期",
+    "col_added": "添加日期",
+    "col_created_by": "创建者",
+    "col_opened": "打开日期",
+    "col_path": "位置",
+    "new_elements": "新元素"
   },
   "dialogs": {
     "rename_folder": "重命名文件夹",
@@ -451,7 +470,8 @@
       "trashed_time": "删除时间"
     },
     "delete": "永久删除",
-    "empty_action": "Empty trash"
+    "empty_action": "Empty trash",
+    "expires_at": "到期时间"
   },
   "daysRemaining": {
     "expired": "已过期",
@@ -570,7 +590,10 @@
     "accessed": "访问于",
     "empty_state": "没有最近文件",
     "empty_hint": "您打开的文件将显示在这里",
-    "loadMore": "加载更多"
+    "empty_hidden_state": "根据您的偏好隐藏了 {{n}} 个最近项目",
+    "empty_hidden_hint": "在个人资料中关闭「隐藏隐藏文件」即可查看。",
+    "loadMore": "加载更多",
+    "remove_item": "从最近使用中移除"
   },
   "batch": {
     "one_selected": "已选择 1 个项目",
@@ -789,7 +812,70 @@
     "title": "管理员",
     "user": "用户",
     "username": "用户名",
-    "users": "用户"
+    "users": "用户",
+    "drive_manage_policies": "管理策略",
+    "drive_manage_policies_for": "策略 — {{name}}",
+    "drive_manage_policies_help": "策略仅限管理员配置 — 云盘 所有者无法修改。每个开关控制一项强制规则。",
+    "drive_policy": {
+      "forbid_sharing": "禁止按资源共享",
+      "forbid_sharing_help": "阻止按文件 / 文件夹的授予（同时涵盖公开链接和外部共享）。云盘 级别的成员资格仍然有效。",
+      "forbid_public_links": "禁止公开链接",
+      "forbid_public_links_help": "阻止在此 云盘 的资源上创建匿名共享链接。",
+      "forbid_external_sharing": "禁止外部共享",
+      "forbid_external_sharing_help": "阻止向外部用户授予权限（电子邮件邀请和已存在的外部帐户）。",
+      "forbid_cross_drive_move": "禁止跨 云盘 移动",
+      "forbid_cross_drive_move_help": "阻止将文件或文件夹移动到另一个 云盘。不阻止下载后再上传。",
+      "forbid_owner_role_change": "锁定所有者名单",
+      "forbid_owner_role_change_help": "在此项启用时，只有管理员可以添加、移除或降级 云盘 所有者。",
+      "include_in_photo_index": "包含在照片中",
+      "include_in_photo_index_help": "在照片时间线和地点地图中显示此 云盘 的图像和视频文件。默认个人 云盘 自动包含在内；对于真正包含照片的共享 云盘（例如\"家庭照片\"），请开启此选项。",
+      "include_in_music_index": "包含在音乐中",
+      "include_in_music_index_help": "将此 云盘 的音频文件包含在音乐库中。默认个人 云盘 自动包含在内；对于真正包含音乐收藏的共享 云盘（例如\"家庭音乐\"、\"乐队协作\"），请开启此选项。",
+      "implied_by_forbid_sharing": "已由\"禁止按资源共享\"强制执行。",
+      "read_only": "只读(冻结)",
+      "read_only_help": "完全冻结云盘 — 任何修改都会被拒绝(上传、编辑、删除、重命名、分享、成员变更)。读取和下载仍可正常使用。回收站的自动清理也会暂停。适用于归档、法律保留或账户关闭。只有管理员可以解冻。"
+    },
+    "drives": "云盘",
+    "drive_name": "名称",
+    "drive_kind": "类型",
+    "drive_owners": "所有者",
+    "drive_usage": "使用情况",
+    "drive_created_at": "创建时间",
+    "drive_kind_shared": "共享",
+    "drive_kind_personal": "个人",
+    "drive_kind_default_suffix": "(默认)",
+    "drive_manage_owners": "管理所有者",
+    "drive_manage_owners_for": "管理所有者 — {{name}}",
+    "drive_edit_quota": "编辑配额",
+    "drive_delete": "删除云盘",
+    "drive_delete_confirm": "删除云盘\"{{name}}\"?此操作无法撤销。",
+    "drive_deleted": "云盘已删除。",
+    "drive_created": "云盘已创建。",
+    "drive_add_owner": "添加所有者",
+    "drive_current_owners": "当前所有者",
+    "drive_no_owners": "无所有者",
+    "drive_owner": "所有者",
+    "drive_owner_hint": "选择一个用户(唯一所有者)或一个群组(通过主体扩展,每位成员都成为所有者)。",
+    "drive_owner_picked": "所有者: {{name}}",
+    "drive_owner_placeholder": "搜索用户或群组…",
+    "drive_owner_remove_confirm": "从云盘中移除该所有者?",
+    "drive_name_placeholder": "例如: 工程",
+    "drive_error_name_required": "云盘名称为必填项。",
+    "drive_error_owner_required": "请选择用户或群组作为云盘所有者。",
+    "create_drive": "创建共享云盘",
+    "no_drives": "暂无云盘。",
+    "external_user": "外部",
+    "external_user_hint": "仅邀请账户(magic-link 或 OCM)。不能作为管理员,也没有存储配额。",
+    "no_storage_for_external": "外部账户没有存储配额。",
+    "promote_to_internal_title": "提升为内部用户",
+    "confirm_promote_user": "将 {{name}} 提升为内部用户?这将预配主云盘并分配正常的存储配额。账户身份保持不变;在设置密码前,magic-link 登录仍然是进入方式。",
+    "delete_user_title": "删除用户",
+    "delete_user_warning": "即将永久删除\"{{name}}\"。这将移除账户、撤销所有会话并清除个人云盘。此操作无法撤销。",
+    "delete_user_confirm_hint": "要确认,请在下方输入账户邮箱: {{email}}",
+    "deleting": "删除中…",
+    "auth": "认证",
+    "quota": "存储用量",
+    "last_login": "最后登录"
   },
   "profile": {
     "page_title": "个人资料",
@@ -842,6 +928,7 @@
     "family_name": "姓",
     "notify_on_share": "当有人与我共享时通过电子邮件通知我",
     "notify_on_share_hint": "取消勾选后，共享项目仍会显示在您的账户中 — 只是不会收到相关邮件通知。",
+    "hide_dotfiles": "隐藏名称以点开头的文件（.env、.git 等）",
     "save_profile": "保存更改",
     "profile_saved": "个人资料已更新",
     "profile_no_changes": "无更改可保存。",
@@ -979,7 +1066,17 @@
     "notifyRateLimited": "对此收件人的通知过多 — 请稍后重试。",
     "removeAccess": "移除访问权限",
     "resendInvitation": "重新发送邀请邮件",
-    "publicLinks": "Public links"
+    "publicLinks": "Public links",
+    "filter": {
+      "button": "类型",
+      "title": "按类型筛选",
+      "files": "文件",
+      "folders": "文件夹",
+      "drives": "驱动器",
+      "emptyTitle": "没有共享项符合当前筛选",
+      "emptyHint": "调整类型筛选或将其重置为默认 (文件 + 文件夹)。",
+      "reset": "重置筛选"
+    }
   },
   "sort": {
     "asc": "ascending",
@@ -1078,7 +1175,9 @@
     "rename": "重命名",
     "save": "保存",
     "search": "搜索",
-    "yes": "有"
+    "yes": "有",
+    "saving": "保存中…",
+    "deleting": "删除中…"
   },
   "device": {
     "continue": "继续",
@@ -1108,5 +1207,79 @@
   "view": {
     "grid": "网格视图",
     "list": "列表视图"
+  },
+  "preferences": {
+    "save_failed": "无法保存偏好设置。请重试。"
+  },
+  "upgrade": {
+    "title": "升级为完整账户",
+    "lede": "获得您自己的存储空间并开始上传文件。您现有的共享保持不变。",
+    "busy": "升级中…",
+    "submit": "升级我的账户",
+    "cancel": "暂不 — 返回共享给我",
+    "success": "您的账户已升级。正在跳转到您的文件…",
+    "error": "升级失败。",
+    "password_required": "需要密码 — 此部署未提供邮件链接登录。",
+    "password_too_short": "密码必须至少 8 个字符。",
+    "oidc_user": "SSO/OIDC 账户由您的身份提供商管理。无法升级。",
+    "domain_not_allowed": "此部署不接受来自您邮箱域的新账户。请联系管理员启用。",
+    "banner_aria": "升级提示",
+    "banner_title": "获得您自己的存储空间",
+    "banner_body": "您正在使用访客账户。升级以获得个人云盘并开始上传文件。",
+    "banner_cta": "升级"
+  },
+  "drive": {
+    "read_only_banner": {
+      "title": "此云盘为只读",
+      "title_named": "云盘 \"{{name}}\" 为只读",
+      "body": "上传、编辑、删除、重命名、分享和成员变更均被拒绝。读取和下载仍可正常使用。请联系管理员解冻此云盘。",
+      "aria": "此云盘为只读"
+    },
+    "back_to_files": "返回文件",
+    "danger_zone": "危险操作",
+    "delete": "删除云盘",
+    "delete_confirm": "删除云盘\"{{name}}\"?此操作无法撤销 — 云盘必须为空,否则服务器将拒绝。",
+    "delete_hint": "删除云盘会永久移除。删除前云盘必须为空(没有活动的文件或文件夹)。",
+    "deleted": "云盘已删除。",
+    "field": {
+      "created": "创建时间",
+      "default": "默认",
+      "default_yes": "这是你的主云盘",
+      "id": "标识符",
+      "kind": "类型",
+      "updated": "最近更新"
+    },
+    "info": "云盘信息",
+    "kind_personal": "个人云盘",
+    "kind_shared": "共享云盘",
+    "manage_members": "管理成员",
+    "members": "成员",
+    "members_empty": "暂无成员。",
+    "not_found_body": "此云盘不存在或你无权访问。",
+    "not_found_title": "未找到云盘",
+    "policies": "策略",
+    "policies_help": "OxiCloud 管理员为此云盘设置的规则。只有管理员可以更改;你看到的是当前状态。",
+    "quota": "配额",
+    "rename": "重命名云盘",
+    "role": {
+      "commenter": "评论者",
+      "contributor": "贡献者",
+      "editor": "编辑者",
+      "owner": "所有者",
+      "viewer": "查看者"
+    },
+    "storage": "存储",
+    "usage": "使用情况",
+    "used": "已用",
+    "members_personal_immutable": "个人云盘的成员关系固定为单一所有者。"
+  },
+  "group": {
+    "members_empty": "无成员",
+    "member_count": "{{n}} 名成员"
+  },
+  "resource_list": {
+    "location": "位置",
+    "wrong_drop_zone_msg": "上传仅在 “文件” 中生效 — 请打开文件区并在那里拖放。",
+    "wrong_drop_zone_action": "前往文件"
   }
 }

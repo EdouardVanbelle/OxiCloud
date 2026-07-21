@@ -38,16 +38,33 @@ wait_for_http() {
 
 SERVER_PID=""
 
+WOPI_MOCK_PID=""
+
 cleanup() {
   if [[ -n "$SERVER_PID" ]]; then
     log "Stopping OxiCloud server (pid $SERVER_PID)..."
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
   fi
+  if [[ -n "$WOPI_MOCK_PID" ]]; then
+    log "Stopping WOPI mock discovery (pid $WOPI_MOCK_PID)..."
+    kill "$WOPI_MOCK_PID" 2>/dev/null || true
+    wait "$WOPI_MOCK_PID" 2>/dev/null || true
+  fi
   bash "$COMMON/stop-db.sh"
 }
 
 trap cleanup EXIT
+
+# ── 0. WOPI mock discovery ────────────────────────────────────────────────────
+# Serves the static discovery.xml `OXICLOUD_WOPI_DISCOVERY_URL`
+# points at (server.env pins port 9100). Started BEFORE OxiCloud so
+# the server's cache-fill on first WOPI request finds it. The mock
+# is stdlib-only Python (no deps) — see the file header for what it
+# returns and why it's cheap.
+log "Starting WOPI mock discovery on port 9100..."
+node "$COMMON/wopi_mock_discovery.js" > /tmp/wopi-mock-discovery.log 2>&1 &
+WOPI_MOCK_PID=$!
 
 # ── 1. Start postgres ─────────────────────────────────────────────────────────
 
@@ -129,10 +146,14 @@ log "Running Hurl tests..."
 hurl --variables-file "$API_DIR/test.env" --file-root "$REPO_ROOT/tests" --test --jobs 1 \
   "$API_DIR/setup.hurl" \
   "$API_DIR/auth_login.hurl" \
+  "$API_DIR/user_ui_preferences.hurl" \
   "$API_DIR/auth_session_lifecycle.hurl" \
+  "$API_DIR/auth_magic_link_login.hurl" \
+  "$API_DIR/auth_upgrade_to_internal.hurl" \
   "$API_DIR/registration.hurl" \
   "$API_DIR/nc_status_capabilities.hurl" \
   "$API_DIR/nc_login_flow_v2.hurl" \
+  "$API_DIR/nc_login_flow_v2_drive_picker.hurl" \
   "$API_DIR/nc_ocs_user_info.hurl" \
   "$API_DIR/nc_avatar_preview.hurl" \
   "$API_DIR/files-folders.hurl" \
@@ -143,10 +164,19 @@ hurl --variables-file "$API_DIR/test.env" --file-root "$REPO_ROOT/tests" --test 
   "$API_DIR/recent.hurl" \
   "$API_DIR/batch_folder_copy.hurl" \
   "$API_DIR/dedup_blob_cleanup.hurl" \
+  "$API_DIR/dedup_admin_gate.hurl" \
+  "$API_DIR/default_caldav_carddav.hurl" \
+  "$API_DIR/dav_error_mapping.hurl" \
+  "$API_DIR/carddav_vcard_properties.hurl" \
   "$API_DIR/contacts.hurl" \
+  "$API_DIR/calendar.hurl" \
+  "$API_DIR/caldav_recurring.hurl" \
+  "$API_DIR/caldav_calendar_query.hurl" \
+  "$API_DIR/playlists.hurl" \
   "$API_DIR/public_shares.hurl" \
   "$API_DIR/permissions.hurl" \
   "$API_DIR/grants.hurl" \
+  "$API_DIR/grant_cleanup.hurl" \
   "$API_DIR/role_grants.hurl" \
   "$API_DIR/subject_groups.hurl" \
   "$API_DIR/groups_effective_members.hurl" \
@@ -160,7 +190,31 @@ hurl --variables-file "$API_DIR/test.env" --file-root "$REPO_ROOT/tests" --test 
   "$API_DIR/admin_user_ops.hurl" \
   "$API_DIR/chunked_upload_cap.hurl" \
   "$API_DIR/nc_auth_failures.hurl" \
-  "$API_DIR/dedup_create.hurl"
+  "$API_DIR/dedup_create.hurl" \
+  "$API_DIR/trash_per_drive.hurl" \
+  "$API_DIR/drive_quota.hurl" \
+  "$API_DIR/user_envelope_quota.hurl" \
+  "$API_DIR/regression_595_unlimited_user_quota.hurl" \
+  "$API_DIR/drive_policies.hurl" \
+  "$API_DIR/drive_read_only.hurl" \
+  "$API_DIR/cross_drive_move.hurl" \
+  "$API_DIR/cross_drive_copy.hurl" \
+  "$API_DIR/nc_multidrive_move_regression.hurl" \
+  "$API_DIR/webdav_dead_properties.hurl" \
+  "$API_DIR/nc_webdav_dead_properties.hurl" \
+  "$API_DIR/webdav_protected_properties.hurl" \
+  "$API_DIR/webdav_quota_properties.hurl" \
+  "$API_DIR/nc_webdav_quota_properties.hurl" \
+  "$API_DIR/webdav_patch.hurl" \
+  "$API_DIR/nc_webdav_patch.hurl" \
+  "$API_DIR/webdav_patch_consistency.hurl" \
+  "$API_DIR/nc_webdav_patch_consistency.hurl" \
+  "$API_DIR/nc_webdav_put_gaps.hurl" \
+  "$API_DIR/webdav_drive_root.hurl" \
+  "$API_DIR/webdav_permissions.hurl" \
+  "$API_DIR/webdav_nested_move_cascade.hurl" \
+  "$API_DIR/wopi_authz.hurl" \
+  "$API_DIR/wopi_shared_drive.hurl"
 
 #bash "$API_DIR/dedup_bulk_upload.sh"
 

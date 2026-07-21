@@ -1,71 +1,41 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Grant Access - OxiCloud</title>
-    <link rel="icon" type="image/svg+xml" href="/logo/logo-plain.svg">
-    <link rel="stylesheet" href="/css/main.css">
-    <link rel="stylesheet" href="/css/views/auth.css">
+    <script>
+        const url = new URL(window.location.href);
+        const user = url.searchParams.get('user');
+        const pathSegments = url.pathname.split('/');
+        const token = pathSegments[pathSegments.length - 1];
+        const validToken = token ? /^[0-9a-fA-F]+$/.test(token) : false;
+
+        if (validToken && username) {
+            const destinationUri = `/nextcloud/login?token=${token}&user=${user}`;
+            window.location.replace(destinationUri);
+        } else {
+            document.getElementById("wrap").innerText = "Redirect failed";
+        }
+    </script>
+    <style>
+        #wrap {
+            height: 100dvh;
+            width: 100vw;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 20pt;
+            font-weight: 500;
+            color: #000000;
+            background-color: #ffffff;
+        }
+    </style>
 </head>
+
 <body>
-    <div class="auth-container">
-        <div class="auth-panel">
-            <div class="auth-logo">
-                <div class="auth-logo-icon">
-                    <svg viewBox="0 0 500 500">
-                        <path d="M345 310c32 0 58-26 58-58s-26-58-58-58c-6.2 0-12 0.9-17.5 2.7C318 166 289 143 255 143c-34.3 0-63.1 22.6-73 53.7C176.9 195.7 171 195 165 195c-32 0-58 26-58 58s26 58 58 58h180z" fill="#fff"/>
-                    </svg>
-                </div>
-                <div class="auth-logo-text">OxiCloud</div>
-            </div>
-
-            <h1 class="auth-title">Grant Access</h1>
-            <p class="auth-subtitle">
-                A Nextcloud client is requesting access to your account.
-            </p>
-
-            <form class="auth-form" method="POST" id="login-flow-form">
-                <div class="auth-input-group">
-                    <label class="auth-label" for="user">Username</label>
-                    <input
-                        type="text"
-                        id="user"
-                        name="user"
-                        class="auth-input"
-                        placeholder="Enter your username"
-                        required
-                        autocomplete="username"
-                        autofocus
-                    >
-                </div>
-
-                <div class="auth-input-group">
-                    <label class="auth-label" for="password">Password</label>
-                    <input
-                        type="password"
-                        id="password"
-                        name="password"
-                        class="auth-input"
-                        placeholder="Enter your password"
-                        required
-                        autocomplete="current-password"
-                    >
-                </div>
-
-                <button type="submit" class="auth-button" id="password-submit">Grant Access</button>
-            </form>
-
-            <!-- OIDC/SSO login — shown only when OIDC is enabled -->
-            <div id="oidc-section" class="hidden">
-                <div class="auth-divider"><span>or</span></div>
-                <button type="button" id="oidc-button" class="auth-button auth-button-sso">
-                    Sign in with SSO
-                </button>
-            </div>
-        </div>
-    </div>
-
-    <script src="/js/views/nextcloud/login.js"></script>
+    <div id="wrap">Redirecting, please wait...</div>
 </body>
+
 </html>

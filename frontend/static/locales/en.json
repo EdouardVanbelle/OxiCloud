@@ -57,7 +57,17 @@
     "manageAccess": "Manage access",
     "notifySent": "Notification sent.",
     "passwordLinks": "Password-protected links",
-    "publicLinks": "Public links"
+    "publicLinks": "Public links",
+    "filter": {
+      "button": "Kinds",
+      "title": "Filter by kind",
+      "files": "Files",
+      "folders": "Folders",
+      "drives": "Drives",
+      "emptyTitle": "No shares match the current filter",
+      "emptyHint": "Adjust the kind filter or reset it to the default (Files + Folders).",
+      "reset": "Reset filter"
+    }
   },
   "nav": {
     "files": "Files",
@@ -77,6 +87,8 @@
   "photos": {
     "empty_state": "No photos yet",
     "empty_hint": "Upload images or videos to see them here",
+    "empty_hidden": "{{n}} photo(s) hidden by your dotfile preference",
+    "empty_hidden_hint": "Turn off \"Hide dotfiles\" in your profile to see them.",
     "items_selected": "selected",
     "view_daily": "Day",
     "view_monthly": "Month",
@@ -327,7 +339,9 @@
     "set_expiry": "Set expiry",
     "title": "Shared",
     "unlock": "Unlock",
-    "role_label": "Role"
+    "role_label": "Role",
+    "col_shared_by": "Shared by",
+    "col_shared": "Shared"
   },
   "share_dialogTitle": "Share Link",
   "share_linkLabel": "Share Link:",
@@ -430,6 +444,7 @@
     "modified": "Modified",
     "no_files": "No files in this folder",
     "empty_hint": "Upload files or create folders to get started",
+    "drop_to_upload": "Drop files here to upload",
     "loading": "Loading files…",
     "view_grid": "Grid view",
     "view_list": "List view",
@@ -454,7 +469,10 @@
     "batch_delete": "Delete selected",
     "breadcrumb": "Breadcrumb",
     "cancel_selection": "Cancel selection",
-    "col_modified": "Date",
+    "col_modified": "Modified",
+    "col_added": "Added",
+    "col_created_by": "Created by",
+    "col_opened": "Opened",
     "col_name": "Name",
     "col_owner": "Owner",
     "col_path": "Location",
@@ -487,6 +505,7 @@
     "moved": "Moved",
     "new_folder": "New folder",
     "new_folder_prompt": "New folder name",
+    "new_elements": "New elements",
     "no_home": "No home folder available.",
     "no_preview": "No preview available for this file type.",
     "no_subfolders": "No subfolders here.",
@@ -508,7 +527,15 @@
     "uploading": "Uploading…",
     "uploading_file": "Uploading {{name}}…",
     "uploading_n": "Uploading {{done}}/{{total}} files…",
-    "view": "View"
+    "view": "View",
+    "empty_hidden_title": "{{n}} hidden item(s) in this folder",
+    "empty_hidden_hint": "Files whose name starts with '.' are hidden. Toggle the setting to see them.",
+    "show_hidden": "Show hidden files",
+    "upload_dotfile_hidden": "{{n}} file(s) uploaded but hidden by your dotfile preference.",
+    "rename_dotfile_hidden": "Renamed to '{{name}}' — now hidden by your preference.",
+    "new_folder_dotfile_hidden": "Created folder '{{name}}' — hidden by your dotfile preference.",
+    "dotfiles_hidden_toast": "Dotfiles hidden",
+    "dotfiles_shown_toast": "Dotfiles shown"
   },
   "dialogs": {
     "rename_folder": "Rename folder",
@@ -598,7 +625,8 @@
     "confirm_empty": "Empty the trash? This cannot be undone.",
     "delete": "Delete permanently",
     "empty_action": "Empty trash",
-    "restored": "Restored"
+    "restored": "Restored",
+    "expires_at": "Expires at"
   },
   "daysRemaining": {
     "expired": "Expired",
@@ -622,6 +650,7 @@
     "login_identifier_placeholder": "Enter your username or email",
     "password": "Password",
     "password_placeholder": "Enter your password",
+    "password_or_link_hint": "Password (leave blank for a sign-in link)",
     "login_button": "Sign in",
     "no_account": "Don't have an account?",
     "register": "Sign up",
@@ -676,6 +705,7 @@
     "session_expired": "Your session expired. Please sign in again.",
     "sign_in": "Sign in",
     "signing_in": "Signing in…",
+    "sending": "Sending…",
     "toggle_password": "Show password"
   },
   "storage": {
@@ -728,8 +758,11 @@
     "accessed": "Accessed",
     "empty_state": "No recent files",
     "empty_hint": "Files you open will appear here",
+    "empty_hidden_state": "{{n}} recent item(s) hidden by your dotfile preference",
+    "empty_hidden_hint": "Turn off \"Hide dotfiles\" in your profile to see them.",
     "loadMore": "Load more",
-    "confirm_clear": "Clear your recent items?"
+    "confirm_clear": "Clear your recent items?",
+    "remove_item": "Remove from recent"
   },
   "notifications": {
     "file_renamed": "File renamed",
@@ -1091,7 +1124,67 @@
     "encryption": "Encryption",
     "encryption_hint": "Generate an AES-256 key for at-rest blob encryption, then set it as OXICLOUD_STORAGE_ENCRYPTION_KEY in your server environment.",
     "gen_key": "Generate key",
-    "gen_key_warning": "Store this key securely. If it is lost, the encrypted data is irrecoverably lost."
+    "gen_key_warning": "Store this key securely. If it is lost, the encrypted data is irrecoverably lost.",
+    "drive_manage_policies": "Manage policies",
+    "drive_manage_policies_for": "Manage policies — {{name}}",
+    "drive_manage_policies_help": "Policies are admin-only — drive owners cannot mutate them. Each toggle controls one enforcement gate.",
+    "drive_policy": {
+      "forbid_sharing": "Forbid per-resource sharing",
+      "forbid_sharing_help": "Block per-file / per-folder grants (covers public links and external sharing as well). Drive-level membership still works.",
+      "forbid_public_links": "Forbid public links",
+      "forbid_public_links_help": "Block anonymous share links on resources in this drive.",
+      "forbid_external_sharing": "Forbid external sharing",
+      "forbid_external_sharing_help": "Block grants to external users (email invitations and pre-existing external accounts).",
+      "forbid_cross_drive_move": "Forbid cross-drive move",
+      "forbid_cross_drive_move_help": "Block moving files or folders out to another drive. Does not stop download + re-upload.",
+      "forbid_owner_role_change": "Lock Owner roster",
+      "forbid_owner_role_change_help": "Only admin can add, remove, or demote drive Owners while this is on.",
+      "include_in_photo_index": "Include in Photos",
+      "include_in_photo_index_help": "Show image and video files from this drive in the Photos timeline and on the Places map. Default personal drives are opted in automatically; turn on for shared drives that genuinely hold photos (e.g. \"Family Photos\").",
+      "include_in_music_index": "Include in Music",
+      "include_in_music_index_help": "Include audio files from this drive in the Music library. Default personal drives are opted in automatically; turn on for shared drives that genuinely hold a music collection (e.g. \"Family Music\", \"Band Collaboration\").",
+      "implied_by_forbid_sharing": "Already enforced by Forbid per-resource sharing.",
+      "read_only": "Read-only (freeze)",
+      "read_only_help": "Freeze the drive entirely — every mutation is refused (uploads, edits, deletes, renames, sharing, membership changes). Reads and downloads keep working. The trash-retention janitor also pauses. Use for archives, legal holds, or account wind-downs. Only an admin can un-freeze."
+    },
+    "drives": "Drives",
+    "drive_name": "Name",
+    "drive_kind": "Kind",
+    "drive_owners": "Owners",
+    "drive_usage": "Usage",
+    "drive_created_at": "Created",
+    "drive_kind_shared": "Shared",
+    "drive_kind_personal": "Personal",
+    "drive_kind_default_suffix": "(default)",
+    "drive_manage_owners": "Manage owners",
+    "drive_manage_owners_for": "Manage owners — {{name}}",
+    "drive_edit_quota": "Edit quota",
+    "drive_delete": "Delete drive",
+    "drive_delete_confirm": "Delete drive \"{{name}}\"? This cannot be undone.",
+    "drive_deleted": "Drive deleted.",
+    "drive_created": "Drive created.",
+    "drive_add_owner": "Add owner",
+    "drive_current_owners": "Current owners",
+    "drive_no_owners": "No owners",
+    "drive_owner": "Owner",
+    "drive_owner_hint": "Pick a user (sole Owner) or a group (every member becomes Owner via subject expansion).",
+    "drive_owner_picked": "Owner: {{name}}",
+    "drive_owner_placeholder": "Search a user or group…",
+    "drive_owner_remove_confirm": "Remove this owner from the drive?",
+    "drive_name_placeholder": "e.g. Engineering",
+    "drive_error_name_required": "Drive name is required.",
+    "drive_error_owner_required": "Pick a user or group as the drive owner.",
+    "create_drive": "Create shared drive",
+    "no_drives": "No drives yet.",
+    "external_user": "external",
+    "external_user_hint": "Grant-only account (magic-link or OCM). Cannot be admin and has no storage envelope.",
+    "no_storage_for_external": "External accounts have no storage envelope.",
+    "promote_to_internal_title": "Promote to internal user",
+    "confirm_promote_user": "Promote {{name}} to an internal user? This provisions a home drive and gives the account a normal storage envelope. The account keeps its identity; magic-link login stays the way in unless a password is set later.",
+    "delete_user_title": "Delete user",
+    "delete_user_warning": "You are about to permanently delete \"{{name}}\". This will remove the account, revoke every session, and reap the personal drive. This cannot be undone.",
+    "delete_user_confirm_hint": "To confirm, type the account email below: {{email}}",
+    "deleting": "Deleting…"
   },
   "profile": {
     "page_title": "Profile",
@@ -1144,6 +1237,7 @@
     "family_name": "Last name",
     "notify_on_share": "Email me when someone shares with me",
     "notify_on_share_hint": "When unchecked, shares still appear in your account — you just won't get an email about them.",
+    "hide_dotfiles": "Hide files whose name starts with a dot (.env, .git, …)",
     "save_profile": "Save changes",
     "profile_saved": "Profile updated",
     "profile_no_changes": "No changes to save.",
@@ -1391,7 +1485,9 @@
     "select": "Select",
     "select_all": "Select all",
     "yes": "Yes",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "saving": "Saving…",
+    "deleting": "Deleting…"
   },
   "device": {
     "approve": "Approve",
@@ -1504,6 +1600,82 @@
   "view": {
     "grid": "Grid view",
     "label": "View options",
-    "list": "List view"
+    "list": "List view",
+    "hide_dotfiles": "Hide hidden files",
+    "show_dotfiles": "Show hidden files"
+  },
+  "preferences": {
+    "save_failed": "Couldn't save your preference. Please try again."
+  },
+  "upgrade": {
+    "title": "Upgrade to a full account",
+    "lede": "Get your own storage and start uploading files. Your existing shares stay untouched.",
+    "busy": "Upgrading…",
+    "submit": "Upgrade my account",
+    "cancel": "Not now — back to shared with me",
+    "success": "Your account has been upgraded. Redirecting to your files…",
+    "error": "Upgrade failed.",
+    "password_required": "Password is required — this deployment does not offer email-link login.",
+    "password_too_short": "Password must be at least 8 characters long.",
+    "oidc_user": "SSO/OIDC accounts are managed by your identity provider. Upgrade is not available.",
+    "domain_not_allowed": "This deployment does not accept new accounts from your email domain. Contact the administrator to enable it.",
+    "banner_aria": "Upgrade prompt",
+    "banner_title": "Get your own storage",
+    "banner_body": "You're using a guest account. Upgrade to get a personal drive and start uploading files.",
+    "banner_cta": "Upgrade"
+  },
+  "drive": {
+    "read_only_banner": {
+      "title": "This drive is read-only",
+      "title_named": "Drive \"{{name}}\" is read-only",
+      "body": "Uploads, edits, deletes, renames, sharing and membership changes are refused. Reads and downloads keep working. Contact an administrator to un-freeze the drive.",
+      "aria": "This drive is read-only"
+    },
+    "back_to_files": "Back to Files",
+    "danger_zone": "Danger zone",
+    "delete": "Delete drive",
+    "delete_confirm": "Delete drive \"{{name}}\"? This cannot be undone — the drive must be empty first or the server will refuse.",
+    "delete_hint": "Deleting a drive removes it permanently. The drive must be empty (no live files or folders) before delete is allowed.",
+    "deleted": "Drive deleted.",
+    "field": {
+      "created": "Created",
+      "default": "Default",
+      "default_yes": "This is your home drive",
+      "id": "Identifier",
+      "kind": "Kind",
+      "updated": "Last updated"
+    },
+    "info": "Drive info",
+    "kind_personal": "Personal drive",
+    "kind_shared": "Shared drive",
+    "manage_members": "Manage members",
+    "members": "Members",
+    "members_empty": "No members.",
+    "not_found_body": "This drive doesn't exist or you don't have access to it.",
+    "not_found_title": "Drive not found",
+    "policies": "Policies",
+    "policies_help": "Rules an OxiCloud admin has set for this drive. Only admins can change them; you're seeing the current state.",
+    "quota": "Quota",
+    "rename": "Rename drive",
+    "role": {
+      "commenter": "Commenter",
+      "contributor": "Contributor",
+      "editor": "Editor",
+      "owner": "Owner",
+      "viewer": "Viewer"
+    },
+    "storage": "Storage",
+    "usage": "Usage",
+    "used": "Used",
+    "members_personal_immutable": "Personal drives have a fixed single-owner membership."
+  },
+  "group": {
+    "members_empty": "No members",
+    "member_count": "{{n}} members"
+  },
+  "resource_list": {
+    "location": "Location",
+    "wrong_drop_zone_msg": "Uploads only work in Files — open the Files section and drop there.",
+    "wrong_drop_zone_action": "Go to Files"
   }
 }

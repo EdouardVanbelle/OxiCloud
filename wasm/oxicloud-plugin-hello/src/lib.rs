@@ -37,8 +37,12 @@ pub fn abi_version() -> FnResult<u32> {
 }
 
 /// Handler for the `file.uploaded` event.
+///
+/// `#[plugin_fn]` rewrites the fn signature, so an outer `#[allow]` doesn't
+/// reach the inner scope where `input` is bound — hence the `_` prefix on the
+/// parameter. The well-behaved tail rebinds it as `input` locally.
 #[plugin_fn]
-pub fn on_file_uploaded(input: String) -> FnResult<String> {
+pub fn on_file_uploaded(_input: String) -> FnResult<String> {
     // --- misbehaving variants (compiled in only under their feature) ---------
     #[cfg(feature = "panic")]
     panic!("intentional panic: exercises host failure isolation");
@@ -53,27 +57,33 @@ pub fn on_file_uploaded(input: String) -> FnResult<String> {
         }
     }
 
-    #[cfg(feature = "net")]
+    // The well-behaved tail is unreachable under the diverging variants above;
+    // gate it so the compiler doesn't flag input/tail as unused/dead.
+    #[cfg(not(any(feature = "panic", feature = "sleep")))]
     {
-        // Attempt an outbound HTTP call. The host grants no `allowed_hosts`, so
-        // Extism denies this before any socket is opened (offline-deterministic)
-        // and the error propagates out of the handler.
-        let req = HttpRequest::new("https://example.com/");
-        let _ = http::request::<()>(&req, None)?;
-    }
+        let input = _input;
 
-    // --- well-behaved path ---------------------------------------------------
-    let ev: serde_json::Value = serde_json::from_str(&input)?;
-    let path = ev["payload"]["path"].as_str().unwrap_or("<unknown>");
-    let size = ev["payload"]["size"].as_u64().unwrap_or(0);
+        #[cfg(feature = "net")]
+        {
+            // Attempt an outbound HTTP call. The host grants no `allowed_hosts`,
+            // so Extism denies this before any socket is opened
+            // (offline-deterministic) and the error propagates out.
+            let req = HttpRequest::new("https://example.com/");
+            let _ = http::request::<()>(&req, None)?;
+        }
 
-    unsafe {
-        log(
-            "info".to_string(),
-            format!("hello plugin saw upload: {path} ({size} bytes)"),
-        )?;
+        let ev: serde_json::Value = serde_json::from_str(&input)?;
+        let path = ev["payload"]["path"].as_str().unwrap_or("<unknown>");
+        let size = ev["payload"]["size"].as_u64().unwrap_or(0);
+
+        unsafe {
+            log(
+                "info".to_string(),
+                format!("hello plugin saw upload: {path} ({size} bytes)"),
+            )?;
+        }
+        Ok(serde_json::json!({ "ok": true }).to_string())
     }
-    Ok(serde_json::json!({ "ok": true }).to_string())
 }
 
 /// Handler for the `user.login` event. Dropped by the `omit_login` variant so

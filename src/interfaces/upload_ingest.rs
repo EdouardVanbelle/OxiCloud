@@ -13,9 +13,10 @@
 //! detection before being forwarded unchanged.
 
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use axum::body::Body;
 use bytes::Bytes;
@@ -79,6 +80,24 @@ pub async fn discard_ingested(dedup: &DedupService, blob: &IngestedBlob) {
 /// Shared mutable tee for computing a client-requested checksum during the
 /// ingest pass (REST chunked uploads) — no post-store re-read needed.
 pub type ChecksumTee = Arc<StdMutex<Option<IncrementalHasher>>>;
+
+/// A byte-range stream paired with its known length, used by
+/// [`ingest_range_patch_to_cas`] for the untouched prefix/suffix either
+/// side of a PATCH edit.
+pub type RangeSegment = (
+    Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>,
+    u64,
+);
+
+/// Size cap and expected-length validation for [`ingest_range_patch_to_cas`].
+pub struct PatchIngestBudget {
+    /// Caps the size of the *edit* (the request body), not the whole
+    /// spliced file — see the field's use in [`ingest_range_patch_to_cas`].
+    pub max_bytes: usize,
+    /// Declared `X-Update-Range` span, `None` for `append`. Validated
+    /// against the actual streamed body length, not `Content-Length`.
+    pub expected_body_len: Option<u64>,
+}
 
 /// Create a checksum tee for [`ingest_stream_to_cas`].
 pub fn checksum_tee(alg: ChecksumAlg) -> ChecksumTee {
@@ -249,6 +268,95 @@ pub async fn ingest_body_to_cas(
     ingest_stream_to_cas(source, dedup, filename, claimed_type, max_bytes, None).await
 }
 
+/// Splice a PATCH request body ([RFC 5789]) between the file's untouched
+/// `prefix`/`suffix` byte ranges and ingest the result as one continuous
+/// stream into the CDC chunk store.
+///
+/// `prefix`/`suffix` are `stream::empty()`-backed when the edit starts at
+/// byte 0 or reaches EOF respectively — callers build the real ranges from
+/// [`FileRetrievalUseCase::get_file_range_stream_with_perms`](crate::application::ports::file_ports::FileRetrievalUseCase::get_file_range_stream_with_perms).
+/// Because FastCDC chunking is content-defined rather than offset-defined,
+/// unedited chunks on either side of the edit typically dedup for free.
+///
+/// Each of `prefix`/`suffix` is paired with its known byte length (from the
+/// file's size and the requested range — callers compute it, not this
+/// function). `budget.max_bytes` bounds the size of the *edit* (the request
+/// body) — it is widened by the prefix/suffix lengths before being applied
+/// to the combined stream, so that already-stored, untouched bytes being
+/// re-ingested unchanged don't count against the cap. Without this, any
+/// PATCH against a file at or above `max_bytes` would be rejected
+/// regardless of how small the edit itself is.
+///
+/// `budget.expected_body_len`, when `Some`, is validated against the
+/// *actual* number of body bytes streamed — not the client-supplied
+/// `Content-Length` header, which chunked-transfer-encoded requests may
+/// omit entirely. Counting the real bytes means a request that declares
+/// `X-Update-Range: bytes=5-9` (a 5-byte span) but streams a
+/// differently-sized body is caught regardless of whether `Content-Length`
+/// was present. On mismatch the already-ingested blob is discarded and
+/// never reaches the atomic store, so a rejected PATCH can't leave stray
+/// unreferenced content.
+///
+/// [RFC 5789]: https://www.rfc-editor.org/rfc/rfc5789
+pub async fn ingest_range_patch_to_cas(
+    prefix: RangeSegment,
+    body: Body,
+    suffix: RangeSegment,
+    dedup: &Arc<DedupService>,
+    filename: &str,
+    claimed_type: &str,
+    budget: PatchIngestBudget,
+) -> Result<IngestedBlob, AppError> {
+    let PatchIngestBudget {
+        max_bytes,
+        expected_body_len,
+    } = budget;
+    let (prefix_stream, prefix_len) = prefix;
+    let (suffix_stream, suffix_len) = suffix;
+    let body_len = Arc::new(AtomicU64::new(0));
+    let counter = body_len.clone();
+    let body_stream = BodyStream::new(body).filter_map(move |item| {
+        let counter = counter.clone();
+        async move {
+            match item {
+                Ok(frame) => {
+                    let bytes = frame.into_data().ok()?;
+                    counter.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                    Some(Ok(bytes))
+                }
+                Err(e) => Some(Err(std::io::Error::other(e.to_string()))),
+            }
+        }
+    });
+    let effective_max = max_bytes.saturating_add((prefix_len + suffix_len) as usize);
+    let combined = prefix_stream.chain(body_stream).chain(suffix_stream);
+    let ingested =
+        ingest_stream_to_cas(combined, dedup, filename, claimed_type, effective_max, None)
+            .await
+            .map_err(|e| {
+                if e.error_type == "PayloadTooLarge" {
+                    AppError::payload_too_large(format!(
+                        "PATCH body exceeds the direct-PATCH edit-size cap ({max_bytes} bytes). \
+                     Use the chunked-upload protocol for edits larger than this."
+                    ))
+                } else {
+                    e
+                }
+            })?;
+
+    if let Some(expected) = expected_body_len {
+        let actual = body_len.load(Ordering::Relaxed);
+        if actual != expected {
+            discard_ingested(dedup, &ingested).await;
+            return Err(AppError::bad_request(format!(
+                "PATCH body ({actual} bytes) does not match the X-Update-Range span ({expected} bytes)"
+            )));
+        }
+    }
+
+    Ok(ingested)
+}
+
 /// Adapt a multipart field into a byte stream for [`ingest_stream_to_cas`].
 ///
 /// Terminates after the first error — multipart fields are not resumable.
@@ -273,11 +381,16 @@ pub fn multipart_field_stream(
 pub fn stream_from_files(
     paths: Vec<PathBuf>,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    // 512 KiB per poll: each ReaderStream poll on a tokio::fs::File is one
+    // blocking-pool dispatch + one read(2) of the buffer size. The old
+    // 64 KiB buffer paid 8x the dispatches/syscalls of every other blob
+    // read path (STREAM_CHUNK_SIZE = 256 KiB) for the single read pass
+    // over every completed chunked upload (benches/UPLOAD-SPOOL.md).
     stream::iter(paths.into_iter().map(Ok::<_, std::io::Error>))
         .and_then(|path| async move {
             tokio::fs::File::open(path)
                 .await
-                .map(|file| ReaderStream::with_capacity(file, 64 * 1024))
+                .map(|file| ReaderStream::with_capacity(file, 512 * 1024))
         })
         .try_flatten()
 }
@@ -286,6 +399,10 @@ pub fn stream_from_files(
 pub struct StreamedToPath {
     /// Total bytes written.
     pub bytes_written: u64,
+    /// `true` when the destination did not exist before this call — the
+    /// open itself detects it (`create_new` + AlreadyExists fallback), so
+    /// retry-detection callers don't need a separate `stat` per chunk.
+    pub created_fresh: bool,
     /// Lowercase hex digest, populated only when `checksum_alg=Some(_)`
     /// was passed. The algorithm is identified by [`StreamedToPath::alg`].
     pub checksum_hex: Option<String>,
@@ -319,9 +436,38 @@ pub async fn stream_body_to_path(
     max_bytes: usize,
     checksum_alg: Option<ChecksumAlg>,
 ) -> Result<StreamedToPath, AppError> {
-    let mut file = tokio::fs::File::create(path)
+    // BufWriter coalesces the per-HTTP-frame writes (~16-64 KiB each) into
+    // 512 KiB write(2)s — a bare tokio File dispatches one blocking-pool op
+    // per frame (benches/UPLOAD-SPOOL.md). Same capacity as the dedup
+    // handler's spool loop. On the error paths below the partial file is
+    // removed, so silently dropping unflushed buffer contents is fine.
+    //
+    // `create_new` first: the common fresh-chunk case stays one open AND
+    // doubles as the retry probe (AlreadyExists → truncate-open), so callers
+    // that need overwrite detection no longer pay a separate stat per chunk.
+    let (file, created_fresh) = match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
         .await
-        .map_err(|e| AppError::internal_error(format!("Failed to open chunk file: {e}")))?;
+    {
+        Ok(f) => (f, true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let f = tokio::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(path)
+                .await
+                .map_err(|e| AppError::internal_error(format!("Failed to open chunk file: {e}")))?;
+            (f, false)
+        }
+        Err(e) => {
+            return Err(AppError::internal_error(format!(
+                "Failed to open chunk file: {e}"
+            )));
+        }
+    };
+    let mut file = tokio::io::BufWriter::with_capacity(512 * 1024, file);
 
     let mut total_bytes: usize = 0;
     let mut stream = BodyStream::new(body);
@@ -366,6 +512,7 @@ pub async fn stream_body_to_path(
 
     Ok(StreamedToPath {
         bytes_written: total_bytes as u64,
+        created_fresh,
         checksum_hex: hasher.map(IncrementalHasher::finalize_hex),
         alg: checksum_alg,
     })
@@ -408,8 +555,8 @@ impl IncrementalHasher {
 
     fn finalize_hex(self) -> String {
         match self {
-            Self::Md5(h) => h.finalize().iter().map(|b| format!("{b:02x}")).collect(),
-            Self::Sha256(h) => h.finalize().iter().map(|b| format!("{b:02x}")).collect(),
+            Self::Md5(h) => crate::common::fmt::hex_lower(&h.finalize()),
+            Self::Sha256(h) => crate::common::fmt::hex_lower(&h.finalize()),
             Self::Blake3(h) => h.finalize().to_hex().to_string(),
         }
     }

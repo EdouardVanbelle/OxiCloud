@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::application::dtos::cursor::PageCursor;
 use crate::application::dtos::display_helpers::{
-    category_for, format_file_size, icon_class_for, icon_special_class_for,
+    classify_display, format_file_size, intern_display, intern_mime,
 };
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
@@ -14,7 +14,7 @@ use crate::application::dtos::trash_dto::{
 };
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::file_lifecycle::FileLifecycleHook;
-use crate::application::ports::storage_ports::{FileReadPort, FileWritePort};
+use crate::application::ports::storage_ports::FileWritePort;
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::common::errors::{DomainError, ErrorKind, Result};
 use crate::domain::entities::file::File;
@@ -24,7 +24,6 @@ use crate::domain::repositories::folder_repository::FolderRepository;
 use crate::domain::repositories::trash_repository::TrashRepository;
 use crate::domain::services::authorization::ResourceKind;
 use crate::domain::services::authorization::{Permission, Resource, Subject};
-use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
 use crate::infrastructure::repositories::pg::file_blob_write_repository::FileBlobWriteRepository;
 use crate::infrastructure::repositories::pg::folder_db_repository::FolderDbRepository;
 use crate::infrastructure::repositories::pg::trash_db_repository::TrashDbRepository;
@@ -49,9 +48,6 @@ pub struct TrashService {
     /// Repository for trash-specific operations like listing and retrieving trashed items
     trash_repository: Arc<TrashDbRepository>,
 
-    /// Port for file read operations (get file metadata)
-    file_read_port: Arc<FileBlobReadRepository>,
-
     /// Port for file write operations (trash, restore, delete)
     file_write_port: Arc<FileBlobWriteRepository>,
 
@@ -75,19 +71,14 @@ pub struct TrashService {
     /// so trash listings filter by drive membership instead of the legacy
     /// per-user scope.
     drive_repo: Arc<crate::infrastructure::repositories::pg::DrivePgRepository>,
-
-    /// Number of days items should be kept in trash before automatic cleanup
-    retention_days: u32,
 }
 
 impl TrashService {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         trash_repository: Arc<TrashDbRepository>,
-        file_read_port: Arc<FileBlobReadRepository>,
         file_write_port: Arc<FileBlobWriteRepository>,
         folder_storage_port: Arc<FolderDbRepository>,
-        retention_days: u32,
         dedup_service: Arc<DedupService>,
         content_cache: Option<Arc<FileContentCache>>,
         authz: Arc<PgAclEngine>,
@@ -95,7 +86,6 @@ impl TrashService {
     ) -> Self {
         Self {
             trash_repository,
-            file_read_port,
             file_write_port,
             folder_storage_port,
             dedup_service,
@@ -103,7 +93,6 @@ impl TrashService {
             content_cache,
             authz,
             drive_repo,
-            retention_days,
         }
     }
 
@@ -126,25 +115,31 @@ impl TrashService {
                 "folder-icon".to_string(),
             ),
             TrashedItemType::File => {
-                let name = item.name();
-                // Use empty MIME type to leverage extension fallback
-                let category = category_for(name, "").to_string();
-                let icon_class = icon_class_for(name, "").to_string();
-                let icon_special_class = icon_special_class_for(name, "").to_string();
-                (category, icon_class, icon_special_class)
+                // Use empty MIME type to leverage extension fallback; one
+                // fused pass lowers the extension once instead of three
+                // times (benches/ROUND11.md §21).
+                let classes = classify_display(item.name(), "");
+                (
+                    classes.category.to_string(),
+                    classes.icon_class.to_string(),
+                    classes.icon_special_class.to_string(),
+                )
             }
         };
 
+        // Move the owned Strings out of the consumed item — the getter
+        // `.to_string()` clones paid 2 extra allocations per trash row.
+        let parts = item.into_parts();
         TrashedItemDto {
-            id: item.id().to_string(),
-            original_id: item.original_id().to_string(),
-            item_type: match item.item_type() {
+            id: parts.id.to_string(),
+            original_id: parts.original_id.to_string(),
+            item_type: match parts.item_type {
                 TrashedItemType::File => "file".to_string(),
                 TrashedItemType::Folder => "folder".to_string(),
             },
-            name: item.name().to_string(),
-            original_path: item.original_path().to_string(),
-            trashed_at: item.trashed_at(),
+            name: parts.name,
+            original_path: parts.original_path,
+            trashed_at: parts.trashed_at,
             days_until_deletion,
             category,
             icon_class,
@@ -177,23 +172,17 @@ impl TrashUseCase for TrashService {
         // Note: We now verify file/folder ownership BEFORE moving to trash.
         // This prevents users from trashing items they do not own (IDOR).
 
-        // Parse UUIDs with detailed error handling
+        // Parse UUIDs with detailed error handling. The parsed value is
+        // re-derived per branch below; this early check preserves the 400
+        // (validation) error shape for malformed ids.
         debug!("Validating item UUID: {}", item_id);
-        let item_uuid = match Uuid::parse_str(item_id) {
-            Ok(uuid) => {
-                debug!("Valid item UUID: {}", uuid);
-                uuid
-            }
-            Err(e) => {
-                error!("Invalid item UUID: {} - Error: {}", item_id, e);
-                return Err(DomainError::validation_error(format!(
-                    "Invalid item ID: {}",
-                    e
-                )));
-            }
-        };
-
-        let user_uuid = user_id;
+        if let Err(e) = Uuid::parse_str(item_id) {
+            error!("Invalid item UUID: {} - Error: {}", item_id, e);
+            return Err(DomainError::validation_error(format!(
+                "Invalid item ID: {}",
+                e
+            )));
+        }
 
         match item_type {
             "file" => {
@@ -209,59 +198,13 @@ impl TrashUseCase for TrashService {
                     )
                     .await?;
 
-                // Authz already passed — use the non-owner-scoped read so that
-                // grantees with Delete permission can trash files they don't own.
-                // The file's user_id in storage.files is unchanged, so the item
-                // will appear in the original owner's trash view.
-                let file = match self.file_read_port.get_file(item_id).await {
-                    Ok(file) => {
-                        debug!("File found: {} ({})", file.name(), item_id);
-                        file
-                    }
-                    Err(e) => {
-                        error!("Error getting file: {} - {}", item_id, e);
-                        return Err(DomainError::new(
-                            ErrorKind::NotFound,
-                            "File",
-                            format!("Error retrieving file {}: {}", item_id, e),
-                        ));
-                    }
-                };
-
-                let original_path = file.storage_path().to_string();
-                debug!("Original file path: {}", original_path);
-
-                debug!("Creating TrashedItem object for the file");
-                let trashed_item = TrashedItem::new(
-                    item_uuid,
-                    user_uuid,
-                    TrashedItemType::File,
-                    file.name().to_string(),
-                    original_path,
-                    self.retention_days,
-                );
-                debug!(
-                    "TrashedItem created successfully: {} -> {}",
-                    file.name(),
-                    trashed_item.id()
-                );
-
-                // First add to trash index to register the item
-                info!("Adding file {} to trash index", item_id);
-                match self.trash_repository.add_to_trash(&trashed_item).await {
-                    Ok(_) => {
-                        debug!("File added to trash index successfully");
-                    }
-                    Err(e) => {
-                        error!("Error adding file to trash index: {}", e);
-                        return Err(DomainError::internal_error(
-                            "TrashRepository",
-                            format!("Failed to add file to trash: {}", e),
-                        ));
-                    }
-                };
-
-                // Then physically move the file to trash.
+                // Soft-delete model: the is_trashed flag on the row IS the
+                // trash membership — there is no separate trash index to
+                // register into (`TrashRepository::add_to_trash` is a
+                // documented no-op). The previous shape still fetched the
+                // full file entity and built a `TrashedItem` only to feed
+                // that no-op: one wasted SELECT per trash operation.
+                //
                 // §14: caller_id stamps `updated_by` on the trashed row.
                 info!("Physically moving file to trash: {}", item_id);
                 match self.file_write_port.move_to_trash(item_id, user_id).await {
@@ -293,43 +236,10 @@ impl TrashUseCase for TrashService {
                     )
                     .await?;
 
-                let folder = self
-                    .folder_storage_port
-                    .get_folder(item_id)
-                    .await
-                    .map_err(|e| {
-                        DomainError::new(
-                            ErrorKind::NotFound,
-                            "Folder",
-                            format!("Error retrieving folder {}: {}", item_id, e),
-                        )
-                    })?;
-
-                let original_path = folder.storage_path().to_string();
-
-                let trashed_item = TrashedItem::new(
-                    item_uuid,
-                    user_uuid,
-                    TrashedItemType::Folder,
-                    folder.name().to_string(),
-                    original_path,
-                    self.retention_days,
-                );
-
-                // First add to trash index to register the item
-                debug!("Adding folder {} to trash repository", item_id);
-                match self.trash_repository.add_to_trash(&trashed_item).await {
-                    Ok(_) => debug!("Successfully added folder to trash repository"),
-                    Err(e) => {
-                        error!("Failed to add folder to trash repository: {}", e);
-                        return Err(DomainError::internal_error(
-                            "TrashRepository",
-                            format!("Failed to add folder to trash: {}", e),
-                        ));
-                    }
-                };
-
-                // Then physically move the folder to trash.
+                // Soft-delete model — same as the file branch above: the
+                // cascade UPDATE below is the whole operation; no folder
+                // fetch or trash-index write needed.
+                //
                 // §14: caller_id stamps `updated_by` on every cascade-trashed row.
                 self.folder_storage_port
                     .move_to_trash(item_id, user_id)
@@ -632,6 +542,21 @@ impl TrashUseCase for TrashService {
                         // Permanently delete the folder
                         let folder_id = item.original_id().to_string();
 
+                        // Snapshot the cascade's file ids BEFORE the bulk
+                        // DELETE so `on_file_deleted` fires per cascaded
+                        // file (same shape as the bulk `clear_trash_in`
+                        // path at line ~804). Skipped when no hook is
+                        // registered — the enumeration is a SQL round-trip
+                        // we don't want to pay for nothing.
+                        let cascaded_file_ids: Vec<String> = if self.file_deleted_hook.is_some() {
+                            self.folder_storage_port
+                                .list_file_ids_in_subtree(&folder_id)
+                                .await
+                                .unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
+
                         info!("Permanently deleting folder: {}", folder_id);
                         match self
                             .folder_storage_port
@@ -664,6 +589,12 @@ impl TrashUseCase for TrashService {
                                         ),
                                     ));
                                 }
+                            }
+                        }
+
+                        if let Some(hook) = &self.file_deleted_hook {
+                            for file_id in &cascaded_file_ids {
+                                hook.on_file_deleted(file_id);
                             }
                         }
                     }
@@ -725,13 +656,52 @@ impl TrashUseCase for TrashService {
         // the drives where the caller is effectively Owner (direct or via a
         // group). Single-drive users: this resolves to just their personal
         // drive, identical to the legacy `WHERE user_id = $1` scope.
-        let (subject_types, subject_ids) = self
-            .authz
-            .expand_subject_for_listing(Subject::User(user_id))
+        let drive_ids = self.drives_with_delete_for(user_id).await?;
+        if drive_ids.is_empty() {
+            info!("empty_trash: caller has Delete on no drive — nothing to do");
+            return Ok(());
+        }
+        self.clear_trash_in(&drive_ids, user_id).await
+    }
+
+    #[instrument(skip(self))]
+    async fn empty_trash_for_drive(&self, user_id: Uuid, drive_id: Uuid) -> Result<()> {
+        // Per-drive trash empty — the Drive group-by on `/trash` exposes
+        // this as a per-row affordance so multi-drive owners can clear
+        // one drive without touching the others.
+        //
+        // Route through `authz.require(Delete, Drive)` so the denial
+        // shape stays consistent with every other write verb: 403 when
+        // the caller has Read on the drive (viewer/editor holding no
+        // Delete), 404 when they don't (anti-enum). Before 2026-07-16
+        // this method rolled its own `drives_with_delete_for` check +
+        // hardcoded `NotFound` — that predated the graduated-denial
+        // engine change and returned 404 unconditionally even for a
+        // Viewer who could see the drive in `/api/drives`. The engine
+        // now emits `authz.denied` with `visibility="visible"|"hidden"`
+        // and the standard mapping renders it as 403 or 404.
+        self.authz
+            .require(
+                Subject::User(user_id),
+                Permission::Delete,
+                Resource::Drive(drive_id),
+            )
             .await?;
+        info!("Emptying trash for drive {} (user {})", drive_id, user_id);
+        self.clear_trash_in(&[drive_id], user_id).await
+    }
+}
+
+impl TrashService {
+    /// Drives where the caller has `Permission::Delete` (via any role
+    /// bundle, direct or group-mediated). Shared by `empty_trash` and
+    /// `empty_trash_for_drive`; lifting the lookup out of both methods
+    /// keeps the two HTTP surfaces semantically consistent and avoids
+    /// duplicating the subject-expansion plumbing.
+    async fn drives_with_delete_for(&self, user_id: Uuid) -> Result<Vec<Uuid>> {
         let drives = self
             .drive_repo
-            .list_for_subjects(&subject_types, &subject_ids)
+            .list_readable_by(user_id)
             .await
             .map_err(|e| {
                 DomainError::internal_error(
@@ -739,29 +709,32 @@ impl TrashUseCase for TrashService {
                     format!("Failed to resolve accessible drives: {e:?}"),
                 )
             })?;
-        let drive_ids: Vec<Uuid> = drives
+        Ok(drives
             .iter()
             .filter(|d| {
                 d.caller_role
                     .is_some_and(|r| r.expand().contains(&Permission::Delete))
             })
             .map(|d| d.drive.id)
-            .collect();
+            .collect())
+    }
 
-        if drive_ids.is_empty() {
-            info!("empty_trash: caller has Delete on no drive — nothing to do");
-            return Ok(());
-        }
-
-        // Collect ALL trashed file IDs BEFORE bulk-deleting so hooks (thumbnail
-        // cleanup, etc.) can run afterward.  We use get_all_trashed_file_ids (not
-        // get_trash_items) because the trash_items view excludes files inside a
-        // trashed folder — those files will still be deleted by clear_trash via
-        // the folder CASCADE, but their hooks would otherwise be missed.
+    /// Bulk-clear trash within the given drives, running every side
+    /// effect once: trashed-file id list (for hooks), `clear_trash`
+    /// SQL, dedup GC, content-cache invalidation, file-deleted hook.
+    /// The two `TrashUseCase` entry points compose this with their
+    /// respective drive-id scopes — call-once, no duplication.
+    async fn clear_trash_in(&self, drive_ids: &[Uuid], user_id: Uuid) -> Result<()> {
+        // Collect ALL trashed file IDs BEFORE bulk-deleting so hooks
+        // (thumbnail cleanup, etc.) can run afterward. We use
+        // `get_all_trashed_file_ids` (not `get_trash_items`) because the
+        // trash_items view excludes files inside a trashed folder —
+        // those files will still be deleted by `clear_trash` via the
+        // folder CASCADE, but their hooks would otherwise be missed.
         let trashed_file_ids: Vec<String> = if self.file_deleted_hook.is_some() {
             match self
                 .trash_repository
-                .get_all_trashed_file_ids(&drive_ids)
+                .get_all_trashed_file_ids(drive_ids)
                 .await
             {
                 Ok(ids) => ids,
@@ -781,29 +754,33 @@ impl TrashUseCase for TrashService {
         // Folder deletion cascades (FK ON DELETE CASCADE) to child folders and
         // their files. The PG trigger `trg_files_decrement_blob_ref` automatically
         // decrements blob ref_counts for every deleted file row.
-        self.trash_repository.clear_trash(&drive_ids).await?;
+        self.trash_repository.clear_trash(drive_ids).await?;
 
-        // The PG trigger decremented ref_counts but cannot delete disk files or
-        // thumbnails.  Run garbage_collect() to remove any blobs whose ref_count
-        // reached 0, along with their blob-keyed thumbnail files.
+        // The PG trigger decremented ref_counts but cannot delete disk
+        // files or thumbnails. `garbage_collect()` removes any blobs
+        // whose ref_count reached 0, along with their blob-keyed
+        // thumbnail files. Failure here is non-fatal — the rows are
+        // gone in any case; the next GC pass mops up.
         if let Err(e) = self.dedup_service.garbage_collect().await {
-            warn!("empty_trash: garbage_collect failed: {:?}", e);
+            warn!("clear_trash_in: garbage_collect failed: {:?}", e);
         }
 
-        // Invalidate content cache for all permanently deleted files.
         if let Some(cc) = &self.content_cache {
             for file_id in &trashed_file_ids {
                 cc.invalidate(file_id).await;
             }
         }
-
         if let Some(hook) = &self.file_deleted_hook {
             for file_id in &trashed_file_ids {
                 hook.on_file_deleted(file_id);
             }
         }
 
-        info!("Trash emptied for user {}", user_id);
+        info!(
+            "Trash cleared across {} drive(s) for user {}",
+            drive_ids.len(),
+            user_id
+        );
         Ok(())
     }
 }
@@ -832,16 +809,8 @@ impl TrashService {
         // D2b: scope by drives the caller can read (resolved through
         // role_grants on resource_type='drive', including group-mediated
         // grants). Empty set → empty page without a SQL round-trip.
-        let (subject_types, subject_ids) = self
-            .authz
-            .expand_subject_for_listing(Subject::User(user_id))
-            .await?;
-        let drive_ids: Vec<Uuid> = match self
-            .drive_repo
-            .list_for_subjects(&subject_types, &subject_ids)
-            .await
-        {
-            Ok(drives) => drives.into_iter().map(|d| d.drive.id).collect(),
+        let drive_ids: Vec<Uuid> = match self.drive_repo.list_readable_by(user_id).await {
+            Ok(drives) => drives.iter().map(|d| d.drive.id).collect(),
             Err(e) => {
                 return Err(DomainError::internal_error(
                     "Trash",
@@ -897,16 +866,18 @@ fn build_trash_cursor(row: &TrashResourceRow, order_by: &str, reverse: bool) -> 
 
 /// Convert a raw repository row into the API DTO.
 fn row_to_item_dto(row: TrashResourceRow) -> TrashResourceItemDto {
-    let path = row.path.clone().unwrap_or_default();
+    // `row` is owned and dropped at fn end, so move its String fields into the
+    // DTO instead of cloning (the favorites / recent / folder row mappers
+    // already move these same fields — trash was missed). benches/ROUND19.md §M4.
+    let path = row.path.unwrap_or_default();
     if row.resource_type == "folder" {
         let resource_id = row.resource_id.to_string();
         let dto = FolderDto {
             etag: resource_id.clone(),
             id: resource_id,
-            name: row.name.clone(),
+            name: row.name,
             path,
             parent_id: row.parent_id.map(|u| u.to_string()),
-            owner_id: Some(row.owner_id.to_string()),
             // D2b: the trash listing query now SELECTs `drive_id` (the
             // unified view exposes it). Surfaced so per-drive grouping
             // in the `/trash` UI doesn't need an extra lookup per row.
@@ -914,12 +885,11 @@ fn row_to_item_dto(row: TrashResourceRow) -> TrashResourceItemDto {
             created_at: row.resource_created_at.timestamp() as u64,
             modified_at: row.modified_at.timestamp() as u64,
             is_root: false,
-            icon_class: std::sync::Arc::from("fas fa-folder"),
-            icon_special_class: std::sync::Arc::from("folder-icon"),
-            category: std::sync::Arc::from("Folder"),
-            // §14 provenance not selected by the trash listing query.
-            created_by: None,
-            updated_by: None,
+            icon_class: intern_display("fas fa-folder"),
+            icon_special_class: intern_display("folder-icon"),
+            category: intern_display("Folder"),
+            created_by: row.created_by,
+            updated_by: row.updated_by,
         };
         TrashResourceItemDto {
             resource_type: ResourceTypeDto::Folder,
@@ -938,32 +908,31 @@ fn row_to_item_dto(row: TrashResourceRow) -> TrashResourceItemDto {
         // match GET/HEAD/PROPFIND ETags — a client restoring a
         // file may conditional-request it immediately after.
         let modified_at_u = row.modified_at.timestamp() as u64;
-        let content_hash = row.blob_hash.clone().unwrap_or_default();
+        let content_hash = row.blob_hash.unwrap_or_default();
         let etag = if content_hash.is_empty() {
             String::new()
         } else {
             File::compute_etag(&content_hash, modified_at_u)
         };
+        let classes = classify_display(&row.name, mime);
         let dto = FileDto {
             id: row.resource_id.to_string(),
-            name: row.name.clone(),
+            name: row.name,
             path,
             size: size_bytes,
-            mime_type: std::sync::Arc::from(mime),
+            mime_type: intern_mime(mime),
             folder_id: row.parent_id.map(|u| u.to_string()),
             created_at: row.resource_created_at.timestamp() as u64,
             modified_at: modified_at_u,
-            icon_class: std::sync::Arc::from(icon_class_for(&row.name, mime)),
-            icon_special_class: std::sync::Arc::from(icon_special_class_for(&row.name, mime)),
-            category: std::sync::Arc::from(category_for(&row.name, mime)),
+            icon_class: intern_display(classes.icon_class),
+            icon_special_class: intern_display(classes.icon_special_class),
+            category: intern_display(classes.category),
             size_formatted: format_file_size(size_bytes),
-            owner_id: Some(row.owner_id.to_string()),
             sort_date: None,
             content_hash,
             etag,
-            // §14 provenance not selected by the trash listing query.
-            created_by: None,
-            updated_by: None,
+            created_by: row.created_by,
+            updated_by: row.updated_by,
         };
         TrashResourceItemDto {
             resource_type: ResourceTypeDto::File,

@@ -1,7 +1,13 @@
 # Sharing
 
-OxiCloud lets you share any file or folder with other people. Open the
-item, click **Share**, and pick who you'd like to share it with.
+OxiCloud lets you share any file, folder, drive, calendar, address
+book, or playlist with other people. Open the item, click **Share**,
+and pick who you'd like to share it with.
+
+> Sharing works inside any [Drive](/guide/drives) you have access to.
+> Some sharing options may be limited by a drive's policies (no public
+> links, no email invitations) — the share dialog just hides the
+> options that are disallowed.
 
 ## Who you can share with
 
@@ -21,8 +27,15 @@ above it allows.
 | Level | What it allows |
 |---|---|
 | **Can view** | Open and download. |
+| **Can view & comment** | Plus leave comments (comments are a planned feature; the level is reserved for it). |
+| **Can upload** | Plus add new files or folders. Cannot modify or delete siblings — useful for "drop-box" style folders where you want contributors to submit but not touch each other's work. |
 | **Can edit** | Plus create, rename, and modify files. |
-| **Can manage** | Plus delete and reshare. |
+| **Can manage** | Plus delete, reshare, and change settings. On a drive, also controls membership. |
+
+Sharing a **drive** grants the same level on everything inside it, and
+future items added to it. If you share a drive as *Can edit* and later
+someone drops a folder in there, the person you shared with can edit
+that folder too.
 
 ## Public links are view-only
 

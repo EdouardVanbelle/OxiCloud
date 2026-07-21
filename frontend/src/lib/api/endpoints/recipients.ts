@@ -134,10 +134,26 @@ export async function ensureResolvers(): Promise<void> {
 	await Promise.all([systemContacts(), loadGroups()]);
 }
 
+// O(1) id→contact index over `contactCache`, built once per cache identity.
+// `resolveLabel`/`resolveRecipient` run per rendered grant row on /shared —
+// the previous `contactCache.find(...)` linear scan made each render frame
+// O(rows × directory size).
+let contactById: Map<string, Contact> | null = null;
+let contactByIdSource: Contact[] | null = null;
+
+function contactIndex(): Map<string, Contact> | null {
+	if (!contactCache) return null;
+	if (!contactById || contactByIdSource !== contactCache) {
+		contactById = new Map(contactCache.map((c) => [c.id, c]));
+		contactByIdSource = contactCache;
+	}
+	return contactById;
+}
+
 /** Resolve a subject id to a display label using the preloaded caches. */
 export function resolveLabel(type: 'user' | 'group', id: string): string {
 	if (type === 'group') return groupCache?.get(id) ?? id;
-	const c = contactCache?.find((x) => x.id === id);
+	const c = contactIndex()?.get(id);
 	return c ? contactLabel(c).label : id;
 }
 
@@ -146,7 +162,7 @@ export function resolveRecipient(type: 'user' | 'group', id: string): Recipient 
 	if (type === 'group') {
 		return { type: 'group', id, label: groupCache?.get(id) ?? id };
 	}
-	const c = contactCache?.find((x) => x.id === id);
+	const c = contactIndex()?.get(id);
 	if (!c) return { type: 'user', id, label: id };
 	const { label, email } = contactLabel(c);
 	return { type: 'user', id, label, sublabel: email };

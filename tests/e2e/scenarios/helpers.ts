@@ -224,6 +224,26 @@ export async function apiEmptyTrash(page: Page): Promise<void> {
   }
 }
 
+/**
+ * Flip the caller's `ui_preferences.hide_dotfiles` server-side. Used by the
+ * dotfile-filter e2e spec to establish a known state at test start and to
+ * clean up at teardown so sibling tests aren't polluted by a leftover
+ * "hidden" mode (the preference is persistent across sessions because it's
+ * stored on `auth.users.ui_preferences`, not in localStorage).
+ *
+ * PATCHes only `hide_dotfiles`; siblings in the bag (view_mode, future
+ * keys) survive the shallow-merge on the server side.
+ */
+export async function apiSetHideDotfiles(page: Page, hide: boolean): Promise<void> {
+  const res = await page.request.patch('/api/auth/me/profile', {
+    headers: await csrfHeaders(page),
+    data: { ui_preferences: { hide_dotfiles: hide } },
+  });
+  if (!res.ok()) {
+    throw new Error(`apiSetHideDotfiles(${hide}) failed: ${res.status()} ${await res.text()}`);
+  }
+}
+
 /** A file to seed: its name, MIME type, and raw bytes. */
 export type SeedFile = { name: string; mimeType: string; body: Buffer };
 
