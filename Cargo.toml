@@ -358,6 +358,17 @@ name = "bench_micro_allocs"
 path = "examples/bench_micro_allocs.rs"
 required-features = ["bench"]
 
+# Round-27 battery ────────────────────────────────────────────────────────────
+
+# Round-27 CPU/alloc micro-pack (no Postgres) — NC PROPFIND per-row oc:id String
+# → reused buffer via format_oc_id_into (H1); contact create/update JSONB write
+# through a throwaway serde_json::Value DOM → sqlx::types::Json(&dtos) direct
+# serialize (P2, the write-side twin of §J1).
+[[example]]
+name = "bench_round27_micro"
+path = "examples/bench_round27_micro.rs"
+required-features = ["bench"]
+
 # Round-26 battery ────────────────────────────────────────────────────────────
 
 # Round-26 CPU/alloc micro-pack (no Postgres) — drive-policy JSONB decode through

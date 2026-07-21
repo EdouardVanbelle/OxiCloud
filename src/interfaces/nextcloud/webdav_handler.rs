@@ -1610,8 +1610,10 @@ fn build_nc_streaming_propfind(
                 {
                     let mut xml = Writer::new(&mut chunk);
                     // One href buffer reused across the page instead of a fresh
-                    // format! String per child (benches/ROUND19.md §M6).
+                    // format! String per child (benches/ROUND19.md §M6); likewise
+                    // one oc:id buffer (benches/ROUND27.md §H1).
                     let mut href = String::new();
+                    let mut oc_buf = String::new();
                     for file in batch.iter() {
                         let dead = dead_props_for(&file.id, &file_deads);
                         // Only the name varies per row — the encoded
@@ -1622,8 +1624,14 @@ fn build_nc_streaming_propfind(
                         href.push_str(&child_href_prefix);
                         href.push_str(&urlencoding::encode(&file.name));
                         let fid = nc_id_of(&file_id_map, &file.id);
-                        let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
-                        write_file_response(&mut xml, file, &href, (fid, oc_id.as_deref()), &username, &favs, dead)
+                        let oc_id: Option<&str> = match fid {
+                            Some(id) => {
+                                format_oc_id_into(&mut oc_buf, id, file_id_svc);
+                                Some(oc_buf.as_str())
+                            }
+                            None => None,
+                        };
+                        write_file_response(&mut xml, file, &href, (fid, oc_id), &username, &favs, dead)
                             .map_err(std::io::Error::other)?;
                     }
                 }
@@ -1675,8 +1683,10 @@ fn build_nc_streaming_propfind(
                 let mut chunk = Vec::with_capacity(batch.len() * 1024);
                 {
                     let mut xml = Writer::new(&mut chunk);
-                    // One href buffer reused across the page (benches/ROUND19.md §M6).
+                    // One href buffer reused across the page (benches/ROUND19.md
+                    // §M6); likewise one oc:id buffer (benches/ROUND27.md §H1).
                     let mut href = String::new();
+                    let mut oc_buf = String::new();
                     for sf in batch.iter() {
                         let dead = dead_props_for(&sf.id, &sub_deads);
                         // Collections carry the trailing slash; prefix
@@ -1686,8 +1696,14 @@ fn build_nc_streaming_propfind(
                         href.push_str(&urlencoding::encode(&sf.name));
                         href.push('/');
                         let fid = nc_id_of(&sub_id_map, &sf.id);
-                        let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
-                        write_folder_response(&mut xml, sf, &href, (fid, oc_id.as_deref()), &username, &favs, quota, dead)
+                        let oc_id: Option<&str> = match fid {
+                            Some(id) => {
+                                format_oc_id_into(&mut oc_buf, id, file_id_svc);
+                                Some(oc_buf.as_str())
+                            }
+                            None => None,
+                        };
+                        write_folder_response(&mut xml, sf, &href, (fid, oc_id), &username, &favs, quota, dead)
                             .map_err(std::io::Error::other)?;
                     }
                 }
@@ -2060,6 +2076,17 @@ pub fn format_oc_id(id: i64, svc: Option<&Arc<NextcloudFileIdService>>) -> Strin
         Some(s) => s.format_oc_id(id),
         None => format!("{:08}ocnca", id),
     }
+}
+
+/// Write `oc:id` (`{:08}{instance_id}`) into a caller-provided buffer reused
+/// across a PROPFIND/REPORT page — the 0-alloc form of [`format_oc_id`] for the
+/// emit loops, replacing a fresh `String` per child (benches/ROUND27.md §H1).
+/// Output is byte-identical to `format_oc_id`.
+pub fn format_oc_id_into(out: &mut String, id: i64, svc: Option<&Arc<NextcloudFileIdService>>) {
+    use std::fmt::Write as _;
+    out.clear();
+    let _ = write!(out, "{id:08}");
+    out.push_str(svc.map(|s| s.instance_id()).unwrap_or("ocnca"));
 }
 
 #[cfg(test)]

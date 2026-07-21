@@ -1,5 +1,4 @@
 use chrono::Utc;
-use serde_json::Value as JsonValue;
 use sqlx::{PgPool, Row, types::Uuid};
 use std::sync::Arc;
 
@@ -98,10 +97,6 @@ impl ContactRepository for ContactPgRepository {
         let phone_dtos = phones_to_persistence(contact.phone());
         let address_dtos = addresses_to_persistence(contact.address());
 
-        let email_json = serde_json::to_value(&email_dtos).unwrap_or(JsonValue::Null);
-        let phone_json = serde_json::to_value(&phone_dtos).unwrap_or(JsonValue::Null);
-        let address_json = serde_json::to_value(&address_dtos).unwrap_or(JsonValue::Null);
-
         let row = sqlx::query(
             r#"
             INSERT INTO carddav.contacts (
@@ -126,9 +121,9 @@ impl ContactRepository for ContactPgRepository {
         .bind(contact.first_name_owned())
         .bind(contact.last_name_owned())
         .bind(contact.nickname_owned())
-        .bind(email_json)
-        .bind(phone_json)
-        .bind(address_json)
+        .bind(sqlx::types::Json(&email_dtos))
+        .bind(sqlx::types::Json(&phone_dtos))
+        .bind(sqlx::types::Json(&address_dtos))
         .bind(contact.organization_owned())
         .bind(contact.title_owned())
         .bind(contact.notes_owned())
@@ -152,10 +147,6 @@ impl ContactRepository for ContactPgRepository {
         let email_dtos = emails_to_persistence(contact.email());
         let phone_dtos = phones_to_persistence(contact.phone());
         let address_dtos = addresses_to_persistence(contact.address());
-
-        let email_json = serde_json::to_value(&email_dtos).unwrap_or(JsonValue::Null);
-        let phone_json = serde_json::to_value(&phone_dtos).unwrap_or(JsonValue::Null);
-        let address_json = serde_json::to_value(&address_dtos).unwrap_or(JsonValue::Null);
 
         // Create a clone of the contact with the updated timestamp
         let mut updated_contact = contact.clone();
@@ -192,9 +183,9 @@ impl ContactRepository for ContactPgRepository {
         .bind(updated_contact.first_name_owned())
         .bind(updated_contact.last_name_owned())
         .bind(updated_contact.nickname_owned())
-        .bind(email_json)
-        .bind(phone_json)
-        .bind(address_json)
+        .bind(sqlx::types::Json(&email_dtos))
+        .bind(sqlx::types::Json(&phone_dtos))
+        .bind(sqlx::types::Json(&address_dtos))
         .bind(updated_contact.organization_owned())
         .bind(updated_contact.title_owned())
         .bind(updated_contact.notes_owned())
