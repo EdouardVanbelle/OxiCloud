@@ -140,19 +140,18 @@ impl MusicStoragePort for MusicStorageAdapter {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<PlaylistDto>, DomainError> {
+        // One `LEFT JOIN … GROUP BY` instead of 1 listing + N per-playlist
+        // `COUNT(*)` round-trips (up to 101 at limit=100) — benches/ROUND25.md §Q1.
         let playlists = self
             .playlist_repository
-            .list_public_playlists(limit, offset)
+            .list_public_playlists_with_counts(limit, offset)
             .await?;
-        let mut result = Vec::new();
-        for playlist in playlists {
-            let dto = PlaylistDto::from(playlist);
-            let track_count = self
-                .get_track_count(&uuid::Uuid::parse_str(&dto.id).unwrap())
-                .await?;
-            result.push(dto.with_track_info(track_count, 0));
-        }
-        Ok(result)
+        Ok(playlists
+            .into_iter()
+            .map(|(playlist, track_count)| {
+                PlaylistDto::from(playlist).with_track_info(track_count, 0)
+            })
+            .collect())
     }
 
     async fn user_has_access(&self, playlist_id: &str, user_id: Uuid) -> Result<bool, DomainError> {

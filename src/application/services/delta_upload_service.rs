@@ -446,8 +446,12 @@ impl DeltaUploadService {
             ct if ct.is_empty() => "application/octet-stream".to_string(),
             ct => ct,
         };
-        let chunk_hashes: Vec<String> = request.chunks.iter().map(|c| c.h.clone()).collect();
-        let chunk_sizes: Vec<u64> = request.chunks.iter().map(|c| c.s).collect();
+        // `request.chunks` is owned and dead after this line (only
+        // `request.file_hash` is read below), so move the hashes out instead of
+        // cloning each 64-char hash a third time — the distinct set and the
+        // verification tuple already materialized it twice (benches/ROUND25.md §M2).
+        let (chunk_hashes, chunk_sizes): (Vec<String>, Vec<u64>) =
+            request.chunks.into_iter().map(|c| (c.h, c.s)).unzip();
         let attached = self
             .dedup
             .attach_manifest(

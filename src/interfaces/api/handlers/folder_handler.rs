@@ -4,7 +4,6 @@ use axum::{
     http::{Response, StatusCode, header},
     response::IntoResponse,
 };
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::application::dtos::display_helpers::{
@@ -210,7 +209,6 @@ impl FolderHandler {
         State(state): State<Arc<GlobalAppState>>,
         auth_user: AuthUser,
         Path(id): Path<String>,
-        Query(_params): Query<HashMap<String, String>>,
     ) -> impl IntoResponse {
         tracing::info!("Downloading folder as ZIP: {}", id);
 
@@ -421,9 +419,12 @@ pub async fn download_folder_zip(
     state: State<Arc<GlobalAppState>>,
     auth_user: AuthUser,
     path: Path<String>,
-    query: Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    FolderHandler::download_folder_zip_impl(state, auth_user, path, query).await
+    // No `Query` extractor: the handler reads only the path `id`. axum ignores
+    // any query string when no extractor is present, so the response is
+    // byte-identical while a per-request HashMap + owned key/value Strings are
+    // no longer parsed and dropped (benches/ROUND25.md §M3).
+    FolderHandler::download_folder_zip_impl(state, auth_user, path).await
 }
 
 // ── GET /api/folders/{id}/resources ─────────────────────────────────────────

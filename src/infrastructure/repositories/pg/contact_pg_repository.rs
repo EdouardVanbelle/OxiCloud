@@ -21,8 +21,28 @@ impl ContactPgRepository {
         Self { pool }
     }
 
-    /// Maps a database row to a Contact domain entity
+    /// Maps a database row to a Contact domain entity (reads the `vcard` column).
     fn row_to_contact(row: &sqlx::postgres::PgRow) -> Result<Contact, DomainError> {
+        Self::row_to_contact_with_vcard(row, row.get("vcard"))
+    }
+
+    /// Maps a row whose SELECT omitted the `vcard` column — used by the REST
+    /// listings (paginated / search / by-group) whose `ContactDto` drops vcard
+    /// anyway, so the multi-KB vCard TEXT (which can embed a base64 PHOTO) is
+    /// never SELECTed, shipped over the wire, or allocated (benches/ROUND25.md
+    /// §Q2). The domain `Contact` keeps an empty vcard; these paths never
+    /// re-emit it. Do NOT use for CardDAV sync / whole-book export, which need
+    /// the round-trip vCard.
+    fn row_to_contact_lite(row: &sqlx::postgres::PgRow) -> Result<Contact, DomainError> {
+        Self::row_to_contact_with_vcard(row, String::new())
+    }
+
+    /// Shared row → `Contact` mapper; `vcard` is supplied by the caller so the
+    /// TEXT column can be omitted from listings that don't consume it.
+    fn row_to_contact_with_vcard(
+        row: &sqlx::postgres::PgRow,
+        vcard: String,
+    ) -> Result<Contact, DomainError> {
         // Decode each JSONB column straight into its typed Vec via
         // `sqlx::types::Json<T>` (a single `serde_json::from_slice` pass over
         // the raw JSONB bytes) instead of `row.get::<serde_json::Value>` +
@@ -63,7 +83,7 @@ impl ContactPgRepository {
             row.get::<Option<String>, _>("photo_url"),
             row.get("birthday"),
             row.get("anniversary"),
-            row.get("vcard"),
+            vcard,
             row.get("etag"),
             row.get("created_at"),
             row.get("updated_at"),
@@ -366,7 +386,7 @@ impl ContactRepository for ContactPgRepository {
             SELECT
                 id, address_book_id, uid, full_name, first_name, last_name, nickname,
                 email, phone, address, organization, title, notes, photo_url,
-                birthday, anniversary, vcard, etag, created_at, updated_at
+                birthday, anniversary, etag, created_at, updated_at
             FROM carddav.contacts
             WHERE address_book_id = $1
             ORDER BY full_name, first_name, last_name
@@ -387,7 +407,7 @@ impl ContactRepository for ContactPgRepository {
 
         let mut contacts = Vec::with_capacity(rows.len());
         for row in &rows {
-            contacts.push(Self::row_to_contact(row)?);
+            contacts.push(Self::row_to_contact_lite(row)?);
         }
         Ok(contacts)
     }
@@ -429,7 +449,7 @@ impl ContactRepository for ContactPgRepository {
             SELECT 
                 c.id, c.address_book_id, c.uid, c.full_name, c.first_name, c.last_name, c.nickname,
                 c.email, c.phone, c.address, c.organization, c.title, c.notes, c.photo_url,
-                c.birthday, c.anniversary, c.vcard, c.etag, c.created_at, c.updated_at
+                c.birthday, c.anniversary, c.etag, c.created_at, c.updated_at
             FROM carddav.contacts c
             INNER JOIN carddav.group_memberships m ON c.id = m.contact_id
             WHERE m.group_id = $1
@@ -445,7 +465,7 @@ impl ContactRepository for ContactPgRepository {
 
         let mut contacts = Vec::with_capacity(rows.len());
         for row in &rows {
-            contacts.push(Self::row_to_contact(row)?);
+            contacts.push(Self::row_to_contact_lite(row)?);
         }
         Ok(contacts)
     }
@@ -462,9 +482,9 @@ impl ContactRepository for ContactPgRepository {
             SELECT 
                 id, address_book_id, uid, full_name, first_name, last_name, nickname,
                 email, phone, address, organization, title, notes, photo_url,
-                birthday, anniversary, vcard, etag, created_at, updated_at
+                birthday, anniversary, etag, created_at, updated_at
             FROM carddav.contacts
-            WHERE address_book_id = $1 
+            WHERE address_book_id = $1
               AND (
                   full_name ILIKE $2 
                   OR first_name ILIKE $2
@@ -485,7 +505,7 @@ impl ContactRepository for ContactPgRepository {
 
         let mut contacts = Vec::with_capacity(rows.len());
         for row in &rows {
-            contacts.push(Self::row_to_contact(row)?);
+            contacts.push(Self::row_to_contact_lite(row)?);
         }
         Ok(contacts)
     }

@@ -354,6 +354,27 @@ name = "bench_micro_allocs"
 path = "examples/bench_micro_allocs.rs"
 required-features = ["bench"]
 
+# Round-25 battery ────────────────────────────────────────────────────────────
+
+# Round-25 CPU/alloc/RAM micro-pack (no Postgres) — deterministic alloc+bytes
+# gates: EncryptedBlobBackend::decrypt_bytes split_off full copy → in-place
+# detached decrypt + zero-copy slice (M1, the RAM headline); delta-commit
+# chunk-hash list third clone → move-unzip (M2); folder download dead
+# Query<HashMap> extractor removal (M3).
+[[example]]
+name = "bench_round25_micro"
+path = "examples/bench_round25_micro.rs"
+required-features = ["bench"]
+
+# Round-25 PG query-shape pack — public-playlist listing 1+N COUNT round-trips
+# → one LEFT JOIN GROUP BY (Q1); contact REST listings dropping the over-fetched
+# multi-KB vcard TEXT the ContactDto discards (Q2). Needs the dev Postgres up
+# (reads DATABASE_URL from .env).
+[[example]]
+name = "bench_round25_queries"
+path = "examples/bench_round25_queries.rs"
+required-features = ["bench"]
+
 # Round-24 battery ────────────────────────────────────────────────────────────
 
 # Round-24 download_zip authz+metadata N+1 → batch, VALIDATED. The per-file

@@ -86,7 +86,7 @@ impl EncryptedBlobBackend {
 
 /// Encrypt `data` into the on-disk layout: `[12-byte nonce][ciphertext + tag]`.
 ///
-/// Single output buffer, mirroring the read side's `decrypt_in_place`:
+/// Single output buffer, mirroring the read side's in-place detached decrypt:
 /// the payload is copied exactly once and encrypted in place with the tag
 /// appended. The old shape let `cipher.encrypt` allocate a full ciphertext
 /// `Vec` and then copied it a second time behind the nonce — one extra
@@ -106,22 +106,39 @@ fn encrypt_bytes(cipher: &Aes256Gcm, data: &[u8]) -> Result<Bytes, DomainError> 
 
 /// Decrypt the on-disk layout `[nonce][ciphertext + tag]` **in place**.
 ///
-/// Consumes the encrypted buffer and reuses it for the plaintext, so peak
-/// RAM is one buffer — not ciphertext + plaintext side by side (which for
-/// legacy whole-file blobs would double a multi-hundred-MB allocation).
+/// Reuses the encrypted buffer for the plaintext, so peak RAM is one buffer —
+/// not ciphertext + plaintext side by side (which for legacy whole-file blobs
+/// would double a multi-hundred-MB allocation). The nonce and 16-byte GCM tag
+/// are lifted to the stack, the ciphertext body is decrypted in place via the
+/// detached API (mirroring the encrypt side's `encrypt_in_place_detached`), and
+/// the plaintext is returned as a zero-copy `Bytes::slice` past the nonce.
+///
+/// The prior shape did `encrypted.split_off(NONCE_SIZE)`, which allocated a
+/// fresh `Vec` and memcpy'd the entire ciphertext (up to a whole legacy blob)
+/// on every decrypted read — one full-payload allocation + copy the doc comment
+/// above claimed did not happen (benches/ROUND25.md §M1; ROUND11 §15 fixed only
+/// the encrypt side). Output plaintext is byte-identical.
 fn decrypt_bytes(cipher: &Aes256Gcm, mut encrypted: Vec<u8>) -> Result<Bytes, DomainError> {
-    if encrypted.len() < NONCE_SIZE {
+    let len = encrypted.len();
+    if len < NONCE_SIZE + TAG_SIZE {
         return Err(DomainError::internal_error(
             "Encryption",
-            "encrypted blob too short (missing nonce)",
+            "encrypted blob too short (missing nonce/tag)",
         ));
     }
-    let mut ciphertext = encrypted.split_off(NONCE_SIZE); // `encrypted` keeps the nonce
-    let nonce = Nonce::from_slice(&encrypted);
+    // Nonce (first 12 bytes) and GCM tag (last 16 bytes) copied to the stack so
+    // the middle can be borrowed mutably for in-place decryption.
+    let mut nonce_buf = [0u8; NONCE_SIZE];
+    nonce_buf.copy_from_slice(&encrypted[..NONCE_SIZE]);
+    let nonce = Nonce::from_slice(&nonce_buf);
+    let tag = aes_gcm::aead::Tag::<Aes256Gcm>::clone_from_slice(&encrypted[len - TAG_SIZE..]);
     cipher
-        .decrypt_in_place(nonce, b"", &mut ciphertext)
+        .decrypt_in_place_detached(nonce, b"", &mut encrypted[NONCE_SIZE..len - TAG_SIZE], &tag)
         .map_err(|e| DomainError::internal_error("Encryption", format!("decrypt failed: {e}")))?;
-    Ok(Bytes::from(ciphertext))
+    // Plaintext now lives at `encrypted[NONCE_SIZE..len - TAG_SIZE]`; drop the
+    // tag and hand out a refcounted view past the nonce — no copy, no new alloc.
+    encrypted.truncate(len - TAG_SIZE);
+    Ok(Bytes::from(encrypted).slice(NONCE_SIZE..))
 }
 
 /// Run a crypto closure inline for small payloads, on the blocking pool for
