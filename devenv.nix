@@ -36,6 +36,7 @@
     # API/WebDAV functional tests + the DB-readiness probe in tests/common/spawn-db.sh
     hurl
     netcat-gnu                # provides `nc`
+    b3sum                     # storage-integrity check in tests/api/run.sh
   ];
 
   # Dev Postgres on :5432, matching DATABASE_URL in example.env
