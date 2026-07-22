@@ -22,6 +22,8 @@ type MediaFileRow = (
     String,         // blob_hash
     Option<Uuid>,   // created_by (§14 provenance)
     Option<Uuid>,   // updated_by (§14 provenance)
+    bool,           // is_favorite (caller-scoped EXISTS on user_favorites)
+    bool,           // is_shared   (resource-scoped EXISTS on role_grants)
     i64,            // sort_date
     Option<i32>,    // width
     Option<i32>,    // height
@@ -522,7 +524,19 @@ impl FileBlobReadRepository {
         caller_id: Uuid,
         before: Option<i64>,
         limit: i64,
-    ) -> Result<(Vec<File>, Vec<i64>, Vec<(Option<i32>, Option<i32>)>), DomainError> {
+    ) -> Result<
+        (
+            Vec<File>,
+            Vec<i64>,
+            Vec<(Option<i32>, Option<i32>)>,
+            // Per-row caller flags (is_favorite, is_shared). Aligned
+            // with `files` — zip 1:1. Kept parallel to `sort_dates` /
+            // `dims` instead of on the File entity so the domain
+            // stays caller-agnostic.
+            Vec<(bool, bool)>,
+        ),
+        DomainError,
+    > {
         // Sargable keyset cursor: compare the RAW `media_sort_date` column
         // against a timestamptz bind so the planner can use the cursor as
         // an index boundary condition on `idx_files_media_timeline_by_drive`.
@@ -562,6 +576,17 @@ impl FileBlobReadRepository {
                    EXTRACT(EPOCH FROM top.updated_at)::bigint,
                    top.blob_hash,
                    top.created_by, top.updated_by,
+                   EXISTS (
+                       SELECT 1 FROM auth.user_favorites uf
+                        WHERE uf.user_id   = $1
+                          AND uf.item_id   = top.id::text
+                          AND uf.item_type = 'file'
+                   ) AS is_favorite,
+                   EXISTS (
+                       SELECT 1 FROM storage.role_grants g
+                        WHERE g.resource_id   = top.id
+                          AND g.resource_type = 'file'
+                   ) AS is_shared,
                    EXTRACT(EPOCH FROM top.media_sort_date)::bigint AS sort_date,
                    fm.width, fm.height
               FROM (
@@ -596,16 +621,36 @@ impl FileBlobReadRepository {
         let mut files = Vec::with_capacity(rows.len());
         let mut sort_dates = Vec::with_capacity(rows.len());
         let mut dims = Vec::with_capacity(rows.len());
+        let mut flags = Vec::with_capacity(rows.len());
 
-        for (id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub, sd, w, h) in rows {
+        for (
+            id,
+            name,
+            fid,
+            fpath,
+            size,
+            mime,
+            ca,
+            ma,
+            blob_hash,
+            cb,
+            ub,
+            is_fav,
+            is_shr,
+            sd,
+            w,
+            h,
+        ) in rows
+        {
             files.push(Self::row_to_file(
                 id, name, fid, fpath, size, mime, ca, ma, blob_hash, cb, ub,
             )?);
             sort_dates.push(sd);
             dims.push((w, h));
+            flags.push((is_fav, is_shr));
         }
 
-        Ok((files, sort_dates, dims))
+        Ok((files, sort_dates, dims, flags))
     }
 
     /// Aggregate the caller's geotagged photos into grid cells of side `cell`

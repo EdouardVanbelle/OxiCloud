@@ -25,6 +25,8 @@ use crate::interfaces::middleware::auth::AuthUser;
 
 type AppState = Arc<FolderService>;
 
+use crate::interfaces::api::handlers::caller_flags::enrich_folder_flags;
+
 /// Handler for folder-related API endpoints
 pub struct FolderHandler;
 
@@ -40,10 +42,11 @@ impl FolderHandler {
     /// When parent_id is not provided, the folder is created inside the
     /// authenticated user's home folder rather than at the storage root.
     pub(super) async fn create_folder_impl(
-        State(service): State<AppState>,
+        State(state): State<Arc<GlobalAppState>>,
         auth_user: AuthUser,
         Json(mut dto): Json<CreateFolderDto>,
     ) -> impl IntoResponse {
+        let service = &state.applications.folder_service_concrete;
         // If no parent_id was supplied, resolve the user's home folder as
         // the default parent so the new folder is nested correctly.
         if dto.parent_id.is_none() {
@@ -77,7 +80,10 @@ impl FolderHandler {
         }
 
         match service.create_folder_with_perms(dto, auth_user.id).await {
-            Ok(folder) => (StatusCode::CREATED, Json(folder)).into_response(),
+            Ok(mut folder) => {
+                enrich_folder_flags(&state, &mut folder, auth_user.id).await;
+                (StatusCode::CREATED, Json(folder)).into_response()
+            }
             Err(err) => AppError::from(err).into_response(),
         }
     }
@@ -85,12 +91,16 @@ impl FolderHandler {
     /// Gets a folder by ID.
     /// Validates that the authenticated user owns the folder.
     pub(super) async fn get_folder_impl(
-        State(service): State<AppState>,
+        State(state): State<Arc<GlobalAppState>>,
         auth_user: AuthUser,
         Path(id): Path<String>,
     ) -> impl IntoResponse {
+        let service = &state.applications.folder_service_concrete;
         match service.get_folder_with_perms(&id, auth_user.id).await {
-            Ok(folder) => (StatusCode::OK, Json(folder)).into_response(),
+            Ok(mut folder) => {
+                enrich_folder_flags(&state, &mut folder, auth_user.id).await;
+                (StatusCode::OK, Json(folder)).into_response()
+            }
             Err(err) => AppError::from(err).into_response(),
         }
     }
@@ -126,29 +136,37 @@ impl FolderHandler {
 
     /// Renames a folder (ownership enforced).
     pub(super) async fn rename_folder_impl(
-        State(service): State<AppState>,
+        State(state): State<Arc<GlobalAppState>>,
         auth_user: AuthUser,
         Path(id): Path<String>,
         Json(dto): Json<RenameFolderDto>,
     ) -> impl IntoResponse {
+        let service = &state.applications.folder_service_concrete;
         match service
             .rename_folder_with_perms(&id, dto, auth_user.id)
             .await
         {
-            Ok(folder) => (StatusCode::OK, Json(folder)).into_response(),
+            Ok(mut folder) => {
+                enrich_folder_flags(&state, &mut folder, auth_user.id).await;
+                (StatusCode::OK, Json(folder)).into_response()
+            }
             Err(err) => AppError::from(err).into_response(),
         }
     }
 
     /// Moves a folder to a new parent (ownership enforced).
     pub(super) async fn move_folder_impl(
-        State(service): State<AppState>,
+        State(state): State<Arc<GlobalAppState>>,
         auth_user: AuthUser,
         Path(id): Path<String>,
         Json(dto): Json<MoveFolderDto>,
     ) -> impl IntoResponse {
+        let service = &state.applications.folder_service_concrete;
         match service.move_folder_with_perms(&id, dto, auth_user.id).await {
-            Ok(folder) => (StatusCode::OK, Json(folder)).into_response(),
+            Ok(mut folder) => {
+                enrich_folder_flags(&state, &mut folder, auth_user.id).await;
+                (StatusCode::OK, Json(folder)).into_response()
+            }
             Err(err) => AppError::from(err).into_response(),
         }
     }
@@ -300,7 +318,7 @@ impl FolderHandler {
     tag = "folders"
 )]
 pub async fn create_folder(
-    state: State<AppState>,
+    state: State<Arc<GlobalAppState>>,
     auth_user: AuthUser,
     json: Json<CreateFolderDto>,
 ) -> impl IntoResponse {
@@ -319,7 +337,7 @@ pub async fn create_folder(
     tag = "folders"
 )]
 pub async fn get_folder(
-    state: State<AppState>,
+    state: State<Arc<GlobalAppState>>,
     auth_user: AuthUser,
     path: Path<String>,
 ) -> impl IntoResponse {
@@ -355,7 +373,7 @@ pub async fn list_root_folders(
     tag = "folders"
 )]
 pub async fn rename_folder(
-    state: State<AppState>,
+    state: State<Arc<GlobalAppState>>,
     auth_user: AuthUser,
     path: Path<String>,
     json: Json<RenameFolderDto>,
@@ -376,7 +394,7 @@ pub async fn rename_folder(
     tag = "folders"
 )]
 pub async fn move_folder(
-    state: State<AppState>,
+    state: State<Arc<GlobalAppState>>,
     auth_user: AuthUser,
     path: Path<String>,
     json: Json<MoveFolderDto>,
@@ -490,6 +508,8 @@ pub async fn list_folder_resources(
                             category: intern_display("Folder"),
                             created_by: row.created_by,
                             updated_by: row.updated_by,
+                            is_favorite: row.is_favorite,
+                            is_shared: row.is_shared,
                         };
                         FolderResourceItemDto {
                             resource_type: ResourceTypeDto::Folder,
@@ -541,6 +561,8 @@ pub async fn list_folder_resources(
                             etag,
                             created_by: row.created_by,
                             updated_by: row.updated_by,
+                            is_favorite: row.is_favorite,
+                            is_shared: row.is_shared,
                         };
                         FolderResourceItemDto {
                             resource_type: ResourceTypeDto::File,

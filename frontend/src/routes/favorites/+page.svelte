@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+	import { SvelteMap } from 'svelte/reactivity';
 	import { primeContextPage } from '$lib/utils/listContext';
 	import Button from '$lib/components/Button.svelte';
 	import { useOwnerCache } from '$lib/composables/useOwnerCache.svelte';
@@ -50,22 +50,15 @@
 	// action surfaces don't filter, algorithmic surfaces do.
 	//
 	// ResourceList consumes raw `FileItem | FolderItem`; the favorites
-	// envelope contributes `favorited_at` via `date` in contextMap. All
-	// items on this page are favorites — pass every id in `favoriteIds`
-	// so the star widget lights up universally.
+	// envelope contributes `favorited_at` via `date` in contextMap.
+	// Every item on this page has `is_favorite: true` by construction
+	// (the listing SQL hardcodes `TRUE AS is_favorite`), so the star
+	// widget lights up universally without any shadow set here.
 	const items = $derived(raw.map((it) => it.resource as FileItem | FolderItem));
 	// Persistent reactive map, primed per page in `load()` (benches/ROUND16.md §F2)
 	// instead of rebuilding a fresh Map that re-hashes the whole accumulated list
-	// on every infinite-scroll page. Mirrors the sibling `favoriteIds` SvelteSet.
+	// on every infinite-scroll page.
 	const contextMap = new SvelteMap<string, ItemContext>();
-	// Persistent reactive set, updated in place per page (add the fresh page's
-	// ids; clear on reset) instead of rebuilding a brand-new SvelteSet over the
-	// whole accumulated list on every infinite-scroll page — that was O(N²)
-	// across a drain and, being a new instance each page, invalidated every
-	// mounted star reader. Every item on this page is a favorite, and removed
-	// items are no longer rendered, so the set only needs to be a superset of
-	// the displayed ids (benches/ROUND14.md §F2, mirrors recent's shipped shape).
-	const favoriteIds = new SvelteSet<string>();
 
 	const groupBys: GroupByDef[] = [
 		{ key: '', label: t('files.name', 'Name'), orderBy: 'name', icon: 'arrow-up-a-z' },
@@ -114,10 +107,6 @@
 				resourceTypes: ['file', 'folder']
 			});
 			raw = reset ? page.items : [...raw, ...page.items];
-			// Keep the persistent favoriteIds set in sync incrementally: clear on
-			// reset, then add only this page's ids (benches/ROUND14.md §F2).
-			if (reset) favoriteIds.clear();
-			for (const it of page.items) favoriteIds.add(it.resource.id);
 			primeContextPage(contextMap, reset, page.items, (it) => [
 				it.resource.id,
 				{ date: it.favorited_at }
@@ -164,7 +153,6 @@
 		try {
 			await removeFavorite(kind, item.id);
 			raw = raw.filter((i) => i.resource.id !== item.id);
-			favoriteIds.delete(item.id);
 		} catch (e) {
 			errorToast(e);
 		}
@@ -317,7 +305,6 @@
 	title={t('nav.favorites', 'Favorites')}
 	{items}
 	{contextMap}
-	{favoriteIds}
 	resolveOwnerName={(id) => owners.name(id)}
 	{loading}
 	{error}
@@ -328,6 +315,10 @@
 	onloadmore={() => load(false, orderByForGroup())}
 	onopen={open}
 	onfavorite={unfavorite}
+	onshared={(item) => {
+		shareTarget = { id: item.id, name: item.name, kind: kindOf(item) };
+		shareOpen = true;
+	}}
 	showOwner
 	showPath
 	dateLabel={t('files.col_added', 'Added')}

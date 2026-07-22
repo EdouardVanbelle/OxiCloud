@@ -38,6 +38,10 @@ export function minimalPhotoItem(id: string): FileItem {
 		size_formatted: '',
 		sort_date: 0,
 		etag: '',
-		content_hash: ''
+		content_hash: '',
+		// Stub item — never wired to a live server response, so the
+		// two required wire flags default to the safe "not set" value.
+		is_favorite: false,
+		is_shared: false
 	};
 }

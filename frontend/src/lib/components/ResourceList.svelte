@@ -120,13 +120,6 @@
 		 */
 		contextMap?: Map<string, ItemContext>;
 		/**
-		 * Set of item ids the caller considers "favorite". When
-		 * provided, the star widget renders next to each row and
-		 * `onfavorite` is invoked on click. Kept as an external Set so
-		 * the page owns the source of truth (e.g. the favorites store).
-		 */
-		favoriteIds?: Set<string>;
-		/**
 		 * Resolve `userId → display name`. Optional; when absent
 		 * `UserVignette` falls back to its own internal resolution.
 		 * Accepts `null` for consistency with the useOwnerCache API
@@ -213,6 +206,14 @@
 		onopen?: (item: FileItem | FolderItem) => void;
 		/** Per-item favorite star toggle. */
 		onfavorite?: (item: FileItem | FolderItem) => void;
+		/**
+		 * Per-item share affordance — opens the page's ShareDialog for
+		 * this row. Wired symmetrically to `onfavorite`: the button lives
+		 * in `.action-cell`, its `.active` styling tracks `item.is_shared`,
+		 * and rows that are shared keep the button visible in list view
+		 * even when the row isn't hovered.
+		 */
+		onshared?: (item: FileItem | FolderItem) => void;
 		/** Selection changed (set of selected item ids). */
 		onselectionchange?: (ids: Set<string>) => void;
 		/**
@@ -353,7 +354,6 @@
 		title,
 		items,
 		contextMap,
-		favoriteIds,
 		resolveOwnerName,
 		loading = false,
 		error = null,
@@ -383,6 +383,7 @@
 		onreload,
 		onopen,
 		onfavorite,
+		onshared,
 		onselectionchange,
 		oncontextmenu: onContextMenuOverride,
 		menuPrepare,
@@ -463,7 +464,11 @@
 	// gate below. Feeds both the list-view column track and the header
 	// row's trailing placeholder so the layout stays in sync.
 	const hasActionCell = $derived(
-		!!onfavorite || !!itemActions || !!onContextMenuOverride || !!contextActions?.length
+		!!onfavorite ||
+			!!onshared ||
+			!!itemActions ||
+			!!onContextMenuOverride ||
+			!!contextActions?.length
 	);
 
 	// Build the list-view column track from the enabled cells.
@@ -978,7 +983,6 @@
 {#snippet row(item: FileItem | FolderItem)}
 	{@const kind = isFile(item) ? 'file' : 'folder'}
 	{@const iconName = kind === 'folder' ? 'folder' : iconNameFromClass(iconClassOf(item))}
-	{@const isFav = favoriteIds?.has(item.id) ?? false}
 	{@const ctx = ctxOf(item.id)}
 	{@const ownerId = ownerIdOf(item)}
 	{@const dateVal = dateOf(item)}
@@ -1060,11 +1064,11 @@
 						}}
 					/>
 				{/if}
-				<!-- Row badge (e.g. /trash's expiration chip) sits absolutely
-				     inside `.file-icon` — one DOM location, one render, works
-				     for both views. Because it's positioned absolutely it
-				     never affects the row/card height; the surrounding
-				     layout can't stretch to accommodate it. -->
+				<!-- `rowBadge` snippet — page-specific extension slot (e.g.
+				     `/trash`'s expiration chip). `is_favorite` / `is_shared`
+				     are NOT rendered here — both are surfaced as buttons in
+				     `.action-cell` so the two flags share a single visual
+				     grammar (button whose `.active` styling tracks the flag). -->
 				{#if rowBadge}
 					<span class="file-icon__badge">{@render rowBadge(item, ctx)}</span>
 				{/if}
@@ -1106,31 +1110,55 @@
 		</div>
 		<!--
 			Every row that surfaces an action puts everything into a single
-			`.action-cell` — the shared `ported/resourceList.css` styles both
-			the favorite-star and the `.file-actions` kebab expecting them to
-			live inside `.action-cell` (grid view uses the corner-overlay CSS
-			to float `.file-actions` into the top-right; list view flexes them
-			inline). The cell renders when ANY of favorite / itemActions /
-			context-menu is enabled; a row with none of those still lays out
-			cleanly because the columns collapse via the grid track.
+			`.action-cell` — the shared `ported/resourceList.css` styles the
+			favorite-star, the shared-button, and the `.file-actions` kebab
+			expecting them to live inside `.action-cell` (grid view uses the
+			corner-overlay CSS to float them into the top-right; list view
+			flexes them inline). The cell renders when ANY of favorite /
+			shared / itemActions / context-menu is enabled; a row with none
+			of those still lays out cleanly because the columns collapse via
+			the grid track.
+
+			Fav-star and shared-button share the same interaction grammar:
+			each toggles/opens the corresponding affordance, each carries an
+			`.active` class that tracks its DTO flag, and (via CSS in
+			`ported/resourceList.css`) each stays visible in list view even
+			without a row hover when its `.active` flag is set — so a
+			favorited or shared row is discoverable at a glance without the
+			user having to mouse over it.
 		-->
-		{#if onfavorite || itemActions || onContextMenuOverride || contextActions?.length}
+		{#if hasActionCell}
 			<div class="action-cell">
+				{#if onshared}
+					<button
+						class="shared-button"
+						class:active={item.is_shared}
+						data-testid={`resource-list-shared-${item.id}-btn`}
+						title={item.is_shared ? t('files.shared', 'Shared') : t('files.share', 'Share')}
+						aria-pressed={item.is_shared}
+						onclick={(e) => {
+							e.stopPropagation();
+							onshared(item);
+						}}
+					>
+						<Icon name="oxiexport" />
+					</button>
+				{/if}
 				{#if onfavorite}
 					<button
 						class="favorite-star"
-						class:active={isFav}
+						class:active={item.is_favorite}
 						data-testid={`resource-list-favorite-${item.id}-btn`}
-						title={isFav
+						title={item.is_favorite
 							? t('files.unfavorite', 'Remove favorite')
 							: t('files.favorite', 'Add favorite')}
-						aria-pressed={isFav}
+						aria-pressed={item.is_favorite}
 						onclick={(e) => {
 							e.stopPropagation();
 							onfavorite(item);
 						}}
 					>
-						<Icon name={isFav ? 'star' : 'star-outline'} />
+						<Icon name={item.is_favorite ? 'star' : 'star-outline'} />
 					</button>
 				{/if}
 				{#if itemActions}{@render itemActions(item)}{/if}

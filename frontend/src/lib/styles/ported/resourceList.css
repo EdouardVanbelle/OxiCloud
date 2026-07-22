@@ -178,10 +178,6 @@
     background-color: var(--color-warning-ring);
 }
 
-.file-badge-shared {
-    color: var(--color-badge-blue-text);
-}
-
 .file-item .file-icon > i,
 .file-item .file-icon > svg {
     position: absolute;
@@ -460,7 +456,17 @@
 }
 
 .files-list-view .file-item .action-cell {
+    /* Right-justified flex row: gives every list-view action button
+       (shared, fav, broom, kebab, trash's restore/delete, …) a
+       predictable horizontal cluster with a stable gap. The legacy
+       `display: inline` on individual buttons ignored `width`/`height`,
+       so once /recent grew a 4th button the mix of `inline` + `inline-
+       flex` (`.btn-action`) started wrapping onto pseudo-rows that
+       read as a broken grid. Flex flattens the mix into one line. */
+    display: flex;
+    justify-content: flex-end;
     align-items: center;
+    gap: var(--space-1);
     text-align: right;
 }
 
@@ -493,27 +499,44 @@
     color: var(--color-text-dark);
 }
 
-/* could be visible if we want */
-.files-list-view .file-item .action-cell button.favorite-star {
-    display: none;
+/* Fav-star + shared-button share the same visibility rule: hidden on
+   quiet rows, visible on row hover, and — crucially — always visible
+   when their `.active` class is set. That's what lets a favorited or
+   shared row be discoverable at a glance in list view without the
+   user having to mouse over it.
+
+   We use `visibility: hidden` (not `display: none`) so a hidden
+   button still reserves its slot in the action cell. Otherwise a row
+   that's shared-but-not-favorited would slide its shared icon into
+   the fav-star's column, breaking vertical alignment across rows. */
+.files-list-view .file-item .action-cell button.favorite-star,
+.files-list-view .file-item .action-cell button.shared-button {
+    visibility: hidden;
     border: none;
 }
 
-.files-list-view .file-item:hover .action-cell button.favorite-star {
-    display: inline;
+.files-list-view .file-item:hover .action-cell button.favorite-star,
+.files-list-view .file-item:hover .action-cell button.shared-button,
+.files-list-view .file-item .action-cell button.favorite-star.active,
+.files-list-view .file-item .action-cell button.shared-button.active {
+    visibility: visible;
 }
 
 /* Reveal the kebab on hover for cleaner rows — but only on hover-capable
    devices, so touch users (no hover) keep it always tappable. Stays visible
-   on keyboard focus within the row. */
+   on keyboard focus within the row. Applies to both list and grid views
+   because both keep the kebab inside `.action-cell`. */
 @media (hover: hover) {
-    .files-list-view .file-item .action-cell button.file-actions {
+    .files-list-view .file-item .action-cell button.file-actions,
+    .files-grid-view .file-item .action-cell button.file-actions {
         opacity: 0;
         transition: opacity var(--motion-fast) var(--ease-standard);
     }
 
     .files-list-view .file-item:hover .action-cell button.file-actions,
-    .files-list-view .file-item:focus-within .action-cell button.file-actions {
+    .files-list-view .file-item:focus-within .action-cell button.file-actions,
+    .files-grid-view .file-item:hover .action-cell button.file-actions,
+    .files-grid-view .file-item:focus-within .action-cell button.file-actions {
         opacity: 1;
     }
 }
@@ -737,26 +760,95 @@
     z-index: 10;
     display: flex;
     gap: var(--space-1);
-    opacity: 0;
-    transition: opacity var(--motion-fast) var(--ease-standard);
 }
 
-.files-grid-view .file-item:hover .action-cell,
-.files-grid-view .file-item:focus-within .action-cell,
-.files-grid-view .file-item .action-cell:has(.favorite-star.active) {
-    opacity: 1;
+/* Full-width top action bar — only applies when the row surfaces at
+   least one state chip (shared or favorite). Trash (no shared / no
+   favorite) falls through to the horizontal corner cluster above,
+   preserving its Restore / Delete / kebab layout.
+
+   Layout target:
+     ┌────────────────────────────────────────────┐
+     │[chk] [kebab] [btn-action…]  [shared] [fav] │  ← single row
+     │                                            │
+     │             (thumbnail)                    │
+     │                                            │
+     └────────────────────────────────────────────┘
+
+   The checkbox stays where it is (its own `.checkbox-cell` absolute at
+   top-left); the action-cell spans horizontally next to it so the two
+   clusters read as one row. `justify-content: space-between` + `order`
+   splits the flex row into a left group (kebab + btn-actions) and a
+   right group (shared + favorite) without fighting DOM order — the
+   markup still has shared, favorite, itemActions, kebab in that
+   sequence so list-view's inline right-aligned flow is unchanged. */
+.files-grid-view .file-item .action-cell:has(.shared-button, .favorite-star) {
+    /* Start right after the checkbox column (26px chip + inline gap)
+       so the left group aligns visually with the checkbox row. */
+    left: calc(var(--space-3) + 8px + 26px + var(--space-2));
+    right: calc(var(--space-3) + 8px);
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: var(--space-1);
 }
 
-/* The favorite state is already shown by the corner star button, so the inline
-   name-cell favorite badge is redundant on grid cards. */
-.files-grid-view .file-item .name-cell .item-badge {
-    display: none;
+.files-grid-view .file-item .action-cell:has(.shared-button, .favorite-star) .file-actions {
+    order: 1;
+}
+
+.files-grid-view .file-item .action-cell:has(.shared-button, .favorite-star) .btn-action {
+    order: 2;
+}
+
+/* The first "right group" item eats all remaining horizontal space via
+   `margin-left: auto`, which is the flexbox idiom for splitting a row
+   into left+right clusters without wrapping the two groups in extra
+   containers. When both buttons are wired, shared is first (`order: 3`)
+   and takes the push; fav follows with the normal gap. When only fav
+   is wired (`/shared-with-me` — recipient side, no share affordance),
+   fav is the sole right-group item and takes the push instead. */
+.files-grid-view .file-item .action-cell:has(.shared-button, .favorite-star) .shared-button {
+    order: 3;
+    margin-left: auto;
+}
+
+.files-grid-view .file-item .action-cell:has(.shared-button, .favorite-star) .favorite-star {
+    order: 4;
+}
+
+.files-grid-view
+    .file-item
+    .action-cell:has(.favorite-star):not(:has(.shared-button))
+    .favorite-star {
+    margin-left: auto;
+}
+
+/* Per-button visibility (mirrors list view): each button is independently
+   gated by its own `.active` flag OR row-hover. This prevents a favorited
+   row from also lighting up the shared button (and vice versa) — the cell
+   used to reveal all its children together via a single opacity toggle. */
+.files-grid-view .file-item .action-cell .favorite-star,
+.files-grid-view .file-item .action-cell .shared-button {
+    visibility: hidden;
+    transition: visibility var(--motion-fast) var(--ease-standard);
+}
+
+.files-grid-view .file-item:hover .action-cell .favorite-star,
+.files-grid-view .file-item:hover .action-cell .shared-button,
+.files-grid-view .file-item:focus-within .action-cell .favorite-star,
+.files-grid-view .file-item:focus-within .action-cell .shared-button,
+.files-grid-view .file-item .action-cell .favorite-star.active,
+.files-grid-view .file-item .action-cell .shared-button.active {
+    visibility: visible;
 }
 
 /* Chip visuals for anything inside the corner cluster — the kebab, the star,
-   any `.btn-action`. Uniform 30x30 scrim pill so they line up in the flex row. */
+   the shared button, any `.btn-action`. Uniform 30x30 scrim pill so they
+   line up in the flex row. */
 .files-grid-view .file-item .action-cell .file-actions,
 .files-grid-view .file-item .action-cell .favorite-star,
+.files-grid-view .file-item .action-cell .shared-button,
 .files-grid-view .file-item .action-cell .btn-action {
     position: static;
     width: 30px;
@@ -792,36 +884,15 @@
     border: 2px dashed var(--color-warning-border);
 }
 
-/* "Shared" indicator — top-left of the thumbnail. Sits below the checkbox
-   (which only appears on hover), so the two never both compete for the eye. */
-.files-grid-view .file-item .file-badge-shared {
-    position: absolute;
-    top: calc(var(--space-3) + 8px);
-    left: calc(var(--space-3) + 8px);
-    width: 24px;
-    height: 24px;
-    border-radius: var(--radius-full);
-    border: none;
-    background: var(--color-scrim-control);
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
-    box-shadow: 0 1px 3px var(--color-shadow-sm);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 9;
-    font-size: var(--text-2xs);
-    padding: 0;
-    line-height: var(--leading-none);
-}
-
-/* Favorite star — visual overrides only. Position, hover-reveal, chip
-   geometry all come from the shared corner-cluster rule on
-   `.files-grid-view .file-item .action-cell`. What's left here is just
-   the star's per-state colour: subtle at rest, active-gold when the
-   item is a favorite. `.active` still bumps the parent cluster's
-   opacity so an unhovered card can still show its star. */
-.files-grid-view .file-item button.favorite-star {
+/* Favorite star + shared button — visual overrides only. Position,
+   hover-reveal, chip geometry all come from the shared corner-cluster
+   rule on `.files-grid-view .file-item .action-cell`. What's left
+   here is just the per-state colour: subtle at rest, saturated when
+   the item's flag is set. `.active` on either button also bumps the
+   parent cluster's opacity (via `:has()` above) so an unhovered card
+   still shows its favorited/shared state. */
+.files-grid-view .file-item button.favorite-star,
+.files-grid-view .file-item button.shared-button {
     color: var(--color-text-subtle);
     font-size: 15px;
     line-height: var(--leading-none);
@@ -837,6 +908,11 @@
 
 .files-grid-view .file-item button.favorite-star.active:hover {
     color: var(--color-star-active);
+}
+
+.files-grid-view .file-item button.shared-button:hover,
+.files-grid-view .file-item button.shared-button.active {
+    color: var(--color-badge-blue-text);
 }
 
 .files-grid-view .file-item .name-cell {
@@ -1199,6 +1275,24 @@
 .btn-action:hover {
     background: var(--color-border-subtle);
     color: var(--color-text-dark);
+}
+
+/* Opt-in modifier: hide the button until the row is hovered / focused.
+   Used by `/recent`'s per-row broom (a history-management action that
+   shouldn't distract from the row content at rest). Trash's Restore /
+   Delete stay on the plain `.btn-action` — those are the reason the
+   user opened trash, and hiding them would fail Fitts' law. */
+.files-list-view .file-item .action-cell .btn-action--hover,
+.files-grid-view .file-item .action-cell .btn-action--hover {
+    visibility: hidden;
+    transition: visibility var(--motion-fast) var(--ease-standard);
+}
+
+.files-list-view .file-item:hover .action-cell .btn-action--hover,
+.files-list-view .file-item:focus-within .action-cell .btn-action--hover,
+.files-grid-view .file-item:hover .action-cell .btn-action--hover,
+.files-grid-view .file-item:focus-within .action-cell .btn-action--hover {
+    visibility: visible;
 }
 
 /* Legacy: a margin-top on `.btn-action` in grid view for the era when

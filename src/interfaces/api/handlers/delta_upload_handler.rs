@@ -235,12 +235,18 @@ pub async fn delta_commit(
         .await
         .map_err(AppError::from)?;
     Ok(match outcome {
-        DeltaCommitOutcome::Done { file, created } => {
+        DeltaCommitOutcome::Done { mut file, created } => {
             let status = if created {
                 StatusCode::CREATED
             } else {
                 StatusCode::OK
             };
+            crate::interfaces::api::handlers::caller_flags::enrich_file_flags(
+                &state,
+                &mut file,
+                auth_user.id,
+            )
+            .await;
             (status, Json(file)).into_response()
         }
         DeltaCommitOutcome::StillMissing(still_missing) => (

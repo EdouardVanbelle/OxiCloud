@@ -154,6 +154,8 @@ mod before {
             etag,
             created_by: parts.created_by,
             updated_by: parts.updated_by,
+            is_favorite: false,
+            is_shared: false,
         }
     }
 
@@ -179,6 +181,8 @@ mod before {
             etag,
             created_by: folder.created_by(),
             updated_by: folder.updated_by(),
+            is_favorite: false,
+            is_shared: false,
         }
     }
 }

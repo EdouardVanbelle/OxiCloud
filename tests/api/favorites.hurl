@@ -94,6 +94,11 @@ jsonpath "$.items" count == 1
 jsonpath "$.items[0].resource.id" == {{file_id}}
 jsonpath "$.items[0].resource_type" == "file"
 jsonpath "$.items[0].resource.name" == "hello-renamed.txt"
+# Caller-flag contract — every row on /api/favorites/resources IS
+# favorited by construction (the listing SQL hardcodes
+# `TRUE AS is_favorite`). `is_shared` is a real per-row EXISTS.
+jsonpath "$.items[0].resource.is_favorite" == true
+jsonpath "$.items[0].resource.is_shared" == false
 
 
 # ─────────────────────────────────────────────────────────────

@@ -289,6 +289,53 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
         Ok(rows.iter().map(|r| r.get::<String, _>("item_id")).collect())
     }
 
+    async fn caller_flags(
+        &self,
+        caller_id: Uuid,
+        resource_type: &str,
+        resource_id: Uuid,
+    ) -> Result<(bool, bool)> {
+        // One round trip, two per-row EXISTS in the SELECT. Both hit
+        // covering indexes: `auth.user_favorites` UNIQUE on
+        // `(user_id, item_id, item_type)` and
+        // `idx_role_grants_resource` on `(resource_type, resource_id)`.
+        // Sub-millisecond on hot data.
+        //
+        // Positional tuple decode (Dio's pattern) — no per-column
+        // name lookup, no HashMap. Sqlx's 2-tuple `query_as` decodes
+        // by index, matching the perf shape used in the
+        // folder_db_repository listing hot path.
+        let (is_favorite, is_shared): (bool, bool) = sqlx::query_as(
+            "SELECT \
+                EXISTS ( \
+                    SELECT 1 FROM auth.user_favorites \
+                     WHERE user_id = $1 \
+                       AND item_id = $2::text \
+                       AND item_type = $3 \
+                ), \
+                EXISTS ( \
+                    SELECT 1 FROM storage.role_grants \
+                     WHERE resource_id = $2 \
+                       AND resource_type = $3 \
+                )",
+        )
+        .bind(caller_id)
+        .bind(resource_id)
+        .bind(resource_type)
+        .fetch_one(&*self.db_pool)
+        .await
+        .map_err(|e| {
+            error!("Database error running caller_flags: {}", e);
+            DomainError::new(
+                ErrorKind::InternalError,
+                "CallerFlags",
+                format!("Failed to compute caller flags: {}", e),
+            )
+        })?;
+
+        Ok((is_favorite, is_shared))
+    }
+
     async fn list_resources_paged(
         &self,
         user_id: Uuid,
@@ -319,6 +366,14 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
         NULL::text                       AS blob_hash,
         fld.created_by                   AS created_by,
         fld.updated_by                   AS updated_by,
+        -- Every row on this feed IS a favorite by construction —
+        -- hardcode the flag to skip a per-row EXISTS.
+        TRUE                             AS is_favorite,
+        EXISTS (
+            SELECT 1 FROM storage.role_grants g
+             WHERE g.resource_id   = fld.id
+               AND g.resource_type = 'folder'
+        )                                AS is_shared,
         EXISTS (
             SELECT 1 FROM storage.role_grants g
              WHERE g.resource_type = 'drive'
@@ -352,6 +407,13 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
         f.blob_hash,
         f.created_by                     AS created_by,
         f.updated_by                     AS updated_by,
+        -- Every row on this feed IS a favorite by construction.
+        TRUE                             AS is_favorite,
+        EXISTS (
+            SELECT 1 FROM storage.role_grants g
+             WHERE g.resource_id   = f.id
+               AND g.resource_type = 'file'
+        )                                AS is_shared,
         EXISTS (
             SELECT 1 FROM storage.role_grants g
              WHERE g.resource_type = 'drive'
@@ -532,6 +594,7 @@ SELECT
     r.resource_type, r.resource_id, r.name, r.parent_id,
     r.mime_type, r.size, r.resource_created_at, r.modified_at,
     r.drive_id, r.blob_hash, r.created_by, r.updated_by,
+    r.is_favorite, r.is_shared,
     r.is_owner, r.favorited_at, r.resource_path,
     r.sort_str, r.type_order, r.folder_first{username_col}
 FROM resources r
@@ -607,6 +670,8 @@ LIMIT $6"
                     blob_hash: row.try_get("blob_hash").ok(),
                     created_by: row.try_get("created_by").ok(),
                     updated_by: row.try_get("updated_by").ok(),
+                    is_favorite: row.try_get("is_favorite").unwrap_or(true),
+                    is_shared: row.try_get("is_shared").unwrap_or(false),
                     is_owner: row.try_get("is_owner").unwrap_or(false),
                     favorited_at: row.get("favorited_at"),
                     path: row.try_get("resource_path").ok(),

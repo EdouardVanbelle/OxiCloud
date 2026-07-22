@@ -111,6 +111,8 @@ fn fixture_folder() -> FolderDto {
         category: Arc::from("Folder"),
         created_by: None,
         updated_by: None,
+        is_favorite: false,
+        is_shared: false,
     }
 }
 

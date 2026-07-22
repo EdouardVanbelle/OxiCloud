@@ -8,6 +8,7 @@
 	import {
 		addFavorite,
 		dateBucket,
+		removeFavorite,
 		resolveOwnerName,
 		typeLabel
 	} from '$lib/api/endpoints/favorites';
@@ -161,11 +162,23 @@
 	// folders show "Download as ZIP" (server-side archive). Two entries
 	// with `visible?` predicates rather than one label that changes,
 	// so the `.icon` reads correctly per kind too.
-	//
-	// The favorite entry stays "Add to favorites" only: un-favoriting
-	// from here would need per-row favorite-state tracking which this
-	// view doesn't carry — users toggle off from /favorites' own row
-	// menu. Backend swallows duplicate `addFavorite` calls idempotently.
+	async function toggleFavorite(item: FileItem | FolderItem) {
+		const kind = isFile(item) ? 'file' : 'folder';
+		const wasFav = item.is_favorite;
+		item.is_favorite = !wasFav;
+		try {
+			if (wasFav) await removeFavorite(kind, item.id);
+			else await addFavorite(kind, item.id);
+		} catch (e) {
+			errorToast(e);
+			item.is_favorite = wasFav;
+		}
+	}
+
+	// Favorite entry mirrors the star toggle in the row action cell —
+	// same wording, same behavior. Context-menu label flips based on
+	// `item.is_favorite` so keyboard users get the same state read as
+	// the button-hovering ones.
 	const contextActions: ContextAction[] = [
 		{
 			key: 'download',
@@ -182,12 +195,18 @@
 			run: downloadItem
 		},
 		{
-			key: 'favorite',
+			key: 'favorite_add',
 			label: t('files.favorite', 'Add favorite'),
 			icon: 'star',
-			run: (item) => {
-				void addFavorite(isFile(item) ? 'file' : 'folder', item.id).catch(errorToast);
-			}
+			visible: (item) => !item.is_favorite,
+			run: toggleFavorite
+		},
+		{
+			key: 'favorite_remove',
+			label: t('files.unfavorite', 'Remove favorite'),
+			icon: 'star',
+			visible: (item) => item.is_favorite,
+			run: toggleFavorite
 		}
 	];
 
@@ -235,6 +254,7 @@
 	bind:reversed
 	onloadmore={() => load(false, orderByForGroup())}
 	onopen={open}
+	onfavorite={toggleFavorite}
 	onreload={(orderBy, rev) => {
 		cursor = undefined;
 		load(true, orderBy, rev);

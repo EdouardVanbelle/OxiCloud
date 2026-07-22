@@ -29,9 +29,7 @@ function fakeRes(opts: { status: number; body?: ResourcePage }): Response {
 
 const emptyListing = (): FolderListing => ({
 	folders: [],
-	files: [],
-	favoriteIds: [],
-	sharedIds: []
+	files: []
 });
 
 beforeEach(() => {
@@ -56,7 +54,6 @@ describe('fetchFolderListing (cursor-paginated /resources)', () => {
 		expect(r.status).toBe(200);
 		expect(r.listing?.folders.map((f) => f.id)).toEqual(['d1']);
 		expect(r.listing?.files.map((f) => f.id)).toEqual(['x1']);
-		expect(r.listing?.favoriteIds).toEqual([]);
 		expect(vi.mocked(apiFetch).mock.calls[0][0]).toContain('/api/folders/f1/resources');
 	});
 
@@ -124,9 +121,7 @@ describe('folder name cache (breadcrumbs)', () => {
 	it("learns its children's names from a cached listing", () => {
 		cacheFolder('nc-parent', {
 			folders: [folder('nc-a', 'Alpha'), folder('nc-b', 'Beta')],
-			files: [],
-			favoriteIds: [],
-			sharedIds: []
+			files: []
 		});
 		expect(getFolderName('nc-a')).toBe('Alpha');
 		expect(getFolderName('nc-b')).toBe('Beta');

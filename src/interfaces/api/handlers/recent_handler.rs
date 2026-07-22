@@ -239,6 +239,8 @@ pub async fn list_recent_resources(
                             category: intern_display("Folder"),
                             created_by: row.created_by,
                             updated_by: row.updated_by,
+                            is_favorite: row.is_favorite,
+                            is_shared: row.is_shared,
                         };
                         RecentResourceItemDto {
                             resource_type: ResourceTypeDto::Folder,
@@ -285,6 +287,8 @@ pub async fn list_recent_resources(
                             etag,
                             created_by: row.created_by,
                             updated_by: row.updated_by,
+                            is_favorite: row.is_favorite,
+                            is_shared: row.is_shared,
                         };
                         RecentResourceItemDto {
                             resource_type: ResourceTypeDto::File,

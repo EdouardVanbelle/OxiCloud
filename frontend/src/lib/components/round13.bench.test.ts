@@ -43,6 +43,8 @@ interface TestFile {
 	sort_date: number;
 	etag: string;
 	content_hash: string;
+	is_favorite: boolean;
+	is_shared: boolean;
 }
 
 function fileItem(i: number): TestFile {
@@ -63,7 +65,9 @@ function fileItem(i: number): TestFile {
 		size_formatted: '4 B',
 		sort_date: 0,
 		etag: 'e',
-		content_hash: 'h'
+		content_hash: 'h',
+		is_favorite: false,
+		is_shared: false
 	};
 }
 

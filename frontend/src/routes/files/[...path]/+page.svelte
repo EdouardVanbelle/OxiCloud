@@ -108,7 +108,7 @@
 		return drivesStore.findByRootFolderId(pathSegments[0] ?? null);
 	});
 
-	let listing = $state<FolderListing>({ folders: [], files: [], favoriteIds: [], sharedIds: [] });
+	let listing = $state<FolderListing>({ folders: [], files: [] });
 	// Server-order accumulator — items in the exact sequence the backend
 	// returned across pages, honouring `sortField`+`reversed` on the wire.
 	// Under order_by=name/type/size the server puts folders first then files;
@@ -176,14 +176,13 @@
 	let actionTarget = $state<ActionTarget | null>(null);
 	let moveItems = $state<ActionTarget[] | null>(null);
 
-	// Favorite + shared badge sets for the current folder, seeded directly from
-	// the listing response (server-computed, scoped to these items — no extra
-	// per-navigation fetch) and updated optimistically on mutation.
-	// `SvelteSet` mutated in place: a toggle costs O(1) instead of copying
-	// the whole set, and every other present-key `.has()` reader is spared
-	// (measured in selectionPatterns.bench.test.ts).
-	const favoriteIds = new SvelteSet<string>();
-	const sharedIds = new SvelteSet<string>();
+	// Favorite / shared state now lives inline on every `FileItem` /
+	// `FolderItem` DTO (`is_favorite`, `is_shared` — see
+	// `frontend/src/lib/api/types.ts`). Populated by the backend
+	// listing SQL (per-row `EXISTS`) and single-item enrichment
+	// helper. The row-badge snippet and star gate read these
+	// fields directly; the toggle path mutates the item in place
+	// inside `orderedItems`. No more `SvelteSet` shadowing.
 
 	function openMove(kind: ItemType, id: string, name: string) {
 		actionTarget = { id, name, kind };
@@ -203,17 +202,20 @@
 	}
 
 	async function toggleFavorite(kind: ItemType, id: string) {
-		const isFav = favoriteIds.has(id);
-		// Optimistic toggle, reverted on failure.
-		if (isFav) favoriteIds.delete(id);
-		else favoriteIds.add(id);
+		// Server-authoritative `is_favorite` lives on every
+		// `FileItem`/`FolderItem` DTO. Read → optimistic flip → server
+		// call → revert on failure. All state changes happen in-place
+		// on the item inside `orderedItems`; there is no shadow set.
+		const item = orderedItems.find((it) => it.id === id);
+		if (!item) return; // row scrolled off / navigated away mid-click
+		const wasFav = item.is_favorite;
+		item.is_favorite = !wasFav;
 		try {
-			if (isFav) await removeFavorite(kind, id);
+			if (wasFav) await removeFavorite(kind, id);
 			else await addFavorite(kind, id);
 		} catch (e) {
 			errorToast(e);
-			if (isFav) favoriteIds.add(id);
-			else favoriteIds.delete(id);
+			item.is_favorite = wasFav;
 		}
 	}
 
@@ -295,7 +297,7 @@
 			// Reset paging state: previous folder's cursor is meaningless here,
 			// and mixing its rows with the new folder's would flash a wrong list.
 			pageCursor = undefined;
-			listing = { folders: [], files: [], favoriteIds: [], sharedIds: [] };
+			listing = { folders: [], files: [] };
 			orderedItems = [];
 			loading = true;
 
@@ -336,17 +338,13 @@
 			if (reset) {
 				listing = {
 					folders: page.folders,
-					files: page.files,
-					favoriteIds: [],
-					sharedIds: []
+					files: page.files
 				};
 				orderedItems = page.items;
 			} else {
 				listing = {
 					folders: [...listing.folders, ...page.folders],
-					files: [...listing.files, ...page.files],
-					favoriteIds: listing.favoriteIds,
-					sharedIds: listing.sharedIds
+					files: [...listing.files, ...page.files]
 				};
 				orderedItems = [...orderedItems, ...page.items];
 			}
@@ -1009,7 +1007,13 @@
 
 	/** Batch add the selection to favorites — single /api/favorites/batch call. */
 	async function batchFavorites() {
-		const items = selectionTargets().filter((it) => !favoriteIds.has(it.id));
+		// Build an id → item index so the "already favorite" filter is
+		// O(1) per selection member instead of an O(N·M) scan. Reused
+		// after success to flip `is_favorite` in place on each row.
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity -- ephemeral local index, discarded before any reactive read
+		const byId = new Map<string, FileItem | FolderItem>();
+		for (const it of orderedItems) byId.set(it.id, it);
+		const items = selectionTargets().filter((it) => !(byId.get(it.id)?.is_favorite ?? false));
 		if (items.length === 0) {
 			ui.notify(t('files.already_favorites', 'All selected items are already favorites'), 'info');
 			clearSelection();
@@ -1025,7 +1029,10 @@
 				})
 			});
 			if (!res.ok) throw new Error(`Server returned ${res.status}`);
-			for (const it of items) favoriteIds.add(it.id);
+			for (const it of items) {
+				const row = byId.get(it.id);
+				if (row) row.is_favorite = true;
+			}
 			ui.notify(t('files.added_favorites', 'Added to favorites'), 'success');
 			clearSelection();
 		} catch (e) {
@@ -1779,7 +1786,6 @@
 	<ResourceList
 		title={t('nav.files', 'Files')}
 		items={rlItems}
-		{favoriteIds}
 		emptyText={hiddenCount > 0
 			? t('files.empty_hidden_title', { n: hiddenCount }, '{{n}} hidden item(s) in this folder')
 			: t('files.empty_title', 'This folder is empty')}
@@ -1812,6 +1818,7 @@
 		}}
 		onopen={rlOnOpen}
 		onfavorite={rlOnFavorite}
+		onshared={(item) => openShare(isFile(item) ? 'file' : 'folder', item.id, item.name)}
 		oncontextmenu={rlOnContextMenu}
 		onselectionchange={(ids) => replaceSet(selected, ids)}
 		isDraggable={rlIsDraggable}
@@ -1993,19 +2000,6 @@
 				<span>{t('common.delete', 'Delete')}</span>
 			</button>
 		{/snippet}
-
-		{#snippet rowBadge(item)}
-			{#if favoriteIds.has(item.id)}
-				<span class="item-badge item-badge--fav" title={t('files.favorited', 'Favorite')}>
-					<Icon name="star" />
-				</span>
-			{/if}
-			{#if sharedIds.has(item.id)}
-				<span class="file-badge file-badge-shared" title={t('files.shared', 'Shared')}>
-					<Icon name="oxiexport" />
-				</span>
-			{/if}
-		{/snippet}
 	</ResourceList>
 </div>
 
@@ -2024,7 +2018,16 @@
 {/if}
 {#if shareDialog.component}
 	{@const ShareDialog = shareDialog.component}
-	<ShareDialog bind:open={shareOpen} item={actionTarget} onshared={(id) => sharedIds.add(id)} />
+	<ShareDialog
+		bind:open={shareOpen}
+		item={actionTarget}
+		onshared={(id) => {
+			// Optimistic in-place flip so the shared chip appears on
+			// the row without waiting for the next listing refetch.
+			const row = orderedItems.find((it) => it.id === id);
+			if (row) row.is_shared = true;
+		}}
+	/>
 {/if}
 {#if fileViewer.component}
 	{@const FileViewer = fileViewer.component}
@@ -2182,7 +2185,7 @@
 			}}
 		>
 			<Icon name="star" />
-			{favoriteIds.has(ctxTarget.id)
+			{orderedItems.find((it) => it.id === ctxTarget!.id)?.is_favorite
 				? t('files.unfavorite', 'Remove favorite')
 				: t('files.favorite', 'Add favorite')}
 		</button>
@@ -2214,27 +2217,21 @@
 		min-height: 100%;
 	}
 
-	.item-badge {
-		display: inline-flex;
-		align-items: center;
-		margin-left: var(--space-1);
-		font-size: 0.75rem;
-		color: var(--color-text-muted);
-	}
-
-	.item-badge--fav {
-		color: var(--color-warning-text, var(--color-accent));
-	}
-
+	/* Scrim + menu must sit ABOVE `.page-sticky-header` (breadcrumb +
+	   action bar, `z-index: var(--z-sticky)` = 100) so a click on the
+	   breadcrumb or the action bar closes the menu. Otherwise the
+	   sticky header covers the scrim and swallows the outside-click.
+	   Aligns with ResourceList's built-in menu (`.rl-ctx-scrim` uses
+	   `1000` / `.rl-ctx-menu` uses `1001`). */
 	.ctx-scrim {
 		position: fixed;
 		inset: 0;
-		z-index: 90;
+		z-index: 1000;
 	}
 
 	.ctx-menu {
 		position: fixed;
-		z-index: 100;
+		z-index: 1001;
 		min-width: 12rem;
 		padding: var(--space-1);
 		background: var(--color-bg-surface);

@@ -206,15 +206,23 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
         batch_service: batch_service.clone(),
     };
 
-    // Create the basic folders router with service operations
+    // Basic folder listing (no caller-flag enrichment needed — flags
+    // come from the per-row SQL EXISTS in the listing repo).
     let folders_basic_router = Router::new()
-        .route("/", post(create_folder))
         .route("/", get(list_root_folders))
-        .route("/{id}", get(get_folder))
         .route("/{id}/resources", get(list_folder_resources))
+        .with_state(folder_service.clone());
+
+    // Single-item CRUD emits a FolderDto to the SPA and MUST carry
+    // authoritative `is_favorite` / `is_shared` flags. The impls call
+    // the `caller_flags` enrichment helper via
+    // `state.favorites_service`, so the full `AppState` is required.
+    let folders_crud_router = Router::new()
+        .route("/", post(create_folder))
+        .route("/{id}", get(get_folder))
         .route("/{id}/rename", put(rename_folder))
         .route("/{id}/move", put(move_folder))
-        .with_state(folder_service.clone());
+        .with_state(app_state.clone());
 
     // Special route for ZIP download that requires AppState instead of just FolderService
     let folder_zip_router = Router::new()
@@ -226,6 +234,7 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
 
     // Merge the routers
     let folders_router = folders_basic_router
+        .merge(folders_crud_router)
         .merge(folders_ops_router)
         .merge(folder_zip_router);
 

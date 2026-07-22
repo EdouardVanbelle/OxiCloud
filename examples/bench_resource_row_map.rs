@@ -97,6 +97,8 @@ fn rows(n: usize) -> Vec<FolderResourceRow> {
                 },
                 created_by: Some(Uuid::new_v4()),
                 updated_by: Some(Uuid::new_v4()),
+                is_favorite: false,
+                is_shared: false,
                 sort_str: format!("row {i}"),
                 type_order: 0,
                 folder_first: if is_folder { 0 } else { 1 },
@@ -130,6 +132,8 @@ fn map_before(rows: Vec<FolderResourceRow>) -> Vec<Probe> {
                     category: intern_display("Folder"),
                     created_by: None,
                     updated_by: None,
+                    is_favorite: false,
+                    is_shared: false,
                 };
                 (dto.name, dto.icon_class, dto.category)
             } else {
@@ -163,6 +167,8 @@ fn map_before(rows: Vec<FolderResourceRow>) -> Vec<Probe> {
                     etag,
                     created_by: None,
                     updated_by: None,
+                    is_favorite: false,
+                    is_shared: false,
                 };
                 (dto.name, dto.icon_class, dto.category)
             }
@@ -191,6 +197,8 @@ fn map_after(rows: Vec<FolderResourceRow>) -> Vec<Probe> {
                     category: intern_display("Folder"),
                     created_by: None,
                     updated_by: None,
+                    is_favorite: false,
+                    is_shared: false,
                 };
                 (dto.name, dto.icon_class, dto.category)
             } else {
@@ -227,6 +235,8 @@ fn map_after(rows: Vec<FolderResourceRow>) -> Vec<Probe> {
                     etag,
                     created_by: None,
                     updated_by: None,
+                    is_favorite: false,
+                    is_shared: false,
                 };
                 (dto.name, dto.icon_class, dto.category)
             }
@@ -266,6 +276,8 @@ fn fav_rows(n: usize) -> Vec<FavoriteResourceRow> {
                 },
                 created_by: Some(Uuid::new_v4()),
                 updated_by: Some(Uuid::new_v4()),
+                is_favorite: true,
+                is_shared: false,
                 is_owner: true,
                 favorited_at: ts,
                 path: Some(format!("Documents/Work/item-{i:05}")),
@@ -314,6 +326,8 @@ fn fav_map_before(rows: Vec<FavoriteResourceRow>) -> Vec<FavProbe> {
                     category: intern_display("Folder"),
                     created_by: None,
                     updated_by: None,
+                    is_favorite: false,
+                    is_shared: false,
                 };
                 (
                     dto.name,
@@ -353,6 +367,8 @@ fn fav_map_before(rows: Vec<FavoriteResourceRow>) -> Vec<FavProbe> {
                     etag,
                     created_by: None,
                     updated_by: None,
+                    is_favorite: false,
+                    is_shared: false,
                 };
                 (
                     dto.name,
@@ -393,6 +409,8 @@ fn fav_map_after(rows: Vec<FavoriteResourceRow>) -> Vec<FavProbe> {
                     category: intern_display("Folder"),
                     created_by: None,
                     updated_by: None,
+                    is_favorite: false,
+                    is_shared: false,
                 };
                 (
                     dto.name,
@@ -435,6 +453,8 @@ fn fav_map_after(rows: Vec<FavoriteResourceRow>) -> Vec<FavProbe> {
                     etag,
                     created_by: None,
                     updated_by: None,
+                    is_favorite: false,
+                    is_shared: false,
                 };
                 (
                     dto.name,

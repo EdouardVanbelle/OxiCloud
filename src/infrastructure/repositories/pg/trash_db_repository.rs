@@ -333,9 +333,11 @@ impl TrashDbRepository {
     /// Returns rows in caller-requested sort order. The caller is expected to
     /// fetch `limit + 1` to detect end-of-results. Empty `drive_ids` returns
     /// an empty page without hitting PG.
+    #[allow(clippy::too_many_arguments)]
     pub async fn list_resources_paged(
         &self,
         drive_ids: &[Uuid],
+        caller_id: Uuid,
         limit: usize,
         cursor: Option<&TrashCursor>,
         order_by: &str,
@@ -369,6 +371,17 @@ impl TrashDbRepository {
         NULL::text                                           AS blob_hash,
         fld.created_by                                       AS created_by,
         fld.updated_by                                       AS updated_by,
+        EXISTS (
+            SELECT 1 FROM auth.user_favorites uf
+             WHERE uf.user_id   = $8::uuid
+               AND uf.item_id   = fld.id::text
+               AND uf.item_type = 'folder'
+        )                                                    AS is_favorite,
+        EXISTS (
+            SELECT 1 FROM storage.role_grants g
+             WHERE g.resource_id   = fld.id
+               AND g.resource_type = 'folder'
+        )                                                    AS is_shared,
         fld.trashed_at                                       AS trashed_at,
         (fld.trashed_at + ($7::int * INTERVAL '1 day'))      AS deletion_date,
         fld.path::text                                       AS resource_path,
@@ -397,6 +410,17 @@ impl TrashDbRepository {
         f.blob_hash,
         f.created_by                                         AS created_by,
         f.updated_by                                         AS updated_by,
+        EXISTS (
+            SELECT 1 FROM auth.user_favorites uf
+             WHERE uf.user_id   = $8::uuid
+               AND uf.item_id   = f.id::text
+               AND uf.item_type = 'file'
+        )                                                    AS is_favorite,
+        EXISTS (
+            SELECT 1 FROM storage.role_grants g
+             WHERE g.resource_id   = f.id
+               AND g.resource_type = 'file'
+        )                                                    AS is_shared,
         f.trashed_at                                         AS trashed_at,
         (f.trashed_at + ($7::int * INTERVAL '1 day'))        AS deletion_date,
         COALESCE(pfld.path::text || '/' || f.name, f.name)   AS resource_path,
@@ -527,6 +551,7 @@ SELECT
     r.resource_type, r.resource_id, r.name, r.parent_id,
     r.mime_type, r.size, r.resource_created_at, r.modified_at,
     r.drive_id, r.blob_hash, r.created_by, r.updated_by,
+    r.is_favorite, r.is_shared,
     r.trashed_at, r.deletion_date, r.resource_path,
     r.sort_str, r.type_order, r.folder_first
 FROM resources r
@@ -543,6 +568,7 @@ LIMIT $6"
             .bind(cur_id) // $5
             .bind(limit as i64) // $6
             .bind(self.retention_days as i32) // $7
+            .bind(caller_id) // $8 — favorites EXISTS on the branch SELECTs
             .fetch_all(self.pool.as_ref())
             .await
             .map_err(|e| {
@@ -588,6 +614,8 @@ LIMIT $6"
                     blob_hash: row.try_get("blob_hash").ok(),
                     created_by: row.try_get("created_by").ok(),
                     updated_by: row.try_get("updated_by").ok(),
+                    is_favorite: row.try_get("is_favorite").unwrap_or(false),
+                    is_shared: row.try_get("is_shared").unwrap_or(false),
                     trashed_at,
                     deletion_date,
                     path: row.try_get("resource_path").ok(),

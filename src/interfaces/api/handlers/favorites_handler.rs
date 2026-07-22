@@ -219,6 +219,11 @@ pub async fn list_favorites_resources(
                             category: intern_display("Folder"),
                             created_by: row.created_by,
                             updated_by: row.updated_by,
+                            // Every row on this listing is a favorite by
+                            // construction; the listing repo returns
+                            // `TRUE AS is_favorite` unconditionally.
+                            is_favorite: row.is_favorite,
+                            is_shared: row.is_shared,
                         };
                         FavoritesResourceItemDto {
                             resource_type: ResourceTypeDto::Folder,
@@ -267,6 +272,8 @@ pub async fn list_favorites_resources(
                             etag,
                             created_by: row.created_by,
                             updated_by: row.updated_by,
+                            is_favorite: row.is_favorite,
+                            is_shared: row.is_shared,
                         };
                         FavoritesResourceItemDto {
                             resource_type: ResourceTypeDto::File,

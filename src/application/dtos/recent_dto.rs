@@ -122,6 +122,14 @@ pub struct RecentResourceRow {
     /// consumed by the UI but surfaced for API parity with the other
     /// listing endpoints.
     pub updated_by: Option<Uuid>,
+    /// Caller-scoped: `true` when the requesting user has favorited
+    /// this row. Populates `FileDto::is_favorite` /
+    /// `FolderDto::is_favorite` on this listing via a per-row
+    /// `EXISTS` in the SQL.
+    pub is_favorite: bool,
+    /// Resource-scoped: `true` when the row has any
+    /// `storage.role_grants` entry.
+    pub is_shared: bool,
     /// `true` when `owner_id == requesting user_id`.
     pub is_owner: bool,
     pub accessed_at: DateTime<Utc>,

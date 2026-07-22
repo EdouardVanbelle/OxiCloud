@@ -96,6 +96,17 @@ pub struct FolderDto {
     /// stub/legacy folders.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_by: Option<Uuid>,
+
+    /// Caller-scoped: `true` when the requesting user has favorited
+    /// this folder. See `FileDto::is_favorite` for the full wire
+    /// contract note (always present, never null; enrichment path
+    /// covers listing rows via inline `EXISTS` and single-item
+    /// endpoints via the `caller_flags` helper).
+    pub is_favorite: bool,
+
+    /// Resource-scoped: `true` when the folder has ANY explicit
+    /// role-grant on it. Same wire contract as `is_favorite`.
+    pub is_shared: bool,
 }
 
 impl From<Folder> for FolderDto {
@@ -127,6 +138,11 @@ impl From<Folder> for FolderDto {
             etag,
             created_by: parts.created_by,
             updated_by: parts.updated_by,
+            // `From<Folder>` has no caller context. Handlers that
+            // emit to the SPA MUST override via `caller_flags` before
+            // Json response.
+            is_favorite: false,
+            is_shared: false,
         }
     }
 }
@@ -179,6 +195,8 @@ impl FolderDto {
             etag: String::new(),
             created_by: None,
             updated_by: None,
+            is_favorite: false,
+            is_shared: false,
         }
     }
 }
@@ -226,6 +244,16 @@ pub struct FolderResourceRow {
     pub created_by: Option<Uuid>,
     /// §14 provenance — who last touched the row.
     pub updated_by: Option<Uuid>,
+    /// Caller-scoped: `true` when the requesting user has favorited
+    /// this row. Populates `FileDto::is_favorite` / `FolderDto::is_favorite`
+    /// on the listing without a follow-up query. Computed by the
+    /// per-row `EXISTS` in `list_resources_paged`.
+    pub is_favorite: bool,
+    /// Resource-scoped: `true` when the row has any `storage.role_grants`
+    /// entry — link share (`subject_type = 'token'`), user grant, group
+    /// grant, or any role. Populates `FileDto::is_shared` /
+    /// `FolderDto::is_shared`.
+    pub is_shared: bool,
     // Pre-computed sort fields — returned by the SQL for cursor construction.
     /// `LOWER(name)` used by `name`/`type` sorts.
     pub sort_str: String,

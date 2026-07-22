@@ -462,6 +462,10 @@ fn file_dto_from_search(fr: &crate::application::dtos::search_dto::SearchFileRes
         // §14 provenance not selected by the search result DTO.
         created_by: None,
         updated_by: None,
+        // NextCloud search doesn't render the SPA badges; safe
+        // defaults, dropped by the WebDAV/NC XML property serializer.
+        is_favorite: false,
+        is_shared: false,
     }
 }
 
@@ -495,6 +499,10 @@ fn folder_dto_from_search(
         // §14 provenance not selected by search results.
         created_by: None,
         updated_by: None,
+        // See file_dto_from_search: NC/DAV property serializer drops
+        // these; safe default.
+        is_favorite: false,
+        is_shared: false,
     }
 }
 

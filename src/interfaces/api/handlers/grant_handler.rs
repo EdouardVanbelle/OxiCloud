@@ -933,19 +933,28 @@ pub async fn list_shared_with_me(
     // looking each resolved resource up by id.
     let mut items: Vec<SharedWithMeItemDto> = Vec::with_capacity(summaries.len());
 
+    // Enrich caller flags on every returned resource DTO. Incoming
+    // grants pages are typically small (10-50 items), so N sequential
+    // helper calls is acceptable; the folded-into-SQL treatment
+    // photos got is overkill here. Follow-up path if this grows
+    // hot: same LATERAL EXISTS shape in `get_files_by_ids` /
+    // `get_folders_by_ids`.
     for summary in &summaries {
         let rid = summary.resource_id.to_string();
         match summary.resource_type {
             ResourceKind::File => match file_map.get(&rid) {
                 Some(file_dto) => {
+                    let mut dto = file_dto.clone().without_hierarchy_info();
+                    crate::interfaces::api::handlers::caller_flags::enrich_file_flags(
+                        &state, &mut dto, caller_id,
+                    )
+                    .await;
                     items.push(SharedWithMeItemDto {
                         resource_type: ResourceTypeDto::File,
                         permissions: summary.permissions.iter().map(|p| (*p).into()).collect(),
                         granted_at: summary.granted_at,
                         granted_by: summary.granted_by,
-                        resource: ResourceContentDto::File(
-                            file_dto.clone().without_hierarchy_info(),
-                        ),
+                        resource: ResourceContentDto::File(dto),
                     });
                 }
                 None => warn!(
@@ -955,14 +964,17 @@ pub async fn list_shared_with_me(
             },
             ResourceKind::Folder => match folder_map.get(&rid) {
                 Some(folder_dto) => {
+                    let mut dto = folder_dto.clone().without_hierarchy_info();
+                    crate::interfaces::api::handlers::caller_flags::enrich_folder_flags(
+                        &state, &mut dto, caller_id,
+                    )
+                    .await;
                     items.push(SharedWithMeItemDto {
                         resource_type: ResourceTypeDto::Folder,
                         permissions: summary.permissions.iter().map(|p| (*p).into()).collect(),
                         granted_at: summary.granted_at,
                         granted_by: summary.granted_by,
-                        resource: ResourceContentDto::Folder(
-                            folder_dto.clone().without_hierarchy_info(),
-                        ),
+                        resource: ResourceContentDto::Folder(dto),
                     });
                 }
                 None => warn!(
@@ -1209,10 +1221,18 @@ pub async fn list_my_shares(
                     // Caller is the granter — they had share-access to the
                     // resource, so the containing hierarchy is already known
                     // to them. Keep `path` (unlike list_shared_with_me).
+                    let mut dto = file_dto.clone();
+                    // is_shared: TRUE by construction on this feed.
+                    // is_favorite: real EXISTS via the shared helper.
+                    crate::interfaces::api::handlers::caller_flags::enrich_file_flags(
+                        &state, &mut dto, caller_id,
+                    )
+                    .await;
+                    dto.is_shared = true;
                     items.push(OutgoingResourceItemDto {
                         resource_type: ResourceTypeDto::File,
                         first_shared_at: summary.first_shared_at,
-                        resource: ResourceContentDto::File(file_dto.clone()),
+                        resource: ResourceContentDto::File(dto),
                         grants,
                     });
                 }
@@ -1223,10 +1243,16 @@ pub async fn list_my_shares(
             },
             ResourceKind::Folder => match folder_map.get(&rid) {
                 Some(folder_dto) => {
+                    let mut dto = folder_dto.clone();
+                    crate::interfaces::api::handlers::caller_flags::enrich_folder_flags(
+                        &state, &mut dto, caller_id,
+                    )
+                    .await;
+                    dto.is_shared = true;
                     items.push(OutgoingResourceItemDto {
                         resource_type: ResourceTypeDto::Folder,
                         first_shared_at: summary.first_shared_at,
-                        resource: ResourceContentDto::Folder(folder_dto.clone()),
+                        resource: ResourceContentDto::Folder(dto),
                         grants,
                     });
                 }

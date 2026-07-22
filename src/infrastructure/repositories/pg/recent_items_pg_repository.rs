@@ -246,6 +246,17 @@ impl RecentItemsRepositoryPort for RecentItemsPgRepository {
         fld.created_by                   AS created_by,
         fld.updated_by                   AS updated_by,
         EXISTS (
+            SELECT 1 FROM auth.user_favorites uf
+             WHERE uf.user_id   = $1::uuid
+               AND uf.item_id   = fld.id::text
+               AND uf.item_type = 'folder'
+        )                                AS is_favorite,
+        EXISTS (
+            SELECT 1 FROM storage.role_grants g
+             WHERE g.resource_id   = fld.id
+               AND g.resource_type = 'folder'
+        )                                AS is_shared,
+        EXISTS (
             SELECT 1 FROM storage.role_grants g
              WHERE g.resource_type = 'drive'
                AND g.resource_id   = fld.drive_id
@@ -278,6 +289,17 @@ impl RecentItemsRepositoryPort for RecentItemsPgRepository {
         f.blob_hash,
         f.created_by                     AS created_by,
         f.updated_by                     AS updated_by,
+        EXISTS (
+            SELECT 1 FROM auth.user_favorites uf
+             WHERE uf.user_id   = $1::uuid
+               AND uf.item_id   = f.id::text
+               AND uf.item_type = 'file'
+        )                                AS is_favorite,
+        EXISTS (
+            SELECT 1 FROM storage.role_grants g
+             WHERE g.resource_id   = f.id
+               AND g.resource_type = 'file'
+        )                                AS is_shared,
         EXISTS (
             SELECT 1 FROM storage.role_grants g
              WHERE g.resource_type = 'drive'
@@ -457,6 +479,7 @@ SELECT
     r.resource_type, r.resource_id, r.name, r.parent_id,
     r.mime_type, r.size, r.resource_created_at, r.modified_at,
     r.drive_id, r.blob_hash, r.created_by, r.updated_by,
+    r.is_favorite, r.is_shared,
     r.is_owner, r.accessed_at, r.resource_path,
     r.sort_str, r.type_order, r.folder_first{username_col}
 FROM resources r
@@ -536,6 +559,8 @@ LIMIT $6"
                     blob_hash: row.try_get("blob_hash").ok(),
                     created_by: row.try_get("created_by").ok(),
                     updated_by: row.try_get("updated_by").ok(),
+                    is_favorite: row.try_get("is_favorite").unwrap_or(false),
+                    is_shared: row.try_get("is_shared").unwrap_or(false),
                     is_owner: row.try_get("is_owner").unwrap_or(false),
                     accessed_at: row.get("accessed_at"),
                     path: row.try_get("resource_path").ok(),

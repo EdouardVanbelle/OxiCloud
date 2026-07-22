@@ -107,6 +107,10 @@ jsonpath "$.parent_id" == {{home_folder_id}}
 # D0 §14 provenance — self-creation: both fields stamp the caller.
 jsonpath "$.created_by" == "{{admin_user_id}}"
 jsonpath "$.updated_by" == "{{admin_user_id}}"
+# Caller-flag contract — fresh folder: not favorited, no grants on it.
+# Wire contract is "always present bool" — never null, never absent.
+jsonpath "$.is_favorite" == false
+jsonpath "$.is_shared" == false
 
 
 # ─────────────────────────────────────────────────────────────
@@ -176,6 +180,9 @@ jsonpath "$.size" == 32
 jsonpath "$.mime_type" == "text/plain"
 # D0 §14 provenance — uploader's id stamps both fields on a fresh upload.
 jsonpath "$.created_by" == "{{admin_user_id}}"
+# Caller-flag contract — fresh upload: not favorited, no grants on it.
+jsonpath "$.is_favorite" == false
+jsonpath "$.is_shared" == false
 jsonpath "$.updated_by" == "{{admin_user_id}}"
 
 

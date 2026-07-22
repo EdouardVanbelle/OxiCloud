@@ -18,6 +18,7 @@ vi.mock('$lib/api/endpoints/grants', () => ({
 	fetchGrantsForResource: vi.fn(),
 	notifyGrantRecipient: vi.fn(),
 	revokeGrant: vi.fn(),
+	todayIso: () => '2026-07-22',
 	updateGrantRole: vi.fn()
 }));
 vi.mock('$lib/api/endpoints/recipients', () => ({

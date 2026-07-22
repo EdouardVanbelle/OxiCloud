@@ -189,6 +189,14 @@ impl PathResolverService {
                     // reload through the repo.
                     created_by: None,
                     updated_by: None,
+                    // Caller state flags not looked up here — the
+                    // resolver is an internal utility that answers
+                    // existence/type questions, not a wire emission
+                    // path. Callers that emit to the SPA reload
+                    // through the listing repo or the caller_flags
+                    // helper.
+                    is_favorite: false,
+                    is_shared: false,
                 }))
             }
             _ => {
@@ -217,6 +225,10 @@ impl PathResolverService {
                     // §14 provenance not selected by this resolver path
                     created_by: None,
                     updated_by: None,
+                    // Caller state flags not looked up here — see
+                    // the folder branch above for rationale.
+                    is_favorite: false,
+                    is_shared: false,
                 }))
             }
         }

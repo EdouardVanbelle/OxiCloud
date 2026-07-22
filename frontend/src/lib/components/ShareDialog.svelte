@@ -14,6 +14,7 @@
 		fetchGrantsForResource,
 		notifyGrantRecipient,
 		revokeGrant,
+		todayIso,
 		updateGrantRole,
 		type Grant,
 		type GrantSubject,
@@ -378,15 +379,33 @@
 	});
 </script>
 
-<!-- ── Reusable expiry chip ─────────────────────────────────────────────── -->
+<!-- ── Reusable expiry chip ───────────────────────────────────────────────
+
+     Both branches drive a `<input type="date">` and open the native
+     picker via `HTMLInputElement.showPicker()`. The previous invisible-
+     overlay trick (an `opacity: 0` input covering a chip label) was
+     unreliable — some browsers refuse to open the picker for a hidden
+     input, which is why "Set expiry" appeared inert. `showPicker()`
+     is the modern, explicit path and works from a button click.
+
+     `min={todayIso()}` (from `../../api/endpoints/grants`) hard-caps
+     the picker to today-or-later so a past date can't be selected.
+     The `onchange` handler mirrors the same check as a belt-and-braces
+     guard against the min attribute being ignored.  -->
 {#snippet expiryChip(value: string | null, onchange: (v: string | null) => void)}
+	{@const today = todayIso()}
 	<span class="chip-edit">
 		{#if value}
 			<input
 				class="chip-edit__date"
 				type="date"
 				value={value ?? ''}
-				onchange={(e) => onchange((e.currentTarget as HTMLInputElement).value || null)}
+				min={today}
+				onchange={(e) => {
+					const v = (e.currentTarget as HTMLInputElement).value;
+					if (v && v < today) return;
+					onchange(v || null);
+				}}
 				aria-label={t('share.expiry', 'Expiry')}
 			/>
 			<button
@@ -396,16 +415,34 @@
 				aria-label={t('actions.clear', 'Clear')}>×</button
 			>
 		{:else}
-			<label class="chip chip--ghost">
-				<Icon name="infinity" />
-				<span>{t('share.noExpiry', 'No expiry')}</span>
-				<input
-					class="chip-edit__date chip-edit__date--hidden"
-					type="date"
-					onchange={(e) => onchange((e.currentTarget as HTMLInputElement).value || null)}
+			<span class="chip-edit__ghost">
+				<button
+					type="button"
+					class="chip chip--ghost"
 					aria-label={t('share.set_expiry', 'Set expiry')}
+					onclick={(e) => {
+						const picker = (e.currentTarget as HTMLElement)
+							.nextElementSibling as HTMLInputElement | null;
+						picker?.showPicker?.();
+						picker?.focus();
+					}}
+				>
+					<Icon name="infinity" />
+					<span>{t('share.noExpiry', 'No expiry')}</span>
+				</button>
+				<input
+					class="chip-edit__date chip-edit__date--offscreen"
+					type="date"
+					min={today}
+					aria-hidden="true"
+					tabindex="-1"
+					onchange={(e) => {
+						const v = (e.currentTarget as HTMLInputElement).value;
+						if (v && v < today) return;
+						onchange(v || null);
+					}}
 				/>
-			</label>
+			</span>
 		{/if}
 	</span>
 {/snippet}
@@ -584,7 +621,12 @@
 							type="date"
 							data-testid="share-dialog-link-expires-input"
 							value={expiresAt ?? ''}
-							onchange={(e) => (expiresAt = e.currentTarget.value || null)}
+							min={todayIso()}
+							onchange={(e) => {
+								const v = e.currentTarget.value;
+								if (v && v < todayIso()) return;
+								expiresAt = v || null;
+							}}
 						/>
 					</label>
 				</div>
@@ -892,7 +934,19 @@
 
 	.chip--ghost {
 		border-style: dashed;
-		color: var(--color-text-muted);
+		/* WCAG-friendly foreground on both light and dark surfaces —
+		   `--color-text-muted` was under the minimum AA contrast ratio,
+		   making "No expiry" hard to read. Use the subtle-but-not-muted
+		   text token instead, and give the ghost chip a low-tint
+		   background so it visually separates from the modal body. */
+		color: var(--color-text-subtle);
+		background: var(--color-bg-input);
+	}
+
+	.chip--ghost:hover,
+	.chip--ghost:focus-visible {
+		color: var(--color-text);
+		background: var(--color-border-subtle);
 	}
 
 	.chip-edit__date {
@@ -904,11 +958,24 @@
 		font-size: var(--text-sm);
 	}
 
-	.chip-edit__date--hidden {
+	/* Positions the hidden `<input type="date">` off-screen (no `display:
+	   none` — `showPicker()` refuses to open on a display:none input in
+	   several browsers). The button next to it invokes `showPicker()`
+	   programmatically. */
+	.chip-edit__ghost {
+		position: relative;
+		display: inline-flex;
+		align-items: center;
+	}
+
+	.chip-edit__date--offscreen {
 		position: absolute;
-		inset: 0;
+		width: 1px;
+		height: 1px;
+		left: 0;
+		bottom: 0;
 		opacity: 0;
-		cursor: pointer;
+		pointer-events: none;
 	}
 
 	.chip-edit__clear {

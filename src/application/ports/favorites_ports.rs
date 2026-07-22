@@ -90,4 +90,26 @@ pub trait FavoritesRepositoryPort: Send + Sync + 'static {
         kinds: Option<&[ResourceKind]>,
         reverse: bool,
     ) -> Result<Vec<FavoriteResourceRow>>;
+
+    /// Caller-scoped inline state flags for a single resource — the
+    /// shared enrichment helper called by every single-item handler
+    /// that emits `FileDto` / `FolderDto` to the SPA (get / rename /
+    /// move / upload / delta upload / photos / bulk get by ids).
+    ///
+    /// Runs one SQL round trip with two `EXISTS` in the SELECT:
+    ///   * `is_favorite` — `EXISTS on auth.user_favorites` for the
+    ///     `(caller_id, resource_id, resource_type)` triple.
+    ///   * `is_shared`   — `EXISTS on storage.role_grants` for the
+    ///     `(resource_id, resource_type)` pair, regardless of role /
+    ///     subject_type / granter. Link shares live in `role_grants`
+    ///     as `subject_type = 'token'` under the unified model, so
+    ///     one EXISTS covers link shares + user grants + group grants.
+    ///
+    /// `resource_type` MUST be `"file"` or `"folder"`.
+    async fn caller_flags(
+        &self,
+        caller_id: Uuid,
+        resource_type: &str,
+        resource_id: Uuid,
+    ) -> Result<(bool, bool)>;
 }

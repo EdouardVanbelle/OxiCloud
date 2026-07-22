@@ -1417,9 +1417,11 @@ impl FolderDbRepository {
     /// Fetches `limit` rows (caller should pass `desired_page_size + 1` to
     /// detect the existence of a next page).  Returns raw [`FolderResourceRow`]
     /// values; the handler / service layer converts them to DTOs.
+    #[allow(clippy::too_many_arguments)]
     pub async fn list_resources_paged(
         &self,
         parent_id: Uuid,
+        caller_id: Uuid,
         limit: usize,
         cursor: Option<&FolderResourceCursor>,
         order_by: &str,
@@ -1448,6 +1450,17 @@ impl FolderDbRepository {
                 NULL::text                AS blob_hash,
                 f.created_by,
                 f.updated_by,
+                EXISTS (
+                    SELECT 1 FROM auth.user_favorites uf
+                     WHERE uf.user_id   = $7::uuid
+                       AND uf.item_id   = f.id::text
+                       AND uf.item_type = 'folder'
+                )                         AS is_favorite,
+                EXISTS (
+                    SELECT 1 FROM storage.role_grants g
+                     WHERE g.resource_id   = f.id
+                       AND g.resource_type = 'folder'
+                )                         AS is_shared,
                 LOWER(f.name)             AS sort_str,
                 0::bigint                 AS type_order,
                 0::int                    AS folder_first
@@ -1469,6 +1482,17 @@ impl FolderDbRepository {
                 fm.blob_hash,
                 fm.created_by,
                 fm.updated_by,
+                EXISTS (
+                    SELECT 1 FROM auth.user_favorites uf
+                     WHERE uf.user_id   = $7::uuid
+                       AND uf.item_id   = fm.id::text
+                       AND uf.item_type = 'file'
+                )                         AS is_favorite,
+                EXISTS (
+                    SELECT 1 FROM storage.role_grants g
+                     WHERE g.resource_id   = fm.id
+                       AND g.resource_type = 'file'
+                )                         AS is_shared,
                 LOWER(fm.name)            AS sort_str,
                 fm.category_order::bigint AS type_order,
                 1::int                    AS folder_first
@@ -1660,66 +1684,71 @@ impl FolderDbRepository {
             "SELECT resource_type, id, name, folder_id, mime_type, size, \
                     created_at, modified_at, drive_id, blob_hash, \
                     created_by, updated_by, \
+                    is_favorite, is_shared, \
                     sort_str, type_order, folder_first \
              FROM ({inner}) r \
              {outer_order} \
              LIMIT $6"
         );
 
-        // Row: (resource_type, id, name, folder_id, mime_type, size,
-        //        created_at, modified_at, drive_id, blob_hash,
-        //        created_by, updated_by,
-        //        sort_str, type_order, folder_first)
-        type Row = (
-            String,
-            Uuid,
-            String,
-            Option<Uuid>,
-            Option<String>,
-            i64,
-            chrono::DateTime<chrono::Utc>,
-            chrono::DateTime<chrono::Utc>,
-            Uuid, // drive_id
-            Option<String>,
-            Option<Uuid>, // created_by
-            Option<Uuid>, // updated_by
-            String,
-            i64,
-            i32,
-        );
-
-        let rows = sqlx::query_as::<_, Row>(&sql)
+        // 17 columns exceed sqlx's 16-element tuple `FromRow` limit,
+        // so we can't use `query_as::<_, (T1..T17)>` directly. Instead
+        // we fetch raw `PgRow`s and decode each column positionally
+        // into `FolderResourceRow` via `try_get_unchecked(idx)`. This
+        // matches Dio's positional shape (index decode, no per-row
+        // column-name HashMap) AND skips the intermediate tuple
+        // struct + row-to-struct move that a manual `FromRow` impl
+        // would introduce — one construction, one destination.
+        //
+        // Column indices below MUST match the outer `SELECT` list
+        // above (resource_type, id, name, folder_id, mime_type, size,
+        // created_at, modified_at, drive_id, blob_hash, created_by,
+        // updated_by, is_favorite, is_shared, sort_str, type_order,
+        // folder_first).
+        let rows = sqlx::query(&sql)
             .bind(parent_id)
             .bind(cursor_str)
             .bind(cursor_int)
             .bind(cursor_ts)
             .bind(cursor_id)
             .bind(limit as i64)
+            .bind(caller_id)
             .fetch_all(self.pool())
             .await
             .map_err(|e| {
                 DomainError::internal_error("FolderDb", format!("list_resources_paged: {e}"))
             })?;
 
-        Ok(rows
-            .into_iter()
-            .map(|r| FolderResourceRow {
-                resource_type: r.0,
-                id: r.1,
-                name: r.2,
-                parent_id: r.3,
-                mime_type: r.4,
-                size: r.5,
-                created_at: r.6,
-                modified_at: r.7,
-                drive_id: r.8,
-                blob_hash: r.9,
-                created_by: r.10,
-                updated_by: r.11,
-                sort_str: r.12,
-                type_order: r.13,
-                folder_first: r.14,
+        use sqlx::Row as _;
+        let decode_err = |col: usize, e: sqlx::Error| -> DomainError {
+            DomainError::internal_error(
+                "FolderDb",
+                format!("list_resources_paged decode col {col}: {e}"),
+            )
+        };
+
+        rows.into_iter()
+            .map(|r| {
+                Ok(FolderResourceRow {
+                    resource_type: r.try_get_unchecked(0).map_err(|e| decode_err(0, e))?,
+                    id: r.try_get_unchecked(1).map_err(|e| decode_err(1, e))?,
+                    name: r.try_get_unchecked(2).map_err(|e| decode_err(2, e))?,
+                    parent_id: r.try_get_unchecked(3).map_err(|e| decode_err(3, e))?,
+                    mime_type: r.try_get_unchecked(4).map_err(|e| decode_err(4, e))?,
+                    size: r.try_get_unchecked(5).map_err(|e| decode_err(5, e))?,
+                    created_at: r.try_get_unchecked(6).map_err(|e| decode_err(6, e))?,
+                    modified_at: r.try_get_unchecked(7).map_err(|e| decode_err(7, e))?,
+                    drive_id: r.try_get_unchecked(8).map_err(|e| decode_err(8, e))?,
+                    blob_hash: r.try_get_unchecked(9).map_err(|e| decode_err(9, e))?,
+                    created_by: r.try_get_unchecked(10).map_err(|e| decode_err(10, e))?,
+                    updated_by: r.try_get_unchecked(11).map_err(|e| decode_err(11, e))?,
+                    is_favorite: r.try_get_unchecked(12).map_err(|e| decode_err(12, e))?,
+                    is_shared: r.try_get_unchecked(13).map_err(|e| decode_err(13, e))?,
+                    sort_str: r.try_get_unchecked(14).map_err(|e| decode_err(14, e))?,
+                    type_order: r.try_get_unchecked(15).map_err(|e| decode_err(15, e))?,
+                    folder_first: r.try_get_unchecked(16).map_err(|e| decode_err(16, e))?,
+                })
             })
-            .collect())
+            .collect()
     }
 }

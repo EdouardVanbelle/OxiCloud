@@ -16,6 +16,7 @@
 	import {
 		addFavorite,
 		dateBucket,
+		removeFavorite,
 		resolveOwnerName,
 		sizeBucket,
 		typeLabel
@@ -314,23 +315,35 @@
 			}
 		},
 		{
-			// "Add to favorites" — /recent doesn't track per-row favorite
-			// state (the star widget was replaced by the broom), so the
-			// entry always reads "Add" and the backend swallows duplicate
-			// adds idempotently. If the user wants to un-favorite, they
-			// navigate to /favorites and use the row menu there. Placed
-			// between Move and Rename to match the canonical context-menu
-			// order on `/files`.
-			key: 'favorite',
+			key: 'favorite_add',
 			label: t('files.favorite', 'Add favorite'),
 			icon: 'star',
-			run: (item) => {
-				void addFavorite(kindOf(item), item.id).catch(errorToast);
-			}
+			visible: (item) => !item.is_favorite,
+			run: toggleFavorite
+		},
+		{
+			key: 'favorite_remove',
+			label: t('files.unfavorite', 'Remove favorite'),
+			icon: 'star',
+			visible: (item) => item.is_favorite,
+			run: toggleFavorite
 		},
 		{ key: 'rename', label: t('common.rename', 'Rename'), icon: 'pen', run: rename },
 		{ key: 'delete', label: t('common.delete', 'Delete'), icon: 'trash', danger: true, run: remove }
 	];
+
+	async function toggleFavorite(item: FileItem | FolderItem) {
+		const kind = kindOf(item);
+		const wasFav = item.is_favorite;
+		item.is_favorite = !wasFav;
+		try {
+			if (wasFav) await removeFavorite(kind, item.id);
+			else await addFavorite(kind, item.id);
+		} catch (e) {
+			errorToast(e);
+			item.is_favorite = wasFav;
+		}
+	}
 
 	// ── Selection + batch ─────────────────────────────────────────────────────
 	// Selected items arrive via the batchActions snippet param —
@@ -372,6 +385,11 @@
 	hasMore={!!cursor}
 	onloadmore={() => load(false, orderByForGroup())}
 	onopen={open}
+	onfavorite={toggleFavorite}
+	onshared={(item) => {
+		shareTarget = { id: item.id, name: item.name, kind: kindOf(item) };
+		shareOpen = true;
+	}}
 	showOwner
 	showPath
 	dateLabel={t('files.col_opened', 'Opened')}
@@ -436,7 +454,7 @@
 			buttons at the row's action-cell.
 		-->
 		<button
-			class="btn-action"
+			class="btn-action btn-action--hover"
 			data-testid={`recent-remove-btn-${item.id}`}
 			title={t('recent.remove_item', 'Remove from recent')}
 			aria-label={t('recent.remove_item', 'Remove from recent')}

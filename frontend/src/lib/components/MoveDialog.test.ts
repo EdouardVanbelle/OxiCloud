@@ -69,9 +69,7 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	m(listFolder).mockResolvedValue({
 		folders: [folder('sub1', 'Sub')],
-		files: [],
-		favoriteIds: [],
-		sharedIds: []
+		files: []
 	});
 });
 

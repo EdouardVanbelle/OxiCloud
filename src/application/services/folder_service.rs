@@ -828,7 +828,15 @@ impl FolderService {
         // 2. Fetch limit+1 rows so we can detect has_next
         let mut rows = self
             .folder_storage
-            .list_resources_paged(pid, limit + 1, cursor.as_ref(), order_by, kinds, reverse)
+            .list_resources_paged(
+                pid,
+                caller_id,
+                limit + 1,
+                cursor.as_ref(),
+                order_by,
+                kinds,
+                reverse,
+            )
             .await?;
 
         // 3. Detect has_next, build encoded next cursor

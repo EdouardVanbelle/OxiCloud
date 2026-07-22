@@ -48,6 +48,21 @@ export interface FolderItem {
 	 * leading segment being a drive-root folder id.
 	 */
 	drive_id: string;
+	/**
+	 * Caller-scoped: `true` when the requesting user has favorited
+	 * this folder. Always present on the wire — never null, never
+	 * absent — per the backend enrichment contract. `ResourceList`
+	 * renders the fav-star chip natively from this field.
+	 */
+	is_favorite: boolean;
+	/**
+	 * Resource-scoped: `true` when the folder has any
+	 * `storage.role_grants` entry (link share via `subject_type =
+	 * 'token'`, user grant, group grant, any role). "Someone was
+	 * given access to this beyond drive membership." Always present
+	 * on the wire.
+	 */
+	is_shared: boolean;
 }
 
 export interface FileItem {
@@ -70,6 +85,10 @@ export interface FileItem {
 	sort_date: number;
 	etag: string;
 	content_hash: string;
+	/** See `FolderItem.is_favorite` — same wire contract. */
+	is_favorite: boolean;
+	/** See `FolderItem.is_shared` — same wire contract. */
+	is_shared: boolean;
 	/** Search-only: plain-text fragment around a content match. */
 	snippet?: string;
 	/** Search-only: "name" or "content". */

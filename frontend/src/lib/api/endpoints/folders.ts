@@ -13,10 +13,9 @@ const NO_CACHE: RequestInit = {
 export interface FolderListing {
 	folders: FolderItem[];
 	files: FileItem[];
-	/** Ids in this listing the caller has favorited (server-computed badge set). */
-	favoriteIds: string[];
-	/** Ids in this listing the caller has an outgoing share/grant on. */
-	sharedIds: string[];
+	// Legacy `favoriteIds` / `sharedIds` fields are gone — the same
+	// signals now live inline on every `FileItem` / `FolderItem`
+	// (`is_favorite`, `is_shared`). Consumers read those directly.
 }
 
 /** Result of a (possibly conditional) listing fetch. */
@@ -213,13 +212,13 @@ export async function fetchFolderListing(
 		files.push(...page.files);
 		cursor = page.nextCursor;
 	} while (cursor);
-	return { status: 200, listing: { folders, files, favoriteIds: [], sharedIds: [] } };
+	return { status: 200, listing: { folders, files } };
 }
 
 /** Non-conditional listing fetch (e.g. the move-dialog folder tree). */
 export async function listFolder(folderId: string, forceRefresh = false): Promise<FolderListing> {
 	const res = await fetchFolderListing(folderId, { forceRefresh });
-	return res.listing ?? { folders: [], files: [], favoriteIds: [], sharedIds: [] };
+	return res.listing ?? { folders: [], files: [] };
 }
 
 export async function createFolder(name: string, parentId: string | null): Promise<FolderItem> {

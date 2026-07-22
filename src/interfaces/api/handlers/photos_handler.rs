@@ -75,7 +75,7 @@ pub async fn list_photos(
         .list_media_files(caller_id, params.before, limit)
         .await
     {
-        Ok((files, sort_dates, dims)) => {
+        Ok((files, sort_dates, dims, flags)) => {
             // Lightweight revalidation ETag: page identity (cursor + limit) plus a
             // freshness signal (max modified_at + row count over the page),
             // mirroring the file-list endpoint. With `Cache-Control: no-cache` the
@@ -106,14 +106,22 @@ pub async fn list_photos(
 
             info!("Photos: returned {} media files for user", count);
 
-            // Convert to DTOs with sort_date + pixel dimensions populated.
+            // Convert to DTOs with sort_date + pixel dimensions + inline
+            // caller flags populated. `list_media_files` computes
+            // `is_favorite` / `is_shared` via two per-row `EXISTS`
+            // columns in its SELECT — the same pattern the four
+            // `list_resources_paged` repos use — so this stays a
+            // single round trip regardless of page size.
             let dtos: Vec<PhotoDto> = files
                 .into_iter()
                 .zip(sort_dates.iter())
                 .zip(dims.iter())
-                .map(|((file, &sd), &(w, h))| {
+                .zip(flags.iter())
+                .map(|(((file, &sd), &(w, h)), &(is_fav, is_shr))| {
                     let mut dto = FileDto::from(file);
                     dto.sort_date = Some(sd as u64);
+                    dto.is_favorite = is_fav;
+                    dto.is_shared = is_shr;
                     PhotoDto {
                         file: dto,
                         width: w.map(|v| v.max(0) as u32),

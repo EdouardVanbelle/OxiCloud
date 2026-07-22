@@ -738,6 +738,16 @@ jsonpath "$.items[0].resource.updated_by" == "{{alice_user_id}}"
 jsonpath "$.items[1].resource.name" == "adam-renamed-logo.jpg"
 jsonpath "$.items[1].resource.created_by" == "{{alice_user_id}}"
 jsonpath "$.items[1].resource.updated_by" == "{{adam_user_id}}"
+# Caller-flag contract on the listing endpoint. Neither row
+# favorited by Alice → is_favorite = false. The `perm_folder_id`
+# tree carries a role_grant on the FOLDER (Adam as Editor), not
+# on `perm-test-child` or `adam-renamed-logo.jpg` — so both
+# child rows should carry is_shared = false; the grant on the
+# parent doesn't cascade to per-child EXISTS.
+jsonpath "$.items[0].resource.is_favorite" == false
+jsonpath "$.items[0].resource.is_shared" == false
+jsonpath "$.items[1].resource.is_favorite" == false
+jsonpath "$.items[1].resource.is_shared" == false
 
 # ── Thumbnail push (Update) succeeds ────────────────────────
 PUT {{base_url}}/api/files/{{perm_file_id}}/thumbnail/preview

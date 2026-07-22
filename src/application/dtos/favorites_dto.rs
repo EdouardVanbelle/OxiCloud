@@ -132,6 +132,14 @@ pub struct FavoriteResourceRow {
     pub created_by: Option<Uuid>,
     /// §14 provenance — who last touched the row.
     pub updated_by: Option<Uuid>,
+    /// Caller-scoped favorite state — `TRUE` by construction on this
+    /// listing (every row IS a favorite). The listing SQL hardcodes
+    /// `TRUE AS is_favorite`; this field stays here so the DTO builder
+    /// signature stays symmetric with the other listings.
+    pub is_favorite: bool,
+    /// Resource-scoped: `true` when the row has any `storage.role_grants`
+    /// entry. Computed by a per-row `EXISTS` in the listing SQL.
+    pub is_shared: bool,
     /// `true` when `owner_id == requesting user_id`.
     pub is_owner: bool,
     pub favorited_at: DateTime<Utc>,

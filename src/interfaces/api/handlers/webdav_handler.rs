@@ -565,6 +565,9 @@ async fn handle_propfind(
                 category: intern_display("Folder"),
                 created_by: None,
                 updated_by: None,
+                // Synthetic root, not on the SPA path — safe default.
+                is_favorite: false,
+                is_shared: false,
             };
             // Skip the 2-query quota resolution when the request's prop list
             // never mentions quota (benches/QUOTA-PATH.md).

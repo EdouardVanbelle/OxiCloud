@@ -77,6 +77,13 @@ pub struct TrashResourceRow {
     /// §14 provenance — who last touched the row (includes the trash
     /// action itself, which stamps `updated_by = caller_id`).
     pub updated_by: Option<Uuid>,
+    /// Caller-scoped: `true` when the caller has favorited this
+    /// trashed item.
+    pub is_favorite: bool,
+    /// Resource-scoped: `true` when the row has any
+    /// `storage.role_grants` entry (surviving trash — grants are
+    /// GC'd by `purge_expired_grants` on the 15-day grace).
+    pub is_shared: bool,
     pub trashed_at: DateTime<Utc>,
     pub deletion_date: DateTime<Utc>,
     /// Original location path (for folders: `path`; for files: `parent.path || '/' || name`).

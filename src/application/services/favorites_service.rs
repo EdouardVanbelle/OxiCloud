@@ -50,6 +50,26 @@ impl FavoritesService {
     ) -> Result<HashSet<String>> {
         self.repo.batch_check_favorites(user_id, items).await
     }
+
+    /// Shared enrichment helper — computes `is_favorite` + `is_shared`
+    /// for a single resource so single-item handlers (get / rename /
+    /// move / upload / delta upload / photos / bulk get by ids) can
+    /// populate the two wire-contract flags on FileDto / FolderDto
+    /// before Json emission. Delegates straight to the repository
+    /// port; kept on `FavoritesService` because the port already
+    /// lives on that service and callers already hold it in DI.
+    ///
+    /// `resource_type` MUST be `"file"` or `"folder"`.
+    pub async fn caller_flags(
+        &self,
+        caller_id: Uuid,
+        resource_type: &str,
+        resource_id: Uuid,
+    ) -> Result<(bool, bool)> {
+        self.repo
+            .caller_flags(caller_id, resource_type, resource_id)
+            .await
+    }
 }
 
 impl FavoritesUseCase for FavoritesService {

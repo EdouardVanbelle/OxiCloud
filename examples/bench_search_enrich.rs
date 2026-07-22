@@ -242,6 +242,8 @@ mod before {
             etag,
             created_by: None,
             updated_by: None,
+            is_favorite: false,
+            is_shared: false,
         }
     }
 }
@@ -297,6 +299,8 @@ fn folder_dtos(n: usize) -> Vec<FolderDto> {
             category: Arc::from("Folder"),
             created_by: None,
             updated_by: None,
+            is_favorite: false,
+            is_shared: false,
         })
         .collect()
 }

@@ -83,6 +83,25 @@ pub struct FileDto {
     /// stub/legacy files.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_by: Option<Uuid>,
+
+    /// Caller-scoped: `true` when the requesting user has favorited
+    /// this file. **Wire contract: always present**, never null and
+    /// never absent — the SPA reads it as a required `boolean` with no
+    /// nullish branch. Every emission path (listing endpoints inline
+    /// via a per-row `EXISTS` in the listing SQL; single-item endpoints
+    /// via the shared `caller_flags` helper on the favorites port) is
+    /// responsible for populating this before the DTO reaches the
+    /// wire. WebDAV/CalDAV/CardDAV DTOs default to `false` — the XML
+    /// property serializer drops the field entirely, so a stale
+    /// default is never observable on those surfaces.
+    pub is_favorite: bool,
+
+    /// Resource-scoped: `true` when the file has ANY explicit
+    /// role-grant on it (link share via `subject_type = 'token'`,
+    /// user/group grant, any role). "Someone was given access to
+    /// this beyond drive membership." Same wire contract as
+    /// `is_favorite` — always present.
+    pub is_shared: bool,
 }
 
 impl From<File> for FileDto {
@@ -132,6 +151,11 @@ impl From<File> for FileDto {
             etag,
             created_by: parts.created_by,
             updated_by: parts.updated_by,
+            // `From<File>` has no caller context. Callers that will
+            // emit the DTO to the SPA MUST override these before
+            // Json emission via the `caller_flags` helper.
+            is_favorite: false,
+            is_shared: false,
         }
     }
 }
@@ -189,6 +213,8 @@ impl FileDto {
             sort_date: None,
             created_by: None,
             updated_by: None,
+            is_favorite: false,
+            is_shared: false,
         }
     }
 }

@@ -64,7 +64,15 @@ impl FileHandler {
         multipart: Multipart,
     ) -> impl IntoResponse {
         match Self::upload_file_inner(&state, &auth_user, multipart).await {
-            Ok((file, _blob_hash)) => Self::created_json_response(&file).into_response(),
+            Ok((mut file, _blob_hash)) => {
+                crate::interfaces::api::handlers::caller_flags::enrich_file_flags(
+                    &state,
+                    &mut file,
+                    auth_user.id,
+                )
+                .await;
+                Self::created_json_response(&file).into_response()
+            }
             Err(response) => response.into_response(),
         }
     }
@@ -115,7 +123,15 @@ impl FileHandler {
             )
             .await
         {
-            Ok(file) => Self::created_json_response(&file).into_response(),
+            Ok(mut file) => {
+                crate::interfaces::api::handlers::caller_flags::enrich_file_flags(
+                    &state,
+                    &mut file,
+                    auth_user.id,
+                )
+                .await;
+                Self::created_json_response(&file).into_response()
+            }
             Err(err) => {
                 // Anti-enumeration shape: every "caller cannot reach this
                 // hash" outcome collapses into the same 404 with an
@@ -890,11 +906,16 @@ impl FileHandler {
         auth_user: AuthUser,
         multipart: Multipart,
     ) -> impl IntoResponse {
-        let (file, _) = match Self::upload_file_inner(&state, &auth_user, multipart).await {
+        let (mut file, _) = match Self::upload_file_inner(&state, &auth_user, multipart).await {
             Ok(pair) => pair,
             Err(response) => return response.into_response(),
         };
-
+        crate::interfaces::api::handlers::caller_flags::enrich_file_flags(
+            &state,
+            &mut file,
+            auth_user.id,
+        )
+        .await;
         Self::created_json_response(&file).into_response()
     }
 
@@ -1026,7 +1047,15 @@ impl FileHandler {
             .move_file_with_perms(&id, auth_user.id, payload.folder_id)
             .await
         {
-            Ok(file) => (StatusCode::OK, Json(file)).into_response(),
+            Ok(mut file) => {
+                crate::interfaces::api::handlers::caller_flags::enrich_file_flags(
+                    &state,
+                    &mut file,
+                    auth_user.id,
+                )
+                .await;
+                (StatusCode::OK, Json(file)).into_response()
+            }
             Err(err) => AppError::from(err).into_response(),
         }
     }
