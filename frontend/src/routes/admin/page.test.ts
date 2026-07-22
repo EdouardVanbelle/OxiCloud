@@ -9,10 +9,13 @@ vi.mock('$lib/stores/session.svelte', () => ({ session }));
 vi.mock('$lib/stores/ui.svelte', () => ({ ui }));
 vi.mock('$lib/api/endpoints/admin', () => ({
 	clearPluginLogs: vi.fn(),
+	createExternalMount: vi.fn(),
 	createUser: vi.fn(),
+	deleteExternalMount: vi.fn(),
 	deletePlugin: vi.fn(),
 	deleteUser: vi.fn(),
 	getDashboard: vi.fn(),
+	listExternalMounts: vi.fn(),
 	getMigration: vi.fn(),
 	getOidcSettings: vi.fn(),
 	getPluginLogs: vi.fn(),
@@ -71,6 +74,17 @@ const user = {
 	is_external: false
 };
 
+const mount = {
+	mount_folder_id: 'mnt-1',
+	name: 'Media',
+	kind: 'local_fs',
+	owner_id: 'admin',
+	read_only: true,
+	drive_id: 'd1',
+	mount_path: 'Personal/Media',
+	config: { path: '/srv/media', read_only: true }
+};
+
 beforeEach(() => {
 	vi.clearAllMocks();
 	m(admin.getDashboard).mockResolvedValue(dashboard);
@@ -104,6 +118,7 @@ beforeEach(() => {
 		from: 'a@x.test',
 		user_state: 'unset'
 	});
+	m(admin.listExternalMounts).mockResolvedValue([mount]);
 });
 
 it('loads the dashboard on mount', async () => {
@@ -158,6 +173,51 @@ it('loads plugins when the plugins tab is opened', async () => {
 	render(AdminPage);
 	await fireEvent.click(await screen.findByTestId('admin-plugins-tab'));
 	await waitFor(() => expect(admin.listPlugins).toHaveBeenCalled());
+});
+
+it('loads external mounts when the mounts tab is opened and lists them', async () => {
+	render(AdminPage);
+	await fireEvent.click(await screen.findByTestId('admin-mounts-tab'));
+	await waitFor(() => expect(admin.listExternalMounts).toHaveBeenCalled());
+	// The configured mount is rendered in the table.
+	expect(await screen.findByText('Media')).toBeTruthy();
+});
+
+it('creates a mount from the mounts form', async () => {
+	// A distinct mount (new id) so the keyed {#each} doesn't collide with
+	// the one already loaded by listExternalMounts.
+	m(admin.createExternalMount).mockResolvedValue({
+		...mount,
+		mount_folder_id: 'mnt-2',
+		name: 'Photos',
+		read_only: false,
+		mount_path: 'Personal/Photos',
+		config: { path: '/srv/photos', read_only: false }
+	});
+	render(AdminPage);
+	await fireEvent.click(await screen.findByTestId('admin-mounts-tab'));
+	await fireEvent.input(await screen.findByTestId('mount-name'), {
+		target: { value: 'Photos' }
+	});
+	await fireEvent.input(screen.getByTestId('mount-path'), {
+		target: { value: '/srv/photos' }
+	});
+	await fireEvent.click(screen.getByTestId('mount-create'));
+	await waitFor(() =>
+		expect(admin.createExternalMount).toHaveBeenCalledWith(
+			expect.objectContaining({ name: 'Photos', host_path: '/srv/photos' })
+		)
+	);
+});
+
+it('deletes a mount through the confirm modal', async () => {
+	m(admin.deleteExternalMount).mockResolvedValue(undefined);
+	render(AdminPage);
+	await fireEvent.click(await screen.findByTestId('admin-mounts-tab'));
+	await fireEvent.click(await screen.findByTestId('mount-delete'));
+	// deleteMount() gates on the styled confirm modal.
+	await fireEvent.click(await screen.findByTestId('admin-confirm-ok-btn'));
+	await waitFor(() => expect(admin.deleteExternalMount).toHaveBeenCalledWith('mnt-1'));
 });
 
 it("toggles a user's role through the confirm modal", async () => {

@@ -39,4 +39,20 @@ ignore = [
     #   RUSTSEC-2026-0194: quadratic dup-attribute check → CPU-DoS
     "RUSTSEC-2026-0195",
     "RUSTSEC-2026-0194",
+
+    # astral-tokio-tar 0.5.6 — tar extraction advisories, transitive via
+    # testcontainers → testcontainers-modules, a DEV-dependency used only by
+    # the `--cfg integration_tests` harness to spin up throwaway Postgres
+    # containers. Never compiled into the production binary and never fed
+    # attacker-controlled tar input — the only archives extracted are the
+    # official Postgres images the test harness pulls. testcontainers 0.25.2
+    # pins astral-tokio-tar to ^0.5, so the fixed 0.6.x is not reachable
+    # without a testcontainers major bump (tracked separately).
+    #   RUSTSEC-2026-0145 / -0112: PAX header desynchronization
+    #   RUSTSEC-2026-0113: unpack_in symlink-following chmod
+    #   RUSTSEC-2026-0066: insufficient PAX extension validation (low)
+    "RUSTSEC-2026-0145",
+    "RUSTSEC-2026-0112",
+    "RUSTSEC-2026-0113",
+    "RUSTSEC-2026-0066",
 ]

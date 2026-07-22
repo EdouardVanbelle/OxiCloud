@@ -45,6 +45,7 @@ async-trait = "0.1.89"
 mime_guess = "2.0.5"
 uuid = { version = "1.23.3", features = ["v4", "v7", "serde"] }
 thiserror = "2.0.18"
+arc-swap = "1.9"
 
 mockall = { version = "0.14.0", optional = true }
 sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio", "tls-rustls", "chrono", "uuid", "json", "migrate"] }
@@ -146,6 +147,10 @@ bench = []
 
 [dev-dependencies]
 criterion = "0.5"
+# Ephemeral service containers for integration tests (gated by
+# `--cfg integration_tests`). `testcontainers-modules` re-exports the
+# `testcontainers` runner, so the postgres image + runner come from one dep.
+testcontainers-modules = { version = "0.13", features = ["postgres"] }
 # Round-11 L1 harness only (bench_log_writer): the non-blocking writer was
 # REJECTED for production — slower than sync on fast sinks and can lose
 # buffered tail lines at shutdown on slow ones (benches/ROUND11.md).

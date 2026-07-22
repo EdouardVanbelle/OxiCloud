@@ -645,3 +645,52 @@ export function getPluginLogs(
 		credentials: 'same-origin'
 	});
 }
+
+// ── External file mounts ────────────────────────────────────────────────────
+
+/** A configured external mount as returned by the admin API. */
+export interface ExternalMount {
+	mount_folder_id: string;
+	name: string;
+	kind: string;
+	owner_id: string;
+	read_only: boolean;
+	drive_id: string;
+	mount_path: string;
+	config: Record<string, unknown>;
+}
+
+/** Request body for creating an external mount. */
+export interface CreateExternalMountInput {
+	name: string;
+	host_path: string;
+	kind?: string;
+	read_only?: boolean;
+}
+
+/** GET /api/admin/external-mounts — list all configured mounts. */
+export function listExternalMounts(): Promise<ExternalMount[]> {
+	return apiJson<ExternalMount[]>('/api/admin/external-mounts', {
+		credentials: 'same-origin'
+	});
+}
+
+/** POST /api/admin/external-mounts — create a mount in the admin's drive. */
+export async function createExternalMount(input: CreateExternalMountInput): Promise<ExternalMount> {
+	const res = await apiFetch('/api/admin/external-mounts', {
+		method: 'POST',
+		credentials: 'same-origin',
+		headers: { ...JSON_HEADERS, ...getCsrfHeaders() },
+		body: JSON.stringify(input)
+	});
+	if (!res.ok) {
+		const e = (await res.json().catch(() => ({}))) as { message?: string };
+		throw new Error(e.message || `Create mount failed: ${res.status}`);
+	}
+	return (await res.json()) as ExternalMount;
+}
+
+/** DELETE /api/admin/external-mounts/{id} — remove a mount (host content kept). */
+export function deleteExternalMount(mountFolderId: string): Promise<void> {
+	return mutate(`/api/admin/external-mounts/${mountFolderId}`, 'DELETE');
+}

@@ -522,6 +522,7 @@ impl AppServiceFactory {
         plugin_dispatch: Option<
             Arc<dyn crate::application::ports::plugin_ports::PluginDispatchPort>,
         >,
+        mount_router: Arc<crate::application::services::external_mount_router::MountRouter>,
         resource_access_hook: Option<
             Arc<dyn crate::application::ports::resource_access_hook::ResourceAccessHook>,
         >,
@@ -535,6 +536,7 @@ impl AppServiceFactory {
                 // `delete_folder_with_perms` fans out to the same handlers
                 // (thumbnails, metadata, …) as a single-file delete.
                 core.file_lifecycle.clone(),
+                mount_router.clone(),
             )
             // D5 cross-drive move gate reads policies via the same
             // drive repo every other policy uses. Wired here so
@@ -558,7 +560,8 @@ impl AppServiceFactory {
                 core.file_content_cache.clone(),
                 core.image_transcode_service.clone(),
                 authz.clone(),
-            );
+            )
+            .with_mount_router(mount_router.clone());
             if let Some(hook) = resource_access_hook.clone() {
                 svc = svc.with_resource_access_hook(hook);
             }
@@ -623,6 +626,7 @@ impl AppServiceFactory {
                 authz.clone(),
             )
             .with_file_lifecycle_hook(file_lifecycle.clone())
+            .with_mount_router(mount_router.clone())
             // D5 cross-drive move gate reads policies via the same
             // drive repo every other policy uses. Wired here so
             // `move_file_with_perms` can enforce `forbid_cross_drive_move`
@@ -636,6 +640,13 @@ impl AppServiceFactory {
             }
             svc
         });
+
+        // Streams uploads to external mount providers (bypasses the CAS).
+        let external_upload_service = Arc::new(
+            crate::application::services::external_upload_service::ExternalUploadService::new(
+                authz.clone(),
+            ),
+        );
 
         let file_use_case_factory = Arc::new(AppFileUseCaseFactory::new(
             repos.file_read_repository.clone(),
@@ -675,6 +686,7 @@ impl AppServiceFactory {
             delta_upload_service,
             file_retrieval_service,
             file_management_service,
+            external_upload_service,
             file_use_case_factory,
             i18n_service,
             trash_service, // Already set via parameter
@@ -1278,6 +1290,27 @@ impl AppServiceFactory {
         let (plugin_dispatch, plugin_management) = self.create_plugin_ports();
 
         // 4. Application services (with trash + authz already wired)
+        // External mount registry + router. Built before the application
+        // services because `FolderService` holds the router to branch listing
+        // onto the provider. The router is always present (an empty registry is
+        // a cheap no-op); when the feature is enabled we load the configured
+        // mounts and build their providers up front. The registry is
+        // interior-mutable (arc-swap), so reloading here is visible to every
+        // holder of the shared router.
+        let mount_registry =
+            Arc::new(crate::application::services::mount_registry::MountRegistry::empty());
+        if self.config.features.enable_external_mounts {
+            let repo = crate::infrastructure::repositories::pg::ExternalMountPgRepository::new(
+                pool.clone(),
+            );
+            let factory =
+                crate::infrastructure::services::mount_provider_factory::DefaultMountProviderFactory::new();
+            mount_registry.reload(&repo, &factory).await;
+        }
+        let mount_router = Arc::new(
+            crate::application::services::external_mount_router::MountRouter::new(mount_registry),
+        );
+
         let mut apps = self.create_application_services(
             &core,
             &repos,
@@ -1287,6 +1320,7 @@ impl AppServiceFactory {
             &storage_usage,
             content_index.as_ref().map(|(idx, _)| idx.clone()),
             plugin_dispatch.clone(),
+            mount_router.clone(),
             Some(resource_access_hook.clone()),
         );
 
@@ -1641,6 +1675,7 @@ impl AppServiceFactory {
             locale_registry: self.locale_registry.clone(),
             db_pool: Some(pool.clone()),
             maintenance_pool: Some(maintenance_pool),
+            mount_router,
             auth_service: auth_services,
             nextcloud: nextcloud_services,
             admin_settings_service: None,
@@ -2068,6 +2103,9 @@ pub struct ApplicationServices {
         Arc<crate::application::services::delta_upload_service::DeltaUploadService>,
     pub file_retrieval_service: Arc<FileRetrievalService>,
     pub file_management_service: Arc<FileManagementService>,
+    /// Streams uploads straight to an external mount provider (bypasses the CAS).
+    pub external_upload_service:
+        Arc<crate::application::services::external_upload_service::ExternalUploadService>,
     pub file_use_case_factory: Arc<dyn FileUseCaseFactory>,
     pub i18n_service: Arc<I18nApplicationService>,
     pub trash_service: Option<Arc<TrashService>>,
@@ -2111,6 +2149,13 @@ pub struct AppState {
     pub db_pool: Option<Arc<PgPool>>,
     /// Isolated pool for background / batch operations.
     pub maintenance_pool: Option<Arc<PgPool>>,
+    /// External-mount classifier + registry. Always present; an empty registry
+    /// (feature disabled or no mounts configured) makes `classify` a cheap no-op
+    /// that routes every id to native handling. Handlers consult this before
+    /// parsing an id as a UUID, then call the matching service-layer mount
+    /// method (which still owns the authorization check).
+    pub mount_router:
+        Arc<crate::application::services::external_mount_router::MountRouter>,
     pub auth_service: Option<AuthServices>,
     pub nextcloud: Option<NextcloudServices>,
     pub admin_settings_service: Option<Arc<AdminSettingsService>>,

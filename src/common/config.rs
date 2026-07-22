@@ -1072,6 +1072,12 @@ pub struct FeaturesConfig {
     /// thumbnail through the same WebP pipeline as photos; otherwise videos have
     /// no thumbnail. Env: `OXICLOUD_ENABLE_VIDEO_THUMBNAILS`.
     pub enable_video_thumbnails: bool,
+    /// Expose admin-configured external filesystem mounts (raw host fs, …) as
+    /// folders inside a user's drive. Contents are read live from the backend
+    /// and are a deliberately limited, separate storage type (no dedup/sharing/
+    /// trash/search). OFF by default — opt-in per deployment.
+    /// Env: `OXICLOUD_ENABLE_EXTERNAL_MOUNTS`.
+    pub enable_external_mounts: bool,
     /// Expose `/api/admin/internal/*` test-only endpoints that trigger
     /// background sweeps on demand (storage-usage reconciliation, blob
     /// GC). Intended for Hurl / integration tests that need to wait
@@ -1156,6 +1162,7 @@ impl Default for FeaturesConfig {
             enable_faces: false,           // People/faces (biometric) — opt-in, off by default
             expose_system_users: true,     // Expose OxiCloud users as address book by default
             enable_video_thumbnails: true, // Video thumbs via ffmpeg (if detected)
+            enable_external_mounts: false, // External mounts — opt-in, off by default
             // Test-only sweep triggers — strictly opt-in. Production
             // deployments do NOT need this; the periodic ticker handles
             // reconciliation transparently.
@@ -1902,6 +1909,13 @@ impl AppConfig {
             && let Ok(val) = enable_faces
         {
             config.features.enable_faces = val;
+        }
+
+        if let Ok(enable_external_mounts) =
+            env::var("OXICLOUD_ENABLE_EXTERNAL_MOUNTS").map(|v| v.parse::<bool>())
+            && let Ok(val) = enable_external_mounts
+        {
+            config.features.enable_external_mounts = val;
         }
 
         // Faces (People) ONNX runtime + models — operator-provided at runtime.

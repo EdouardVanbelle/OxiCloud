@@ -7,7 +7,8 @@ use axum::{
 use std::sync::Arc;
 
 use crate::application::dtos::display_helpers::{
-    classify_display, format_file_size, intern_display, intern_mime,
+    category_for, classify_display, format_file_size, icon_class_for, icon_special_class_for,
+    intern_display, intern_mime,
 };
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::{
@@ -15,11 +16,17 @@ use crate::application::dtos::folder_dto::{
     ListResourcesOptions, MoveFolderDto, RenameFolderDto,
 };
 use crate::application::dtos::grant_dto::{ResourceContentDto, ResourceTypeDto};
+use crate::application::ports::external_mount_ports::MountEntry;
 use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::ports::trash_ports::TrashUseCase;
+use crate::application::services::external_mount_router::ResolvedId;
 use crate::application::services::folder_service::FolderService;
+use crate::application::services::mount_registry::MountConfig;
 use crate::common::di::AppState as GlobalAppState;
 use crate::domain::entities::file::File;
+use crate::domain::services::external_mount_id::{
+    NodeId, encode_child_id, virtual_file_etag, virtual_folder_etag,
+};
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::AuthUser;
 
@@ -190,6 +197,22 @@ impl FolderHandler {
         Path(id): Path<String>,
     ) -> impl IntoResponse {
         let user_id = auth_user.id;
+
+        // External mounts have no trash — a permanent provider delete is the
+        // only option. Route `ext:` ids straight to the mount-aware service
+        // delete, skipping the (always-failing) trash attempt.
+        if state.mount_router.is_mount_id(&id) {
+            return match state
+                .applications
+                .folder_service
+                .delete_folder_with_perms(&id, user_id)
+                .await
+            {
+                Ok(_) => StatusCode::NO_CONTENT.into_response(),
+                Err(err) => AppError::from(err).into_response(),
+            };
+        }
+
         // Check if trash service is available
         // FIXME: permissions !!
         if let Some(trash_service) = &state.trash_service {
@@ -481,6 +504,28 @@ pub async fn list_folder_resources(
         reverse: q.reverse,
     };
 
+    // External mount branch: a mount-root UUID or an `ext:` id lists live from
+    // the provider instead of the PostgreSQL UNION. The parent of each entry is
+    // the requested id itself.
+    match service.mount_router().classify(&id) {
+        ResolvedId::MountRoot { cfg } => {
+            return list_mount_dir_response(
+                &service,
+                &cfg,
+                &NodeId::default(),
+                &id,
+                auth_user.id,
+                opts,
+            )
+            .await;
+        }
+        ResolvedId::MountChild { cfg, node_id } => {
+            return list_mount_dir_response(&service, &cfg, &node_id, &id, auth_user.id, opts)
+                .await;
+        }
+        ResolvedId::Regular => {}
+    }
+
     match service
         .list_resources_paged_with_perms(&id, auth_user.id, opts)
         .await
@@ -583,5 +628,176 @@ pub async fn list_folder_resources(
             }
         }
         Err(e) => AppError::from(e).into_response(),
+    }
+}
+
+/// List one directory inside an external mount and render the standard
+/// `/resources` envelope, mapping each live provider entry to a
+/// `FolderResourceItemDto` with a synthetic `ext:` id. `parent_id` is the
+/// requested id (the directory being listed), which becomes each entry's parent.
+async fn list_mount_dir_response(
+    service: &FolderService,
+    cfg: &MountConfig,
+    node_id: &NodeId,
+    parent_id: &str,
+    caller_id: uuid::Uuid,
+    opts: ListResourcesOptions<'_>,
+) -> axum::response::Response {
+    match service
+        .list_mount_dir_with_perms(cfg, node_id, caller_id, opts)
+        .await
+    {
+        Ok((entries, next_cursor)) => {
+            let items: Vec<FolderResourceItemDto> = entries
+                .into_iter()
+                .map(|entry| mount_entry_to_item(cfg, parent_id, entry))
+                .collect();
+            (
+                StatusCode::OK,
+                Json(FolderResourcesDto::with_cursor(items, next_cursor)),
+            )
+                .into_response()
+        }
+        Err(e) => AppError::from(e).into_response(),
+    }
+}
+
+/// Map a live mount entry to a `/resources` item with a synthetic `ext:` id and
+/// virtual (size+mtime / mtime) etag. Mount entries have no blob hash.
+fn mount_entry_to_item(
+    cfg: &MountConfig,
+    parent_id: &str,
+    entry: MountEntry,
+) -> FolderResourceItemDto {
+    let id = encode_child_id(cfg.mount_id, entry.node_id.clone());
+    if entry.is_dir {
+        let dto = FolderDto {
+            etag: virtual_folder_etag(entry.modified_at),
+            id,
+            name: entry.name.clone(),
+            path: String::new(),
+            parent_id: Some(parent_id.to_owned()),
+            drive_id: cfg.drive_id,
+            created_at: entry.created_at,
+            modified_at: entry.modified_at,
+            is_root: false,
+            icon_class: Arc::from("fas fa-folder"),
+            icon_special_class: Arc::from("folder-icon"),
+            category: Arc::from("Folder"),
+            created_by: Some(cfg.owner_id),
+            updated_by: Some(cfg.owner_id),
+        };
+        FolderResourceItemDto {
+            resource_type: ResourceTypeDto::Folder,
+            resource: ResourceContentDto::Folder(dto),
+        }
+    } else {
+        let mime = mime_guess::from_path(&entry.name)
+            .first_or_octet_stream()
+            .to_string();
+        let dto = FileDto {
+            id,
+            name: entry.name.clone(),
+            path: String::new(),
+            size: entry.size,
+            mime_type: Arc::from(mime.as_str()),
+            folder_id: Some(parent_id.to_owned()),
+            created_at: entry.created_at,
+            modified_at: entry.modified_at,
+            icon_class: Arc::from(icon_class_for(&entry.name, &mime)),
+            icon_special_class: Arc::from(icon_special_class_for(&entry.name, &mime)),
+            category: Arc::from(category_for(&entry.name, &mime)),
+            size_formatted: format_file_size(entry.size),
+            sort_date: None,
+            content_hash: String::new(),
+            etag: virtual_file_etag(entry.size, entry.modified_at),
+            created_by: Some(cfg.owner_id),
+            updated_by: Some(cfg.owner_id),
+        };
+        FolderResourceItemDto {
+            resource_type: ResourceTypeDto::File,
+            resource: ResourceContentDto::File(dto),
+        }
+    }
+}
+
+#[cfg(test)]
+mod mount_mapping_tests {
+    use super::*;
+    use crate::application::services::mount_registry::MountConfig;
+    use crate::infrastructure::services::local_fs_mount_provider::LocalFsMountProvider;
+    use uuid::Uuid;
+
+    fn config() -> MountConfig {
+        let dir = tempfile::tempdir().unwrap();
+        // Leak the tempdir so the path stays valid for the provider's lifetime;
+        // the provider is never exercised here (mapping is pure metadata).
+        let path = dir.keep();
+        MountConfig {
+            mount_id: Uuid::new_v4(),
+            kind: "local_fs".to_string(),
+            name: "Media".to_string(),
+            owner_id: Uuid::new_v4(),
+            drive_id: Uuid::new_v4(),
+            read_only: false,
+            mount_path: "Personal/Media".to_string(),
+            provider: Arc::new(LocalFsMountProvider::new(&path, false).unwrap()),
+        }
+    }
+
+    fn mount_entry(name: &str, node_id: &str, is_dir: bool, size: u64, mtime: u64) -> MountEntry {
+        MountEntry {
+            name: name.to_string(),
+            node_id: NodeId(node_id.to_string()),
+            is_dir,
+            size,
+            modified_at: mtime,
+            created_at: mtime,
+        }
+    }
+
+    #[test]
+    fn maps_folder_entry_to_item() {
+        let cfg = config();
+        let parent = cfg.mount_id.to_string();
+        let item = mount_entry_to_item(&cfg, &parent, mount_entry("docs", "docs", true, 0, 1234));
+
+        assert!(matches!(item.resource_type, ResourceTypeDto::Folder));
+        let ResourceContentDto::Folder(dto) = item.resource else {
+            panic!("expected folder");
+        };
+        assert_eq!(dto.name, "docs");
+        // id is the synthetic ext: envelope for (mount_id, node_id).
+        assert_eq!(dto.id, encode_child_id(cfg.mount_id, "docs"));
+        assert_eq!(dto.parent_id.as_deref(), Some(parent.as_str()));
+        assert_eq!(dto.etag, virtual_folder_etag(1234));
+        assert_eq!(dto.drive_id, cfg.drive_id);
+        assert!(!dto.is_root);
+        // Hierarchy is intentionally cleared on this listing.
+        assert_eq!(dto.path, "");
+    }
+
+    #[test]
+    fn maps_file_entry_to_item_with_virtual_etag_and_no_hash() {
+        let cfg = config();
+        let parent = encode_child_id(cfg.mount_id, "docs");
+        let item = mount_entry_to_item(
+            &cfg,
+            &parent,
+            mount_entry("report.json", "docs/report.json", false, 42, 999),
+        );
+
+        assert!(matches!(item.resource_type, ResourceTypeDto::File));
+        let ResourceContentDto::File(dto) = item.resource else {
+            panic!("expected file");
+        };
+        assert_eq!(dto.id, encode_child_id(cfg.mount_id, "docs/report.json"));
+        assert_eq!(dto.folder_id.as_deref(), Some(parent.as_str()));
+        assert_eq!(dto.size, 42);
+        assert_eq!(dto.etag, virtual_file_etag(42, 999));
+        // Virtual files have no blob hash.
+        assert_eq!(dto.content_hash, "");
+        // Mime is sniffed from the name.
+        assert_eq!(&*dto.mime_type, "application/json");
     }
 }

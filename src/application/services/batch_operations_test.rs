@@ -101,10 +101,16 @@ mod tests {
             None,
             authz.clone(),
         ));
+        let mount_router = Arc::new(
+            crate::application::services::external_mount_router::MountRouter::new(Arc::new(
+                crate::application::services::mount_registry::MountRegistry::empty(),
+            )),
+        );
         let folder_service = Arc::new(FolderService::new(
             folder_repo,
             authz,
             Arc::new(FileLifecycleService::new()),
+            mount_router,
         ));
 
         let _batch_service = BatchOperationService::new(

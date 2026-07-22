@@ -50,6 +50,18 @@ test:
 test-mocks:
     cargo test --features test_utils
 
+# Source-based line coverage (HTML + summary) via cargo-llvm-cov.
+# Requires `cargo install cargo-llvm-cov` and llvm-tools (rustup component
+# llvm-tools-preview, or set LLVM_COV / LLVM_PROFDATA to an llvm-binutils).
+# Unit tests only (no DB). Pass a filter: `just coverage external_mount`.
+coverage filter='':
+    cargo llvm-cov --lib --html {{ if filter == '' { '' } else { '--' } }} {{filter}}
+    cargo llvm-cov --lib --summary-only {{ if filter == '' { '' } else { '--' } }} {{filter}}
+
+# Coverage including the testcontainers integration tests (needs docker).
+coverage-integration filter='mount':
+    RUSTFLAGS='--cfg integration_tests' cargo llvm-cov --lib --summary-only -- {{filter}}
+
 # DB-dependent integration tests gated on `--cfg integration_tests`.
 # Spins up the test postgres on port 5433 first. Requires one row in
 # auth.users on the test DB (start the server against it once to seed).

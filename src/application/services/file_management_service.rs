@@ -7,9 +7,13 @@ use crate::application::ports::file_ports::FileManagementUseCase;
 use crate::application::ports::resource_access_hook::ResourceAccessHook;
 use crate::application::ports::storage_ports::{CopyFolderTreeResult, FileWritePort};
 use crate::application::ports::trash_ports::TrashUseCase;
+use crate::application::services::external_mount_router::{MountRouter, ResolvedId};
+use crate::application::services::mount_dto::{audit_mount_write, mount_file_dto, mount_parent_id};
+use crate::application::services::mount_registry::MountConfig;
 use crate::application::services::trash_service::TrashService;
 use crate::common::errors::DomainError;
 use crate::domain::services::authorization::{Permission, Resource, Subject};
+use crate::domain::services::external_mount_id::NodeId;
 use crate::domain::services::path_service::validate_storage_name;
 use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
 use crate::infrastructure::repositories::pg::file_blob_write_repository::FileBlobWriteRepository;
@@ -32,6 +36,9 @@ pub struct FileManagementService {
     authz: Arc<PgAclEngine>,
     /// Lifecycle hook dispatcher — fired on file created (copy) and deleted.
     file_lifecycle_hook: Option<Arc<dyn FileLifecycleHook>>,
+    /// External-mount classifier. `None` in stub/test construction → all ids
+    /// are treated as native.
+    mount_router: Option<Arc<MountRouter>>,
     /// Read/write access hook — fired so Recent reflects "this is the file
     /// I just copied / renamed / moved", same way the read paths surface
     /// downloads. Distinct from the lifecycle hook because lifecycle hooks
@@ -72,6 +79,7 @@ impl FileManagementService {
             content_cache,
             authz,
             file_lifecycle_hook: None,
+            mount_router: None,
             resource_access_hook: None,
             drive_repo: None,
             storage_usage: None,
@@ -82,6 +90,59 @@ impl FileManagementService {
     pub fn with_file_lifecycle_hook(mut self, hook: Arc<dyn FileLifecycleHook>) -> Self {
         self.file_lifecycle_hook = Some(hook);
         self
+    }
+
+    /// Injects the external-mount classifier so file mutations can branch
+    /// `ext:` ids to the provider.
+    pub fn with_mount_router(mut self, router: Arc<MountRouter>) -> Self {
+        self.mount_router = Some(router);
+        self
+    }
+
+    /// Classify an id via the mount router (if configured). Returns `Regular`
+    /// when no router is wired.
+    fn classify(&self, id: &str) -> ResolvedId {
+        match &self.mount_router {
+            Some(r) => r.classify(id),
+            None => ResolvedId::Regular,
+        }
+    }
+
+    /// Authorize a mutation inside a mount (gates on the mount-root folder).
+    async fn require_mount_perm(
+        &self,
+        cfg: &MountConfig,
+        perm: Permission,
+        caller_id: Uuid,
+    ) -> Result<(), DomainError> {
+        self.authz
+            .require(
+                Subject::User(caller_id),
+                perm,
+                Resource::Folder(cfg.mount_id),
+            )
+            .await
+    }
+
+    /// Resolve a move destination within the same mount as `cfg`. Errors when
+    /// the destination is absent, native, or in a different mount.
+    fn mount_dest_node(
+        &self,
+        cfg: &MountConfig,
+        folder_id: Option<&str>,
+    ) -> Result<NodeId, DomainError> {
+        let Some(folder_id) = folder_id else {
+            return Err(cross_boundary_move_err());
+        };
+        match self.classify(folder_id) {
+            ResolvedId::MountRoot { cfg: dest } if dest.mount_id == cfg.mount_id => {
+                Ok(NodeId::default())
+            }
+            ResolvedId::MountChild { cfg: dest, node_id } if dest.mount_id == cfg.mount_id => {
+                Ok(node_id)
+            }
+            _ => Err(cross_boundary_move_err()),
+        }
     }
 
     /// Registers the read/write access hook (Recent list recorder).
@@ -316,6 +377,29 @@ impl FileManagementUseCase for FileManagementService {
         caller_id: Uuid,
         folder_id: Option<String>,
     ) -> Result<FileDto, DomainError> {
+        // External mount: moves stay within one mount; cross-backend is forbidden.
+        match self.classify(file_id) {
+            ResolvedId::Regular => {
+                if let Some(dst) = folder_id.as_deref()
+                    && !matches!(self.classify(dst), ResolvedId::Regular)
+                {
+                    return Err(cross_boundary_move_err());
+                }
+            }
+            ResolvedId::MountRoot { .. } => return Err(DomainError::not_found("File", file_id)),
+            ResolvedId::MountChild { cfg, node_id } => {
+                let dest = self.mount_dest_node(&cfg, folder_id.as_deref())?;
+                self.require_mount_perm(&cfg, Permission::Update, caller_id)
+                    .await?;
+                self.require_mount_perm(&cfg, Permission::Create, caller_id)
+                    .await?;
+                let stat = cfg.provider.move_within(&node_id, &dest).await?;
+                audit_mount_write("move", &cfg, caller_id, stat.node_id.as_str());
+                let parent = mount_parent_id(&cfg, stat.node_id.as_str());
+                return Ok(mount_file_dto(&cfg, &parent, &stat));
+            }
+        }
+
         // Move = Update on the file + Create on the target folder (if any).
         self.require_file_perm(file_id, Permission::Update, caller_id)
             .await?;
@@ -460,12 +544,32 @@ impl FileManagementUseCase for FileManagementService {
         caller_id: Uuid,
         new_name: &str,
     ) -> Result<FileDto, DomainError> {
+        if let ResolvedId::MountChild { cfg, node_id } = self.classify(file_id) {
+            if let Err(reason) = validate_storage_name(new_name) {
+                return Err(DomainError::validation_error(format!(
+                    "Invalid file name '{new_name}': {reason}"
+                )));
+            }
+            self.require_mount_perm(&cfg, Permission::Update, caller_id)
+                .await?;
+            let stat = cfg.provider.rename(&node_id, new_name).await?;
+            audit_mount_write("rename", &cfg, caller_id, stat.node_id.as_str());
+            let parent = mount_parent_id(&cfg, stat.node_id.as_str());
+            return Ok(mount_file_dto(&cfg, &parent, &stat));
+        }
         self.require_file_perm(file_id, Permission::Update, caller_id)
             .await?;
         self.rename_file(file_id, new_name, caller_id).await
     }
 
     async fn delete_file_with_perms(&self, id: &str, caller_id: Uuid) -> Result<(), DomainError> {
+        if let ResolvedId::MountChild { cfg, node_id } = self.classify(id) {
+            self.require_mount_perm(&cfg, Permission::Delete, caller_id)
+                .await?;
+            cfg.provider.delete(&node_id).await?;
+            audit_mount_write("delete", &cfg, caller_id, node_id.as_str());
+            return Ok(());
+        }
         self.require_file_perm(id, Permission::Delete, caller_id)
             .await?;
         self.delete_file(id).await
@@ -482,6 +586,15 @@ impl FileManagementUseCase for FileManagementService {
         id: &str,
         caller_id: Uuid,
     ) -> Result<bool, DomainError> {
+        // External mount: permanent provider delete (mounts have no trash).
+        if let ResolvedId::MountChild { cfg, node_id } = self.classify(id) {
+            self.require_mount_perm(&cfg, Permission::Delete, caller_id)
+                .await?;
+            cfg.provider.delete(&node_id).await?;
+            audit_mount_write("delete", &cfg, caller_id, node_id.as_str());
+            return Ok(false); // permanently deleted (no trash)
+        }
+
         self.require_file_perm(id, Permission::Delete, caller_id)
             .await?;
         // Step 1: Try trash (soft delete — file row stays, blob stays referenced)
@@ -551,4 +664,13 @@ impl FileManagementUseCase for FileManagementService {
         self.copy_folder_tree(source_folder_id, target_parent_id, dest_name)
             .await
     }
+}
+
+/// Error for a move/copy that would cross a storage backend boundary
+/// (mount ↔ native, or between two different mounts). Forbidden in v1.
+fn cross_boundary_move_err() -> DomainError {
+    DomainError::operation_not_supported(
+        "File",
+        "moving between external mounts and regular storage is not supported",
+    )
 }

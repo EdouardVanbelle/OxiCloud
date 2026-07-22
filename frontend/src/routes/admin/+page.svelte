@@ -35,6 +35,11 @@
 		testOidc,
 		testStorage,
 		verifyMigration,
+		createExternalMount,
+		deleteExternalMount,
+		listExternalMounts,
+		type ExternalMount,
+		type CreateExternalMountInput,
 		type AdminDashboard,
 		type GeneratedKey,
 		type MigrationStatus,
@@ -167,12 +172,52 @@
 		}
 	}
 
-	type Tab = 'dashboard' | 'users' | 'drives' | 'plugins' | 'oidc' | 'storage' | 'smtp';
+	type Tab = 'dashboard' | 'users' | 'drives' | 'mounts' | 'plugins' | 'oidc' | 'storage' | 'smtp';
 	let tab = $state<Tab>('dashboard');
 
 	// Dashboard
 	let dashboard = $state<AdminDashboard | null>(null);
 	let dashboardError = $state<string | null>(null);
+
+	// External mounts
+	let mounts = $state<ExternalMount[] | null>(null);
+	let mountsError = $state<string | null>(null);
+	let newMount = $state<CreateExternalMountInput>({ name: '', host_path: '', read_only: false });
+	let mountCreating = $state(false);
+
+	async function loadMounts() {
+		mountsError = null;
+		try {
+			mounts = await listExternalMounts();
+		} catch (e) {
+			mountsError = errorMessage(e);
+		}
+	}
+
+	async function createMount() {
+		if (!newMount.name.trim() || !newMount.host_path.trim()) return;
+		mountCreating = true;
+		try {
+			const created = await createExternalMount(newMount);
+			mounts = [...(mounts ?? []), created];
+			newMount = { name: '', host_path: '', read_only: false };
+		} catch (e) {
+			mountsError = errorMessage(e);
+		} finally {
+			mountCreating = false;
+		}
+	}
+
+	async function deleteMount(id: string) {
+		if (!(await showConfirm('Remove this mount? Files on the host are kept.'))) return;
+		try {
+			await deleteExternalMount(id);
+			mounts = mounts?.filter((m) => m.mount_folder_id !== id) ?? null;
+		} catch (e) {
+			reportError(e);
+			await loadMounts();
+		}
+	}
 
 	// SMTP
 	let smtp = $state<SmtpInfo | null>(null);
@@ -1413,6 +1458,7 @@
 		dashboard: false,
 		users: false,
 		drives: false,
+		mounts: false,
 		plugins: false,
 		oidc: false,
 		storage: false,
@@ -1425,6 +1471,7 @@
 		if (tab === 'dashboard') void loadDashboard();
 		else if (tab === 'users') void loadUsers();
 		else if (tab === 'drives') void loadDrivesTab();
+		else if (tab === 'mounts') void loadMounts();
 		else if (tab === 'plugins') void loadPlugins();
 		else if (tab === 'oidc') void loadOidc();
 		else if (tab === 'storage') {
@@ -1486,6 +1533,15 @@
 		>
 			<Icon name="folder" />
 			{t('admin.drives', 'Drives')}
+		</button>
+		<button
+			role="tab"
+			data-testid="admin-mounts-tab"
+			aria-selected={tab === 'mounts'}
+			onclick={() => (tab = 'mounts')}
+		>
+			<Icon name="folder" />
+			{t('admin.mounts', 'External Mounts')}
 		</button>
 		<button
 			role="tab"
@@ -2467,6 +2523,87 @@
 				>
 			</div>
 		{/if}
+	{:else if tab === 'mounts'}
+		<section class="admin-section" data-testid="admin-mounts-section">
+			<h2>{t('admin.mounts.title', 'External File Mounts')}</h2>
+			<p class="muted">
+				{t(
+					'admin.mounts.help',
+					'Mount a host directory as a folder in your drive. Files stay on the host and are read live; deletes here are permanent.'
+				)}
+			</p>
+
+			<form
+				class="mount-form"
+				onsubmit={(e) => {
+					e.preventDefault();
+					void createMount();
+				}}
+			>
+				<input
+					type="text"
+					placeholder={t('admin.mounts.name', 'Name')}
+					bind:value={newMount.name}
+					data-testid="mount-name"
+				/>
+				<input
+					type="text"
+					placeholder={t('admin.mounts.path', 'Host path (e.g. /srv/media)')}
+					bind:value={newMount.host_path}
+					data-testid="mount-path"
+				/>
+				<label>
+					<input type="checkbox" bind:checked={newMount.read_only} />
+					{t('admin.mounts.readonly', 'Read-only')}
+				</label>
+				<button type="submit" disabled={mountCreating} data-testid="mount-create">
+					{t('admin.mounts.add', 'Add mount')}
+				</button>
+			</form>
+
+			{#if mountsError}
+				<p class="error" data-testid="mount-error">{mountsError}</p>
+			{/if}
+
+			{#if mounts}
+				{#if mounts.length === 0}
+					<p class="muted">{t('admin.mounts.empty', 'No mounts configured.')}</p>
+				{:else}
+					<table class="table">
+						<thead>
+							<tr>
+								<th>{t('admin.mounts.name', 'Name')}</th>
+								<th>{t('admin.mounts.kind', 'Kind')}</th>
+								<th>{t('admin.mounts.path', 'Path')}</th>
+								<th>{t('admin.mounts.readonly', 'Read-only')}</th>
+								<th></th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each mounts as m (m.mount_folder_id)}
+								<tr>
+									<td>{m.name}</td>
+									<td>{m.kind}</td>
+									<td class="muted">{m.mount_path}</td>
+									<td>{m.read_only ? t('common.yes', 'Yes') : t('common.no', 'No')}</td>
+									<td>
+										<button
+											class="danger"
+											onclick={() => void deleteMount(m.mount_folder_id)}
+											data-testid="mount-delete"
+										>
+											{t('common.delete', 'Delete')}
+										</button>
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				{/if}
+			{:else}
+				<p class="muted">{t('common.loading', 'Loading…')}</p>
+			{/if}
+		</section>
 	{:else if tab === 'drives'}
 		<div class="bar">
 			<button

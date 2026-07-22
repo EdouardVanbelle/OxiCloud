@@ -4,12 +4,19 @@ use crate::application::dtos::folder_dto::{
     MoveFolderDto, RenameFolderDto,
 };
 use crate::application::ports::authorization_ports::AuthorizationEngine;
+use crate::application::ports::external_mount_ports::MountEntry;
 use crate::application::ports::file_lifecycle::FileLifecycleHook;
 use crate::application::ports::folder_ports::FolderUseCase;
+use crate::application::services::external_mount_router::{MountRouter, ResolvedId};
 use crate::application::services::file_lifecycle_service::FileLifecycleService;
+use crate::application::services::mount_dto::{
+    audit_mount_write, mount_entry_folder_dto, mount_folder_dto, mount_parent_id,
+};
+use crate::application::services::mount_registry::MountConfig;
 use crate::common::errors::{DomainError, ErrorKind};
 use crate::domain::repositories::folder_repository::FolderRepository;
-use crate::domain::services::authorization::{Permission, Resource, Subject};
+use crate::domain::services::authorization::{Permission, Resource, ResourceKind, Subject};
+use crate::domain::services::external_mount_id::NodeId;
 use crate::domain::services::path_service::{StoragePath, validate_storage_name};
 use crate::infrastructure::repositories::pg::folder_db_repository::FolderDbRepository;
 use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
@@ -20,6 +27,9 @@ use uuid::Uuid;
 pub struct FolderService {
     folder_storage: Arc<FolderDbRepository>,
     authz: Arc<PgAclEngine>,
+    /// External-mount classifier. Lets folder operations branch a mount-root or
+    /// `ext:` id onto the provider instead of the PostgreSQL repositories.
+    mount_router: Arc<MountRouter>,
     /// File lifecycle dispatcher. Carried so `delete_folder_with_perms`
     /// can fire `on_file_deleted` for every file the PG cascade is about
     /// to reap. Always present — the dispatcher itself is a no-op when
@@ -44,13 +54,70 @@ impl FolderService {
         folder_storage: Arc<FolderDbRepository>,
         authz: Arc<PgAclEngine>,
         file_lifecycle: Arc<FileLifecycleService>,
+        mount_router: Arc<MountRouter>,
     ) -> Self {
         Self {
             folder_storage,
             authz,
+            mount_router,
             file_lifecycle,
             drive_repo: None,
             storage_usage: None,
+        }
+    }
+
+    /// Borrow the external-mount classifier (handlers branch on this before
+    /// treating an id as a native UUID).
+    pub fn mount_router(&self) -> &MountRouter {
+        &self.mount_router
+    }
+
+    /// Authorize a mutation inside a mount. All operations within a mount gate
+    /// on the mount-root folder grant (the `cfg.mount_id` resource).
+    async fn require_mount_perm(
+        &self,
+        cfg: &MountConfig,
+        perm: Permission,
+        caller_id: Uuid,
+    ) -> Result<(), DomainError> {
+        self.authz
+            .require(
+                Subject::User(caller_id),
+                perm,
+                Resource::Folder(cfg.mount_id),
+            )
+            .await
+    }
+
+    /// If `id` addresses a mount directory (root or `ext:` child), return the
+    /// mount config and the node id of that directory. `None` for native ids.
+    fn mount_node_for(&self, id: &str) -> Option<(Arc<MountConfig>, NodeId)> {
+        match self.mount_router.classify(id) {
+            ResolvedId::Regular => None,
+            ResolvedId::MountRoot { cfg } => Some((cfg, NodeId::default())),
+            ResolvedId::MountChild { cfg, node_id } => Some((cfg, node_id)),
+        }
+    }
+
+    /// Resolve a move destination within the SAME mount as `cfg`, returning the
+    /// destination parent's node id. Errors (`UnsupportedOperation`) if the
+    /// destination is absent, native, or in a different mount.
+    fn mount_dest_node(
+        &self,
+        cfg: &MountConfig,
+        parent_id: Option<&str>,
+    ) -> Result<NodeId, DomainError> {
+        let Some(parent_id) = parent_id else {
+            return Err(cross_boundary_move_err());
+        };
+        match self.mount_router.classify(parent_id) {
+            ResolvedId::MountRoot { cfg: dest } if dest.mount_id == cfg.mount_id => {
+                Ok(NodeId::default())
+            }
+            ResolvedId::MountChild { cfg: dest, node_id } if dest.mount_id == cfg.mount_id => {
+                Ok(node_id)
+            }
+            _ => Err(cross_boundary_move_err()),
         }
     }
 
@@ -264,6 +331,29 @@ impl FolderUseCase for FolderService {
                 "Root folder creation is reserved for registration",
             ));
         };
+
+        // External mount: create the directory on the provider, not in PG.
+        match self.mount_router.classify(parent_id) {
+            ResolvedId::Regular => {}
+            ResolvedId::MountRoot { cfg } => {
+                self.require_mount_perm(&cfg, Permission::Create, caller_id)
+                    .await?;
+                let stat = cfg
+                    .provider
+                    .create_dir(&NodeId::default(), &dto.name)
+                    .await?;
+                audit_mount_write("mkdir", &cfg, caller_id, stat.node_id.as_str());
+                return Ok(mount_folder_dto(&cfg, parent_id, &stat));
+            }
+            ResolvedId::MountChild { cfg, node_id } => {
+                self.require_mount_perm(&cfg, Permission::Create, caller_id)
+                    .await?;
+                let stat = cfg.provider.create_dir(&node_id, &dto.name).await?;
+                audit_mount_write("mkdir", &cfg, caller_id, stat.node_id.as_str());
+                return Ok(mount_folder_dto(&cfg, parent_id, &stat));
+            }
+        }
+
         let parent_resource = Self::folder_resource(parent_id)?;
         self.authz
             .require(
@@ -320,6 +410,21 @@ impl FolderUseCase for FolderService {
         path: &str,
         drive_id: Uuid,
     ) -> Result<FolderDto, DomainError> {
+        // External mount: a path that descends past a mount root (non-empty
+        // remainder) resolves on the provider. The mount root itself is a real
+        // folder row, so the empty-remainder case falls through to the DB.
+        if let Some((cfg, remainder)) = self.mount_router.find_path(drive_id, path)
+            && !remainder.is_empty()
+        {
+            let node = cfg.provider.resolve_path(&remainder);
+            let stat = cfg.provider.stat(&node).await?;
+            if !stat.is_dir {
+                return Err(DomainError::not_found("Folder", path));
+            }
+            let parent = mount_parent_id(&cfg, stat.node_id.as_str());
+            return Ok(mount_folder_dto(&cfg, &parent, &stat));
+        }
+
         let storage_path = StoragePath::from_string(path);
 
         let folder = self
@@ -495,6 +600,32 @@ impl FolderUseCase for FolderService {
     {
         let pagination = pagination.validate_and_adjust();
 
+        // External mount: list subdirectories from the provider (used by the
+        // WebDAV/NextCloud PROPFIND Depth:1 folder loop).
+        if let Some(pid) = parent_id
+            && let Some((cfg, node)) = self.mount_node_for(pid)
+        {
+            self.require_mount_perm(&cfg, Permission::Read, owner_id)
+                .await?;
+            let entries = cfg.provider.list_dir(&node).await?;
+            let mut dirs: Vec<FolderDto> = entries
+                .iter()
+                .filter(|e| e.is_dir)
+                .map(|e| mount_entry_folder_dto(&cfg, pid, e))
+                .collect();
+            let total = dirs.len();
+            let (offset, limit) = (pagination.offset(), pagination.limit());
+            let page: Vec<FolderDto> = dirs.drain(..).skip(offset).take(limit).collect();
+            return Ok(
+                crate::application::dtos::pagination::PaginatedResponseDto::new(
+                    page,
+                    pagination.page,
+                    pagination.page_size,
+                    total,
+                ),
+            );
+        }
+
         if let Some(parent_id_unwrapped) = parent_id {
             self.authz
                 .require(
@@ -549,6 +680,26 @@ impl FolderUseCase for FolderService {
                 "Invalid folder name '{}': {reason}",
                 dto.name
             )));
+        }
+
+        // External mount: rename on the provider. The mount root cannot be
+        // renamed through here (it's a real folder row managed elsewhere).
+        match self.mount_router.classify(id) {
+            ResolvedId::Regular => {}
+            ResolvedId::MountRoot { .. } => {
+                return Err(DomainError::operation_not_supported(
+                    "Folder",
+                    "a mount root cannot be renamed through this endpoint",
+                ));
+            }
+            ResolvedId::MountChild { cfg, node_id } => {
+                self.require_mount_perm(&cfg, Permission::Update, caller_id)
+                    .await?;
+                let stat = cfg.provider.rename(&node_id, &dto.name).await?;
+                let parent = mount_parent_id(&cfg, stat.node_id.as_str());
+                audit_mount_write("rename", &cfg, caller_id, stat.node_id.as_str());
+                return Ok(mount_folder_dto(&cfg, &parent, &stat));
+            }
         }
 
         // Drive roots double as the drive's display name (per drive.md §3,
@@ -622,6 +773,37 @@ impl FolderUseCase for FolderService {
         dto: MoveFolderDto,
         caller_id: Uuid,
     ) -> Result<FolderDto, DomainError> {
+        // External mount: moves must stay within a single mount. The provider
+        // relocates; cross-backend moves (mount ↔ native, or between mounts) are
+        // forbidden in v1.
+        match self.mount_router.classify(id) {
+            ResolvedId::Regular => {
+                // Native source: forbid moving INTO a mount.
+                if let Some(parent_id) = &dto.parent_id
+                    && self.mount_router.is_mount_id(parent_id)
+                {
+                    return Err(cross_boundary_move_err());
+                }
+            }
+            ResolvedId::MountRoot { .. } => {
+                return Err(DomainError::operation_not_supported(
+                    "Folder",
+                    "a mount root cannot be moved",
+                ));
+            }
+            ResolvedId::MountChild { cfg, node_id } => {
+                let dest = self.mount_dest_node(&cfg, dto.parent_id.as_deref())?;
+                self.require_mount_perm(&cfg, Permission::Update, caller_id)
+                    .await?;
+                self.require_mount_perm(&cfg, Permission::Create, caller_id)
+                    .await?;
+                let stat = cfg.provider.move_within(&node_id, &dest).await?;
+                audit_mount_write("move", &cfg, caller_id, stat.node_id.as_str());
+                let parent = mount_parent_id(&cfg, stat.node_id.as_str());
+                return Ok(mount_folder_dto(&cfg, &parent, &stat));
+            }
+        }
+
         let source_resource = Self::folder_resource(id)?;
         self.authz
             .require(
@@ -758,6 +940,25 @@ impl FolderUseCase for FolderService {
     /// video thumbnails, moka cache entries) leaks past the cascade.
     /// Same shape `clear_trash_in` uses (`trash_service.rs:804-846`).
     async fn delete_folder_with_perms(&self, id: &str, caller_id: Uuid) -> Result<(), DomainError> {
+        // External mount: delete on the provider (permanent — mounts have no
+        // trash). The mount root is a real folder row and is not deletable here.
+        match self.mount_router.classify(id) {
+            ResolvedId::Regular => {}
+            ResolvedId::MountRoot { .. } => {
+                return Err(DomainError::operation_not_supported(
+                    "Folder",
+                    "a mount root cannot be deleted through this endpoint",
+                ));
+            }
+            ResolvedId::MountChild { cfg, node_id } => {
+                self.require_mount_perm(&cfg, Permission::Delete, caller_id)
+                    .await?;
+                cfg.provider.delete(&node_id).await?;
+                audit_mount_write("delete", &cfg, caller_id, node_id.as_str());
+                return Ok(());
+            }
+        }
+
         self.authz
             .require(
                 Subject::User(caller_id),
@@ -789,6 +990,15 @@ impl FolderUseCase for FolderService {
 
         Ok(())
     }
+}
+
+/// The error returned when a move would cross a storage backend boundary
+/// (mount ↔ native, or between two different mounts). Forbidden in v1.
+fn cross_boundary_move_err() -> DomainError {
+    DomainError::operation_not_supported(
+        "Folder",
+        "moving between external mounts and regular storage is not supported",
+    )
 }
 
 // ── FolderService — cursor-paginated resource listing ────────────────────────
@@ -851,6 +1061,125 @@ impl FolderService {
 
         Ok((rows, next_cursor))
     }
+
+    /// List one directory inside an external mount (the mount root when
+    /// `node_id` is empty, or a nested virtual folder otherwise).
+    ///
+    /// Authorization collapses onto the mount-root folder: a caller who may
+    /// `Read` the mount root may browse everything inside it. The provider
+    /// reads the live backend; entries are sorted in memory and paginated with
+    /// a name-keyset cursor (directories are bounded, see provider cap).
+    ///
+    /// Returns the page of raw [`MountEntry`]s plus an encoded next cursor; the
+    /// handler maps each entry to a `FolderResourceItemDto` with a synthetic
+    /// `ext:` id.
+    pub async fn list_mount_dir_with_perms(
+        &self,
+        cfg: &MountConfig,
+        node_id: &NodeId,
+        caller_id: Uuid,
+        opts: ListResourcesOptions<'_>,
+    ) -> Result<(Vec<MountEntry>, Option<String>), DomainError> {
+        // AuthZ — everything in the mount is gated by the mount-root folder.
+        self.authz
+            .require(
+                Subject::User(caller_id),
+                Permission::Read,
+                Resource::Folder(cfg.mount_id),
+            )
+            .await?;
+
+        let entries = cfg.provider.list_dir(node_id).await?;
+        let cursor_name = opts.cursor.as_ref().and_then(|c| c.sort_str.as_deref());
+        Ok(paginate_mount_entries(
+            entries,
+            opts.kinds,
+            opts.order_by,
+            opts.reverse,
+            opts.limit,
+            cursor_name,
+        ))
+    }
+}
+
+/// Filter, sort, and page a directory's worth of mount entries, returning the
+/// page plus an encoded next cursor. Pure (no I/O / authz) so it can be tested
+/// exhaustively.
+///
+/// The cursor is a **name keyset**: names are unique within a directory, so the
+/// last emitted name is a stable resume key under any sort dimension. Resume is
+/// best-effort — if the cursor's entry was deleted out-of-band the page restarts
+/// from the top (documented; avoids an infinite loop).
+fn paginate_mount_entries(
+    mut entries: Vec<MountEntry>,
+    kinds: Option<&[ResourceKind]>,
+    order_by: &str,
+    reverse: bool,
+    limit: usize,
+    cursor_name: Option<&str>,
+) -> (Vec<MountEntry>, Option<String>) {
+    if let Some(kinds) = kinds {
+        let want_files = kinds.contains(&ResourceKind::File);
+        let want_folders = kinds.contains(&ResourceKind::Folder);
+        entries.retain(|e| if e.is_dir { want_folders } else { want_files });
+    }
+
+    sort_mount_entries(&mut entries, order_by, reverse);
+
+    let start = match cursor_name {
+        Some(name) => entries
+            .iter()
+            .position(|e| name.eq_ignore_ascii_case(&e.name))
+            .map(|i| i + 1)
+            .unwrap_or(0),
+        None => 0,
+    };
+
+    let has_more = entries.len() > start + limit;
+    let page: Vec<MountEntry> = entries.into_iter().skip(start).take(limit).collect();
+
+    let next_cursor = if has_more {
+        page.last().map(|last| {
+            FolderResourceCursor {
+                order_by: order_by.to_owned(),
+                resource_id: Uuid::nil(),
+                sort_str: Some(last.name.clone()),
+                sort_int: None,
+                sort_ts: None,
+                reverse,
+            }
+            .encode()
+        })
+    } else {
+        None
+    };
+
+    (page, next_cursor)
+}
+
+/// Sort mount entries in place. Folders sort before files for the `name`/`type`
+/// dimensions; otherwise by the requested key with name as the tie-breaker.
+/// `reverse` flips the final order.
+fn sort_mount_entries(entries: &mut [MountEntry], order_by: &str, reverse: bool) {
+    use std::cmp::Ordering;
+    let name_key = |e: &MountEntry| e.name.to_lowercase();
+    entries.sort_by(|a, b| {
+        let primary = match order_by {
+            "modified_at" => a.modified_at.cmp(&b.modified_at),
+            "created_at" => a.created_at.cmp(&b.created_at),
+            "size" => a.size.cmp(&b.size),
+            // "name" / "type" / anything else: folders first, then by name.
+            _ => b.is_dir.cmp(&a.is_dir),
+        };
+        let ord = primary.then_with(|| name_key(a).cmp(&name_key(b)));
+        if ord == Ordering::Equal {
+            Ordering::Equal
+        } else if reverse {
+            ord.reverse()
+        } else {
+            ord
+        }
+    });
 }
 
 /// Build the next-page cursor from the last row of the current page.
@@ -1103,6 +1432,679 @@ impl UserLifecycleHook for PersonalDriveLifecycleHook {
     }
 }
 
+#[cfg(test)]
+mod mount_listing_tests {
+    use super::{paginate_mount_entries, sort_mount_entries};
+    use crate::application::dtos::cursor::PageCursor;
+    use crate::application::dtos::folder_dto::FolderResourceCursor;
+    use crate::application::ports::external_mount_ports::MountEntry;
+    use crate::domain::services::authorization::ResourceKind;
+    use crate::domain::services::external_mount_id::NodeId;
+
+    fn entry(name: &str, is_dir: bool, size: u64, modified: u64) -> MountEntry {
+        MountEntry {
+            name: name.to_string(),
+            node_id: NodeId(name.to_string()),
+            is_dir,
+            size,
+            modified_at: modified,
+            created_at: modified,
+        }
+    }
+
+    fn names(entries: &[MountEntry]) -> Vec<String> {
+        entries.iter().map(|e| e.name.clone()).collect()
+    }
+
+    #[test]
+    fn sorts_folders_first_then_name_case_insensitive() {
+        let mut e = vec![
+            entry("Banana.txt", false, 1, 1),
+            entry("apple", true, 0, 1),
+            entry("Cherry", true, 0, 1),
+            entry("almond.txt", false, 1, 1),
+        ];
+        sort_mount_entries(&mut e, "name", false);
+        assert_eq!(names(&e), ["apple", "Cherry", "almond.txt", "Banana.txt"]);
+    }
+
+    #[test]
+    fn reverse_flips_order() {
+        let mut e = vec![
+            entry("a", false, 1, 1),
+            entry("b", false, 1, 1),
+            entry("d", true, 0, 1),
+        ];
+        sort_mount_entries(&mut e, "name", true);
+        // folders-first then name, reversed.
+        assert_eq!(names(&e), ["b", "a", "d"]);
+    }
+
+    #[test]
+    fn sorts_by_size_modified_created() {
+        let mut by_size = vec![
+            entry("big", false, 100, 1),
+            entry("small", false, 1, 1),
+            entry("mid", false, 50, 1),
+        ];
+        sort_mount_entries(&mut by_size, "size", false);
+        assert_eq!(names(&by_size), ["small", "mid", "big"]);
+
+        let mut by_mtime = vec![
+            entry("new", false, 1, 300),
+            entry("old", false, 1, 100),
+            entry("mid", false, 1, 200),
+        ];
+        sort_mount_entries(&mut by_mtime, "modified_at", false);
+        assert_eq!(names(&by_mtime), ["old", "mid", "new"]);
+
+        let mut by_ctime = vec![entry("z", false, 1, 9), entry("a", false, 1, 5)];
+        sort_mount_entries(&mut by_ctime, "created_at", false);
+        assert_eq!(names(&by_ctime), ["a", "z"]);
+    }
+
+    #[test]
+    fn filters_by_kind() {
+        let make = || vec![entry("dir", true, 0, 1), entry("file.txt", false, 1, 1)];
+        let (files_only, _) =
+            paginate_mount_entries(make(), Some(&[ResourceKind::File]), "name", false, 50, None);
+        assert_eq!(names(&files_only), ["file.txt"]);
+
+        let (folders_only, _) = paginate_mount_entries(
+            make(),
+            Some(&[ResourceKind::Folder]),
+            "name",
+            false,
+            50,
+            None,
+        );
+        assert_eq!(names(&folders_only), ["dir"]);
+
+        let (both, _) = paginate_mount_entries(
+            make(),
+            Some(&[ResourceKind::File, ResourceKind::Folder]),
+            "name",
+            false,
+            50,
+            None,
+        );
+        assert_eq!(both.len(), 2);
+    }
+
+    #[test]
+    fn paginates_with_name_keyset_cursor() {
+        let all = || {
+            vec![
+                entry("a", false, 1, 1),
+                entry("b", false, 1, 1),
+                entry("c", false, 1, 1),
+                entry("d", false, 1, 1),
+                entry("e", false, 1, 1),
+            ]
+        };
+
+        // Page 1: limit 2 → [a, b], cursor present.
+        let (p1, c1) = paginate_mount_entries(all(), None, "name", false, 2, None);
+        assert_eq!(names(&p1), ["a", "b"]);
+        let c1 = c1.expect("cursor after first page");
+        let decoded = FolderResourceCursor::decode(&c1).expect("decodes");
+        assert_eq!(decoded.sort_str.as_deref(), Some("b"));
+        assert!(!decoded.reverse);
+
+        // Page 2: resume after "b" → [c, d], cursor present.
+        let (p2, c2) = paginate_mount_entries(all(), None, "name", false, 2, Some("b"));
+        assert_eq!(names(&p2), ["c", "d"]);
+        assert!(c2.is_some());
+
+        // Page 3: resume after "d" → [e], no further cursor.
+        let (p3, c3) = paginate_mount_entries(all(), None, "name", false, 2, Some("d"));
+        assert_eq!(names(&p3), ["e"]);
+        assert!(c3.is_none());
+    }
+
+    #[test]
+    fn no_cursor_when_page_is_last() {
+        let e = vec![entry("a", false, 1, 1), entry("b", false, 1, 1)];
+        let (page, cursor) = paginate_mount_entries(e, None, "name", false, 50, None);
+        assert_eq!(page.len(), 2);
+        assert!(cursor.is_none());
+    }
+
+    #[test]
+    fn deleted_cursor_entry_restarts_best_effort() {
+        // Cursor names "zzz" which is not present → start from the top.
+        let e = vec![entry("a", false, 1, 1), entry("b", false, 1, 1)];
+        let (page, _) = paginate_mount_entries(e, None, "name", false, 50, Some("zzz"));
+        assert_eq!(names(&page), ["a", "b"]);
+    }
+
+    #[test]
+    fn empty_directory_yields_empty_page() {
+        let (page, cursor) = paginate_mount_entries(vec![], None, "name", false, 50, None);
+        assert!(page.is_empty());
+        assert!(cursor.is_none());
+    }
+
+    #[test]
+    fn limit_larger_than_len_returns_all_without_cursor() {
+        let e = vec![entry("a", false, 1, 1), entry("b", false, 1, 1)];
+        let (page, cursor) = paginate_mount_entries(e, None, "name", false, 100, None);
+        assert_eq!(page.len(), 2);
+        assert!(cursor.is_none());
+    }
+
+    #[test]
+    fn kind_filter_excluding_all_yields_empty() {
+        let e = vec![entry("only_dir", true, 0, 1)];
+        let (page, cursor) =
+            paginate_mount_entries(e, Some(&[ResourceKind::File]), "name", false, 50, None);
+        assert!(page.is_empty());
+        assert!(cursor.is_none());
+    }
+
+    #[test]
+    fn cursor_preserves_reverse_flag() {
+        let e = vec![
+            entry("a", false, 1, 1),
+            entry("b", false, 1, 1),
+            entry("c", false, 1, 1),
+        ];
+        let (_p, c) = paginate_mount_entries(e, None, "name", true, 1, None);
+        let decoded = FolderResourceCursor::decode(&c.unwrap()).unwrap();
+        assert!(decoded.reverse);
+        assert_eq!(decoded.order_by, "name");
+    }
+}
+
+#[cfg(all(test, integration_tests))]
+mod mount_authz_integration {
+    use super::*;
+    use crate::application::dtos::folder_dto::ListResourcesOptions;
+    use crate::application::services::external_mount_router::{MountRouter, ResolvedId};
+    use crate::application::services::file_retrieval_service::FileRetrievalService;
+    use crate::application::services::mount_registry::MountRegistry;
+    use crate::domain::services::external_mount_id::{NodeId, encode_child_id};
+    use crate::infrastructure::repositories::pg::{
+        ExternalMountPgRepository, FileBlobReadRepository, SubjectGroupPgRepository,
+    };
+    use crate::infrastructure::services::mount_provider_factory::DefaultMountProviderFactory;
+    use crate::mount_it_support::{fresh_db, insert_mount, make_user, provision_folder};
+    use std::sync::Arc;
+
+    fn opts<'a>() -> ListResourcesOptions<'a> {
+        ListResourcesOptions {
+            limit: 50,
+            cursor: None,
+            order_by: "name",
+            kinds: None,
+            reverse: false,
+        }
+    }
+
+    /// Build a real PgAclEngine over the live pool. The folder-ancestry cascade
+    /// uses the engine's own pool; the file repo is a stub (not exercised by
+    /// folder checks).
+    fn acl(pool: &Arc<sqlx::PgPool>) -> Arc<PgAclEngine> {
+        Arc::new(PgAclEngine::new(
+            pool.clone(),
+            Arc::new(FolderDbRepository::new(pool.clone())),
+            Arc::new(FileBlobReadRepository::new_stub()),
+            Arc::new(SubjectGroupPgRepository::new(pool.clone())),
+        ))
+    }
+
+    /// Provision a mount over `host`, build a wired FolderService, and return
+    /// `(folder_service, mount_root_uuid_string, owner_id)`.
+    async fn wire_mount(
+        pool: &Arc<sqlx::PgPool>,
+        host: &std::path::Path,
+    ) -> (FolderService, String, Uuid) {
+        let p = provision_folder(pool, "owner", "Media").await;
+        insert_mount(pool, &p, host.to_str().unwrap()).await;
+        let registry = Arc::new(MountRegistry::empty());
+        registry
+            .reload(
+                &ExternalMountPgRepository::new(pool.clone()),
+                &DefaultMountProviderFactory::new(),
+            )
+            .await;
+        let router = Arc::new(MountRouter::new(registry));
+        let fs = FolderService::new(
+            Arc::new(FolderDbRepository::new(pool.clone())),
+            acl(pool),
+            Arc::new(
+                crate::application::services::file_lifecycle_service::FileLifecycleService::new(),
+            ),
+            router,
+        );
+        (fs, p.mount_folder_id.to_string(), p.owner_id)
+    }
+
+    /// P2 write path: owner can mkdir/rename/delete inside a mount (reflected on
+    /// the host fs); a stranger is denied; the mount root cannot be renamed.
+    #[tokio::test]
+    async fn owner_mkdir_rename_delete_on_mount() {
+        use crate::application::dtos::folder_dto::{CreateFolderDto, RenameFolderDto};
+        let (_c, pool) = fresh_db().await;
+        let host = tempfile::tempdir().unwrap();
+        let (fs, mount_id, owner) = wire_mount(&pool, host.path()).await;
+
+        // mkdir under the mount root.
+        let created = fs
+            .create_folder_with_perms(
+                CreateFolderDto {
+                    name: "docs".into(),
+                    parent_id: Some(mount_id.clone()),
+                },
+                owner,
+            )
+            .await
+            .expect("owner may mkdir");
+        assert!(host.path().join("docs").is_dir());
+        assert!(created.id.starts_with("ext:"));
+        assert_eq!(created.parent_id.as_deref(), Some(mount_id.as_str()));
+
+        // Stranger may NOT mkdir.
+        let stranger = make_user(&pool, "stranger").await;
+        let denied = fs
+            .create_folder_with_perms(
+                CreateFolderDto {
+                    name: "evil".into(),
+                    parent_id: Some(mount_id.clone()),
+                },
+                stranger,
+            )
+            .await;
+        assert!(denied.is_err());
+        assert!(!host.path().join("evil").exists());
+
+        // rename the created dir.
+        let renamed = fs
+            .rename_folder_with_perms(
+                &created.id,
+                RenameFolderDto {
+                    name: "papers".into(),
+                },
+                owner,
+            )
+            .await
+            .expect("owner may rename");
+        assert!(host.path().join("papers").is_dir());
+        assert!(!host.path().join("docs").exists());
+
+        // The mount root itself cannot be renamed through this path.
+        assert!(
+            fs.rename_folder_with_perms(
+                &mount_id,
+                RenameFolderDto {
+                    name: "nope".into()
+                },
+                owner
+            )
+            .await
+            .is_err()
+        );
+
+        // delete (permanent — mounts have no trash).
+        fs.delete_folder_with_perms(&renamed.id, owner)
+            .await
+            .expect("owner may delete");
+        assert!(!host.path().join("papers").exists());
+    }
+
+    /// P2: file rename/delete and streaming upload on a mount, with authz.
+    #[tokio::test]
+    async fn file_rename_delete_and_upload_on_mount() {
+        use crate::application::ports::external_mount_ports::MountByteStream;
+        use crate::application::ports::file_ports::FileManagementUseCase;
+        use crate::application::services::external_upload_service::ExternalUploadService;
+        use crate::application::services::file_management_service::FileManagementService;
+        use crate::infrastructure::repositories::pg::FileBlobWriteRepository;
+        use bytes::Bytes;
+        use futures::stream;
+
+        let (_c, pool) = fresh_db().await;
+        let host = tempfile::tempdir().unwrap();
+        std::fs::write(host.path().join("a.txt"), b"hello").unwrap();
+
+        let p = provision_folder(&pool, "owner", "Media").await;
+        insert_mount(&pool, &p, host.path().to_str().unwrap()).await;
+        let registry = Arc::new(MountRegistry::empty());
+        registry
+            .reload(
+                &ExternalMountPgRepository::new(pool.clone()),
+                &DefaultMountProviderFactory::new(),
+            )
+            .await;
+        let router = Arc::new(MountRouter::new(registry.clone()));
+        let cfg = registry.get(&p.mount_folder_id).expect("registered");
+
+        let mgmt = FileManagementService::with_trash(
+            Arc::new(FileBlobWriteRepository::new_stub()),
+            None,
+            None,
+            None,
+            None,
+            acl(&pool),
+        )
+        .with_mount_router(router.clone());
+
+        let file_id = encode_child_id(p.mount_folder_id, "a.txt");
+
+        // Owner renames the mount file.
+        let renamed = mgmt
+            .rename_file_with_perms(&file_id, p.owner_id, "b.txt")
+            .await
+            .expect("owner may rename");
+        assert!(host.path().join("b.txt").exists());
+        assert!(!host.path().join("a.txt").exists());
+        assert_eq!(renamed.content_hash, "");
+
+        // Stranger may not delete.
+        let stranger = make_user(&pool, "stranger").await;
+        assert!(
+            mgmt.delete_file_with_perms(&renamed.id, stranger)
+                .await
+                .is_err()
+        );
+        assert!(host.path().join("b.txt").exists());
+
+        // Owner deletes (permanent — no trash).
+        mgmt.delete_file_with_perms(&renamed.id, p.owner_id)
+            .await
+            .expect("owner may delete");
+        assert!(!host.path().join("b.txt").exists());
+
+        // Streaming upload straight to the provider.
+        let upload = ExternalUploadService::new(acl(&pool));
+        let body: MountByteStream<'static> =
+            Box::pin(stream::once(async { Ok(Bytes::from_static(b"uploaded")) }));
+        let dto = upload
+            .write_file(&cfg, &NodeId::default(), "new.txt", body, p.owner_id)
+            .await
+            .expect("owner may upload");
+        assert_eq!(dto.size, 8);
+        assert_eq!(
+            std::fs::read(host.path().join("new.txt")).unwrap(),
+            b"uploaded"
+        );
+
+        // Stranger upload denied.
+        let body2: MountByteStream<'static> =
+            Box::pin(stream::once(async { Ok(Bytes::from_static(b"x")) }));
+        assert!(
+            upload
+                .write_file(&cfg, &NodeId::default(), "evil.txt", body2, stranger)
+                .await
+                .is_err()
+        );
+        assert!(!host.path().join("evil.txt").exists());
+    }
+
+    /// P3: the WebDAV/NextCloud-facing path + listing methods resolve mount
+    /// paths and enumerate provider children (PROPFIND Depth:1), and content
+    /// streams from the provider.
+    #[tokio::test]
+    async fn webdav_path_resolution_and_listing() {
+        use crate::application::dtos::pagination::PaginationRequestDto;
+        use crate::application::ports::file_ports::FileRetrievalUseCase;
+        use crate::application::services::file_retrieval_service::FileRetrievalService;
+        use futures::TryStreamExt;
+
+        let (_c, pool) = fresh_db().await;
+        let host = tempfile::tempdir().unwrap();
+        std::fs::create_dir(host.path().join("sub")).unwrap();
+        std::fs::write(host.path().join("a.txt"), b"top").unwrap();
+        std::fs::write(host.path().join("sub/b.txt"), b"nested!").unwrap();
+
+        let p = provision_folder(&pool, "owner", "Media").await;
+        insert_mount(&pool, &p, host.path().to_str().unwrap()).await;
+        let registry = Arc::new(MountRegistry::empty());
+        registry
+            .reload(
+                &ExternalMountPgRepository::new(pool.clone()),
+                &DefaultMountProviderFactory::new(),
+            )
+            .await;
+        let router = Arc::new(MountRouter::new(registry));
+        let folder_service = FolderService::new(
+            Arc::new(FolderDbRepository::new(pool.clone())),
+            acl(&pool),
+            Arc::new(
+                crate::application::services::file_lifecycle_service::FileLifecycleService::new(),
+            ),
+            router.clone(),
+        );
+        let retrieval = FileRetrievalService::new_with_authz_for_test(
+            Arc::new(FileBlobReadRepository::new_stub()),
+            acl(&pool),
+        )
+        .with_mount_router(router.clone());
+
+        // The mount root's materialized path; descend into it.
+        let root = folder_service
+            .get_folder(&p.mount_folder_id.to_string())
+            .await
+            .unwrap();
+
+        // get_folder_by_path resolves a mount subdirectory → synthetic ext: id.
+        let sub = folder_service
+            .get_folder_by_path(&format!("{}/sub", root.path), p.drive_id)
+            .await
+            .expect("resolve sub dir by path");
+        assert!(sub.id.starts_with("ext:"));
+        assert_eq!(sub.name, "sub");
+
+        // get_file_by_path resolves a mount file.
+        let file = retrieval
+            .get_file_by_path(&format!("{}/a.txt", root.path), p.drive_id)
+            .await
+            .expect("resolve file by path");
+        assert!(file.id.starts_with("ext:"));
+        assert_eq!(file.size, 3);
+
+        // PROPFIND Depth:1 folder loop: list subdirectories of the mount root.
+        let dirs = folder_service
+            .list_folders_paginated_with_perms(
+                Some(&p.mount_folder_id.to_string()),
+                p.owner_id,
+                &PaginationRequestDto::default(),
+            )
+            .await
+            .expect("list mount subdirs");
+        assert_eq!(
+            dirs.items
+                .iter()
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>(),
+            ["sub"]
+        );
+
+        // PROPFIND Depth:1 file loop: list files of the mount root.
+        let files = retrieval
+            .list_files_batch_with_perms(
+                Some(&p.mount_folder_id.to_string()),
+                p.owner_id,
+                None,
+                100,
+            )
+            .await
+            .expect("list mount files");
+        assert_eq!(
+            files.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            ["a.txt"]
+        );
+
+        // Content streams from the provider (WebDAV GET) — resolve the nested
+        // file by path, then stream it by its ext: id.
+        let nested = retrieval
+            .get_file_by_path(&format!("{}/sub/b.txt", root.path), p.drive_id)
+            .await
+            .expect("nested file");
+        let content: Vec<u8> = Box::into_pin(retrieval.get_file_stream(&nested.id).await.unwrap())
+            .map_ok(|b| b.to_vec())
+            .try_concat()
+            .await
+            .unwrap();
+        assert_eq!(content, b"nested!");
+    }
+
+    /// P2: a move that would cross the mount boundary is forbidden.
+    #[tokio::test]
+    async fn cross_boundary_move_forbidden() {
+        use crate::application::dtos::folder_dto::{CreateFolderDto, MoveFolderDto};
+        let (_c, pool) = fresh_db().await;
+        let host = tempfile::tempdir().unwrap();
+        std::fs::create_dir(host.path().join("inside")).unwrap();
+        let (fs, mount_id, owner) = wire_mount(&pool, host.path()).await;
+
+        let child_id = encode_child_id(Uuid::parse_str(&mount_id).unwrap(), "inside");
+
+        // Moving a mount child to the user's native root (parent_id = None) is
+        // a cross-backend move → UnsupportedOperation.
+        let err = fs
+            .move_folder_with_perms(&child_id, MoveFolderDto { parent_id: None }, owner)
+            .await
+            .expect_err("cross-boundary move must be forbidden");
+        assert_eq!(
+            err.kind,
+            crate::domain::errors::ErrorKind::UnsupportedOperation
+        );
+
+        // A native folder cannot be moved INTO the mount either.
+        let native = fs
+            .create_folder_with_perms(
+                CreateFolderDto {
+                    name: "n".into(),
+                    parent_id: Some(mount_id.clone()),
+                },
+                owner,
+            )
+            .await;
+        // (n is created inside the mount; that's a normal mkdir, allowed.)
+        assert!(native.is_ok());
+    }
+
+    /// Full read path: owner can list a mount's live contents; a stranger with
+    /// no grant is denied. Exercises the REAL authorization cascade
+    /// (`authz.require(Resource::Folder(mount_id))`) over ltree ancestry.
+    #[tokio::test]
+    async fn owner_lists_mount_contents_stranger_denied() {
+        let (_c, pool) = fresh_db().await;
+
+        // Real host directory the mount points at.
+        let host = tempfile::tempdir().unwrap();
+        std::fs::write(host.path().join("a.txt"), b"hello").unwrap();
+        std::fs::create_dir(host.path().join("sub")).unwrap();
+
+        let p = provision_folder(&pool, "owner", "Media").await;
+        insert_mount(&pool, &p, host.path().to_str().unwrap()).await;
+
+        // Build the registry from the DB (also exercises reload + provider build).
+        let registry = Arc::new(MountRegistry::empty());
+        registry
+            .reload(
+                &ExternalMountPgRepository::new(pool.clone()),
+                &DefaultMountProviderFactory::new(),
+            )
+            .await;
+        let router = Arc::new(MountRouter::new(registry.clone()));
+        let folder_service = FolderService::new(
+            Arc::new(FolderDbRepository::new(pool.clone())),
+            acl(&pool),
+            Arc::new(
+                crate::application::services::file_lifecycle_service::FileLifecycleService::new(),
+            ),
+            router.clone(),
+        );
+
+        let cfg = registry.get(&p.mount_folder_id).expect("mount registered");
+
+        // The mount root UUID classifies as a MountRoot.
+        assert!(matches!(
+            router.classify(&p.mount_folder_id.to_string()),
+            ResolvedId::MountRoot { .. }
+        ));
+
+        // Owner lists the live directory contents.
+        let (entries, _cursor) = folder_service
+            .list_mount_dir_with_perms(&cfg, &NodeId::default(), p.owner_id, opts())
+            .await
+            .expect("owner may list");
+        let mut names: Vec<_> = entries.iter().map(|e| e.name.clone()).collect();
+        names.sort();
+        assert_eq!(names, ["a.txt", "sub"]);
+
+        // A stranger with no grant on the mount-root folder is denied
+        // (NotFound — anti-enumeration).
+        let stranger = make_user(&pool, "stranger").await;
+        let err = folder_service
+            .list_mount_dir_with_perms(&cfg, &NodeId::default(), stranger, opts())
+            .await
+            .expect_err("stranger must be denied");
+        assert_eq!(err.kind, crate::domain::errors::ErrorKind::NotFound);
+    }
+
+    /// Download path authz: owner can stat/open a mount file; stranger denied.
+    #[tokio::test]
+    async fn owner_reads_mount_file_stranger_denied() {
+        let (_c, pool) = fresh_db().await;
+
+        let host = tempfile::tempdir().unwrap();
+        std::fs::write(host.path().join("doc.txt"), b"payload").unwrap();
+
+        let p = provision_folder(&pool, "owner", "Media").await;
+        insert_mount(&pool, &p, host.path().to_str().unwrap()).await;
+
+        let registry = Arc::new(MountRegistry::empty());
+        registry
+            .reload(
+                &ExternalMountPgRepository::new(pool.clone()),
+                &DefaultMountProviderFactory::new(),
+            )
+            .await;
+        let cfg = registry.get(&p.mount_folder_id).expect("registered");
+
+        let retrieval = FileRetrievalService::new_with_authz_for_test(
+            Arc::new(FileBlobReadRepository::new_stub()),
+            acl(&pool),
+        );
+
+        let node = NodeId::from("doc.txt");
+
+        // Owner: stat succeeds with the real size.
+        let stat = retrieval
+            .stat_mount_file_with_perms(&cfg, &node, p.owner_id)
+            .await
+            .expect("owner may stat");
+        assert_eq!(stat.size, 7);
+        assert!(!stat.is_dir);
+
+        // Owner: open succeeds (smoke — stream is consumed elsewhere).
+        assert!(
+            retrieval
+                .open_mount_file_with_perms(&cfg, &node, p.owner_id, None)
+                .await
+                .is_ok()
+        );
+
+        // The synthetic id for this file round-trips through the router.
+        let ext_id = encode_child_id(p.mount_folder_id, "doc.txt");
+        assert!(matches!(
+            MountRouter::new(registry.clone()).classify(&ext_id),
+            ResolvedId::MountChild { .. }
+        ));
+
+        // Stranger: denied.
+        let stranger = make_user(&pool, "stranger").await;
+        let err = retrieval
+            .stat_mount_file_with_perms(&cfg, &node, stranger)
+            .await
+            .expect_err("stranger denied");
+        assert_eq!(err.kind, crate::domain::errors::ErrorKind::NotFound);
+    }
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Integration test — verifies the folder-cascade hook fix lands `on_file_deleted`
 // for every file the PG cascade reaps when a folder is permanently deleted.
@@ -1267,7 +2269,14 @@ mod cascade_hook_integration_tests {
             crate::application::services::file_lifecycle_service::FileLifecycleService::new()
                 .with_hook(recorder.clone() as Arc<dyn FileLifecycleHook>),
         );
-        let service = FolderService::new(folder_repo.clone(), authz, fls);
+        let service = FolderService::new(
+            folder_repo.clone(),
+            authz,
+            fls,
+            Arc::new(MountRouter::new(Arc::new(
+                crate::application::services::mount_registry::MountRegistry::empty(),
+            ))),
+        );
 
         // Build parent/child via the production create path — it stamps
         // provenance and computes paths the same way as live uploads.

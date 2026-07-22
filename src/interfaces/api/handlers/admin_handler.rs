@@ -52,7 +52,17 @@ struct AdminUsersPageResponse {
 
 /// Admin API routes — all require admin role.
 pub fn admin_routes() -> Router<Arc<AppState>> {
+    use super::admin_external_mounts as ext_mounts;
     Router::new()
+        // External file mounts
+        .route(
+            "/external-mounts",
+            get(ext_mounts::list_external_mounts).post(ext_mounts::create_external_mount),
+        )
+        .route(
+            "/external-mounts/{id}",
+            delete(ext_mounts::delete_external_mount),
+        )
         // OIDC settings
         .route("/settings/oidc", get(get_oidc_settings))
         .route("/settings/oidc", put(save_oidc_settings))

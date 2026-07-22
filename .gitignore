@@ -126,3 +126,6 @@ tests/load/storage/
 # `cargo bench --features bench`; drop real photos here (same filenames) to
 # benchmark against real data. (target/ already ignored, covers the JSON dump.)
 benches/corpus/
+
+# Claude Code scheduled-tasks runtime lock — machine-local, never committed.
+.claude/scheduled_tasks.lock

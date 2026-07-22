@@ -1,3 +1,4 @@
+pub mod admin_external_mounts;
 pub mod admin_handler;
 pub mod app_password_handler;
 pub mod auth_handler;

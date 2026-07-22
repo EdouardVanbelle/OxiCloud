@@ -11,13 +11,18 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use utoipa::ToSchema;
 
+use crate::application::ports::external_mount_ports::MountStat;
 use crate::application::ports::file_ports::{
     FileManagementUseCase, FileRetrievalUseCase, FileUploadUseCase, RangeContent,
 };
 use crate::application::ports::storage_ports::{FileReadPort, StorageUsagePort};
 use crate::application::ports::thumbnail_ports::ThumbnailPort;
 use crate::application::ports::{file_ports::OptimizedFileContent, folder_ports::FolderUseCase};
+use crate::application::services::external_mount_router::ResolvedId;
+use crate::application::services::mount_registry::MountConfig;
 use crate::common::di::AppState;
+use crate::domain::errors::DomainError;
+use crate::domain::services::external_mount_id::{NodeId, virtual_file_etag};
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::AuthUser;
 use crate::interfaces::range_requests::not_modified_response;
@@ -248,6 +253,35 @@ impl FileHandler {
                             estimated_size
                         );
                         return Err(Self::quota_error_response(err));
+                    }
+                }
+
+                // ── External mount destination? Stream to the provider ──
+                // Detected BEFORE the CAS ingest so the bytes never touch
+                // BLAKE3/dedup. Authorization happens inside the service.
+                if let Some(ref fid) = folder_id {
+                    let (mount_cfg, parent_node) = match state.mount_router.classify(fid) {
+                        ResolvedId::MountRoot { cfg } => (Some(cfg), NodeId::default()),
+                        ResolvedId::MountChild { cfg, node_id } => (Some(cfg), node_id),
+                        ResolvedId::Regular => (None, NodeId::default()),
+                    };
+                    if let Some(cfg) = mount_cfg {
+                        use futures::StreamExt;
+                        let body: crate::application::ports::external_mount_ports::MountByteStream<
+                            '_,
+                        > = Box::pin(
+                            upload_ingest::multipart_field_stream(field)
+                                .map(|r| r.map_err(|e| std::io::Error::other(e.to_string()))),
+                        );
+                        return match state
+                            .applications
+                            .external_upload_service
+                            .write_file(&cfg, &parent_node, &filename, body, auth_user.id)
+                            .await
+                        {
+                            Ok(file) => Ok((file, String::new())),
+                            Err(err) => Err(Self::domain_error_response(err)),
+                        };
                     }
                 }
 
@@ -683,6 +717,22 @@ impl FileHandler {
         Query(params): Query<HashMap<String, String>>,
         headers: &HeaderMap,
     ) -> impl IntoResponse + use<> {
+        // External mount: download a file living on the provider's backend.
+        // (A mount-root UUID is a folder and is not downloadable — it falls
+        // through and 404s as a non-file.)
+        if let ResolvedId::MountChild { cfg, node_id } = state.mount_router.classify(&id) {
+            return Self::download_mount_file(
+                &state,
+                &cfg,
+                &node_id,
+                &id,
+                auth_user.id,
+                &params,
+                headers,
+            )
+            .await;
+        }
+
         let retrieval = &state.applications.file_retrieval_service;
 
         // ── Get file metadata (ownership-scoped) ────────────────────────
@@ -834,6 +884,134 @@ impl FileHandler {
                     .unwrap()
                     .into_response(),
             },
+            Err(err) => AppError::from(err).into_response(),
+        }
+    }
+
+    /// Download a file living inside an external mount: stat via the provider
+    /// (authorized against the mount root), then serve metadata / 304 / Range /
+    /// full stream straight from the backend. No blob cache, dedup, or WebP
+    /// transcode — mount content is served as-is.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn download_mount_file(
+        state: &AppState,
+        cfg: &MountConfig,
+        node_id: &NodeId,
+        id: &str,
+        caller_id: uuid::Uuid,
+        params: &HashMap<String, String>,
+        headers: &HeaderMap,
+    ) -> axum::response::Response {
+        let retrieval = &state.applications.file_retrieval_service;
+
+        let stat: MountStat = match retrieval
+            .stat_mount_file_with_perms(cfg, node_id, caller_id)
+            .await
+        {
+            Ok(s) => s,
+            Err(err) => return AppError::from(err).into_response(),
+        };
+        if stat.is_dir {
+            // Directories are not downloadable through this endpoint.
+            return AppError::from(DomainError::not_found("File", id)).into_response();
+        }
+
+        let name = node_id
+            .as_str()
+            .rsplit('/')
+            .next()
+            .unwrap_or_else(|| node_id.as_str());
+
+        // ── Metadata-only request ────────────────────────────────────
+        if params
+            .get("metadata")
+            .is_some_and(|v| v == "true" || v == "1")
+        {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "size": stat.size,
+                    "mime_type": stat.mime_type,
+                    "modified_at": stat.modified_at,
+                })),
+            )
+                .into_response();
+        }
+
+        let etag = format!("\"{}\"", virtual_file_etag(stat.size, stat.modified_at));
+        if let Some(resp) = not_modified_response(headers, &etag) {
+            return resp.into_response();
+        }
+
+        // ── Range Requests ───────────────────────────────────────────
+        let range_header = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+        match plan_mount_range(stat.size, range_header) {
+            MountRangePlan::Full => {}
+            MountRangePlan::NotSatisfiable => {
+                return Response::builder()
+                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header(header::CONTENT_RANGE, format!("bytes */{}", stat.size))
+                    .body(Body::empty())
+                    .unwrap()
+                    .into_response();
+            }
+            MountRangePlan::Range { start, end } => {
+                let range_length = end - start + 1;
+                let disposition = Self::content_disposition(name, &stat.mime_type, params);
+                match retrieval
+                    .open_mount_file_with_perms(cfg, node_id, caller_id, Some((start, Some(end))))
+                    .await
+                {
+                    Ok(stream) => {
+                        return Response::builder()
+                            .status(StatusCode::PARTIAL_CONTENT)
+                            .header(header::CONTENT_TYPE, &stat.mime_type)
+                            .header(header::CONTENT_DISPOSITION, &disposition)
+                            .header(header::CONTENT_LENGTH, range_length)
+                            .header(
+                                header::CONTENT_RANGE,
+                                format!("bytes {}-{}/{}", start, end, stat.size),
+                            )
+                            .header(header::ACCEPT_RANGES, "bytes")
+                            .header(header::ETAG, &etag)
+                            .header(
+                                header::CACHE_CONTROL,
+                                "private, max-age=3600, must-revalidate",
+                            )
+                            .body(Body::from_stream(stream))
+                            .unwrap()
+                            .into_response();
+                    }
+                    Err(err) => {
+                        tracing::error!("Error creating mount range stream: {}", err);
+                        // fall through to full download
+                    }
+                }
+            }
+        }
+
+        // ── Normal download ──────────────────────────────────────────
+        let disposition = Self::content_disposition(name, &stat.mime_type, params);
+        match retrieval
+            .open_mount_file_with_perms(cfg, node_id, caller_id, None)
+            .await
+        {
+            Ok(stream) => Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, &stat.mime_type)
+                .header(header::CONTENT_DISPOSITION, &disposition)
+                .header(header::CONTENT_LENGTH, stat.size)
+                .header(header::ETAG, &etag)
+                .header(
+                    header::CACHE_CONTROL,
+                    "private, max-age=3600, must-revalidate",
+                )
+                .header(header::ACCEPT_RANGES, "bytes")
+                .body(Body::from_stream(stream))
+                .unwrap()
+                .into_response(),
             Err(err) => AppError::from(err).into_response(),
         }
     }
@@ -1471,4 +1649,94 @@ pub async fn move_file_simple(
     json: Json<serde_json::Value>,
 ) -> impl IntoResponse {
     FileHandler::move_file_simple_impl(state, auth_user, path, json).await
+}
+
+/// The download decision for a mount file given a `Range` header — the gnarly
+/// parse-and-validate logic, extracted so it is unit-testable without I/O.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum MountRangePlan {
+    /// Serve the whole file (no/invalid range header).
+    Full,
+    /// Serve `start..=end` (inclusive) as 206 Partial Content.
+    Range { start: u64, end: u64 },
+    /// The requested range is unsatisfiable for this size → 416.
+    NotSatisfiable,
+}
+
+/// Decide how to serve a mount file for a given size + optional `Range` header.
+/// A missing or unparseable range → `Full`; a valid range → `Range`; an
+/// out-of-bounds range → `NotSatisfiable`.
+pub(super) fn plan_mount_range(size: u64, range_header: Option<&str>) -> MountRangePlan {
+    let Some(rh) = range_header else {
+        return MountRangePlan::Full;
+    };
+    let Ok(ranges) = parse_range_header(rh) else {
+        // Malformed range header: ignore it and serve the whole file (RFC 7233).
+        return MountRangePlan::Full;
+    };
+    match ranges.validate(size) {
+        Ok(valid) => match valid.first() {
+            Some(r) => MountRangePlan::Range {
+                start: *r.start(),
+                end: *r.end(),
+            },
+            None => MountRangePlan::Full,
+        },
+        Err(_) => MountRangePlan::NotSatisfiable,
+    }
+}
+
+#[cfg(test)]
+mod mount_range_tests {
+    use super::{MountRangePlan, plan_mount_range};
+
+    #[test]
+    fn no_range_header_is_full() {
+        assert_eq!(plan_mount_range(100, None), MountRangePlan::Full);
+    }
+
+    #[test]
+    fn malformed_range_falls_back_to_full() {
+        assert_eq!(
+            plan_mount_range(100, Some("not-a-range")),
+            MountRangePlan::Full
+        );
+        assert_eq!(
+            plan_mount_range(100, Some("bytes=abc")),
+            MountRangePlan::Full
+        );
+    }
+
+    #[test]
+    fn valid_range_is_parsed_inclusive() {
+        assert_eq!(
+            plan_mount_range(100, Some("bytes=10-19")),
+            MountRangePlan::Range { start: 10, end: 19 }
+        );
+    }
+
+    #[test]
+    fn open_ended_range_extends_to_eof() {
+        assert_eq!(
+            plan_mount_range(100, Some("bytes=90-")),
+            MountRangePlan::Range { start: 90, end: 99 }
+        );
+    }
+
+    #[test]
+    fn suffix_range_counts_from_end() {
+        // last 10 bytes of a 100-byte file => 90..=99
+        assert_eq!(
+            plan_mount_range(100, Some("bytes=-10")),
+            MountRangePlan::Range { start: 90, end: 99 }
+        );
+    }
+
+    #[test]
+    fn out_of_bounds_range_is_not_satisfiable() {
+        assert_eq!(
+            plan_mount_range(100, Some("bytes=200-300")),
+            MountRangePlan::NotSatisfiable
+        );
+    }
 }
