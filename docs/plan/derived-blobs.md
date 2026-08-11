@@ -2,8 +2,11 @@
 
 **Status:** design captured 2026-08-02, revised 2026-08-12 — keying
 rule, CDC reuse, backend-dispatch rule, the
-`derived_blobs`/`attached_blobs` pair, and two refcount prerequisites
-(set-based sweep, manifest-level verification). Not implemented. Follow-up to `fix/services-use-blob-abstraction` — that
+`content_derived_blobs` / `file_attached_blobs` pair, and two
+refcount prerequisites (set-based sweep, manifest-level
+verification). Not implemented.
+
+Follow-up to `fix/services-use-blob-abstraction` — that
 PR normalised the **read-side** (services consume blobs through
 `BlobStorageBackend` uniformly). This plan tackles the **write-side**:
 services that today write derived artifacts (thumbnails, transcodes)
@@ -76,7 +79,7 @@ was attached to, never by content.
 | transcode | `f(blob bytes, target)` | ✅ |
 | extracted text | `f(blob bytes)` | ✅ — `storage.blob_extracted_text` |
 | face vectors | `f(blob bytes)` | ✅ — `faces.faces` |
-| client-uploaded preview | `f(user's choice)` | ❌ **must be file-keyed** — `storage.attached_blobs`, see below |
+| client-uploaded preview | `f(user's choice)` | ❌ **must be file-keyed** — `storage.file_attached_blobs`, see below |
 
 This isn't a new pattern: `storage.blob_extracted_text` already
 chose content-keying for the same reason, and the migration says so
@@ -109,7 +112,7 @@ key. Storage stays one keyspace; ownership stays per-service.
 ### Schema
 
 ```sql
-CREATE TABLE storage.derived_blobs (
+CREATE TABLE storage.content_derived_blobs (
     source_hash VARCHAR(64) NOT NULL,   -- source Blob (no FK — see below)
     kind        TEXT NOT NULL,          -- 'thumbnail' | 'transcode'
     variant     TEXT NOT NULL,          -- 'icon.webp', 'large.jpg', 'av1.720p'
@@ -118,7 +121,7 @@ CREATE TABLE storage.derived_blobs (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (source_hash, kind, variant)
 );
-CREATE INDEX ON storage.derived_blobs(blob_hash);
+CREATE INDEX ON storage.content_derived_blobs(blob_hash);
 ```
 
 One table with a `kind` discriminator rather than separate
@@ -142,7 +145,7 @@ severity could differ. With client previews excluded from this table
 it only if that changes.
 
 **Deletion is app-layer.** `on_blob_deleted(source_hash)` does
-`DELETE FROM storage.derived_blobs WHERE source_hash = $1 RETURNING blob_hash`
+`DELETE FROM storage.content_derived_blobs WHERE source_hash = $1 RETURNING blob_hash`
 then `remove_reference()` per row — a one-for-one replacement of
 today's `delete_blob_thumbnails` unlink loop, no new mechanism. A raw
 SQL `ON DELETE CASCADE` would drop the mapping row without
@@ -151,21 +154,31 @@ registry exists the refcount is derivable, so the drift surfaces as a
 `refcount_mismatch` finding, and the interim state is an **over**-count
 (blob retained longer than needed) never an under-count (live data
 reaped). So a cascade is tolerable where it's ergonomic — see
-`attached_blobs` below — provided the registry is in place to
+`file_attached_blobs` below — provided the registry is in place to
 reconcile it.
 
-### The pair — `derived_blobs` and `attached_blobs`
+### The pair — `content_derived_blobs` and `file_attached_blobs`
 
 Two tables, one keying difference, and that difference *is* the
 security boundary (see the client-preview section):
 
 ```
-storage.derived_blobs   (source_hash, kind, variant)  -- derived FROM content
-storage.attached_blobs  (file_id,     kind, variant)  -- attached TO a file
+storage.content_derived_blobs  (source_hash, kind, variant)
+storage.file_attached_blobs    (file_id,     kind, variant)
 ```
 
+**The name states the key**, because the key is the only thing that
+differs and choosing the wrong one is a silent poisoning bug rather
+than a compile error. An earlier draft called these
+`derived_blobs` / `attached_blobs`; that pairing was rejected because
+`derived` vs `attached` is the wrong axis of symmetry — a thumbnail is,
+in plain English, "attached to" a file, so both words plausibly
+describe either table and the names carry no signal about keying. The
+`content_` / `file_` prefixes are non-overlapping and answer the only
+question an implementor needs to ask.
+
 ```sql
-CREATE TABLE storage.attached_blobs (
+CREATE TABLE storage.file_attached_blobs (
     file_id     UUID NOT NULL REFERENCES storage.file_metadata(id) ON DELETE CASCADE,
     kind        TEXT NOT NULL CHECK (kind IN ('preview', 'subtitle', 'cover_art')),
     variant     TEXT NOT NULL,          -- 'preview.jpg', 'sub.en', 'cover.jpg'
@@ -175,14 +188,14 @@ CREATE TABLE storage.attached_blobs (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (file_id, kind, variant)
 );
-CREATE INDEX ON storage.attached_blobs(blob_hash);
+CREATE INDEX ON storage.file_attached_blobs(blob_hash);
 ```
 
 **Routing rule — put this as a comment on both tables:**
 
 > Bytes are a pure deterministic function of the file's content →
-> `derived_blobs` (content-keyed, dedupes across files, regenerable).
-> Bytes are user-supplied or user-chosen → `attached_blobs`
+> `content_derived_blobs` (content-keyed, dedupes across files, regenerable).
+> Bytes are user-supplied or user-chosen → `file_attached_blobs`
 > (file-keyed, never shared across files, not regenerable).
 
 Generic naming rather than `file_previews` because the family is
@@ -209,6 +222,20 @@ so one generic reference-source implementation parameterised by
 table + column covers both — the same one-implementation property
 the rest of this plan is built on.
 
+**Naming and comments are advisory; the boundary needs a test.** The
+one guard that actually stops a future implementor is an integration
+test asserting both halves at once: two users uploading byte-identical
+content resolve to the **same** `content_derived_blobs` rows (dedup
+works), and a client preview uploaded by one of them produces **no**
+row reachable by the other (no cross-file sharing). That test fails
+loudly the moment someone rekeys either table. Ship it with step 4,
+not after.
+
+Structural help, in descending order of reliability: the test; the
+column types (`file_id UUID` vs `source_hash VARCHAR(64)`, so a row
+cannot be copied between tables); the absence of any `file_id` column
+on `content_derived_blobs`; the table comments.
+
 ### Write path — reuse `store_from_stream`, don't special-case CDC
 
 Derived blobs go through `DedupService::store_from_stream()`
@@ -231,7 +258,7 @@ What it buys: zero new write path, zero new read path, and
 ref-counting, GC, `add_reference` / `remove_reference` and both
 consistency jobs all work on derived blobs with no changes, because
 they are already manifest-aware. One `store_from_stream` call == one
-reference == one `derived_blobs` row, symmetric on delete.
+reference == one `content_derived_blobs` row, symmetric on delete.
 
 Two gotchas that come with the reuse:
 
@@ -297,7 +324,7 @@ Two adjacent cleanups in the same file: `stream_blob_to_temp` uses
 `store_external_thumbnail`'s `ext-{file_id}.jpg` write is the last
 hand-crafted path once the rest is converted.
 
-### Client-uploaded thumbnails — file-keyed, and NOT in `derived_blobs`
+### Client-uploaded thumbnails — file-keyed, and NOT in `content_derived_blobs`
 
 Some clients (NC desktop, mobile apps) upload their own encoded
 previews alongside the file. These are **not derivable** — losing
@@ -314,22 +341,22 @@ content-keying a cross-user poisoning vector:
 2. User B uploads the same file X. Dedup matches on `source_hash`.
 3. B is served A's preview.
 
-So client previews **stay file-keyed, in `storage.attached_blobs`,
-and out of `storage.derived_blobs`.** This is a precondition for
-`derived_blobs` having no `source_file_id` column, not an independent
+So client previews **stay file-keyed, in `storage.file_attached_blobs`,
+and out of `storage.content_derived_blobs`.** This is a precondition for
+`content_derived_blobs` having no `source_file_id` column, not an independent
 choice — the two decisions must land together.
 
 Worked example. User A uploads `image.png` (file id `7f3e…9c`,
 content hash `a1b2c3…`), then `PUT`s their own preview:
 
 ```
-storage.derived_blobs                       -- server-derived, content-keyed
+storage.content_derived_blobs      -- server-derived, content-keyed
  source_hash | kind      | variant      | blob_hash | size
  a1b2c3…     | thumbnail | icon.webp    | 9a8b…     |  6012
  a1b2c3…     | thumbnail | preview.webp | d4e5f6…   | 23418
  a1b2c3…     | thumbnail | large.webp   | c7d8…     | 71204
 
-storage.attached_blobs                      -- client-supplied, file-keyed
+storage.file_attached_blobs        -- client-supplied, file-keyed
  file_id  | kind    | variant     | blob_hash | size  | uploaded_by
  7f3e…9c  | preview | preview.jpg | e1f2…     | 18904 | A
 ```
@@ -340,13 +367,13 @@ stay content-addressed and dedupe: two users uploading
 byte-identical previews converge on one object at `ref_count = 2`.
 Only the **mapping** is per-file — and the mapping is the part that
 carries the trust problem. When user B uploads the same
-`image.png`, B matches `a1b2c3…` in `derived_blobs` and gets the
-server-derived thumbnails; B has no `attached_blobs` row, so A's
+`image.png`, B matches `a1b2c3…` in `content_derived_blobs` and gets the
+server-derived thumbnails; B has no `file_attached_blobs` row, so A's
 preview is unreachable.
 
 Read precedence is unchanged from today (the client's preview wins):
-`attached_blobs` for `(file_id, 'preview', …)` first, else
-`derived_blobs` for `(source_hash, 'thumbnail', 'preview.webp')`.
+`file_attached_blobs` for `(file_id, 'preview', …)` first, else
+`content_derived_blobs` for `(source_hash, 'thumbnail', 'preview.webp')`.
 Both fold into the query the handler already issues.
 
 `uploaded_by` is new. Today there is no provenance at all on a
@@ -393,7 +420,7 @@ problem.
 Current scope note: the SvelteKit frontend has no caller of the
 thumbnail `PUT` endpoint outside a test file — server-side ffmpeg
 extraction (`generate_video_thumbnails_background`) replaced it. The
-`attached_blobs` *shape* is settled (above) so the boundary is on
+`file_attached_blobs` *shape* is settled (above) so the boundary is on
 record, but the migration and endpoint work wait for a real feature
 ask — most likely E2E/Vault thumbnails, where the server cannot
 derive them at all.
@@ -422,7 +449,7 @@ pub trait BlobReferenceSource: Send + Sync {
 
     /// A correlated-subquery fragment counting this source's
     /// references to the outer row's hash, e.g.
-    /// `"(SELECT COUNT(*) FROM storage.derived_blobs d WHERE d.blob_hash = b.hash)"`.
+    /// `"(SELECT COUNT(*) FROM storage.content_derived_blobs d WHERE d.blob_hash = b.hash)"`.
     /// The registry sums the fragments into `blobs_consistency`'s
     /// existing per-page SELECT, so the sweep stays ONE query per
     /// page instead of degrading to (sources × blobs) round-trips.
@@ -477,8 +504,8 @@ Tier-2 migration adds two more — one per table, not one per `kind`,
 and both satisfied by the same generic implementation parameterised
 by table + column:
 
-- `DerivedBlobsReferenceSource` — `storage.derived_blobs.blob_hash`
-- `AttachedBlobsReferenceSource` — `storage.attached_blobs.blob_hash`
+- `ContentDerivedReferenceSource` — `storage.content_derived_blobs.blob_hash`
+- `FileAttachedReferenceSource` — `storage.file_attached_blobs.blob_hash`
 
 `ChunksReferenceSource` stays bespoke (array containment,
 `b.hash = ANY(m.chunk_hashes)`).
@@ -494,8 +521,8 @@ whichever level the hash names:
 | `chunk_manifests.chunk_hashes[]` | chunk | `storage.blobs.ref_count` |
 | `files.blob_hash` (legacy, no manifest) | whole-file blob | `storage.blobs.ref_count` |
 | `files.blob_hash` (CDC) | Blob via manifest | `chunk_manifests.ref_count` |
-| `derived_blobs.blob_hash` | Blob via manifest | `chunk_manifests.ref_count` |
-| `attached_blobs.blob_hash` | Blob via manifest | `chunk_manifests.ref_count` |
+| `content_derived_blobs.blob_hash` | Blob via manifest | `chunk_manifests.ref_count` |
+| `file_attached_blobs.blob_hash` | Blob via manifest | `chunk_manifests.ref_count` |
 
 Both new tables reference *manifests*, never chunks — hence
 `ref_level()` on the trait. Adding their fragments to the chunk-level
@@ -528,7 +555,7 @@ Then:
 
 1. **Registry before the tables.** `blobs_consistency` derives
    expected refcounts from `file_metadata` + manifests only. Ship
-   `storage.derived_blobs` first and *every* derived blob becomes a
+   `storage.content_derived_blobs` first and *every* derived blob becomes a
    `refcount_mismatch` finding — a flood, and one an operator might
    "repair".
 2. **`chunk_manifests.ref_count` must become verified.** It is
@@ -553,9 +580,9 @@ the request. Read order:
    nothing — the handler already has the hash from the row it
    loaded — and stops N copies of one photo occupying N entries for
    identical bytes.)
-2. **DB** — `derived_blobs` lookup for the variant. This is free:
+2. **DB** — `content_derived_blobs` lookup for the variant. This is free:
    the miss path already queries `get_blob_hash(&id)`, so a
-   `LEFT JOIN` on `derived_blobs` returns the source hash and the
+   `LEFT JOIN` on `content_derived_blobs` returns the source hash and the
    derived hash in one query. Net DB cost unchanged from today.
 3. **`dedup.read_blob_bytes(derived_hash)`** — through the normal
    backend stack, which is where the disk cache lives.
@@ -621,7 +648,7 @@ option** (config, not a code branch): persist only the `large`
 variant to tier 3 and derive icon/preview from it on demand — the
 render path already decodes once for all sizes, and resampling an
 800px WebP is sub-millisecond. That is 1M objects instead of 3M. It
-changes only *how many variants get a `derived_blobs` row*, so it
+changes only *how many variants get a `content_derived_blobs` row*, so it
 stays a single code path.
 
 ## Sidecar directories after this refactor
@@ -666,18 +693,18 @@ hardcoded SQL). New sources bolt on independently.
 3. ~~`OXICLOUD_SPOOL_DIR`~~ — reduced to a docs change, or dropped;
    see the sidecar section.
 4. **`ThumbnailService` writes go through `DedupService`**. New
-   `storage.derived_blobs` table + `DerivedBlobsReferenceSource`.
+   `storage.content_derived_blobs` table + `ContentDerivedReferenceSource`.
    Deletes `thumbnails_root`, `get_thumbnail_path`, and every
-   filesystem call in the service. Fold the `derived_blobs` lookup
+   filesystem call in the service. Fold the `content_derived_blobs` lookup
    into the handler's existing `get_blob_hash` query.
 5. **`blobs_consistency` bulk-LIST diff** — before, or immediately
    after, step 4 lands at scale; per-row HEADs do not survive a 4×
    row count.
 6. **`ImageTranscodeService`** — same shape, `kind = 'transcode'`,
    no new table.
-7. **`storage.attached_blobs`** — only when a real feature ask
+7. **`storage.file_attached_blobs`** — only when a real feature ask
    appears (most likely E2E/Vault thumbnails). Shape is settled
-   above; file-keyed, never in `derived_blobs`.
+   above; file-keyed, never in `content_derived_blobs`.
 
 Each slice is independently mergeable. Delivery span: rough
 estimate ~2 weeks end-to-end.
@@ -764,12 +791,32 @@ lands so we don't stack schema changes.
   disk cache is `CachedBlobBackend`, instantiated by the existing
   DI branch. Splitting budgets means a second *instance*, never a
   second implementation.
-- **Per-file key/value metadata.** A separate plan. It is not a
-  blob table: k/v pairs are rows, so they belong in their own
-  schema, NOT as an `attached_blobs` row with `kind = 'metadata'`.
-  Both tables in this plan map a key to exactly one blob hash;
-  arbitrary k/v has different cardinality, indexing and query
-  needs. Don't stretch these tables to cover it.
+- **Key/value metadata on files.** A separate plan. It is not a blob
+  table: k/v pairs are rows, so they belong in their own schema, NOT
+  as a `file_attached_blobs` row with `kind = 'metadata'`. Both
+  tables here map a key to exactly one blob hash; arbitrary k/v has
+  different cardinality, indexing and query needs.
+
+  But it will hit **the same content-vs-file split**, so it should
+  inherit the convention rather than invent one:
+  `storage.content_derived_*` for anything that is a pure function of
+  the bytes (EXIF, dimensions, duration, extracted text — the split
+  already exists as `storage.blob_extracted_text` and `faces.faces`),
+  `storage.file_attached_*` for anything user-supplied or
+  per-resource (tags, descriptions, custom properties — WebDAV dead
+  properties are already this shape). The purity rule in the Keying
+  section is not blob-specific; it governs any content-addressed
+  store.
+
+  One hazard is sharper for metadata than for thumbnails. Content-
+  keying is safe when the datum is a function of bytes the caller
+  already holds — a thumbnail of your own file reveals nothing new.
+  A content-keyed datum that encodes *another user's input* leaks
+  across the dedup boundary twice over: user B reads A's text, and
+  learns that someone else holds identical content. So for k/v the
+  purity rule carries an anti-enumeration duty too, alongside the
+  poisoning one — cf. the dedup blob anti-enumeration policy in
+  `project_d7_policy_calls`.
 
 ## References
 
