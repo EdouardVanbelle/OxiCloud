@@ -1,8 +1,9 @@
 # Plan — Derived content as blobs (tier-2 refactor)
 
-**Status:** design captured 2026-08-02, revised 2026-08-12 (keying,
-CDC reuse, backend-dispatch rule, client-preview boundary). Not
-implemented. Follow-up to `fix/services-use-blob-abstraction` — that
+**Status:** design captured 2026-08-02, revised 2026-08-12 — keying
+rule, CDC reuse, backend-dispatch rule, the
+`derived_blobs`/`attached_blobs` pair, and two refcount prerequisites
+(set-based sweep, manifest-level verification). Not implemented. Follow-up to `fix/services-use-blob-abstraction` — that
 PR normalised the **read-side** (services consume blobs through
 `BlobStorageBackend` uniformly). This plan tackles the **write-side**:
 services that today write derived artifacts (thumbnails, transcodes)
@@ -75,7 +76,7 @@ was attached to, never by content.
 | transcode | `f(blob bytes, target)` | ✅ |
 | extracted text | `f(blob bytes)` | ✅ — `storage.blob_extracted_text` |
 | face vectors | `f(blob bytes)` | ✅ — `faces.faces` |
-| client-uploaded preview | `f(user's choice)` | ❌ **must be file-keyed** — see below |
+| client-uploaded preview | `f(user's choice)` | ❌ **must be file-keyed** — `storage.attached_blobs`, see below |
 
 This isn't a new pattern: `storage.blob_extracted_text` already
 chose content-keying for the same reason, and the migration says so
@@ -140,13 +141,73 @@ severity could differ. With client previews excluded from this table
 "warning, regenerable" — the column carries no information. Re-add
 it only if that changes.
 
-**Deletion is app-layer, not `ON DELETE CASCADE`.** A SQL cascade
-would delete the mapping row without decrementing
-`storage.blobs.ref_count`, silently leaking a reference. So
-`on_blob_deleted(source_hash)` does
+**Deletion is app-layer.** `on_blob_deleted(source_hash)` does
 `DELETE FROM storage.derived_blobs WHERE source_hash = $1 RETURNING blob_hash`
-then `remove_reference()` per row. That is a one-for-one replacement
-of today's `delete_blob_thumbnails` unlink loop — no new mechanism.
+then `remove_reference()` per row — a one-for-one replacement of
+today's `delete_blob_thumbnails` unlink loop, no new mechanism. A raw
+SQL `ON DELETE CASCADE` would drop the mapping row without
+decrementing the refcount, but *not* silently: once the reference
+registry exists the refcount is derivable, so the drift surfaces as a
+`refcount_mismatch` finding, and the interim state is an **over**-count
+(blob retained longer than needed) never an under-count (live data
+reaped). So a cascade is tolerable where it's ergonomic — see
+`attached_blobs` below — provided the registry is in place to
+reconcile it.
+
+### The pair — `derived_blobs` and `attached_blobs`
+
+Two tables, one keying difference, and that difference *is* the
+security boundary (see the client-preview section):
+
+```
+storage.derived_blobs   (source_hash, kind, variant)  -- derived FROM content
+storage.attached_blobs  (file_id,     kind, variant)  -- attached TO a file
+```
+
+```sql
+CREATE TABLE storage.attached_blobs (
+    file_id     UUID NOT NULL REFERENCES storage.file_metadata(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL CHECK (kind IN ('preview', 'subtitle', 'cover_art')),
+    variant     TEXT NOT NULL,          -- 'preview.jpg', 'sub.en', 'cover.jpg'
+    blob_hash   VARCHAR(64) NOT NULL,   -- content-addressed bytes (dedup preserved)
+    size        BIGINT NOT NULL,
+    uploaded_by UUID NOT NULL REFERENCES auth.users(id),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (file_id, kind, variant)
+);
+CREATE INDEX ON storage.attached_blobs(blob_hash);
+```
+
+**Routing rule — put this as a comment on both tables:**
+
+> Bytes are a pure deterministic function of the file's content →
+> `derived_blobs` (content-keyed, dedupes across files, regenerable).
+> Bytes are user-supplied or user-chosen → `attached_blobs`
+> (file-keyed, never shared across files, not regenerable).
+
+Generic naming rather than `file_previews` because the family is
+real, and each member would otherwise be a new table plus a new
+`BlobReferenceSource` plus a new term in the consistency recompute.
+With `kind` it's a one-line `ALTER … CHECK`:
+
+| Kind | Why it lands here |
+|---|---|
+| `preview` | client-uploaded thumbnail (today's case) |
+| `e2e_thumbnail` | strongest future case — in an E2E drive the server *cannot* derive thumbnails, so the client must upload them. "Vault" is already reserved as a future E2E drive kind (`project_drive_naming_and_vault_reservation`) |
+| `subtitle` | user-supplied caption tracks, one per language (`variant = 'sub.en'`) |
+| `cover_art` | user override of embedded/derived art; user-chosen video poster frame |
+| `metadata_sidecar` | XMP / `.nfo` uploaded alongside a photo |
+| `signature` | detached signature over the file, per signer |
+
+Avoid `file_sidecars` as a name despite it being the natural
+media-world term: this codebase already uses "sidecar" for the
+tier-2 local directories (see the sidecar section below), and
+overloading it would undo that vocabulary.
+
+Note the `(…, kind, variant)` shape is identical across both tables,
+so one generic reference-source implementation parameterised by
+table + column covers both — the same one-implementation property
+the rest of this plan is built on.
 
 ### Write path — reuse `store_from_stream`, don't special-case CDC
 
@@ -253,10 +314,45 @@ content-keying a cross-user poisoning vector:
 2. User B uploads the same file X. Dedup matches on `source_hash`.
 3. B is served A's preview.
 
-So client previews **stay file-keyed and stay out of
-`storage.derived_blobs`.** This is a precondition for the table
-having no `source_file_id` column, not an independent choice — the
-two decisions must land together.
+So client previews **stay file-keyed, in `storage.attached_blobs`,
+and out of `storage.derived_blobs`.** This is a precondition for
+`derived_blobs` having no `source_file_id` column, not an independent
+choice — the two decisions must land together.
+
+Worked example. User A uploads `image.png` (file id `7f3e…9c`,
+content hash `a1b2c3…`), then `PUT`s their own preview:
+
+```
+storage.derived_blobs                       -- server-derived, content-keyed
+ source_hash | kind      | variant      | blob_hash | size
+ a1b2c3…     | thumbnail | icon.webp    | 9a8b…     |  6012
+ a1b2c3…     | thumbnail | preview.webp | d4e5f6…   | 23418
+ a1b2c3…     | thumbnail | large.webp   | c7d8…     | 71204
+
+storage.attached_blobs                      -- client-supplied, file-keyed
+ file_id  | kind    | variant     | blob_hash | size  | uploaded_by
+ 7f3e…9c  | preview | preview.jpg | e1f2…     | 18904 | A
+```
+
+Both sets of bytes travel the same dispatch
+(`store_from_stream` → blob → backend → encryption), so the *bytes*
+stay content-addressed and dedupe: two users uploading
+byte-identical previews converge on one object at `ref_count = 2`.
+Only the **mapping** is per-file — and the mapping is the part that
+carries the trust problem. When user B uploads the same
+`image.png`, B matches `a1b2c3…` in `derived_blobs` and gets the
+server-derived thumbnails; B has no `attached_blobs` row, so A's
+preview is unreachable.
+
+Read precedence is unchanged from today (the client's preview wins):
+`attached_blobs` for `(file_id, 'preview', …)` first, else
+`derived_blobs` for `(source_hash, 'thumbnail', 'preview.webp')`.
+Both fold into the query the handler already issues.
+
+`uploaded_by` is new. Today there is no provenance at all on a
+client preview, and an Editor on a shared file can overwrite the
+owner's — same family as the known Editor-can-rename gap
+(`bug_drive_rename_editor_can_do_it`), and worth the same decision.
 
 Today's code is already safe, implicitly, via its choice of
 filename; the risk is losing that in the migration:
@@ -296,10 +392,11 @@ problem.
 
 Current scope note: the SvelteKit frontend has no caller of the
 thumbnail `PUT` endpoint outside a test file — server-side ffmpeg
-extraction (`generate_video_thumbnails_background`) replaced it. So
-the client-preview table is speculative; don't build it until
-there's a real feature ask, and don't pay dual-key complexity for it
-in the meantime.
+extraction (`generate_video_thumbnails_background`) replaced it. The
+`attached_blobs` *shape* is settled (above) so the boundary is on
+record, but the migration and endpoint work wait for a real feature
+ask — most likely E2E/Vault thumbnails, where the server cannot
+derive them at all.
 
 ## `BlobReferenceSource` — reference tracking abstraction
 
@@ -318,9 +415,25 @@ pub trait BlobReferenceSource: Send + Sync {
     fn source_name(&self) -> &'static str;
 
     /// Count of references this source holds on `blob_hash`.
-    /// Called by `blobs_consistency` when recomputing
-    /// `refcount_mismatch` findings.
+    /// **On-demand path only** (`dedup_gc` checking one reap
+    /// candidate). MUST NOT be used by the consistency sweep — see
+    /// `ref_count_sql` below.
     async fn count_references(&self, blob_hash: &str) -> Result<u64, DomainError>;
+
+    /// A correlated-subquery fragment counting this source's
+    /// references to the outer row's hash, e.g.
+    /// `"(SELECT COUNT(*) FROM storage.derived_blobs d WHERE d.blob_hash = b.hash)"`.
+    /// The registry sums the fragments into `blobs_consistency`'s
+    /// existing per-page SELECT, so the sweep stays ONE query per
+    /// page instead of degrading to (sources × blobs) round-trips.
+    /// `&'static str` — never interpolate caller input.
+    fn ref_count_sql(&self, outer_alias: &str) -> String;
+
+    /// Which counter this source's references land on. Sources that
+    /// reference a Blob (via its manifest) feed
+    /// `chunk_manifests.ref_count`; sources that reference a physical
+    /// chunk feed `storage.blobs.ref_count`. Mixing them double-counts.
+    fn ref_level(&self) -> RefLevel; // Chunk | Manifest
 
     /// Iterate the source's referenced blobs, paged by the
     /// implementation's natural cursor (typically a DB PK). Used
@@ -360,33 +473,74 @@ registrations:
 - `FilesReferenceSource` — wraps `storage.files.blob_hash`
 - `ChunksReferenceSource` — wraps `storage.chunk_manifests.chunk_hashes[]`
 
-Tier-2 migration adds exactly **one** more (not one per kind, since
-`derived_blobs` is one table):
+Tier-2 migration adds two more — one per table, not one per `kind`,
+and both satisfied by the same generic implementation parameterised
+by table + column:
 
-- `DerivedBlobsReferenceSource` — wraps `storage.derived_blobs`;
-  `count_references` is
-  `SELECT count(*) FROM storage.derived_blobs WHERE blob_hash = $1`
+- `DerivedBlobsReferenceSource` — `storage.derived_blobs.blob_hash`
+- `AttachedBlobsReferenceSource` — `storage.attached_blobs.blob_hash`
+
+`ChunksReferenceSource` stays bespoke (array containment,
+`b.hash = ANY(m.chunk_hashes)`).
+
+### Two counters — get the level right
+
+`add_reference` bumps `chunk_manifests.ref_count` first and only
+falls back to `storage.blobs.ref_count`. So references land at
+whichever level the hash names:
+
+| Reference holder | References a… | Feeds |
+|---|---|---|
+| `chunk_manifests.chunk_hashes[]` | chunk | `storage.blobs.ref_count` |
+| `files.blob_hash` (legacy, no manifest) | whole-file blob | `storage.blobs.ref_count` |
+| `files.blob_hash` (CDC) | Blob via manifest | `chunk_manifests.ref_count` |
+| `derived_blobs.blob_hash` | Blob via manifest | `chunk_manifests.ref_count` |
+| `attached_blobs.blob_hash` | Blob via manifest | `chunk_manifests.ref_count` |
+
+Both new tables reference *manifests*, never chunks — hence
+`ref_level()` on the trait. Adding their fragments to the chunk-level
+recompute would double-count systematically.
+
+**The aliasing trap is the norm here, not an edge case.** Today's
+recompute carries a `NOT EXISTS` clause because a single-chunk file's
+`file_hash` equals its lone chunk's hash (~40% of uploads per the
+comment at `blobs_consistency_service.rs:388`). Derived blobs sit
+below `CDC_MIN_CHUNK`, so ~100% of them are single-chunk and hit that
+aliasing case. Level-correctness is not optional.
 
 Then:
 
 - **`dedup_gc`** — orphan iff `registry.total_references(hash) == 0`
-  (with the existing grace window). No per-service GC changes, and
-  none needed for derived blobs either: they carry real `ref_count`
-  in `storage.blobs`, so the existing grace-window sweep is already
-  correct.
-- **`blobs_consistency`** — `refcount_mismatch` recomputes via
-  `registry.total_references`. New services register → automatically
-  covered.
+  (with the existing grace window). Per-hash `count_references` is
+  fine here: candidates are already filtered to `ref_count = 0` past
+  the grace window, so the set is small.
+- **`blobs_consistency`** — `refcount_mismatch` sums the sources'
+  `ref_count_sql` fragments into its existing per-page SELECT
+  (`blobs_consistency_service.rs:395-411`), which is already
+  set-based. It must NOT be rewritten to call
+  `registry.total_references` per row — that would turn one query per
+  page into (sources × blobs) round-trips.
 - **`backend_consistency`** — walks the backend and unions all
   `list_referenced_blobs` streams for the "did we lose bytes"
   check.
 
-**Hard ordering dependency.** `blobs_consistency` derives expected
-refcounts from `file_metadata` + manifests only. Ship
-`storage.derived_blobs` before the registry and *every* derived blob
-becomes a `refcount_mismatch` finding — a flood, and one an operator
-might "repair". Step 1 must precede step 3 below; this is not a
-sequencing preference.
+### Two hard prerequisites, not sequencing preferences
+
+1. **Registry before the tables.** `blobs_consistency` derives
+   expected refcounts from `file_metadata` + manifests only. Ship
+   `storage.derived_blobs` first and *every* derived blob becomes a
+   `refcount_mismatch` finding — a flood, and one an operator might
+   "repair".
+2. **`chunk_manifests.ref_count` must become verified.** It is
+   currently maintained by `dedup_service` and reconciled by
+   *nothing*: `blobs_consistency` only recomputes
+   `storage.blobs.ref_count`, and the manifest-level integrity it
+   defers to `files_consistency::chunk_missing` is a different check
+   (manifests pointing at reaped chunks). Since both new tables feed
+   the manifest counter, registering a source would give the
+   *illusion* of coverage, not coverage. Failure mode: a manifest
+   stuck at `ref_count > 0` forever, so its chunks are never
+   reclaimed. A manifest-level recompute is part of this work.
 
 ## Read path and caching
 
@@ -499,24 +653,31 @@ hardcoded SQL). New sources bolt on independently.
 
 1. **`BlobReferenceSource` trait + registry** in
    `application/ports/`. `FilesReferenceSource` and
-   `ChunksReferenceSource` implementations mirroring current SQL;
-   wire into `dedup_gc` + `blobs_consistency` behind an integration
-   test that proves the union equals the pre-refactor count on a
-   real DB. **Blocks step 3** (see the ordering dependency above).
-2. ~~`OXICLOUD_SPOOL_DIR`~~ — reduced to a docs change, or dropped;
+   `ChunksReferenceSource` implementations mirroring current SQL,
+   with `ref_count_sql` fragments summed into the existing per-page
+   SELECT; wire into `dedup_gc` + `blobs_consistency` behind an
+   integration test that proves the union equals the pre-refactor
+   count on a real DB. **Blocks step 3** (prerequisite 1 above).
+2. **Manifest-level refcount verification** — recompute
+   `chunk_manifests.ref_count` against its actual referrers, the
+   counter nothing reconciles today. **Also blocks step 3**
+   (prerequisite 2 above): without it, derived-blob refcount drift
+   is invisible.
+3. ~~`OXICLOUD_SPOOL_DIR`~~ — reduced to a docs change, or dropped;
    see the sidecar section.
-3. **`ThumbnailService` writes go through `DedupService`**. New
+4. **`ThumbnailService` writes go through `DedupService`**. New
    `storage.derived_blobs` table + `DerivedBlobsReferenceSource`.
    Deletes `thumbnails_root`, `get_thumbnail_path`, and every
    filesystem call in the service. Fold the `derived_blobs` lookup
    into the handler's existing `get_blob_hash` query.
-4. **`blobs_consistency` bulk-LIST diff** — before, or immediately
-   after, step 3 lands at scale; per-row HEADs do not survive a 4×
+5. **`blobs_consistency` bulk-LIST diff** — before, or immediately
+   after, step 4 lands at scale; per-row HEADs do not survive a 4×
    row count.
-5. **`ImageTranscodeService`** — same shape, `kind = 'transcode'`,
+6. **`ImageTranscodeService`** — same shape, `kind = 'transcode'`,
    no new table.
-6. **Client-uploaded previews** — only if a real feature ask
-   appears. Separate file-keyed table; never in `derived_blobs`.
+7. **`storage.attached_blobs`** — only when a real feature ask
+   appears (most likely E2E/Vault thumbnails). Shape is settled
+   above; file-keyed, never in `derived_blobs`.
 
 Each slice is independently mergeable. Delivery span: rough
 estimate ~2 weeks end-to-end.
@@ -603,6 +764,12 @@ lands so we don't stack schema changes.
   disk cache is `CachedBlobBackend`, instantiated by the existing
   DI branch. Splitting budgets means a second *instance*, never a
   second implementation.
+- **Per-file key/value metadata.** A separate plan. It is not a
+  blob table: k/v pairs are rows, so they belong in their own
+  schema, NOT as an `attached_blobs` row with `kind = 'metadata'`.
+  Both tables in this plan map a key to exactly one blob hash;
+  arbitrary k/v has different cardinality, indexing and query
+  needs. Don't stretch these tables to cover it.
 
 ## References
 
