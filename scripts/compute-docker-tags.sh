@@ -134,11 +134,21 @@ fi
 # later steps (`Verify published image`, DockerHub-gated conditionals)
 # read these directly. Keeps the step-scoped env aligned with the
 # steps.meta.outputs.* set for consumers that prefer one or the other.
+#
+# Also OVERRIDE the workflow-level REGISTRY_IMAGE / GHCR_REGISTRY_IMAGE
+# env vars with the lowercased forms. Without this, the verify step
+# would read the workflow-declared mixed-case value from
+# `${{ github.repository_owner }}` (e.g. `ghcr.io/EdouardVanbelle/
+# oxicloud`) and `docker pull` would reject it — despite the tags
+# themselves being lowercased in the actual push. Step-level env
+# additions take precedence over workflow-level for subsequent steps.
 if [ -n "${GITHUB_ENV:-}" ]; then
     {
         echo "VERSION=$VERSION"
         echo "CHANNEL=$CHANNEL"
         echo "SKIP_DOCKERHUB=$SKIP_DOCKERHUB"
+        echo "REGISTRY_IMAGE=$REGISTRY_IMAGE"
+        echo "GHCR_REGISTRY_IMAGE=$GHCR_REGISTRY_IMAGE"
     } >> "$GITHUB_ENV"
 fi
 
