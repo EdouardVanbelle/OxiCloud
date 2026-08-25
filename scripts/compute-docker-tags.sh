@@ -48,6 +48,16 @@ set -euo pipefail
 : "${REGISTRY_IMAGE:?REGISTRY_IMAGE required}"
 : "${GHCR_REGISTRY_IMAGE:?GHCR_REGISTRY_IMAGE required}"
 
+# Both GHCR and Docker Hub reject mixed-case namespace / image names
+# ("repository name must be lowercase"). `${{ github.repository_owner
+# }}` in the workflow inserts the GitHub username verbatim, and GitHub
+# expression syntax has no `lower()` function. So we normalise here
+# — the workflow keeps its declarative `env:` block, the script owns
+# the case-safety contract, and tests cover it (see
+# `test-docker-publish-tags.sh` for mixed-case cases).
+REGISTRY_IMAGE=$(echo "$REGISTRY_IMAGE" | tr '[:upper:]' '[:lower:]')
+GHCR_REGISTRY_IMAGE=$(echo "$GHCR_REGISTRY_IMAGE" | tr '[:upper:]' '[:lower:]')
+
 # Docker Hub is optional — a fork without DOCKERHUB_TOKEN configured
 # still publishes to GHCR (its own namespace, auth via GITHUB_TOKEN)
 # but skips Docker Hub cleanly. The workflow sets this to "true" when

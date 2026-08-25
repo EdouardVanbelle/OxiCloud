@@ -172,6 +172,47 @@ tags:
   ghcr.io/atalayalabs/oxicloud:main" \
     EVENT_NAME=push GITHUB_REF=refs/heads/main SKIP_DOCKERHUB=false
 
+# ── Case-safety — GHCR / DH reject mixed-case names ─────────────
+#
+# Regression pin: `${{ github.repository_owner }}` inserts a
+# GitHub username verbatim, which is often mixed-case
+# (e.g. EdouardVanbelle). The registries reject that with
+# "repository name must be lowercase". The script normalises
+# both inputs; these cases assert it.
+
+# Local override so we can pass a mixed-case owner without touching
+# the harness's defaults on other cases.
+_orig_ghcr="$GHCR_REGISTRY_IMAGE"
+_orig_dh="$REGISTRY_IMAGE"
+
+GHCR_REGISTRY_IMAGE=ghcr.io/EdouardVanbelle/OxiCloud \
+REGISTRY_IMAGE=ghcr.io/EdouardVanbelle/OxiCloud \
+expect "mixed-case owner and image lowercased in tags" \
+"version=main
+channel=main
+tags:
+  ghcr.io/edouardvanbelle/oxicloud:main" \
+    EVENT_NAME=push GITHUB_REF=refs/heads/main \
+    REGISTRY_IMAGE=DioCrafts/OxiCloud \
+    GHCR_REGISTRY_IMAGE=ghcr.io/EdouardVanbelle/OxiCloud \
+    SKIP_DOCKERHUB=true
+
+expect "release with mixed-case DH namespace lowercased" \
+"version=0.8.7
+channel=release
+tags:
+  diocrafts/oxicloud:0.8.7
+  diocrafts/oxicloud:latest
+  ghcr.io/edouardvanbelle/oxicloud:0.8.7
+  ghcr.io/edouardvanbelle/oxicloud:latest" \
+    EVENT_NAME=release RELEASE_TAG=v0.8.7 \
+    REGISTRY_IMAGE=DioCrafts/OxiCloud \
+    GHCR_REGISTRY_IMAGE=ghcr.io/EdouardVanbelle/OxiCloud
+
+REGISTRY_IMAGE="$_orig_dh"
+GHCR_REGISTRY_IMAGE="$_orig_ghcr"
+unset _orig_dh _orig_ghcr
+
 # ── Error paths ─────────────────────────────────────────────────
 
 expect_fail "unknown event rejected" \
