@@ -19,6 +19,31 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # `git describe` walks commits back until it hits a tag —
+          # needs BOTH the tags and enough history to reach them.
+          # Default checkout is a shallow single-commit clone with no
+          # tags; describe would return only the SHA and the version
+          # string loses its human-readable prefix. `fetch-depth: 0`
+          # (full history) + `fetch-tags: true` (all tag refs) together
+          # give build.rs a real describe output on PR / dev builds.
+          # Cost is small — the repo is a few MB checked out.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Compute build version
+        # Resolves the version string once so both the local build-arg
+        # and any future step that wants to log it share the same value.
+        # Priority mirrors build.rs: tag ref → git describe → SHA.
+        id: version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="$(git describe --tags --always --dirty=-dirty 2>/dev/null | sed 's/^v//' || echo "unknown")"
+          fi
+          echo "value=${v}" >> "$GITHUB_OUTPUT"
+          echo "OxiCloud version: ${v}"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -51,6 +76,7 @@ jobs:
             GITHUB_SHA=${{ github.sha }}
             GITHUB_REF_NAME=${{ github.ref_name }}
             GITHUB_HEAD_REF=${{ github.head_ref }}
+            OXICLOUD_VERSION=${{ steps.version.outputs.value }}
 
       - name: Verify image starts correctly
         run: |
