@@ -713,25 +713,26 @@ async fn run(config: common::config::AppConfig) -> Result<(), Box<dyn std::error
     if !storage_path.exists() {
         std::fs::create_dir_all(&storage_path).expect("Failed to create storage directory");
     }
-    // Initialize database pools if auth is enabled
-    let db_pools = if config.features.enable_auth {
-        match create_database_pools(&config).await {
-            Ok(pools) => {
-                tracing::info!("PostgreSQL database pools initialized successfully");
-                Some(pools)
-            }
-            Err(e) => {
-                // SECURITY: fail-closed. If auth is required but the database
-                // is unreachable, the server MUST NOT start in public mode.
-                panic!(
-                    "FATAL: enable_auth=true but database connection failed: {}. \
-                     Refusing to start without authentication.",
-                    e
-                );
-            }
+    // Initialize database pools — authentication is unconditional
+    // since feat/remove-useless-auth-flag retired OXICLOUD_ENABLE_AUTH.
+    // `db_pools` is kept wrapped in `Some(...)` because downstream
+    // call-sites (DI factory, migration runner, OIDC bootstrap) still
+    // read it as `Option<DbPools>`; a follow-up may flatten the type
+    // once every consumer stops matching on `None`.
+    let db_pools = match create_database_pools(&config).await {
+        Ok(pools) => {
+            tracing::info!("PostgreSQL database pools initialized successfully");
+            Some(pools)
         }
-    } else {
-        None
+        Err(e) => {
+            // SECURITY: fail-closed. The database is required; refuse
+            // to start without it.
+            panic!(
+                "FATAL: database connection failed: {}. \
+                 Refusing to start without a reachable database.",
+                e
+            );
+        }
     };
 
     // Locales directory for i18n. Resolved from wherever the SPA is actually
@@ -887,18 +888,15 @@ async fn run(config: common::config::AppConfig) -> Result<(), Box<dyn std::error
         None
     };
 
-    // Apply auth middleware to protected API routes when auth is enabled
-    if config.features.enable_auth {
-        // SECURITY: if auth is required, auth_service MUST be present at this
-        // point.  The earlier guards in di.rs and main.rs guarantee this, but
-        // add a defensive check so a future refactor cannot silently degrade.
-        assert!(
-            app_state.auth_service.is_some(),
-            "FATAL: enable_auth=true but auth_service is None. \
-             This should have been caught during initialization."
-        );
-    }
-    if config.features.enable_auth {
+    // SECURITY: auth is unconditional since
+    // feat/remove-useless-auth-flag — assert the service is present so
+    // a future refactor cannot silently degrade.
+    assert!(
+        app_state.auth_service.is_some(),
+        "FATAL: auth_service is None after init. \
+         This should have been caught during initialization."
+    );
+    {
         use interfaces::api::handlers::auth_handler::{
             auth_protected_routes, auth_public_routes, login_route, refresh_route, register_route,
             setup_route,
@@ -1344,59 +1342,6 @@ async fn run(config: common::config::AppConfig) -> Result<(), Box<dyn std::error
         //    surfaces) is wrapped. New protocol routers added later
         //    only have to be merged before this point to get tracing
         //    for free — no second site to remember to update.
-        app = app
-            .layer(TraceLayer::new_for_http().make_span_with(ClientIpMakeSpan))
-            .layer(PropagateRequestIdLayer::x_request_id())
-            .layer(SetRequestIdLayer::x_request_id(UuidRequestId));
-    } else {
-        // Auth disabled — no middleware applied
-        tracing::warn!("Authentication is DISABLED — all API routes are publicly accessible");
-        app = Router::new()
-            // Health / readiness probes — no auth, mounted at root
-            .merge(health_routes.layer(access_log!("http::probe")))
-            .nest("/api", public_api_routes.layer(access_log!("http::api")))
-            .nest("/api", api_routes.layer(access_log!("http::api")));
-
-        // Same per-protocol gating as the auth-enabled branch above —
-        // see the comment there for why the well-known discovery is
-        // paired with its protocol.
-        if config.features.enable_caldav {
-            app = app
-                .merge(well_known_caldav.layer(access_log!("http::dav")))
-                .merge(caldav_router.layer(access_log!("http::dav")));
-        }
-        if config.features.enable_carddav {
-            app = app
-                .merge(well_known_carddav.layer(access_log!("http::dav")))
-                .merge(carddav_router.layer(access_log!("http::dav")));
-        }
-        if config.features.enable_webdav {
-            app = app.merge(webdav_router.layer(access_log!("http::dav")));
-        }
-
-        app = app.merge(web_routes.layer(access_log!("http::web")));
-
-        // Mount Nextcloud routes — merged BEFORE the trace + request-id
-        // layers so NC requests get the same span fields as every
-        // other surface (matches the auth-enabled branch above).
-        if let Some(nc_router) = nextcloud_router {
-            app = app.merge(
-                nc_router
-                    .with_state(app_state.clone())
-                    .layer(access_log!("http::nextcloud")),
-            );
-        }
-
-        // Mount WOPI routes (no auth middleware when auth is disabled).
-        // Same reasoning: merge before the trace layer.
-        if let Some((wopi_protocol, wopi_api)) = wopi_routes {
-            app = app
-                .nest("/wopi", wopi_protocol.layer(access_log!("http::wopi")))
-                .nest("/api/wopi", wopi_api.layer(access_log!("http::api")));
-        }
-
-        // ── Trace + request-id layers applied LAST. See the
-        //    auth-enabled branch above for the rationale.
         app = app
             .layer(TraceLayer::new_for_http().make_span_with(ClientIpMakeSpan))
             .layer(PropagateRequestIdLayer::x_request_id())
