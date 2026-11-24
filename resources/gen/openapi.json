@@ -8315,6 +8315,7 @@
           "config"
         ],
         "summary": "`GET /api/config` — return the public server-configuration\nsnapshot. Unauthenticated. No cache header — values change on\nserver-restart / feature-toggle / status flip, and the endpoint\nis called at most once per SPA boot per client. Adding a short\n`Cache-Control` TTL later is safe if load ever becomes a concern.",
+        "description": "Reachable with NO credential at all.",
         "operationId": "get_config",
         "responses": {
           "200": {
@@ -8328,7 +8329,8 @@
             }
           }
         },
-        "security": []
+        "security": [],
+        "x-oxicloud-principal": "public"
       }
     },
     "/api/dedup/blob/{hash}": {
@@ -12148,6 +12150,7 @@
         "tags": [
           "i18n"
         ],
+        "description": "Reachable with NO credential at all.",
         "operationId": "get_locales",
         "responses": {
           "200": {
@@ -12164,7 +12167,8 @@
             }
           }
         },
-        "security": []
+        "security": [],
+        "x-oxicloud-principal": "public"
       }
     },
     "/api/i18n/locales/{locale_code}": {
@@ -12172,6 +12176,7 @@
         "tags": [
           "i18n"
         ],
+        "description": "Reachable with NO credential at all.",
         "operationId": "get_translations_by_locale",
         "parameters": [
           {
@@ -12206,7 +12211,8 @@
             }
           }
         },
-        "security": []
+        "security": [],
+        "x-oxicloud-principal": "public"
       }
     },
     "/api/i18n/translate": {
@@ -12214,6 +12220,7 @@
         "tags": [
           "i18n"
         ],
+        "description": "Reachable with NO credential at all.",
         "operationId": "translate",
         "parameters": [
           {
@@ -12267,7 +12274,8 @@
             }
           }
         },
-        "security": []
+        "security": [],
+        "x-oxicloud-principal": "public"
       }
     },
     "/api/notifications": {
@@ -14011,6 +14019,7 @@
           "shares"
         ],
         "summary": "Access a shared item via its token",
+        "description": "Reachable with NO credential at all.",
         "operationId": "access_shared_item",
         "parameters": [
           {
@@ -14055,7 +14064,8 @@
             }
           }
         },
-        "security": []
+        "security": [],
+        "x-oxicloud-principal": "public"
       }
     },
     "/api/s/{token}/verify": {
@@ -14064,6 +14074,7 @@
           "shares"
         ],
         "summary": "Verify password for a password-protected shared item",
+        "description": "Reachable with NO credential at all.",
         "operationId": "verify_shared_item_password",
         "parameters": [
           {
@@ -14118,7 +14129,8 @@
             }
           }
         },
-        "security": []
+        "security": [],
+        "x-oxicloud-principal": "public"
       }
     },
     "/api/search": {
