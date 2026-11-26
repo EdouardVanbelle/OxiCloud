@@ -851,7 +851,7 @@ export type CreateAppPasswordRequestDto = {
      */
     label: string;
     /**
-     * Comma-separated scopes (defaults to all DAV protocols)
+     * Scopes, space- or comma-separated (defaults to all DAV protocols)
      */
     scopes?: string;
 };
@@ -1819,7 +1819,7 @@ export type DeviceAuthorizeRequestDto = {
      */
     client_name?: string;
     /**
-     * Comma-separated scopes (e.g. "webdav,caldav,carddav")
+     * Scopes, space- or comma-separated (e.g. `oxicloud:files:rw`)
      */
     scope?: string;
 };

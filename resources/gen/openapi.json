@@ -18881,7 +18881,7 @@
           },
           "scopes": {
             "type": "string",
-            "description": "Comma-separated scopes (defaults to all DAV protocols)"
+            "description": "Scopes, space- or comma-separated (defaults to all DAV protocols)"
           }
         }
       },
@@ -20088,7 +20088,7 @@
           },
           "scope": {
             "type": "string",
-            "description": "Comma-separated scopes (e.g. \"webdav,caldav,carddav\")"
+            "description": "Scopes, space- or comma-separated (e.g. `oxicloud:files:rw`)"
           }
         }
       },
